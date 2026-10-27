@@ -699,7 +699,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |  |
 | Network waits | connection, its handshake and an insert: unbounded |  |
-| Driver limits | The driver has no connect, read or write timeout. |  |
+| Driver limits | The driver has no connect, read or write timeout.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### MONGODB COLLECTION emit
@@ -731,7 +731,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Reference | S3 \| GCS \| AZURE_BLOB store and catalog clients |  |
 | Locator and validation rule | TABLE 'Orders' (iceberg_table) |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `LOCATION 's3://warehouse/orders'` (string literal); required<br>`CATALOG catalog` (ICEBERG_REST client); required<br>`COMMIT EACH 10s MAX SIZE 64MiB` (composed clause); required |  |
+| Options in statement order | `NAMESPACE 'Analytics.Events'` (string literal); required<br>`LOCATION 's3://warehouse/orders'` (string literal); required<br>`CATALOG catalog` (ICEBERG_REST client); required<br>`COMMIT EACH 10s MAX SIZE 64MiB` (composed clause); required |  |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |  |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |  |
 | BATCH | optional |  |
@@ -1136,18 +1136,19 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `access_key_id` | optional | string | driver; best effort | yes | none |
-| `allow_anonymous` | optional | boolean | driver; best effort | no | none |
-| `client_region` | optional | string | driver; best effort | no | none |
-| `disable_ec2_metadata` | optional | boolean | driver; best effort | no | none |
-| `endpoint` | optional | URL (http or https) | driver; best effort | no | none |
-| `path_style_access` | optional | boolean | driver; best effort | no | none |
-| `region` | optional | string | driver; best effort | no | none |
-| `secret_access_key` | optional | string | driver; best effort | yes | none |
-| `session_token` | optional | string | driver; best effort | yes | none |
+| `access_key_id` | optional | string | Nervix; strict | yes | none |
+| `allow_anonymous` | optional | boolean | Nervix; strict | no | none |
+| `client_region` | optional | string | Nervix; strict | no | none |
+| `disable_config_load` | optional | boolean | Nervix; strict | no | none |
+| `disable_ec2_metadata` | optional | boolean | Nervix; strict | no | none |
+| `endpoint` | optional | URL (http or https) | Nervix; strict | no | none |
+| `path_style_access` | optional | boolean | Nervix; strict | no | none |
+| `region` | optional | string | Nervix; strict | no | none |
+| `secret_access_key` | optional | string | Nervix; strict | yes | none |
+| `session_token` | optional | string | Nervix; strict | yes | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 
-Delegated property namespaces: all driver property names. Reserved keys: none.
+Delegated property namespaces: s3.*, client.*. Reserved keys: none.
 
 ### GCS client
 
@@ -1160,13 +1161,16 @@ Delegated property namespaces: all driver property names. Reserved keys: none.
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `credential_path` | optional | file path, with resource mount templates resolved before use | driver; best effort | yes | driver file |
-| `no_auth` | optional | boolean | driver; best effort | no | none |
-| `service_path` | optional | URL (http or https) | driver; best effort | no | none |
+| `allow_anonymous` | optional | boolean | Nervix; strict | no | none |
+| `credentials_json` | optional | string | Nervix; strict | yes | none |
+| `disable_config_load` | optional | boolean | Nervix; strict | no | none |
+| `disable_vm_metadata` | optional | boolean | Nervix; strict | no | none |
+| `no_auth` | optional | boolean | Nervix; strict | no | none |
+| `service_path` | optional | URL (http or https) | Nervix; strict | no | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
-| `token` | optional | string | driver; best effort | yes | none |
+| `token` | optional | string | Nervix; strict | yes | none |
 
-Delegated property namespaces: all driver property names. Reserved keys: none.
+Delegated property namespaces: gcs.*. Reserved keys: none.
 
 ### AZURE_BLOB client
 
@@ -1179,18 +1183,16 @@ Delegated property namespaces: all driver property names. Reserved keys: none.
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `account_key` | optional | string | driver; best effort | yes | none |
-| `account_name` | optional | string | driver; best effort | no | none |
-| `authority_host` | optional | string | driver; best effort | no | none |
-| `client_id` | optional | string | driver; best effort | no | none |
-| `client_secret` | optional | string | driver; best effort | yes | none |
-| `connection_string` | optional | string | driver; best effort | yes | none |
-| `endpoint` | optional | URL (http or https) | driver; best effort | no | none |
-| `sas_token` | optional | string | driver; best effort | yes | none |
-| `tenant_id` | optional | string | driver; best effort | no | none |
+| `account_key` | optional | string | Nervix; strict | yes | none |
+| `account_name` | optional | string | Nervix; strict | no | none |
+| `authority_host` | optional | string | Nervix; strict | no | none |
+| `client_id` | optional | string | Nervix; strict | no | none |
+| `client_secret` | optional | string | Nervix; strict | yes | none |
+| `sas_token` | optional | string | Nervix; strict | yes | none |
+| `tenant_id` | optional | string | Nervix; strict | no | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 
-Delegated property namespaces: all driver property names. Reserved keys: none.
+Delegated property namespaces: adls.*. Reserved keys: none.
 
 ### ICEBERG_REST client
 
@@ -1203,11 +1205,18 @@ Delegated property namespaces: all driver property names. Reserved keys: none.
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
+| `audience` | optional | string | driver; best effort | no | none |
 | `credential` | optional | string | driver; best effort | yes | none |
-| `oauth2-server-uri` | optional | URL (http or https) | driver; best effort | no | none |
+| `disable-header-redaction` | optional | boolean | driver; best effort | no | none |
+| `oauth2-server-uri` | optional | URL (http or https) | Nervix; strict | no | none |
+| `prefix` | optional | string | driver; best effort | no | none |
+| `resource` | optional | string | driver; best effort | no | none |
 | `scope` | optional | string | driver; best effort | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 | `token` | optional | string | driver; best effort | yes | none |
-| `uri` | required | URL (http or https) | driver; best effort | no | none |
-| `warehouse` | optional | string | driver; best effort | no | none |
+| `uri` | required | URL (http or https) | Nervix; strict | no | none |
+| `warehouse` | optional | string | Nervix; strict | no | none |
 
-Delegated property namespaces: all driver property names. Reserved keys: none.
+Delegated property namespaces: header.*, s3.*, client.*, gcs.*, adls.*. Reserved keys: none.

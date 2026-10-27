@@ -977,7 +977,7 @@ CREATE ATTACHED REDIS PUBSUB EMITTER redis_distance_alerts
 
 CREATE DETACHED ICEBERG TABLE EMITTER iceberg_connected_sessions
   FROM connected_sessions
-  TO s3_lakehouse TABLE 'datalake_connected_sessions' LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+  TO s3_lakehouse TABLE 'datalake_connected_sessions' NAMESPACE 'datalake_demo' LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
       'event_id' = input.event_id,
@@ -1012,7 +1012,7 @@ CREATE DETACHED ICEBERG TABLE EMITTER iceberg_connected_sessions
 
 CREATE DETACHED ICEBERG TABLE EMITTER iceberg_device_locations
   FROM device_location_checked_events
-  TO s3_lakehouse TABLE 'datalake_device_locations' LOCATION 's3://nervix-iceberg/tables/datalake_device_locations' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+  TO s3_lakehouse TABLE 'datalake_device_locations' NAMESPACE 'datalake_demo' LOCATION 's3://nervix-iceberg/tables/datalake_device_locations' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
       'event_id' = input.event_id,
@@ -1050,7 +1050,7 @@ CREATE DETACHED ICEBERG TABLE EMITTER iceberg_device_locations
 
 CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_matched_events
   FROM disconnect_events_matched
-  TO s3_lakehouse TABLE 'datalake_disconnect_matched_events' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_matched_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+  TO s3_lakehouse TABLE 'datalake_disconnect_matched_events' NAMESPACE 'datalake_demo' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_matched_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
       'event_id' = input.event_id,
@@ -1081,7 +1081,7 @@ CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_matched_events
 
 CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_device_only_events
   FROM disconnect_events_device_only
-  TO s3_lakehouse TABLE 'datalake_disconnect_device_only_events' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_device_only_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+  TO s3_lakehouse TABLE 'datalake_disconnect_device_only_events' NAMESPACE 'datalake_demo' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_device_only_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
       'event_id' = input.event_id,
@@ -1112,7 +1112,7 @@ CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_device_only_events
 
 CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_edge_only_events
   FROM disconnect_events_edge_only
-  TO s3_lakehouse TABLE 'datalake_disconnect_edge_only_events' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_edge_only_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+  TO s3_lakehouse TABLE 'datalake_disconnect_edge_only_events' NAMESPACE 'datalake_demo' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_edge_only_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
       'event_id' = input.event_id,
@@ -1143,7 +1143,7 @@ CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_edge_only_events
 
 CREATE DETACHED ICEBERG TABLE EMITTER iceberg_security_events
   FROM security_events
-  TO s3_lakehouse TABLE 'datalake_security_events' LOCATION 's3://nervix-iceberg/tables/datalake_security_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+  TO s3_lakehouse TABLE 'datalake_security_events' NAMESPACE 'datalake_demo' LOCATION 's3://nervix-iceberg/tables/datalake_security_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
       'event_id' = input.event_id,
@@ -1164,7 +1164,7 @@ CREATE DETACHED ICEBERG TABLE EMITTER iceberg_security_events
 
 CREATE DETACHED ICEBERG TABLE EMITTER iceberg_distance_alerts
   FROM distance_alerts
-  TO s3_lakehouse TABLE 'datalake_distance_alerts' LOCATION 's3://nervix-iceberg/tables/datalake_distance_alerts' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+  TO s3_lakehouse TABLE 'datalake_distance_alerts' NAMESPACE 'datalake_demo' LOCATION 's3://nervix-iceberg/tables/datalake_distance_alerts' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
       'alert_id' = input.alert_id,

@@ -132,8 +132,9 @@ impl ResetWasmStateScope {
                         value,
                     });
                 }
-                let canonical = serde_json::to_string(&canonical)
-                    .map_err(|_| Report::new(ResetWasmStateSelectionError::InvalidFields))?;
+                let canonical = serde_json::to_string(&canonical).map_err(|cause| {
+                    Report::new(cause).change_context(ResetWasmStateSelectionError::InvalidFields)
+                })?;
                 Ok(ResolvedResetWasmStateScope::Branch {
                     fingerprint: BranchKeyFingerprint::of_canonical_text(&canonical),
                     fields: branch_key,

@@ -346,11 +346,21 @@ fn validate_group_count(
 }
 
 fn parse_domain(path: &str, raw: &str) -> Result<DomainName, Report<ArchiveReadError>> {
-    DomainName::parse(raw).map_err(|_| invalid(path, "domain name"))
+    DomainName::parse(raw).map_err(|cause| {
+        cause.change_context(ArchiveReadError::InvalidValue {
+            path: path.to_string(),
+            field: "domain name",
+        })
+    })
 }
 
 fn parse_entity(path: &str, raw: &str) -> Result<ModelName, Report<ArchiveReadError>> {
-    ModelName::parse(raw).map_err(|_| invalid(path, "state entity name"))
+    ModelName::parse(raw).map_err(|cause| {
+        cause.change_context(ArchiveReadError::InvalidValue {
+            path: path.to_string(),
+            field: "state entity name",
+        })
+    })
 }
 
 fn invalid(path: &str, field: &'static str) -> Report<ArchiveReadError> {

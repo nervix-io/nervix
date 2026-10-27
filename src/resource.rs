@@ -217,7 +217,7 @@ impl ArchiveSource {
     fn length(&self) -> Result<u64, Report<ResourceStoreError>> {
         match self {
             Self::File(path) => Ok(fs::metadata(path)
-                .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?
+                .change_context(ResourceStoreError::ReadArchive)?
                 .len()),
             Self::Section { length, .. } => Ok(*length),
         }
@@ -227,11 +227,10 @@ impl ArchiveSource {
     fn open(&self) -> Result<io::Take<fs::File>, Report<ResourceStoreError>> {
         match self {
             Self::File(path) => {
-                let file = fs::File::open(path)
-                    .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                let file = fs::File::open(path).change_context(ResourceStoreError::ReadArchive)?;
                 let length = file
                     .metadata()
-                    .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?
+                    .change_context(ResourceStoreError::ReadArchive)?
                     .len();
                 Ok(file.take(length))
             }
@@ -240,10 +239,10 @@ impl ArchiveSource {
                 offset,
                 length,
             } => {
-                let mut file = fs::File::open(path)
-                    .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                let mut file =
+                    fs::File::open(path).change_context(ResourceStoreError::ReadArchive)?;
                 file.seek(io::SeekFrom::Start(*offset))
-                    .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                    .change_context(ResourceStoreError::ReadArchive)?;
                 Ok(file.take(*length))
             }
         }
@@ -366,9 +365,8 @@ impl ResourceArchiveReader {
                                 let mut bytes = vec![0_u8; wanted];
                                 match file.read_exact(&mut bytes) {
                                     Ok(()) => Ok(ChargedBytes::from_owned(bytes, charge)),
-                                    Err(_) => {
-                                        Err(Report::new(ResourceStoreError::ArchiveTruncated))
-                                    }
+                                    Err(cause) => Err(Report::new(cause)
+                                        .change_context(ResourceStoreError::ArchiveTruncated)),
                                 }
                             }
                             Err(_) => Err(Report::new(ResourceStoreError::ReadArchive)),
@@ -425,34 +423,35 @@ impl ResourceArchiveStager {
             .hasher
             .take()
             .assured("an archive stager returns its hasher after every completed storage job");
-        let write = self
-            .executor
-            .run_storage(
-                StorageClass::Filesystem,
-                reservation,
-                move |_charge, cancellation| {
-                    let mut file = file;
-                    let mut hasher = hasher;
-                    let result = if cancellation.is_cancelled() {
-                        Err(Report::new(ResourceStoreError::Cancelled))
-                    } else {
-                        match file.write_all(&chunk) {
-                            Ok(()) => {
-                                hasher.update(&chunk);
-                                Ok(())
+        let write =
+            self.executor
+                .run_storage(
+                    StorageClass::Filesystem,
+                    reservation,
+                    move |_charge, cancellation| {
+                        let mut file = file;
+                        let mut hasher = hasher;
+                        let result = if cancellation.is_cancelled() {
+                            Err(Report::new(ResourceStoreError::Cancelled))
+                        } else {
+                            match file.write_all(&chunk) {
+                                Ok(()) => {
+                                    hasher.update(&chunk);
+                                    Ok(())
+                                }
+                                Err(cause) => Err(Report::new(cause)
+                                    .change_context(ResourceStoreError::WriteArchive)),
                             }
-                            Err(_) => Err(Report::new(ResourceStoreError::WriteArchive)),
+                        };
+                        ArchiveStageWrite {
+                            file,
+                            hasher,
+                            result,
                         }
-                    };
-                    ArchiveStageWrite {
-                        file,
-                        hasher,
-                        result,
-                    }
-                },
-            )
-            .await
-            .change_context(ResourceStoreError::JoinBlockingTask)?;
+                    },
+                )
+                .await
+                .change_context(ResourceStoreError::JoinBlockingTask)?;
         self.file = Some(write.file);
         self.hasher = Some(write.hasher);
         write.result?;
@@ -490,9 +489,9 @@ impl ResourceArchiveStager {
                     }
                     let mut file = file;
                     file.flush()
-                        .map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
+                        .change_context(ResourceStoreError::WriteArchive)?;
                     file.sync_all()
-                        .map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
+                        .change_context(ResourceStoreError::WriteArchive)?;
                     let hash = hasher.finalize();
                     Ok(StagedResourceArchive {
                         path,
@@ -545,15 +544,15 @@ impl ResourceBundleStager {
                         .map_err(|_| Report::new(ResourceStoreError::Cancelled))?;
                     if let Some(parent) = destination.parent() {
                         fs::create_dir_all(parent)
-                            .map_err(|_| Report::new(ResourceStoreError::CreateResourceDir))?;
+                            .change_context(ResourceStoreError::CreateResourceDir)?;
                     }
                     let file = OpenOptions::new()
                         .write(true)
                         .create_new(true)
                         .open(destination)
-                        .map_err(|_| Report::new(ResourceStoreError::CreateResourceDir))?;
+                        .change_context(ResourceStoreError::CreateResourceDir)?;
                     file.sync_all()
-                        .map_err(|_| Report::new(ResourceStoreError::WriteArchive))
+                        .change_context(ResourceStoreError::WriteArchive)
                 },
             )
             .await
@@ -613,9 +612,9 @@ impl ResourceBundleStager {
                     let mut file = OpenOptions::new()
                         .append(true)
                         .open(destination)
-                        .map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
+                        .change_context(ResourceStoreError::WriteArchive)?;
                     file.write_all(&chunk)
-                        .map_err(|_| Report::new(ResourceStoreError::WriteArchive))
+                        .change_context(ResourceStoreError::WriteArchive)
                 },
             )
             .await
@@ -753,7 +752,7 @@ impl ResourceStore {
             return Err(Report::new(ResourceStoreError::EmptyArchiveChunk));
         }
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(&root).map_err(|_| Report::new(ResourceStoreError::CreateRoot))?;
+        fs::create_dir_all(&root).change_context(ResourceStoreError::CreateRoot)?;
         Ok(Self {
             root,
             executor,
@@ -839,7 +838,7 @@ impl ResourceStore {
                         .prefix(".upload-")
                         .suffix(".staging")
                         .tempdir_in(parent)
-                        .map_err(|_| Report::new(ResourceStoreError::CreateResourceDir))?;
+                        .change_context(ResourceStoreError::CreateResourceDir)?;
                     Ok(directory.keep())
                 },
             )
@@ -878,7 +877,7 @@ impl ResourceStore {
                         .prefix(".archive-")
                         .suffix(".staging")
                         .tempfile_in(parent)
-                        .map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
+                        .change_context(ResourceStoreError::WriteArchive)?;
                     let (file, path) = temporary.into_parts();
                     Ok(OpenArchiveStager { path, file })
                 },
@@ -1018,10 +1017,10 @@ impl ResourceStore {
                         return Err(Report::new(ResourceStoreError::Cancelled));
                     }
                     let file = fs::File::open(archive_path)
-                        .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                        .change_context(ResourceStoreError::ReadArchive)?;
                     let archive_bytes = file
                         .metadata()
-                        .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?
+                        .change_context(ResourceStoreError::ReadArchive)?
                         .len();
                     Ok(OpenArchive {
                         file,
@@ -1063,10 +1062,10 @@ impl ResourceStore {
                         return Err(Report::new(ResourceStoreError::Cancelled));
                     }
                     let file = fs::File::open(manifest_path)
-                        .map_err(|_| Report::new(ResourceStoreError::ReadFile))?;
+                        .change_context(ResourceStoreError::ReadFile)?;
                     let reader = std::io::BufReader::with_capacity(chunk_bytes, file);
                     serde_json::from_reader(reader)
-                        .map_err(|_| Report::new(ResourceStoreError::SerializeManifest))
+                        .change_context(ResourceStoreError::SerializeManifest)
                 },
             )
             .await
@@ -1313,7 +1312,7 @@ impl ResourceStore {
         let manifest = ResourceManifest { resource, entries };
         let manifest_path = install.staging_root.join("manifest.json");
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)
-            .map_err(|_| Report::new(ResourceStoreError::SerializeManifest))?;
+            .change_context(ResourceStoreError::SerializeManifest)?;
         tokio::fs::write(&manifest_path, manifest_bytes)
             .await
             .map_err(|_| Report::new(ResourceStoreError::WriteManifest))?;
@@ -1410,7 +1409,7 @@ fn install_archive(
             }));
         }
         fs::create_dir_all(&install.content_root)
-            .map_err(|_| Report::new(ResourceStoreError::CreateResourceDir))?;
+            .change_context(ResourceStoreError::CreateResourceDir)?;
 
         install_archive_into_staging(
             &install,
@@ -1486,15 +1485,15 @@ fn install_archive_into_staging(
     }
     let manifest = ResourceManifest { resource, entries };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)
-        .map_err(|_| Report::new(ResourceStoreError::SerializeManifest))?;
+        .change_context(ResourceStoreError::SerializeManifest)?;
     let mut manifest_file = fs::File::create(install.staging_root.join("manifest.json"))
-        .map_err(|_| Report::new(ResourceStoreError::WriteManifest))?;
+        .change_context(ResourceStoreError::WriteManifest)?;
     manifest_file
         .write_all(&manifest_bytes)
-        .map_err(|_| Report::new(ResourceStoreError::WriteManifest))?;
+        .change_context(ResourceStoreError::WriteManifest)?;
     manifest_file
         .sync_all()
-        .map_err(|_| Report::new(ResourceStoreError::WriteManifest))?;
+        .change_context(ResourceStoreError::WriteManifest)?;
     sync_directories_recursive(&install.staging_root, cancellation)?;
 
     cancellation
@@ -1504,7 +1503,7 @@ fn install_archive_into_staging(
         remove_tree(&install.install_root, cancellation)?;
     }
     fs::rename(&install.staging_root, &install.install_root)
-        .map_err(|_| Report::new(ResourceStoreError::RenameResourceDir))?;
+        .change_context(ResourceStoreError::RenameResourceDir)?;
     let parent = install
         .install_root
         .parent()
@@ -1514,16 +1513,16 @@ fn install_archive_into_staging(
 }
 
 impl ArchiveStagingWriter<'_> {
-    fn report_failure(&self) -> Report<ResourceStoreError> {
+    fn failure_context(&self) -> ResourceStoreError {
         match self.failure {
-            Some(ArchiveWriteFailure::Cancelled) => Report::new(ResourceStoreError::Cancelled),
+            Some(ArchiveWriteFailure::Cancelled) => ResourceStoreError::Cancelled,
             Some(ArchiveWriteFailure::QuotaExceeded { actual }) => {
-                Report::new(ResourceStoreError::ArchiveQuotaExceeded {
+                ResourceStoreError::ArchiveQuotaExceeded {
                     actual,
                     limit: self.limit,
-                })
+                }
             }
-            None => Report::new(ResourceStoreError::WriteArchive),
+            None => ResourceStoreError::WriteArchive,
         }
     }
 
@@ -1540,7 +1539,7 @@ impl ArchiveStagingWriter<'_> {
             cancellation: _,
         } = self;
         file.sync_all()
-            .map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
+            .change_context(ResourceStoreError::WriteArchive)?;
         Ok(StagedResourceArchive {
             path,
             root_checksum: encode_hex(hasher.finalize().as_bytes()),
@@ -1605,7 +1604,7 @@ fn build_bundle_archive(
         .prefix(".archive-")
         .suffix(".staging")
         .tempfile_in(archive_parent)
-        .map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
+        .change_context(ResourceStoreError::WriteArchive)?;
     let (file, path) = temporary.into_parts();
     let writer = ArchiveStagingWriter {
         file,
@@ -1644,18 +1643,18 @@ fn build_bundle_archive(
                 header.set_mode(0o644);
                 header.set_entry_type(TarEntryType::Regular);
                 header.set_cksum();
-                let file = fs::File::open(full_path)
-                    .map_err(|_| Report::new(ResourceStoreError::ReadFile))?;
+                let file =
+                    fs::File::open(full_path).change_context(ResourceStoreError::ReadFile)?;
                 archive.append_data(&mut header, relative, file)
             }
         };
-        if result.is_err() {
-            return Err(archive.get_ref().report_failure());
+        if let Err(cause) = result {
+            return Err(Report::new(cause).change_context(archive.get_ref().failure_context()));
         }
     }
 
-    if archive.finish().is_err() {
-        return Err(archive.get_ref().report_failure());
+    if let Err(cause) = archive.finish() {
+        return Err(Report::new(cause).change_context(archive.get_ref().failure_context()));
     }
     let writer = archive
         .into_inner()
@@ -1690,13 +1689,11 @@ fn collect_staged_bundle_entries_recursive(
     cancellation: &Cancellation,
     inventory: &mut StagedBundleInventory,
 ) -> Result<(), Report<ResourceStoreError>> {
-    for entry in
-        fs::read_dir(current).map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?
-    {
+    for entry in fs::read_dir(current).change_context(ResourceStoreError::ReadDirectory)? {
         cancellation
             .check()
             .map_err(|_| Report::new(ResourceStoreError::Cancelled))?;
-        let entry = entry.map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?;
+        let entry = entry.change_context(ResourceStoreError::ReadDirectory)?;
         let path = entry.path();
         let relative = path
             .strip_prefix(root)
@@ -1704,7 +1701,7 @@ fn collect_staged_bundle_entries_recursive(
             .to_path_buf();
         let file_type = entry
             .file_type()
-            .map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?;
+            .change_context(ResourceStoreError::ReadDirectory)?;
         if file_type.is_dir() {
             inventory
                 .entries
@@ -1717,7 +1714,7 @@ fn collect_staged_bundle_entries_recursive(
         }
         let size = entry
             .metadata()
-            .map_err(|_| Report::new(ResourceStoreError::ReadFile))?
+            .change_context(ResourceStoreError::ReadFile)?
             .len();
         let next_file_count = inventory.file_count.checked_add(1).ok_or_else(|| {
             Report::new(ResourceStoreError::FileCountQuotaExceeded {
@@ -1763,7 +1760,7 @@ fn copy_archive_to_staging(
 ) -> Result<(String, u64), Report<ResourceStoreError>> {
     let mut source = source.open()?;
     let mut destination =
-        fs::File::create(destination).map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
+        fs::File::create(destination).change_context(ResourceStoreError::WriteArchive)?;
     let mut hasher = Hasher::new();
     let mut total = 0_u64;
     loop {
@@ -1772,7 +1769,7 @@ fn copy_archive_to_staging(
             .map_err(|_| Report::new(ResourceStoreError::Cancelled))?;
         let read = source
             .read(buffer)
-            .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+            .change_context(ResourceStoreError::ReadArchive)?;
         if read == 0 {
             break;
         }
@@ -1792,13 +1789,13 @@ fn copy_archive_to_staging(
         }
         destination
             .write_all(&buffer[..read])
-            .map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
+            .change_context(ResourceStoreError::WriteArchive)?;
         hasher.update(&buffer[..read]);
         total = next_total;
     }
     destination
         .sync_all()
-        .map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
+        .change_context(ResourceStoreError::WriteArchive)?;
     Ok((encode_hex(hasher.finalize().as_bytes()), total))
 }
 
@@ -1809,12 +1806,11 @@ fn extract_archive(
     buffer: &mut [u8],
     cancellation: &Cancellation,
 ) -> Result<(Vec<ResourceManifestEntry>, u64, u64), Report<ResourceStoreError>> {
-    let file =
-        fs::File::open(archive_path).map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+    let file = fs::File::open(archive_path).change_context(ResourceStoreError::ReadArchive)?;
     let mut archive = TarArchive::new(file);
     let archive_entries = archive
         .entries()
-        .map_err(|_| Report::new(ResourceStoreError::InvalidArchive))?;
+        .change_context(ResourceStoreError::InvalidArchive)?;
     let mut contents = BTreeMap::new();
     let mut extracted_bytes = 0_u64;
     let mut file_count = 0_u64;
@@ -1823,11 +1819,11 @@ fn extract_archive(
         cancellation
             .check()
             .map_err(|_| Report::new(ResourceStoreError::Cancelled))?;
-        let mut entry = entry.map_err(|_| Report::new(ResourceStoreError::InvalidArchive))?;
+        let mut entry = entry.change_context(ResourceStoreError::InvalidArchive)?;
         let relative = sanitize_archive_path(
             &entry
                 .path()
-                .map_err(|_| Report::new(ResourceStoreError::InvalidArchive))?,
+                .change_context(ResourceStoreError::InvalidArchive)?,
         )?;
         let manifest_path = relative
             .to_str()
@@ -1843,7 +1839,7 @@ fn extract_archive(
                 return Err(Report::new(ResourceStoreError::InvalidArchive));
             }
             fs::create_dir_all(&output_path)
-                .map_err(|_| Report::new(ResourceStoreError::CreateResourceDir))?;
+                .change_context(ResourceStoreError::CreateResourceDir)?;
             contents.insert(manifest_path, ResourceEntryContent::Directory);
             continue;
         }
@@ -1878,11 +1874,10 @@ fn extract_archive(
         }
 
         if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|_| Report::new(ResourceStoreError::CreateResourceDir))?;
+            fs::create_dir_all(parent).change_context(ResourceStoreError::CreateResourceDir)?;
         }
-        let mut output = fs::File::create(&output_path)
-            .map_err(|_| Report::new(ResourceStoreError::CreateResourceDir))?;
+        let mut output =
+            fs::File::create(&output_path).change_context(ResourceStoreError::CreateResourceDir)?;
         let mut hasher = Hasher::new();
         let mut remaining = size;
         while remaining != 0 {
@@ -1897,13 +1892,13 @@ fn extract_archive(
                 .verified("the requested read is bounded by the buffer length");
             let read = entry
                 .read(&mut buffer[..wanted])
-                .map_err(|_| Report::new(ResourceStoreError::InvalidArchive))?;
+                .change_context(ResourceStoreError::InvalidArchive)?;
             if read == 0 {
                 return Err(Report::new(ResourceStoreError::ArchiveTruncated));
             }
             output
                 .write_all(&buffer[..read])
-                .map_err(|_| Report::new(ResourceStoreError::CreateResourceDir))?;
+                .change_context(ResourceStoreError::CreateResourceDir)?;
             hasher.update(&buffer[..read]);
             remaining = remaining
                 .checked_sub(
@@ -1914,7 +1909,7 @@ fn extract_archive(
         }
         output
             .sync_all()
-            .map_err(|_| Report::new(ResourceStoreError::CreateResourceDir))?;
+            .change_context(ResourceStoreError::CreateResourceDir)?;
         contents.insert(
             manifest_path,
             ResourceEntryContent::File {
@@ -1954,14 +1949,14 @@ fn sync_directories_recursive(
     root: &Path,
     cancellation: &Cancellation,
 ) -> Result<(), Report<ResourceStoreError>> {
-    for entry in fs::read_dir(root).map_err(|_| Report::new(ResourceStoreError::ReadDirectory))? {
+    for entry in fs::read_dir(root).change_context(ResourceStoreError::ReadDirectory)? {
         cancellation
             .check()
             .map_err(|_| Report::new(ResourceStoreError::Cancelled))?;
-        let entry = entry.map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?;
+        let entry = entry.change_context(ResourceStoreError::ReadDirectory)?;
         if entry
             .file_type()
-            .map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?
+            .change_context(ResourceStoreError::ReadDirectory)?
             .is_dir()
         {
             sync_directories_recursive(&entry.path(), cancellation)?;
@@ -1971,11 +1966,10 @@ fn sync_directories_recursive(
 }
 
 fn sync_directory(path: &Path) -> Result<(), Report<ResourceStoreError>> {
-    let directory =
-        fs::File::open(path).map_err(|_| Report::new(ResourceStoreError::WriteManifest))?;
+    let directory = fs::File::open(path).change_context(ResourceStoreError::WriteManifest)?;
     directory
         .sync_all()
-        .map_err(|_| Report::new(ResourceStoreError::WriteManifest))
+        .change_context(ResourceStoreError::WriteManifest)
 }
 
 fn cleanup_staging_paths(
@@ -1983,14 +1977,14 @@ fn cleanup_staging_paths(
     remaining_namespace_levels: u8,
     cancellation: &Cancellation,
 ) -> Result<(), Report<ResourceStoreError>> {
-    for entry in fs::read_dir(root).map_err(|_| Report::new(ResourceStoreError::ReadDirectory))? {
+    for entry in fs::read_dir(root).change_context(ResourceStoreError::ReadDirectory)? {
         cancellation
             .check()
             .map_err(|_| Report::new(ResourceStoreError::Cancelled))?;
-        let entry = entry.map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?;
+        let entry = entry.change_context(ResourceStoreError::ReadDirectory)?;
         let file_type = entry
             .file_type()
-            .map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?;
+            .change_context(ResourceStoreError::ReadDirectory)?;
         let path = entry.path();
         let is_staging = entry
             .file_name()
@@ -2034,24 +2028,21 @@ fn remove_tree_inner(
     root: &Path,
     cancellation: Option<&Cancellation>,
 ) -> Result<(), Report<ResourceStoreError>> {
-    let metadata = fs::symlink_metadata(root)
-        .map_err(|_| Report::new(ResourceStoreError::DeleteResourceDir))?;
+    let metadata =
+        fs::symlink_metadata(root).change_context(ResourceStoreError::DeleteResourceDir)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return fs::remove_file(root)
-            .map_err(|_| Report::new(ResourceStoreError::DeleteResourceDir));
+        return fs::remove_file(root).change_context(ResourceStoreError::DeleteResourceDir);
     }
-    for entry in
-        fs::read_dir(root).map_err(|_| Report::new(ResourceStoreError::DeleteResourceDir))?
-    {
+    for entry in fs::read_dir(root).change_context(ResourceStoreError::DeleteResourceDir)? {
         if let Some(cancellation) = cancellation {
             cancellation
                 .check()
                 .map_err(|_| Report::new(ResourceStoreError::Cancelled))?;
         }
-        let entry = entry.map_err(|_| Report::new(ResourceStoreError::DeleteResourceDir))?;
+        let entry = entry.change_context(ResourceStoreError::DeleteResourceDir)?;
         remove_tree_inner(&entry.path(), cancellation)?;
     }
-    fs::remove_dir(root).map_err(|_| Report::new(ResourceStoreError::DeleteResourceDir))
+    fs::remove_dir(root).change_context(ResourceStoreError::DeleteResourceDir)
 }
 
 fn sanitize_relative_path(path: &str) -> Result<PathBuf, Report<ResourceStoreError>> {
@@ -2126,18 +2117,16 @@ fn collect_manifest_entries_recursive(
     entries: &mut Vec<ResourceManifestEntry>,
     cancellation: &Cancellation,
 ) -> Result<(), Report<ResourceStoreError>> {
-    for entry in
-        fs::read_dir(current).map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?
-    {
+    for entry in fs::read_dir(current).change_context(ResourceStoreError::ReadDirectory)? {
         // One directory entry is the bounded unit this work is cancelled between.
         cancellation
             .check()
             .map_err(|_| Report::new(ResourceStoreError::Cancelled))?;
-        let entry = entry.map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?;
+        let entry = entry.change_context(ResourceStoreError::ReadDirectory)?;
         let path = entry.path();
         let file_type = entry
             .file_type()
-            .map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?;
+            .change_context(ResourceStoreError::ReadDirectory)?;
         let relative = path
             .strip_prefix(root)
             .verified("the walk only yields entries below the root it started from")
@@ -2209,8 +2198,8 @@ async fn checksum_path(path: &Path) -> Result<String, Report<ResourceStoreError>
 fn manifest_checksum(
     entries: &[ResourceManifestEntry],
 ) -> Result<String, Report<ResourceStoreError>> {
-    let bytes = serde_json::to_vec(entries)
-        .map_err(|_| Report::new(ResourceStoreError::SerializeManifest))?;
+    let bytes =
+        serde_json::to_vec(entries).change_context(ResourceStoreError::SerializeManifest)?;
     let mut hasher = Hasher::new();
     hasher.update(&bytes);
     let hash = hasher.finalize();
@@ -2226,6 +2215,8 @@ fn encode_hex(bytes: &[u8]) -> String {
     out
 }
 
+#[cfg(test)]
+mod failure_tests;
 #[cfg(test)]
 mod layout_properties;
 #[cfg(test)]

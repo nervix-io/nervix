@@ -8,9 +8,9 @@
 
 use nervix_arbitrary::{Arbitrary, Domain, Entropy};
 use nervix_models::{
-    ClickHouseTableName, ExternalNameError, IcebergTableName, KafkaConsumerGroupName,
-    KafkaTopicName, MongoDbCollectionName, MqttTopicFilter, MqttTopicName, MySqlTableName,
-    NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName, PostgresTableName,
+    ClickHouseTableName, ExternalNameError, IcebergNamespace, IcebergTableName,
+    KafkaConsumerGroupName, KafkaTopicName, MongoDbCollectionName, MqttTopicFilter, MqttTopicName,
+    MySqlTableName, NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName, PostgresTableName,
     PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName, SqsQueueName,
 };
 
@@ -145,6 +145,7 @@ macro_rules! for_every_external_name_type {
         $assertion!(MySqlTableName, $text);
         $assertion!(MongoDbCollectionName, $text);
         $assertion!(IcebergTableName, $text);
+        $assertion!(IcebergNamespace, $text);
         $assertion!(MqttTopicName, $text);
         $assertion!(NatsPublishSubjectName, $text);
     };
@@ -162,12 +163,13 @@ fn bolero_external_names_round_trip_through_every_representation() {
                 arbitrary.clickhouse_table_name()
             );
             assert_external_name_round_trips!(PostgresTableName, arbitrary.emitter_table_name());
-            assert_external_name_round_trips!(MySqlTableName, arbitrary.emitter_table_name());
+            assert_external_name_round_trips!(MySqlTableName, arbitrary.mysql_table_name());
             assert_external_name_round_trips!(
                 MongoDbCollectionName,
                 arbitrary.emitter_table_name()
             );
             assert_external_name_round_trips!(IcebergTableName, arbitrary.emitter_table_name());
+            assert_external_name_round_trips!(IcebergNamespace, arbitrary.iceberg_namespace());
             assert_external_name_round_trips!(
                 MqttTopicName,
                 arbitrary.mqtt_publication_topic_name()
@@ -377,5 +379,32 @@ fn a_queue_or_channel_admits_any_text_within_its_bound() {
             max: 1024,
             actual: 1025
         }
+    );
+}
+
+#[test]
+fn mysql_table_paths_keep_one_or_two_nonempty_parts() {
+    for text in ["Orders", "Shop.Orders", "shop-1.Orders_2"] {
+        let name = MySqlTableName::parse(text).expect("a current table path");
+        assert_eq!(
+            name.parts().collect::<Vec<_>>(),
+            text.split('.').collect::<Vec<_>>()
+        );
+        assert_external_name_round_trips!(MySqlTableName, name);
+    }
+    let boundary = format!("{}.{}", "D".repeat(63), "T".repeat(64));
+    assert_external_name_round_trips!(
+        MySqlTableName,
+        MySqlTableName::parse(&boundary).expect("the complete qualified path reaches 128 bytes")
+    );
+    for text in [".Orders", "Shop.", "Shop..Orders"] {
+        assert_eq!(
+            refusal!(MySqlTableName, text),
+            ExternalNameError::EmptyLevel { separator: '.' }
+        );
+    }
+    assert_eq!(
+        refusal!(MySqlTableName, "region.Shop.Orders"),
+        ExternalNameError::TooManyLevels { max: 2, actual: 3 }
     );
 }

@@ -107,8 +107,18 @@ impl ArchiveRecord for MaterializedRelayDescriptor {
             return Err(invalid(path, "materialized group count"));
         }
         Ok(Self {
-            domain: DomainName::parse(&wire.domain).map_err(|_| invalid(path, "domain"))?,
-            entity: ModelName::parse(&wire.entity).map_err(|_| invalid(path, "entity"))?,
+            domain: DomainName::parse(&wire.domain).map_err(|cause| {
+                cause.change_context(ArchiveReadError::InvalidValue {
+                    path: path.to_string(),
+                    field: "domain",
+                })
+            })?,
+            entity: ModelName::parse(&wire.entity).map_err(|cause| {
+                cause.change_context(ArchiveReadError::InvalidValue {
+                    path: path.to_string(),
+                    field: "entity",
+                })
+            })?,
             schema: SchemaFingerprint::from_digest(wire.schema),
             revision: wire.revision,
             fence: wire.fence,
@@ -161,8 +171,18 @@ impl ArchiveRecord for MaterializedIdentitiesRecord {
             }
         }
         Ok(Self {
-            domain: DomainName::parse(&wire.domain).map_err(|_| invalid(path, "domain"))?,
-            entity: ModelName::parse(&wire.entity).map_err(|_| invalid(path, "entity"))?,
+            domain: DomainName::parse(&wire.domain).map_err(|cause| {
+                cause.change_context(ArchiveReadError::InvalidValue {
+                    path: path.to_string(),
+                    field: "domain",
+                })
+            })?,
+            entity: ModelName::parse(&wire.entity).map_err(|cause| {
+                cause.change_context(ArchiveReadError::InvalidValue {
+                    path: path.to_string(),
+                    field: "entity",
+                })
+            })?,
             group: wire.group,
             identities: wire.identities,
         })

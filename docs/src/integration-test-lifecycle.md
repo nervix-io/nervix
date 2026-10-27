@@ -175,6 +175,7 @@ resubmitting an outcome that might already have produced output.
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and sequences, and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
 | Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
+| Syslog TLS publication and split-frame writes | One abort-on-drop task on the binary's runtime, owning TCP connection establishment, the TLS handshake and the complete prepared write. Publication closes the connection there; a split-frame write returns its sender for the later remainder | `tests/common/syslog_tls.rs`, using `tests/common/runner_observation.rs` |
 | Command outcome recovery | On the task awaiting the command, including backup setup through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
 | Publication-relative receipt timing | A runtime task owns the subscription read before publication and retains its receipt timestamp. The assertion bounds completion after the HTTP publishing step returns; scenario teardown cancels an unfinished reader before stopping nodes | `tests/common/runner_observation.rs`, `tests/common/raw_session.rs` and the timed subscription steps in `tests/scenarios.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
@@ -191,6 +192,16 @@ keeps its one-second `idle_timeout_ms`, observes both messages beside the silent
 measures the silent connection's close from before connecting. The runtime task removes runner
 polling gaps; it does not remove scheduling delays on the worker itself or change the listener's
 deadline.
+
+The Syslog TLS steps prepare their identity, trust and framed bytes before starting the sender.
+The sender performs its connection, handshake and write together on a runtime worker, independently
+of subsequent runner polls. Dropping the step aborts that task and releases its connection; a
+sender panic still fails the awaiting step with its original cause. The handshake-stall scenario
+retains the listener's one-second `connect_timeout_ms`, observes the silent client's actual close
+at least one second after connection began, and verifies authenticated publication both beside
+the stalled handshake and after it closes. The split-frame scenarios retain their connection and
+exact remainder across steps. This removes runner polling gaps without changing the listener's
+deadline or claiming that runtime workers cannot themselves be delayed.
 
 The controlled NATS endpoint publishes a positive observation when it holds a complete publish
 and stops reading behind it. A connection-loss scenario waits for that observation, ends the
@@ -449,9 +460,31 @@ for a detach reply can queue ticks that arrived before the reply; the post-detac
 the recorded wire order, clears those already queued frames, and waits for any new frame. An unread
 pre-reply tick therefore does not masquerade as delivery after detach.
 
-The generator cadence assertion groups equal logical timestamps across concrete branches and
-checks increasing timestamps within each branch. It allows records from separate branch tasks to
-arrive in either order, as their delivery has no shared ordering contract.
+The generator cadence assertion checks execution timestamps rather than subscription throughput.
+Every row must preserve the expected source fields and its concrete branch key, timestamps must
+increase within each branch, and a complete occurrence has one shared timestamp across both
+branches. Rows from different branches may arrive in either order. Early rows from the first branch
+remain checked while the second branch becomes ready; they do not count as complete occurrences.
+
+The observation runs on a runtime worker independently of the cooperative scenario runner and has
+a 30-second physical liveness budget for four complete occurrences. Delayed subscription reads can
+consume already queued rows, so their arrival spacing cannot measure generation rate. The occurrence
+timestamps must span at least one logical cadence interval. A pending execution can finish late and
+be followed by a coalesced occurrence;
+the next boundary may also be close. Requiring equal gaps would reject that supported behavior,
+while four complete occurrences within less than one interval expose a catch-up burst.
+
+`Paced generators follow domain logical time` covers `EACH 2s` at rate `20.0` and `EACH 200ms` at
+rate `0.1`, with the same one- and three-node examples and replica counts. The slow-rate profile
+discriminates against scheduling in physical time: four 200ms physical occurrences would span only
+60ms of logical time, below the required 200ms. Longer gaps from missed/coalesced periods remain
+valid. The fixture's two-day logical branch TTL exceeds the current 105-minute suite budget at
+rate `20.0` (35 logical hours); branch expiry is not the subject of this scenario.
+
+The focused observation regressions use a paused test clock to delay nineteen subscription reads
+by a second each, including eleven rows from the first branch before both branches appear. They
+retain the same field, key, ordering and shared-timestamp checks, and separately reject a catch-up
+burst, physical scheduling at the slow rate, corrupt rows and a stalled or failed subscription.
 
 `tests-deps` builds the CLI, the Plexus formatter, the paced simulation's Rust driver and the shared
 C binding its Python driver loads in the normal target directory. The full and focused
@@ -726,11 +759,26 @@ document, and an answer outside its schema is reported rather than read. The out
 | `read-only` | Kache made the job's remote read-only, as for a scheduled or manually dispatched run | Nothing: such a job publishes nothing |
 | `not-run` | The job's work failed or was cancelled, so publication returns at once | Queued uploads go to the shutdown drain |
 | `unavailable` | The job has no kache command or no manifest key, or its daemon does not answer | Whatever a stopped daemon left queued: publication asks `kache --json daemon status` first because `kache stats` would start a new daemon |
-| `cancelled` | The step received `SIGINT` or `SIGTERM` | The record names the phase the step reached |
+| `cancelled` | The step received `SIGINT` or `SIGTERM` | The record names the first signal and the phase in which the step received it |
 
 Publication never changes the job's verdict. Every outcome exits `0` except `cancelled`, whose step
-ends with the signal's status, as the runner asked. `incomplete`, `unavailable` and `cancelled` also
-add a workflow warning. A job that failed before its checkout has no script to run, so its step
+ends with the first signal's status, as the runner asked. `incomplete`, `unavailable` and
+`cancelled` also add a workflow warning.
+
+A termination signal never interrupts cleanup. Python runs a signal handler between any two
+bytecodes, so a handler that raised at once could land inside library cleanup. On Python 3.12.3, a
+signal just after `shutil.rmtree` closed a telemetry directory's descriptor made it close that
+descriptor again, and the failure replaced the cancellation before the record was written; later
+Python releases leave the directory behind instead. Publication therefore records the first signal
+when it arrives and raises it only where publication can stop cleanly. Inside a wait for a kache
+command or for the next poll it raises at once and only once, so the interrupted command is killed
+and reaped, and the telemetry directory it was writing is removed. A signal received anywhere else
+is raised when the next wait begins or the current phase ends, so the record names the phase in
+which the step received it. Once the record is written the step stops listening: a signal received
+until then ends the step with the first signal's status, and later ones are ignored, because
+Python's exit restores the default handlers and would let a later signal end the step with its own
+status. A signal that arrives before publication installs its handlers ends the step without a
+record. A job that failed before its checkout has no script to run, so its step
 adds only a notice. The record, `publication.json` and `publication.md`, lands in
 `$RUNNER_TEMP/kache-report`, which the kache report artifact uploads where the job has one, and in
 the job summary. An image build runs `publish --job-status success` as the last command of its
@@ -865,8 +913,21 @@ The harness keeps these boundaries explicit.
   after an unknown outcome, redirect or interrupted transport. It starts no further attempt after
   its 120-second recovery budget; each stream keeps its existing reply timeout. It returns a
   definitive failure or upload refusal immediately, and keeps the terminal reply's actual origin
-  and complete report. The staging scenario transfers leadership while publication is paused on
-  three nodes, while retaining the one-node example and its staging and branch-state checks.
+  and complete report. A scenario whose subject is what a restore did, rather than how the
+  protocol answered one stream, learns the restore's outcome through that probe: the deduplicator
+  and window conversions refused for room, the idle lifetime of restored materialized branches,
+  and the resume of materialized generations larger than the bulk budget. In a cluster of more
+  than one node a single stream can be answered `OutcomeUnknown` with cause `LeadershipLost`
+  without any election, when a loaded runner delays the heartbeats that confirm the leader's lease
+  as it records the outcome; a single-node leader is its own quorum, and its lease never lapses. A
+  raw probe therefore stays only where the answer is the subject: a repetition joining an applying
+  restore or returning its recorded outcome, a reference conflict, a redirect, a controlled
+  leadership loss, or an interrupted upload sent again. The room and idle-lifetime scenarios hold
+  the restore's outcome before its coordinator records it and transfer leadership on three nodes
+  before releasing it, so their three-node examples always learn the outcome under the same
+  reference as recovered, and their one-node examples report it as executed. The staging scenario
+  transfers leadership while publication is paused on three nodes, while retaining the one-node
+  example and its staging and branch-state checks.
   A paced-driver file fixture writes only the
   scenario's ledger or effect file before the driver starts. The published driver reads that
   file, and the scenario checks the process exit and the occurrence count of its terminal cause.
@@ -911,6 +972,20 @@ The harness keeps these boundaries explicit.
   materialized checkpoint staging failure, holds the first coordinator's failed outcome before it
   is recorded, moves leadership, and requires recovery under the same execution reference to end
   failed and stay failed once the condition is cleared.
+- **Forced entity drain timeouts.** A forced entity drain timeout armed for a domain refuses the
+  next drain observed there, after one complete status round. When a durable execution owns the
+  domain's mutation at that drain, the timeout keeps refusing the same drain, the same purpose,
+  relays and entities, whenever that execution observes it again on whichever node coordinates it,
+  until another execution or none owns the domain. A drain that no execution owns meets the timeout
+  once. A timeout that only the first run met would let a leader that runs the command again under
+  the same execution reference, because the refused outcome was never recorded, drain and apply
+  the alteration, and the scenario would observe that success. The execution's other drains, such
+  as a source-intake drain before the full hold or the other units one node drain moves, are left
+  alone, and an alteration a scenario runs later owns the domain under its own reference and
+  drains normally. The three-node Syslog regression moves leadership while the alteration waits at
+  its entity gate pause, holds the new leader's run of the same transaction until the first run
+  has refused and released its hold, and requires the alteration to end refused with every frame
+  delivered once.
 - **Console backup download pauses.** The console reload scenarios hold the archive's first
   download before it streams, so the reload interrupts a download in progress. The archive is
   assembled and served by the leader that completes the backup. A leadership move while the backup
@@ -3132,6 +3207,7 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | A server process report names the listener another socket held only when its outermost context is a lost bind, read without its emphasis | `a_report_names_its_outermost_context_without_its_emphasis`, `the_last_report_a_launch_wrote_is_the_one_read`, `a_log_without_a_report_names_no_context`, `control_sequences_are_removed_and_the_text_between_them_is_kept`, `a_report_of_a_lost_bind_names_the_listener_the_next_launch_moves`, `a_report_of_any_other_failure_names_no_listener` |
 | A failed server process startup keeps what its readiness probes saw and what the still-running process was doing, within a bound | `a_history_without_probes_says_none_completed`, `consecutive_probes_of_one_kind_form_one_run`, `a_kind_that_returns_starts_a_new_run`, `a_long_history_keeps_its_first_and_latest_runs`, `a_sleeping_child_is_described_with_its_thread_and_its_host`, `a_stopped_child_is_described_as_stopped`, `a_reaped_child_is_described_as_ended`, `a_description_lists_a_bounded_number_of_groups_and_names`, `a_description_orders_groups_from_the_largest` |
 | Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
+| The actual Syslog TLS sender completes its handshake and full write while its runner stops polling it, under the unchanged one-second peer deadline | `a_syslog_tls_publication_finishes_while_the_runner_is_unpolled`, `a_syslog_tls_split_write_finishes_while_the_runner_is_unpolled` |
 | Every tick's lateness adds up beside the stalls, and the summary reports the runner thread's CPU and run-queue time and the runtime workers' busy time | `the_lateness_of_every_tick_adds_up_beside_the_stalls`, `a_tick_below_the_bound_counts_as_lateness_and_not_as_a_stall`, `a_thread_schedstat_reads_its_cpu_time_and_run_queue_wait`, `the_runner_thread_reads_the_cpu_time_it_spent_since_it_was_named`, `the_suite_summary_adds_up_every_runner_tick_beside_its_stalls` |
 | A stall lists only the scenarios that hold run slots, and a suite timeout counts only the scenarios still queued or running | `the_running_scenarios_are_those_that_hold_their_run_slots`, `a_suite_timeout_does_not_count_a_finished_attempt_as_active` |
 | jemalloc purges freed memory on its background threads once the scenario process asks, so the runner thread does not wait for a purge | `freed_memory_is_purged_on_jemalloc_background_threads` |

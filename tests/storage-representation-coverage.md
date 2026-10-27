@@ -41,6 +41,17 @@ checkpoint, and the WASM targets listed in the
 [WASM representation coverage map](./wasm-representation-coverage.md) for guest checkpoints and for
 the segment set a current chunk key projects to.
 
+The shared name and Model generators include case-preserving MySQL table and database/table
+paths. `models-external-names` compares their exact spelling through parsing, conversions, JSON
+and the archive. `models-archived-models`, `registry-archived-models`, `registry-stored-models`
+and `registry-stored-models-corruption` carry those current names through their Model storage
+boundaries. Scheduled Models, commit-plan transitions and queued statements also carry them
+through `consensus-state-records`, `consensus-state-corruption` and `consensus-raft-records`.
+The Iceberg namespace and table Model recipe reaches those same consensus consumers through
+schedules, commit-plan transitions and queued statements; their domains advance with it too.
+Their domain versions and case/input budgets are listed in the
+[target register](../docs/src/property-testing-and-fuzzing.md#target-and-representation-register).
+
 Kafka native restore and archive capture preserve the exact optional applied-start generation
 in addition to the complete ordered partition positions: `restore-native-kafka` and
 `backup-native-kafka` compare that identity without deriving it from the domain start version.
@@ -93,3 +104,12 @@ allocation checks.
 
 The public scenario **Persisted models reload from the on-disk tables a node flushed them into**
 covers the registry's on-disk read path on one- and three-node clusters.
+
+## Iceberg Model Coverage
+
+The Model generators include Iceberg declarations with the required case-preserving,
+dot-separated namespace, the storage backend and location, catalog reference and typed positive
+commit-size limit. Registry and Model archive properties compare those fields with the complete
+Model. The vocabulary owner separately checks namespace JSON/archive equality and backend
+conversions in `models-iceberg-declarations`; `client-config-schema` covers ordered owned and
+delegated configuration values through JSON/archive equality and public inspection.

@@ -20,6 +20,11 @@ all use the same backend. Selection depends only on features, never on `cfg(test
 modes fails to compile with a diagnostic that names both, including when two different dependencies
 each enable one.
 
+A closed channel returns its unaccepted value as an ordinary ownership refusal. The modeled
+watch adapter declares that classification on its `SendError` type, matching the selected native
+channel contract. Permit and queue refusals likewise carry admission or absence outcomes;
+infrastructure and decoding failures retain their contextual reports.
+
 The primitive crate depends on the standard library and the backend libraries it selects. It
 names no Nervix vocabulary, graph, policy or scenario. `nervix-model-harness` owns the exploration
 of caller models and their invariant identities, separately from backend selection. The server
@@ -136,6 +141,11 @@ through evaluation and dispatch. Neither active nor retained source views occupy
 capacity that their evaluation, IPC encoding and remote acknowledgement storage need to finish.
 Retention adds no wait, worker pool or execution-mode backend.
 
+A snapshot decoder already holds its encoded input under bulk admission. Its additional scratch
+request therefore refuses immediately when no room is available, releasing the input so another
+read can progress. Metadata and Arrow sections follow the same rule; framing reads release their
+charges before reading the next frame.
+
 The runtime attributes build the selected runtime through a crate path fixed to the boundary: Tokio's
 attribute builds whatever runtime its crate path names, and an attribute that named `tokio` at the
 call site would construct whichever crate a package happened to call `tokio`. Shuttle's own test
@@ -170,7 +180,7 @@ unverified:
 | The Shuttle and Loom runners of `nervix-model-harness` | Their statistics span every model execution they start and are read after the last one | Nothing a check claims; they are runner bookkeeping |
 | The WASM runtime's epoch driver and guest-callback time | The epoch driver is an operating-system thread no model runs, which sleeps for real and is stopped by a flag; a guest callback reads its domain time from Tokio's task-local storage, which no model isolates | When the epoch thread observes shutdown, and a callback's time scope, which Shuttle tasks would share while polled |
 | The C binding's session | The binding owns the runtime its host's threads enter and shuts it down in the background, which is its contract with the host and which Shuttle's runtime does not provide | Everything the binding runs; the Rust client it drives has its own checks |
-| The cluster membership transport | Chitchat hands out Tokio's own lock and watch receiver and runs on Tokio's runtime, so the transport tasks it drives wait, sleep and select on Tokio's primitives | Cluster membership gossip |
+| The cluster membership transport and its native watch fixtures | Chitchat hands out Tokio's own lock and watch receiver and runs on Tokio's runtime, so the transport tasks it drives wait, sleep and select on Tokio's primitives; native watcher fixtures construct that same external receiver type | Cluster membership gossip; the native watch assertions are not model-checking evidence |
 | Process-wide one-time state: the SIMD instruction level, the interconnect's cryptography provider, and the test and benchmark schema and certificate fixtures | Initialized once per process and read by every later model execution in it | Detection, installation and fixture construction |
 | The browser console: its executor installation, and the `futures` channel, `select!` and abort handles its tasks use on the browser's event loop | The browser target runs in no execution mode and has no native capability, so the console takes those families from the `futures` crate, which a native build takes from Tokio | Everything the console runs |
 | The VM benchmarks' allocation probe | A global allocator counts allocations made on every thread | Nothing; the benchmark claims nothing about synchronization |

@@ -30,6 +30,7 @@ use nervix_client_wire::{
 };
 use nervix_models::{ArchiveDigest, CommandExecutionReference, Restore, RestoreArchive};
 use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
+use nervix_recovery::Reported as _;
 use tokio::{fs::File, io::AsyncReadExt as _};
 use tonic::{Request, Response, Status, codegen::http::uri::PathAndQuery, transport::Channel};
 
@@ -314,7 +315,10 @@ impl RestoreStreamAttempt {
         };
         let feeding = match fed {
             Ok(feeding) => feeding,
-            Err(_) => Feeding::ReadFailed(io::ErrorKind::Interrupted),
+            Err(error) => {
+                Err::<(), _>(error).reported("stream local restore archive");
+                Feeding::ReadFailed(io::ErrorKind::Interrupted)
+            }
         };
         match feeding {
             Feeding::Sent => match nervix_primitives::time::timeout(frame_timeout, call).await {

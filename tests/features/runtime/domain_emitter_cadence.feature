@@ -270,7 +270,7 @@ Feature: Domain-paced emitter cadence
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-      CREATE ICEBERG TABLE EMITTER iceberg_cadence FROM notifications TO s3_main TABLE 'cadence_notifications_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/cadence_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 40s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 40s MAX BATCH SIZE 1MiB
+      CREATE ICEBERG TABLE EMITTER iceberg_cadence FROM notifications TO s3_main TABLE 'cadence_notifications_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/cadence_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 40s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 40s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:00:00Z' TIME RATE 20.0;

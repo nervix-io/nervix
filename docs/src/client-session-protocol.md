@@ -1580,6 +1580,21 @@ from the scheduled owner, including when the command enters through another node
 
 ## Resource Uploads
 
+A terminal upload reason includes the rendered storage and archive-decoding cause chain. This is
+the fixed textual outcome recorded for that upload identity; local storage failures remain typed
+until it is constructed. Configured-choice failures keep their fixed status and report their cause
+before projection. An emitter-target inspection failure returns endpoint-unavailable with its
+diagnostic, while an absent target keeps the emitter-not-found disposition.
+The producer's ingestor-target inspection follows the same distinction between endpoint
+unavailability and an absent ingestor. Credential validity remains a deliberate generic
+authentication rejection; operator-visible hash failures keep their separate diagnostic.
+
+The Rust client's terminal subscription close keeps the queue-end report beneath `SessionClosed`.
+The shared C binding declares its host-visible failure as a fixed ABI outcome; conversion from a
+client report renders the whole chain into that outcome's message at the binding boundary.
+Local archive readers and feeders report their actual failure before the stream produces its
+fixed refusal; a client download's file-install worker retains its join error in the I/O cause.
+
 A resource archive travels on its own gRPC call, `UploadResource`, beside the session rather than
 inside it. The client streams one `UploadStart` frame, then the archive as `UploadChunk` frames in
 order, and half-closes the stream; the server answers with exactly one `UploadReply`. The start

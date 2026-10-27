@@ -78,6 +78,17 @@ pub struct Observation {
     pub pattern: Pattern,
 }
 
+/// An informative failure replaced at one resolved operation. The diagnostic shares the
+/// audit's receiver, pattern, unused-binding and failure-layout checks.
+pub struct Replacement {
+    pub node: HirId,
+    pub span: Span,
+    pub error_type: String,
+    pub error_definition: Option<DefId>,
+    pub source_contract: Option<DefId>,
+    pub outcome_definition: Option<DefId>,
+}
+
 /// Candidates collected while the compiler visits authored bodies.
 #[derive(Default)]
 pub struct Audit {
@@ -85,14 +96,18 @@ pub struct Audit {
 }
 
 impl Audit {
-    pub fn body<'tcx>(&mut self, cx: &LateContext<'tcx>, body: &hir::Body<'tcx>) {
+    pub fn body<'tcx>(
+        &mut self,
+        cx: &LateContext<'tcx>,
+        body: &hir::Body<'tcx>,
+    ) -> Vec<Replacement> {
         let owner = cx.tcx.hir_body_owner_def_id(body.id());
         // Derives generate data operations; their authored attribute span is not authored code.
         if let Some(parent) = cx.tcx.opt_parent(owner.to_def_id())
             && matches!(cx.tcx.def_kind(parent), DefKind::Impl { .. })
             && cx.tcx.is_automatically_derived(parent)
         {
-            return;
+            return Vec::new();
         }
         let mut walker = Walker {
             cx,
@@ -101,6 +116,7 @@ impl Audit {
             keyed: Vec::new(),
             assignments: Vec::new(),
             observations: Vec::new(),
+            replacements: Vec::new(),
         };
         walker.visit_expr(body.value);
         walker.repeated_lookups();
@@ -108,6 +124,7 @@ impl Audit {
         if let Some(observation) = forwarding_wrapper(cx, owner, body) {
             self.observations.push(observation);
         }
+        walker.replacements
     }
 }
 
@@ -179,10 +196,12 @@ struct Walker<'a, 'tcx> {
     keyed: Vec<Keyed>,
     assignments: Vec<Assignment>,
     observations: Vec<Observation>,
+    replacements: Vec<Replacement>,
 }
 
 /// A method or path call with its resolved definition and receiver.
 struct Call<'tcx> {
+    expression: &'tcx Expr<'tcx>,
     definition: DefId,
     name: String,
     receiver: &'tcx Expr<'tcx>,
@@ -259,6 +278,7 @@ impl<'tcx> Walker<'_, 'tcx> {
             ExprKind::MethodCall(segment, receiver, arguments, _) => {
                 let definition = typeck.type_dependent_def_id(expression.hir_id)?;
                 Some(Call {
+                    expression,
                     definition,
                     name: segment.ident.name.to_string(),
                     receiver,
@@ -272,6 +292,7 @@ impl<'tcx> Walker<'_, 'tcx> {
                 };
                 let (receiver, arguments) = arguments.split_first()?;
                 Some(Call {
+                    expression,
                     definition,
                     name: self.cx.tcx.item_name(definition).to_string(),
                     receiver,
@@ -677,6 +698,189 @@ impl<'tcx> Walker<'_, 'tcx> {
         }
     }
 
+    fn type_definition(&self, value: Ty<'tcx>) -> Option<DefId> {
+        let value = self.normalize(value).peel_refs();
+        let ty::Adt(adt, _) = value.kind() else {
+            return None;
+        };
+        Some(adt.did())
+    }
+
+    fn local_initializer(&self, binding: HirId) -> Option<&'tcx Expr<'tcx>> {
+        for (_, node) in self.cx.tcx.hir_parent_iter(binding) {
+            match node {
+                hir::Node::LetStmt(local) => {
+                    if let PatKind::Binding(hir::BindingMode::NONE, declared, _, None) =
+                        local.pat.kind
+                        && declared == binding
+                    {
+                        return local.init;
+                    }
+                    return None;
+                }
+                hir::Node::Item(_) | hir::Node::ImplItem(_) | hir::Node::TraitItem(_) => {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn closure(&self, expression: &'tcx Expr<'tcx>) -> Option<&'tcx hir::Closure<'tcx>> {
+        match expression.kind {
+            ExprKind::Closure(closure) => Some(closure),
+            ExprKind::DropTemps(inner) | ExprKind::AddrOf(_, _, inner) => self.closure(inner),
+            ExprKind::Path(QPath::Resolved(None, path)) => {
+                let Res::Local(binding) = path.res else {
+                    return None;
+                };
+                self.closure(self.local_initializer(binding)?)
+            }
+            _ => None,
+        }
+    }
+
+    /// Follow the exact producer, including a local binding, success-only adapters and await.
+    /// An enclosing callable or a call appearing only in an argument is not the producer.
+    fn source_contract(&self, expression: &'tcx Expr<'tcx>) -> Option<DefId> {
+        if let Some(call) = self.call(expression)
+            && self.diagnostic_owner(call.definition, "Result")
+            && matches!(
+                call.name.as_str(),
+                "map" | "inspect" | "inspect_err" | "as_ref" | "as_mut"
+            )
+        {
+            // These operations retain the same error. An adapter such as and_then or map_err
+            // can introduce a different failure and must retain its own return contract.
+            return self.source_contract(call.receiver);
+        }
+        match expression.kind {
+            ExprKind::DropTemps(inner) | ExprKind::AddrOf(_, _, inner) => {
+                self.source_contract(inner)
+            }
+            ExprKind::Call(function, _) => {
+                let ty::FnDef(definition, _) = *self.cx.typeck_results().expr_ty(function).kind()
+                else {
+                    return None;
+                };
+                Some(definition)
+            }
+            ExprKind::MethodCall(..) => self
+                .cx
+                .typeck_results()
+                .type_dependent_def_id(expression.hir_id),
+            ExprKind::Path(QPath::Resolved(None, path)) => {
+                let Res::Local(binding) = path.res else {
+                    return None;
+                };
+                self.source_contract(self.local_initializer(binding)?)
+            }
+            ExprKind::Match(future, _, MatchSource::AwaitDesugar) => {
+                let ExprKind::Call(_, [producer]) = future.kind else {
+                    return None;
+                };
+                self.source_contract(producer)
+            }
+            ExprKind::Block(block, _) if block.stmts.is_empty() => {
+                self.source_contract(block.expr?)
+            }
+            _ => None,
+        }
+    }
+
+    /// A failure branch that constructs an error or report, rather than merely answering a probe.
+    fn new_failure(&self, expression: &'tcx Expr<'tcx>) -> Option<Ty<'tcx>> {
+        struct Failure<'a, 'tcx> {
+            walker: &'a Walker<'a, 'tcx>,
+            error: Option<Ty<'tcx>>,
+        }
+        impl<'tcx> Visitor<'tcx> for Failure<'_, 'tcx> {
+            fn visit_expr(&mut self, expression: &'tcx Expr<'tcx>) {
+                if self.error.is_some() {
+                    return;
+                }
+                let value = self.walker.cx.typeck_results().expr_ty(expression);
+                if let ty::Adt(adt, _) = value.kind()
+                    && matches!(
+                        (
+                            self.walker.cx.tcx.crate_name(adt.did().krate).as_str(),
+                            self.walker.cx.tcx.item_name(adt.did()).as_str(),
+                        ),
+                        ("error_stack", "Report") | ("anyhow", "Error")
+                    )
+                {
+                    self.error = Some(value);
+                    return;
+                }
+                if !value.is_never()
+                    && let Some(error_trait) = self
+                        .walker
+                        .cx
+                        .tcx
+                        .get_diagnostic_item(Symbol::intern("Error"))
+                    && crate::errors::implements_trait(self.walker.cx, value, error_trait)
+                {
+                    self.error = Some(value);
+                    return;
+                }
+                if let ExprKind::Call(function, [error]) = expression.kind
+                    && let ExprKind::Path(ref path) = function.kind
+                    && let Res::Def(DefKind::Ctor(..), constructor) =
+                        self.walker.cx.qpath_res(path, function.hir_id)
+                    && self.walker.cx.tcx.opt_parent(constructor)
+                        == self.walker.cx.tcx.lang_items().get(LangItem::ResultErr)
+                {
+                    self.error = Some(self.walker.cx.typeck_results().expr_ty(error));
+                    return;
+                }
+                intravisit::walk_expr(self, expression);
+            }
+        }
+        let mut failure = Failure {
+            walker: self,
+            error: None,
+        };
+        failure.visit_expr(expression);
+        failure.error
+    }
+
+    fn block_failure(&self, block: &'tcx hir::Block<'tcx>) -> Option<Ty<'tcx>> {
+        for statement in block.stmts {
+            let expression = match statement.kind {
+                StmtKind::Semi(expression) | StmtKind::Expr(expression) => expression,
+                _ => continue,
+            };
+            if let Some(outcome) = self.new_failure(expression) {
+                return Some(outcome);
+            }
+        }
+        self.new_failure(block.expr?)
+    }
+
+    fn replacement(
+        &mut self,
+        source: &'tcx Expr<'tcx>,
+        node: HirId,
+        span: Span,
+        outcome: Ty<'tcx>,
+    ) {
+        let Some(error) = self.error_type(self.cx.typeck_results().expr_ty(source)) else {
+            return;
+        };
+        if self.information(error).is_none() {
+            return;
+        }
+        self.replacements.push(Replacement {
+            node,
+            span,
+            error_type: error.to_string(),
+            error_definition: self.type_definition(error),
+            source_contract: self.source_contract(source),
+            outcome_definition: self.type_definition(outcome),
+        });
+    }
+
     fn discarded(&mut self, span: Span, operation: String, result: Ty<'tcx>) {
         let Some(error) = self.error_type(result) else {
             return;
@@ -697,7 +901,7 @@ impl<'tcx> Walker<'_, 'tcx> {
 
     /// A closure argument that never reads its first parameter.
     fn ignores_argument(&self, argument: &'tcx Expr<'tcx>) -> bool {
-        let ExprKind::Closure(closure) = argument.kind else {
+        let Some(closure) = self.closure(argument) else {
             return false;
         };
         let body = self.cx.tcx.hir_body(closure.body);
@@ -709,12 +913,17 @@ impl<'tcx> Walker<'_, 'tcx> {
             PatKind::Binding(_, binding, _, None) => binding,
             _ => return false,
         };
-        struct Uses {
+        struct Uses<'tcx> {
+            tcx: rustc_middle::ty::TyCtxt<'tcx>,
             binding: HirId,
             found: bool,
         }
-        impl<'v> Visitor<'v> for Uses {
-            fn visit_expr(&mut self, expression: &'v Expr<'v>) {
+        impl<'tcx> Visitor<'tcx> for Uses<'tcx> {
+            fn visit_nested_body(&mut self, body: hir::BodyId) {
+                self.visit_body(self.tcx.hir_body(body));
+            }
+
+            fn visit_expr(&mut self, expression: &'tcx Expr<'tcx>) {
                 if let ExprKind::Path(QPath::Resolved(None, path)) = expression.kind
                     && path.res == Res::Local(self.binding)
                 {
@@ -724,6 +933,7 @@ impl<'tcx> Walker<'_, 'tcx> {
             }
         }
         let mut uses = Uses {
+            tcx: self.cx.tcx,
             binding,
             found: false,
         };
@@ -746,6 +956,20 @@ impl<'tcx> Walker<'_, 'tcx> {
         if discards {
             let result = self.cx.typeck_results().expr_ty(call.receiver);
             self.discarded(call.span, format!("Result::{}", call.name), result);
+            if let Some(argument) = call.arguments.first()
+                && let Some(closure) = self.closure(argument)
+                && self.ignores_argument(argument)
+            {
+                let body = self.cx.tcx.hir_body(closure.body);
+                let outcome = if call.name == "map_err" {
+                    self.error_type(self.cx.typeck_results().expr_ty(call.expression))
+                } else {
+                    self.new_failure(body.value)
+                };
+                if let Some(outcome) = outcome {
+                    self.replacement(call.receiver, call.expression.hir_id, call.span, outcome);
+                }
+            }
         }
     }
 
@@ -1119,6 +1343,9 @@ impl<'tcx> Visitor<'tcx> for Walker<'_, 'tcx> {
                     if self.ignores_error(arm.pat) {
                         let result = self.cx.typeck_results().expr_ty(scrutinee);
                         self.discarded(arm.pat.span, "match Err(_)".into(), result);
+                        if let Some(outcome) = self.new_failure(arm.body) {
+                            self.replacement(scrutinee, arm.pat.hir_id, arm.pat.span, outcome);
+                        }
                     }
                 }
                 self.visit_region(expression.hir_id, Region::Condition, scrutinee);
@@ -1172,6 +1399,9 @@ impl<'tcx> Visitor<'tcx> for Walker<'_, 'tcx> {
         if self.result_pattern(local.pat, LangItem::ResultOk) {
             let result = self.cx.typeck_results().expr_ty(init);
             self.discarded(local.pat.span, "let Ok else".into(), result);
+            if let Some(outcome) = self.block_failure(otherwise) {
+                self.replacement(init, local.hir_id, local.pat.span, outcome);
+            }
         }
         self.visit_region(local.hir_id, Region::Condition, init);
         self.visit_pat(local.pat);

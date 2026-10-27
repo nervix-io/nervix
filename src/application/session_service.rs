@@ -1431,11 +1431,23 @@ impl SessionServiceImpl {
         let queued = self
             .queued_configuration(session.binding(), Some(domain))
             .await
+            .inspect_err(|error| {
+                nervix_recovery::Reported::reported(
+                    Err::<(), _>(error),
+                    "resolve configured choices",
+                )
+            })
             .map_err(|_| ChoiceStatus::StaleContext)?;
         let models = self
             .inner
             .registry
             .resulting_models(domain, &queued.models)
+            .inspect_err(|error| {
+                nervix_recovery::Reported::reported(
+                    Err::<(), _>(error),
+                    "resolve configured choices",
+                )
+            })
             .map_err(|_| ChoiceStatus::LookupFailed)?;
         let resources = self.inner.consensus.current_resources().await;
         let staged_resources = queued.resource_suggestions("");

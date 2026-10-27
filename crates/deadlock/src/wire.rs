@@ -653,7 +653,7 @@ pub(crate) fn nonzero(number: u64) -> Result<NonZeroU64, EvidenceOutOfBounds> {
 pub(crate) fn unix_nanos(time: SystemTime) -> Result<u64, Report<EvidenceError>> {
     let since_epoch = time
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| Report::new(EvidenceError::TimeOutOfRange))?;
+        .map_err(|cause| Report::new(cause).change_context(EvidenceError::TimeOutOfRange))?;
     u64::try_from(since_epoch.as_nanos()).map_err(|_| Report::new(EvidenceError::TimeOutOfRange))
 }
 

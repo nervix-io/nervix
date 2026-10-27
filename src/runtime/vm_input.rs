@@ -207,8 +207,8 @@ pub(super) fn project_vm_input_column(
                     .ingest_metadata
                     .map(|metadata| metadata.field_column(field_name))
                     .transpose()
-                    .map_err(|_| {
-                        Report::new(RuntimeSchemaError::VmProjection {
+                    .map_err(|cause| {
+                        cause.change_context(RuntimeSchemaError::VmProjection {
                             operation: RuntimeVmOperation::ProjectMetadata,
                             field: field.name().clone(),
                         })
@@ -225,8 +225,8 @@ pub(super) fn project_vm_input_column(
                             found: column.data_type().clone(),
                         }));
                     }
-                    return VmTypedArray::try_from_array_ref(column).map_err(|_| {
-                        Report::new(RuntimeSchemaError::UnsupportedArrowType {
+                    return VmTypedArray::try_from_array_ref(column).map_err(|cause| {
+                        cause.change_context(RuntimeSchemaError::UnsupportedArrowType {
                             data_type: field.data_type().clone(),
                         })
                     });
@@ -292,8 +292,8 @@ pub(super) fn carrier_input_column(
             found: column.data_type().clone(),
         }));
     }
-    VmTypedArray::try_from_array_ref(column.clone()).map_err(|_| {
-        Report::new(RuntimeSchemaError::UnsupportedArrowType {
+    VmTypedArray::try_from_array_ref(column.clone()).map_err(|cause| {
+        cause.change_context(RuntimeSchemaError::UnsupportedArrowType {
             data_type: column.data_type().clone(),
         })
     })
@@ -363,8 +363,8 @@ pub(super) fn runtime_values_input_column<'a>(
         append_filter_map_nested_value(builder.as_mut(), field.data_type(), value, field)?;
     }
     let array = builder.finish();
-    VmTypedArray::try_from_array_ref(array.clone()).map_err(|_| {
-        Report::new(RuntimeSchemaError::UnsupportedArrowType {
+    VmTypedArray::try_from_array_ref(array.clone()).map_err(|cause| {
+        cause.change_context(RuntimeSchemaError::UnsupportedArrowType {
             data_type: array.data_type().clone(),
         })
     })

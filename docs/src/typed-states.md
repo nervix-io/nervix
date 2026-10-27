@@ -179,6 +179,12 @@ ordinary prefix; that original deadline then survives cancellation. The connecti
 most one discard and clears it only when it returns the size outcome after confirmation. See
 [MQTT source connections](./connector-contract.md#mqtt-source-connections).
 
+**Iceberg catalog identity.** The namespace is required configuration, represented by one shared
+validated name type from parsing through connector opening. Dot-separated levels are nonempty and
+retain case. No absent namespace is filled from the Nervix domain, and no layer invents another
+namespace key. A commit-size limit is the same positive whole-byte value that bounds a batch;
+decoding validates that value rather than storing text for the runtime to parse.
+
 The Core NATS emitter's buffer is either empty or pending with a nonzero record count and its
 connection expectation. A pending write that began connected requires that same successful
 connection; one queued while disconnected requires the next connection. The state is consumed
@@ -345,6 +351,13 @@ contracts. The registry infers each mapping's type and checks it without coercio
 the candidate graph. It also establishes required batching and schedulable transport delivery
 durations there. Planning consumes those guarantees, including the presence of a required batch,
 and an invalid alteration leaves the accepted configuration intact.
+
+MySQL table names validate their one- or two-part path at construction and decoding, keeping the
+original case. Their parts are borrowed from that validated name when the connector quotes the
+SQL destination; it does not reinterpret the whole path as one identifier. Pooled-client
+configuration has one reserved-key declaration, shared by offline MySQL URL inspection and the
+host's resolved-configuration refusal. Pool capacity remains the client's typed `POOL SIZE`
+bounds, with no competing URL setting.
 
 RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
 and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch
@@ -639,6 +652,11 @@ default. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadloc
 current representation, qualification policy and coverage limits.
 
 ## Validation And Failure Boundaries
+
+Configuration-backup round-trip validation names an unpinned resource binding with its own typed
+refusal, rather than using a resource name itself as the error. Its exact outcome classification
+applies to that validity check. Generic resource-version mapping still forwards the callback's
+actual error type and does not classify every callback failure as a refusal.
 
 Native connection options validate every timeout at setup: one millisecond through 24 hours.
 The backup command wait has its own required duration, distinct from an optional per-domain

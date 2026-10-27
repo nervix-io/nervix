@@ -182,6 +182,21 @@ fn validate_driver(
     config: &[ClientConfigEntry],
 ) -> error_stack::Result<(), OfflineClientConfigError> {
     match connector {
+        ConnectorKind::S3 => nervix_connector_iceberg::validate_client_configuration(
+            nervix_models::IcebergStorageBackend::S3,
+            config,
+        ),
+        ConnectorKind::Gcs => nervix_connector_iceberg::validate_client_configuration(
+            nervix_models::IcebergStorageBackend::Gcs,
+            config,
+        ),
+        ConnectorKind::AzureBlob => nervix_connector_iceberg::validate_client_configuration(
+            nervix_models::IcebergStorageBackend::AzureBlob,
+            config,
+        ),
+        ConnectorKind::IcebergRest => {
+            nervix_connector_iceberg::validate_catalog_configuration(config)
+        }
         ConnectorKind::Kafka => nervix_connector_kafka::validate_client_configuration(config),
         ConnectorKind::Postgres => nervix_connector_postgres::validate_client_configuration(config),
         ConnectorKind::MySql => nervix_connector_mysql::validate_client_configuration(config),

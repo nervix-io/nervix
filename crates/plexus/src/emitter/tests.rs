@@ -458,14 +458,15 @@ fn parses_alter_emitter_direct_emitter_values_and_iceberg_commit_policy() {
         iceberg.operations,
         vec![AlterEmitterOperation::SetCommit {
             commit_each: "30s".to_string(),
-            max_commit_size: "64MiB".to_string(),
+            max_commit_size: "64MiB".parse().expect("valid commit size"),
         }]
     );
 
     let replace_iceberg = parse_alter_emitter(
-        "ALTER ICEBERG TABLE EMITTER event_emitter SET TO s3_main TABLE 'events' LOCATION \
-         's3://warehouse/events' CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK \
-         RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'value' = input.value } ;",
+        "ALTER ICEBERG TABLE EMITTER event_emitter SET TO s3_main TABLE 'events' NAMESPACE \
+         'Analytics.Events' LOCATION 's3://warehouse/events' CATALOG iceberg_catalog COMMIT EACH \
+         1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'value' = \
+         input.value } ;",
     )
     .expect("SET TO Iceberg should require and retain its complete commit contract");
     assert!(matches!(
@@ -479,7 +480,7 @@ fn parses_alter_emitter_direct_emitter_values_and_iceberg_commit_policy() {
                 commit_each,
                 max_commit_size,
                 ..
-            })) if commit_each == "1m" && max_commit_size == "512MiB"
+            })) if commit_each == "1m" && max_commit_size.to_string() == "512MiB"
         )
     ));
 }
@@ -629,9 +630,9 @@ fn every_publishing_mode_body_parses_and_canonical_round_trips() {
          250ms MAX 30s VALUES { 'id' = input.id } BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
         "MONGODB COLLECTION EMITTER emit FROM p99 TO db COLLECTION 'events' MODE ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s VALUES { 'id' = input.id } BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
-        "ICEBERG TABLE EMITTER emit FROM p99 TO store TABLE 'events' LOCATION \
-         's3://bucket/events' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY POLICY \
-         BACKOFF 250ms MAX 30s VALUES { 'id' = input.id } ",
+        "ICEBERG TABLE EMITTER emit FROM p99 TO store TABLE 'events' NAMESPACE 'Analytics.Events' \
+         LOCATION 's3://bucket/events' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB MODE ACK \
+         RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'id' = input.id } ",
         "OTEL LOGS EMITTER emit FROM p99 TO otel_main  MODE ACK RETRY POLICY BACKOFF 250ms MAX \
          30s VALUES { 'time' = input.time, 'body' = input.body } ATTRIBUTES { \
          'service.instance.id' = input.instance_id } RESOURCE { 'service.name' = 'checkout' } \
@@ -1154,7 +1155,7 @@ fn parses_create_emitter_iceberg() {
     let input = r#"
         CREATE DETACHED ICEBERG TABLE EMITTER to_iceberg
             FROM notifications
-            TO s3_client TABLE 'notifications'
+            TO s3_client TABLE 'notifications' NAMESPACE 'Analytics.Events'
             LOCATION 's3://nervix-iceberg/tables/notifications'
             CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "user_id" = input.user_id,
@@ -1204,7 +1205,10 @@ fn parses_create_emitter_iceberg() {
         }
     );
     assert_eq!(destination.commit_each, "1m".to_string());
-    assert_eq!(destination.max_commit_size, "512MiB".to_string());
+    assert_eq!(
+        destination.max_commit_size,
+        "512MiB".parse().expect("valid commit size")
+    );
 }
 
 #[test]
@@ -1212,7 +1216,7 @@ fn parses_create_emitter_iceberg_gcs() {
     let input = r#"
         CREATE ICEBERG TABLE EMITTER to_iceberg
             FROM notifications
-            TO gcs_client TABLE 'notifications'
+            TO gcs_client TABLE 'notifications' NAMESPACE 'Analytics.Events'
             LOCATION 'gs://nervix-iceberg/tables/notifications'
             CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "user_id" = input.user_id,
@@ -1260,7 +1264,10 @@ fn parses_create_emitter_iceberg_gcs() {
         }
     );
     assert_eq!(destination.commit_each, "1m".to_string());
-    assert_eq!(destination.max_commit_size, "512MiB".to_string());
+    assert_eq!(
+        destination.max_commit_size,
+        "512MiB".parse().expect("valid commit size")
+    );
 }
 
 #[test]
@@ -1268,7 +1275,7 @@ fn parses_create_emitter_iceberg_azure_blob() {
     let input = r#"
         CREATE ICEBERG TABLE EMITTER to_iceberg
             FROM notifications
-            TO azure_client TABLE 'notifications'
+            TO azure_client TABLE 'notifications' NAMESPACE 'Analytics.Events'
             LOCATION 'wasb://nervix-iceberg@devstoreaccount1.blob.core.windows.net/tables/notifications'
             CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "user_id" = input.user_id,
@@ -1317,7 +1324,10 @@ fn parses_create_emitter_iceberg_azure_blob() {
         }
     );
     assert_eq!(destination.commit_each, "1m".to_string());
-    assert_eq!(destination.max_commit_size, "512MiB".to_string());
+    assert_eq!(
+        destination.max_commit_size,
+        "512MiB".parse().expect("valid commit size")
+    );
 }
 
 #[test]
@@ -1325,7 +1335,7 @@ fn rejects_iceberg_emitter_without_flush_policy() {
     let tokens = to_tokens(
         r#"
         CREATE ICEBERG TABLE EMITTER to_iceberg FROM notifications
-        TO s3_client TABLE 'notifications'
+        TO s3_client TABLE 'notifications' NAMESPACE 'Analytics.Events'
         LOCATION 's3://nervix-iceberg/tables/notifications'
         CATALOG iceberg_catalog
         COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY POLICY BACKOFF 1s MAX 2s
@@ -1346,7 +1356,7 @@ fn rejects_iceberg_emitter_with_encode_using() {
     let tokens = to_tokens(
         r#"
         CREATE ICEBERG TABLE EMITTER to_iceberg FROM notifications ENCODE USING json_codec
-        TO s3_client TABLE 'notifications'
+        TO s3_client TABLE 'notifications' NAMESPACE 'Analytics.Events'
         VALUES { "user_id" = input.user_id }
         LOCATION 's3://nervix-iceberg/tables/notifications'
         CATALOG iceberg_catalog
@@ -1367,7 +1377,7 @@ fn rejects_iceberg_emitter_without_values_mapping() {
     let tokens = to_tokens(
         r#"
         CREATE ICEBERG TABLE EMITTER to_iceberg FROM notifications
-        TO s3_client TABLE 'notifications'
+        TO s3_client TABLE 'notifications' NAMESPACE 'Analytics.Events'
         LOCATION 's3://nervix-iceberg/tables/notifications'
         CATALOG iceberg_catalog
         COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY POLICY BACKOFF 1s MAX 2s
@@ -1387,7 +1397,7 @@ fn rejects_iceberg_emitter_without_commit_policy() {
     let tokens = to_tokens(
         r#"
         CREATE ICEBERG TABLE EMITTER to_iceberg FROM notifications
-        TO s3_client TABLE 'notifications'
+        TO s3_client TABLE 'notifications' NAMESPACE 'Analytics.Events'
         LOCATION 's3://nervix-iceberg/tables/notifications'
         CATALOG iceberg_catalog
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -1422,35 +1432,18 @@ fn rejects_non_iceberg_emitter_with_commit_policy() {
 }
 
 #[test]
-fn rejects_iceberg_same_client_catalog_syntax() {
-    let tokens = to_tokens(
-        r#"
-        CREATE ICEBERG TABLE EMITTER to_iceberg FROM notifications
-        TO s3_client TABLE 'notifications'
-        VALUES { "user_id" = input.user_id }
-        LOCATION 's3://nervix-iceberg/tables/notifications'
-        CATALOG SAME COMMIT EACH 1m MAX SIZE 512MiB CLIENT LOCATION 's3://nervix-iceberg/catalogs/input.catalog.json' FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#,
-    );
-
-    let errs = parse_create_emitter_tokens(&tokens).expect_err("parse must fail");
-    assert!(!errs.is_empty());
-}
-
-#[test]
 fn iceberg_catalog_context_suggestions_do_not_leak_emitter_keywords() {
     let input = "CREATE ICEBERG TABLE EMITTER to_iceberg FROM notifications TO s3_client TABLE \
-                 'notifications' LOCATION 's3://bucket/table' CATALOG ";
+                 'notifications' NAMESPACE 'Analytics.Events' LOCATION 's3://bucket/table' \
+                 CATALOG ";
     let suggestions = suggest_create_emitter(input, input.len());
-    assert!(suggestions.contains(&"ref:client".to_string()));
-    assert!(!suggestions.contains(&"SAME".to_string()));
-    assert!(!suggestions.contains(&"KAFKA".to_string()));
-    assert!(!suggestions.contains(&"CLICKHOUSE".to_string()));
+    assert_eq!(suggestions, vec!["ref:client".to_string()]);
 }
 
 #[test]
 fn iceberg_options_precede_the_policy_and_values() {
-    let input = "CREATE ICEBERG TABLE EMITTER lake FROM events TO store TABLE 'Orders' ";
+    let input = "CREATE ICEBERG TABLE EMITTER lake FROM events TO store TABLE 'Orders' NAMESPACE \
+                 'Analytics.Events' ";
     assert_eq!(suggest_create_emitter(input, input.len()), vec!["LOCATION"]);
 }
 
@@ -2578,9 +2571,9 @@ fn every_emitter_family_accepts_an_optional_batch_clause_and_round_trips_it() {
     let direct_emitters = [
         "OTEL LOGS EMITTER emit FROM p99 TO otel_main  MODE ACK RETRY POLICY BACKOFF 250ms MAX \
          30s VALUES { 'time' = input.time, 'body' = input.body } ",
-        "ICEBERG TABLE EMITTER emit FROM p99 TO store TABLE 'events' LOCATION \
-         's3://bucket/events' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY POLICY \
-         BACKOFF 250ms MAX 30s VALUES { 'id' = input.id } ",
+        "ICEBERG TABLE EMITTER emit FROM p99 TO store TABLE 'events' NAMESPACE 'Analytics.Events' \
+         LOCATION 's3://bucket/events' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB MODE ACK \
+         RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'id' = input.id } ",
     ];
     for connector in direct_emitters {
         for batch in ["", " BATCH MAX MESSAGES 1000 MAX SIZE 3MiB"] {

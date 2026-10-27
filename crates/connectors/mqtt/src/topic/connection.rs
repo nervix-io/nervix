@@ -51,6 +51,8 @@ use thiserror::Error;
 /// Why an MQTT client's event loop could not connect to its broker, or lost the connection.
 #[derive(Debug, Error)]
 pub enum MqttConnectionError {
+    #[error("the MQTT driver asked to dial '{authority}', whose port is not a number")]
+    InvalidPort { authority: String },
     /// The broker host did not resolve through the node resolver.
     #[error("resolving MQTT host '{host}' failed: {failure}")]
     Resolve {
@@ -79,6 +81,12 @@ impl MqttConnectionError {
         Report::new(lookup.clone()).change_context(context)
     }
 }
+
+/// The socket hook requires a standard error. Retain its typed report and render the whole
+/// chain even when the driver's outer report asks this carrier for ordinary Display.
+#[derive(Debug, Error)]
+#[error("{0:#}")]
+struct MqttDialReport(Report<MqttConnectionError>);
 
 /// The socket connector an MQTT client's event loop opens every broker connection with.
 #[derive(Clone)]
@@ -116,12 +124,16 @@ impl MqttDialer {
                 format!("the MQTT driver asked to dial '{authority}', which names no port"),
             ));
         };
-        let Ok(port) = port.parse::<u16>() else {
-            return Err(io::Error::new(
+        let port = port.parse::<u16>().map_err(|cause| {
+            io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("the MQTT driver asked to dial '{authority}', whose port is not a number"),
-            ));
-        };
+                MqttDialReport(Report::new(cause).change_context(
+                    MqttConnectionError::InvalidPort {
+                        authority: authority.to_string(),
+                    },
+                )),
+            )
+        })?;
         let resolved = self.dns.resolve(host, port, budget.lookup()).await;
         let addresses = match resolved {
             Ok(addresses) => addresses,

@@ -1008,7 +1008,7 @@ impl Application {
                                                 consensus_for_reconcile.create_user(user).await
                                             {
                                                 warn!(
-                                                    error = %error,
+                                                    error = %format_args!("{error:#}"),
                                                     "failed to create configured default user"
                                                 );
                                             } else {
@@ -1021,7 +1021,7 @@ impl Application {
                                         }
                                         Err(error) => {
                                             warn!(
-                                                error = %error,
+                                                error = %format_args!("{error:#}"),
                                                 "failed to prepare configured default user"
                                             );
                                             default_user_resolved = true;
@@ -1040,10 +1040,11 @@ impl Application {
                             Ok(_) => {
                                 default_user_resolved = true;
                             }
-                            Err(_) => {
+                            Err(error) => {
                                 if !missing_init_default_user_password_warned {
                                     warn!(
                                         user = default_user.as_str(),
+                                        error = %format_args!("{error:#}"),
                                         "configured default user name is invalid"
                                     );
                                     missing_init_default_user_password_warned = true;

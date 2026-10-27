@@ -293,7 +293,7 @@ impl SignalingDraft {
     ) -> error_stack::Result<CreateSignalingProtocol<RequestedResourceVersion>, SignalingDraftError>
     {
         let name = SignalingProtocolName::parse(self.name.trim())
-            .map_err(|_| Report::new(SignalingDraftError::Name))?;
+            .map_err(|cause| cause.change_context(SignalingDraftError::Name))?;
         let format = self
             .format
             .as_ref()

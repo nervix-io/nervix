@@ -6,19 +6,21 @@
 //!   node-stop, phase-deadline, status-request, port-pool, node-bound address, process-cluster
 //!   convergence, cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
 //!   Iceberg-catalog-gate, backup phase, materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag,
-//!   runner-offload, server-executable, stallable-TCP-proxy, unaccepted-address,
+//!   runner-offload, Syslog TLS sender, server-executable, stallable-TCP-proxy, unaccepted-address,
 //!   process-observation, process-report, WebSocket close-reply, console-connection and WebSocket peer regressions
 //!   with Rust's test runner, and the stand-in nodes, clients, images and processes those regressions
 //!   talk to.
+//!   It also owns registration of the generator cadence observation regressions.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, node-bound address, process-cluster convergence, cluster-teardown, scenario-phase,
 //!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, backup phase, gRPC-receiver,
-//!   NATS-observer, runner-lag, runner-offload, server-executable, stallable-TCP-proxy,
+//!   NATS-observer, runner-lag, runner-offload, Syslog TLS sender, server-executable, stallable-TCP-proxy,
 //!   unaccepted-address, process-observation, process-report, WebSocket close-reply,
 //!   console-connection, WebSocket peer and materialized-state diagnostic harness modules, the product's shutdown
 //!   coordinator a stopping
 //!   node is read through, and the client wire session protocol the stand-in nodes answer status
 //!   requests with.
+//!   It also depends on the focused generator cadence observation owner.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 use websocket_close::reply_to_close;
@@ -37,6 +39,10 @@ mod cluster_teardown;
 mod console_connections;
 #[path = "common/console_connections_tests.rs"]
 mod console_connections_tests;
+#[path = "common/generator_cadence.rs"]
+mod generator_cadence;
+#[path = "common/generator_cadence_tests.rs"]
+mod generator_cadence_tests;
 #[path = "common/grpc_receiver.rs"]
 mod grpc_receiver;
 #[path = "common/http_receiver.rs"]
@@ -121,6 +127,10 @@ mod stallable_tcp_proxy_tests;
 mod status_request;
 #[path = "common/suite_watchdog.rs"]
 mod suite_watchdog;
+#[path = "common/syslog_tls.rs"]
+mod syslog_tls;
+#[path = "common/syslog_tls_tests.rs"]
+mod syslog_tls_tests;
 #[path = "common/unaccepted_address.rs"]
 mod unaccepted_address;
 #[path = "common/unaccepted_address_tests.rs"]

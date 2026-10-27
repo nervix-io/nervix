@@ -5323,6 +5323,12 @@ fn given_an_plexus_file_containing(world: &mut ScenarioWorld, name: String, #[st
     world.formatter_original_files.insert(name, contents);
 }
 
+#[given(regex = r#"^a Plexus file "([^"]+)" with invalid UTF-8$"#)]
+fn given_a_plexus_file_with_invalid_utf8(world: &mut ScenarioWorld, name: String) {
+    let root = formatter_root(world);
+    std::fs::write(root.join(name), [0xff]).expect("Plexus input bytes must be written");
+}
+
 /// Reads the `\r`, `\n`, `\t` and `\\` escapes a step spells where the characters themselves
 /// cannot be written in a feature file, such as a carriage return.
 fn unescaped_step_text(text: &str) -> String {
@@ -16288,6 +16294,38 @@ async fn when_incomplete_resource_upload_is_sent(
     world.last_command_output = Some(result.message);
 }
 
+#[when(expr = "a malformed archive upload of resource {string} is sent to the leader node")]
+async fn when_malformed_resource_upload_is_sent(world: &mut ScenarioWorld, resource: String) {
+    let resource = expand_placeholders(world, &resource);
+    let leader = current_leader_node(world).await;
+    // The declared byte count is correct; the archive itself has a truncated first tar block.
+    let upload = TestUpload {
+        domain: &world.domain,
+        resource: &resource,
+        identity: "malformed-archive",
+        parts: vec![
+            TestUploadPart::Start {
+                declared_bytes: NonZeroU64::MIN,
+            },
+            TestUploadPart::Chunk(vec![0]),
+        ],
+    };
+    let result = world
+        .cluster()
+        .send_shaped_resource_upload(&leader, upload)
+        .await
+        .expect("the server answers the malformed archive upload");
+    assert!(
+        matches!(
+            result.disposition,
+            nervix_client_wire::UploadDisposition::Failed { .. }
+        ),
+        "a malformed archive cannot be installed: {result:?}"
+    );
+    world.last_command_error = Some(result.message.clone());
+    world.last_command_output = Some(result.message);
+}
+
 #[when(
     expr = "client {string} upload of resource {string} from {string} with identity {string} \
             fails with {string}"
@@ -17921,6 +17959,22 @@ async fn when_selector_is_clicked_by_script(world: &mut ScenarioWorld, selector:
         .expect("selector must be script-clickable");
 }
 
+#[when(expr = "the browser refuses new upload forms with {string}")]
+async fn when_browser_refuses_upload_forms(world: &mut ScenarioWorld, reason: String) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selecting its form failure");
+    let reason = serde_json::to_string(&reason).assured("a string has a JSON representation");
+    let script = format!(
+        "() => {{ const reason = {reason}; window.FormData = new Proxy(window.FormData, {{ \
+         construct() {{ throw new Error(reason); }} }}); }}"
+    );
+    page.evaluate::<(), ()>(&script, None::<&()>)
+        .await
+        .expect("the browser must install the form-construction refusal");
+}
+
 #[when(expr = "selector {string} uploads resource directory {string}")]
 async fn when_selector_uploads_resource_directory(
     world: &mut ScenarioWorld,
@@ -18079,6 +18133,23 @@ async fn when_bulk_execution_is_saturated(world: &mut ScenarioWorld, node_id: St
     .unwrap_or_else(|error| {
         panic!("bulk execution on '{node_id}' never filled its workers and wait queue: {error}")
     });
+}
+
+/// Leave room for transport on the selected node while refusing larger decoding reservations.
+#[when(expr = "bulk memory on node {string} keeps only {string} bytes free")]
+async fn when_bulk_memory_on_node_keeps_only_bytes_free(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    room: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let room = expand_placeholders(world, &room);
+    let room = room
+        .parse::<u64>()
+        .unwrap_or_else(|error| panic!("the free bulk memory '{room}' must be bytes: {error}"));
+    world
+        .fault_injection
+        .hold_bulk_memory_leaving_room_on(&crate::common::cluster::node_name(&node_id), room);
 }
 
 /// Hold every byte of bulk memory on every node but `room`, so a charge that needs more room than
@@ -24608,6 +24679,22 @@ async fn given_iceberg_table_exists_at_with_columns(
         .expect("failed to create Iceberg table");
 }
 
+#[given(expr = "Iceberg table {string} in namespace {string} exists at {string} with columns")]
+async fn given_iceberg_table_in_namespace_exists(
+    world: &mut ScenarioWorld,
+    table: String,
+    namespace: String,
+    location: String,
+    #[step] step: &Step,
+) {
+    let mut fixture = IcebergTableFixture::from_step(world, table, location, docstring(step));
+    fixture.namespace = expand_placeholders(world, &namespace);
+    fixture
+        .ensure()
+        .await
+        .expect("failed to create Iceberg table in its explicit namespace");
+}
+
 #[given(expr = "Kafka topic {string} is observed")]
 async fn given_kafka_topic_is_observed(world: &mut ScenarioWorld, topic: String) {
     let topic = expand_placeholders(world, &topic);
@@ -26385,13 +26472,12 @@ async fn connect_syslog_tcp(addr: &str) -> nervix_primitives::net::TcpStream {
     }
 }
 
-/// A TLS session with a Syslog listener that authenticates with the identity, and trusts the CA,
-/// of the resource directory `resource_directory`.
-async fn connect_syslog_tls(
+/// Prepare the Syslog sender's identity and trust before opening its connection.
+fn syslog_tls_sender(
     world: &ScenarioWorld,
     addr: &str,
     resource_directory: &str,
-) -> tokio_rustls::client::TlsStream<nervix_primitives::net::TcpStream> {
+) -> common::syslog_tls::SyslogTlsSender {
     nervix_interconnect::install_rustls_crypto_provider();
     let parsed = url::Url::parse(&format!("syslog://{addr}"))
         .unwrap_or_else(|error| panic!("invalid Syslog TLS test address '{addr}': {error}"));
@@ -26420,17 +26506,9 @@ async fn connect_syslog_tls(
         .with_root_certificates(roots)
         .with_client_auth_cert(certificates, key)
         .expect("Syslog TLS test client identity must be valid");
-    let connector = tokio_rustls::TlsConnector::from(StdArc::new(config));
-    let stream = connect_syslog_tcp(addr).await;
-    stream
-        .set_nodelay(true)
-        .expect("the Syslog TLS test connection must accept TCP_NODELAY");
     let server_name =
         ServerName::try_from(server_name).expect("Syslog TLS test server name must be valid");
-    connector
-        .connect(server_name, stream)
-        .await
-        .expect("failed to establish Syslog TLS test session")
+    common::syslog_tls::SyslogTlsSender::new(addr.to_owned(), server_name, config)
 }
 
 #[when(
@@ -26443,24 +26521,11 @@ async fn when_syslog_tls_message_is_published_to(
     ca_resource_directory: String,
     #[step] step: &Step,
 ) {
-    use tokio::io::AsyncWriteExt as _;
-
     let addr = expand_placeholders(world, &addr);
-    let mut stream = connect_syslog_tls(world, &addr, &ca_resource_directory).await;
+    let sender = syslog_tls_sender(world, &addr, &ca_resource_directory);
     let payload = expand_placeholders(world, docstring(step));
-    let payload = payload.trim().as_bytes();
-    stream
-        .write_all(format!("{} ", payload.len()).as_bytes())
-        .await
-        .expect("failed to write Syslog TLS octet count");
-    stream
-        .write_all(payload)
-        .await
-        .expect("failed to write Syslog TLS payload");
-    stream
-        .shutdown()
-        .await
-        .expect("failed to close Syslog TLS test sender");
+    let frame = syslog_stream_frame("octet-counted", payload.trim());
+    sender.publish(frame).await;
 }
 
 /// One message in an RFC 6587 framing, as a stream carries it.
@@ -26502,17 +26567,18 @@ fn syslog_split_position(frame: &[u8], framing: &str, split: &str) -> usize {
     }
 }
 
-/// Writes the first docstring message as one complete frame and the second up to `split`, in one
-/// write, and keeps the connection and the rest of the second frame for a later step.
-async fn write_syslog_split_frames(
-    world: &mut ScenarioWorld,
-    mut stream: Box<dyn tokio::io::AsyncWrite + Send + Sync + Unpin>,
+/// The complete first frame and partial second frame, with the remainder retained for later.
+struct SyslogSplitFrames {
+    written: Vec<u8>,
+    rest: Vec<u8>,
+}
+
+fn syslog_split_frames(
+    world: &ScenarioWorld,
     framing: &str,
     split: &str,
     step: &Step,
-) {
-    use tokio::io::AsyncWriteExt as _;
-
+) -> SyslogSplitFrames {
     let messages = expand_placeholders(world, docstring(step))
         .lines()
         .map(str::trim)
@@ -26529,18 +26595,10 @@ async fn write_syslog_split_frames(
     let at = syslog_split_position(&second, framing, split);
     let mut written = first;
     written.extend_from_slice(&second[..at]);
-    stream
-        .write_all(&written)
-        .await
-        .expect("failed to write the frames before the split");
-    stream
-        .flush()
-        .await
-        .expect("failed to flush the frames before the split");
-    world.syslog_split_sender = Some(SyslogSplitSender {
-        stream,
+    SyslogSplitFrames {
+        written,
         rest: second[at..].to_vec(),
-    });
+    }
 }
 
 #[when(expr = "a Syslog TCP sender writes to {string} one {word} frame and another split {string}")]
@@ -26551,12 +26609,26 @@ async fn when_syslog_tcp_sender_writes_split_frames(
     split: String,
     #[step] step: &Step,
 ) {
+    use tokio::io::AsyncWriteExt as _;
+
     let addr = expand_placeholders(world, &addr);
-    let stream = connect_syslog_tcp(&addr).await;
+    let mut stream = connect_syslog_tcp(&addr).await;
     stream
         .set_nodelay(true)
         .expect("the Syslog TCP test connection must accept TCP_NODELAY");
-    write_syslog_split_frames(world, Box::new(stream), &framing, &split, step).await;
+    let frames = syslog_split_frames(world, &framing, &split, step);
+    stream
+        .write_all(&frames.written)
+        .await
+        .expect("failed to write the frames before the split");
+    stream
+        .flush()
+        .await
+        .expect("failed to flush the frames before the split");
+    world.syslog_split_sender = Some(SyslogSplitSender {
+        stream: Box::new(stream),
+        rest: frames.rest,
+    });
 }
 
 #[when(
@@ -26572,8 +26644,13 @@ async fn when_syslog_tls_sender_writes_split_frames(
     #[step] step: &Step,
 ) {
     let addr = expand_placeholders(world, &addr);
-    let stream = connect_syslog_tls(world, &addr, &resource_directory).await;
-    write_syslog_split_frames(world, Box::new(stream), &framing, &split, step).await;
+    let sender = syslog_tls_sender(world, &addr, &resource_directory);
+    let frames = syslog_split_frames(world, &framing, &split, step);
+    let stream = sender.write(frames.written).await;
+    world.syslog_split_sender = Some(SyslogSplitSender {
+        stream: Box::new(stream),
+        rest: frames.rest,
+    });
 }
 
 #[when("the Syslog sender writes the rest of the split frame")]
@@ -28864,158 +28941,55 @@ async fn then_relay_subscription_payloads_share_field(
     );
 }
 
+impl common::generator_cadence::GeneratorSubscription for TestSession {
+    async fn next(&mut self, budget: Duration) -> std::io::Result<Option<String>> {
+        let event = self.try_next_subscription(budget).await?;
+        Ok(event.map(|event| event.payload))
+    }
+}
+
 #[then(
-    expr = "within {string} {int} generator occurrences preserve branches {string} in field \
-            {string} with shared timestamp field {string}"
+    expr = "within {string} {int} generator occurrences preserve rows by {string} on {string} \
+            logical cadence with shared timestamp field {string}"
 )]
 async fn then_generator_occurrences_preserve_branches(
     world: &mut ScenarioWorld,
     duration: String,
     expected_occurrences: usize,
-    branches: String,
     branch_field: String,
+    cadence: String,
     timestamp_field: String,
+    #[step] step: &Step,
 ) {
     let duration = match parse_duration_text(&duration) {
         Ok(duration) => duration,
         Err(error) => panic!("step duration must be valid: {error}"),
     };
-    let branches = expand_placeholders(world, &branches);
-    let expected_branches = branches
-        .split(',')
-        .map(str::trim)
-        .filter(|branch| !branch.is_empty())
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>();
-    assert!(
-        expected_branches.len() >= 2,
-        "generator cadence step requires at least two distinct branches"
+    let cadence = match parse_duration_text(&cadence) {
+        Ok(cadence) => cadence,
+        Err(error) => panic!("logical cadence must be valid: {error}"),
+    };
+    let expected = expand_placeholders(world, docstring(step));
+    let rows = match serde_json::from_str::<Vec<serde_json::Value>>(&expected) {
+        Ok(rows) => rows,
+        Err(error) => panic!("expected generator source rows must be valid JSON: {error}"),
+    };
+    let mut observation = common::generator_cadence::GeneratorCadenceObservation::new(
+        rows,
+        expand_placeholders(world, &branch_field),
+        expand_placeholders(world, &timestamp_field),
+        cadence,
+        expected_occurrences,
     );
-    let branch_field = expand_placeholders(world, &branch_field);
-    let timestamp_field = expand_placeholders(world, &timestamp_field);
     let mut session = world
         .active_session
         .take()
         .assured("an active session with subscription must exist");
-    let deadline = Instant::now()
-        .checked_add(duration)
-        .assured("scenario durations fit Tokio's monotonic instant range");
-    let mut last_payload = world.last_subscription_payload.take();
-    let (session, last_payload) =
-        crate::common::runner_observation::observe_off_the_runner(async move {
-            let mut branches_by_timestamp = BTreeMap::<_, BTreeSet<String>>::new();
-            let mut latest_timestamp_by_branch = BTreeMap::<String, i64>::new();
-            let mut observed = Vec::new();
-
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                let complete_occurrences = branches_by_timestamp
-                    .values()
-                    .filter(|branches| *branches == &expected_branches)
-                    .count();
-                if complete_occurrences >= expected_occurrences {
-                    assert_eq!(
-                        complete_occurrences, expected_occurrences,
-                        "generator produced more complete occurrences than the assertion consumed"
-                    );
-                    return (session, last_payload);
-                }
-                let now = Instant::now();
-                assert!(
-                    now < deadline,
-                    "timed out after observing {complete_occurrences} of {expected_occurrences} \
-                     complete generator occurrences for branches {expected_branches:?}: \
-                     {observed:?}"
-                );
-                let remaining = deadline
-                    .checked_duration_since(now)
-                    .verified("the deadline comparison above established remaining scenario time");
-                let event = match session.try_next_subscription(remaining).await {
-                    Ok(Some(event)) => event,
-                    Ok(None) => panic!(
-                        "timed out after observing {complete_occurrences} of \
-                         {expected_occurrences} complete generator occurrences for branches \
-                         {expected_branches:?}: {observed:?}"
-                    ),
-                    Err(error) => panic!("failed while waiting for subscription payloads: {error}"),
-                };
-                let payload = event.payload;
-                let (key, payload_json) =
-                    if let Some((key, payload_json)) = payload.split_once(" payload=") {
-                        (key.strip_prefix("key="), payload_json)
-                    } else {
-                        (None, payload.as_str())
-                    };
-                let parsed = match serde_json::from_str::<serde_json::Value>(payload_json) {
-                    Ok(parsed) => parsed,
-                    Err(error) => panic!("subscription payload is not valid JSON: {error}"),
-                };
-                let Some(branch) = parsed.get(&branch_field) else {
-                    panic!("subscription payload has no field '{branch_field}': {payload}");
-                };
-                let Some(branch) = branch.as_str() else {
-                    panic!(
-                        "subscription payload field '{branch_field}' is not a string: {payload}"
-                    );
-                };
-                assert!(
-                    expected_branches.contains(branch),
-                    "generator produced unexpected branch '{branch}': {payload}"
-                );
-                if let Some(key) = key {
-                    let key = match serde_json::from_str::<serde_json::Value>(key) {
-                        Ok(key) => key,
-                        Err(error) => panic!("subscription key is not valid JSON: {error}"),
-                    };
-                    assert_eq!(
-                        key.get(&branch_field),
-                        parsed.get(&branch_field),
-                        "generator output did not preserve branch field '{branch_field}': \
-                         {payload}"
-                    );
-                }
-                let Some(timestamp) = parsed.get(&timestamp_field) else {
-                    panic!("subscription payload has no field '{timestamp_field}': {payload}");
-                };
-                let Some(timestamp) = timestamp.as_str() else {
-                    panic!(
-                        "subscription payload field '{timestamp_field}' is not a string: {payload}"
-                    );
-                };
-                let timestamp = match chrono::DateTime::parse_from_rfc3339(timestamp) {
-                    Ok(timestamp) => timestamp,
-                    Err(error) => {
-                        panic!(
-                            "subscription payload field '{timestamp_field}' is not RFC 3339: \
-                             {error}"
-                        )
-                    }
-                };
-                let timestamp = timestamp
-                    .timestamp_nanos_opt()
-                    .assured("generator scenario timestamps fit signed Unix nanoseconds");
-                if let Some(previous) =
-                    latest_timestamp_by_branch.insert(branch.to_string(), timestamp)
-                {
-                    assert!(
-                        timestamp > previous,
-                        "generator timestamps for branch '{branch}' did not increase: \
-                         {observed:?}, {payload}"
-                    );
-                }
-                let inserted = branches_by_timestamp
-                    .entry(timestamp)
-                    .or_default()
-                    .insert(branch.to_string());
-                assert!(
-                    inserted,
-                    "generator repeated an occurrence for branch '{branch}': {payload}"
-                );
-                last_payload = Some(payload.clone());
-                observed.push(payload);
-            }
-        })
-        .await;
+    let (session, last_payload) = common::runner_observation::observe_off_the_runner(async move {
+        observation.observe(duration, &mut session).await;
+        (session, observation.last_payload().cloned())
+    })
+    .await;
     world.active_session = Some(session);
     world.last_subscription_payload = last_payload;
 }
@@ -31208,8 +31182,27 @@ async fn then_iceberg_table_eventually_contains_row(
     table: String,
     #[step] step: &Step,
 ) {
+    assert_iceberg_table_contains_row(world, table, world.domain.clone(), step).await;
+}
+
+#[then(expr = "the Iceberg table {string} in namespace {string} eventually contains a row")]
+async fn then_iceberg_table_in_namespace_contains_row(
+    world: &mut ScenarioWorld,
+    table: String,
+    namespace: String,
+    #[step] step: &Step,
+) {
+    let namespace = expand_placeholders(world, &namespace);
+    assert_iceberg_table_contains_row(world, table, namespace, step).await;
+}
+
+async fn assert_iceberg_table_contains_row(
+    world: &ScenarioWorld,
+    table: String,
+    namespace: String,
+    step: &Step,
+) {
     let table = expand_placeholders(world, &table);
-    let domain = world.domain.clone();
     let expected = expand_placeholders(world, docstring(step));
     let expected = serde_json::from_str::<serde_json::Value>(&expected)
         .expect("Iceberg expected row must be valid JSON");
@@ -31219,7 +31212,7 @@ async fn then_iceberg_table_eventually_contains_row(
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        match iceberg_table_rows(&dependencies, &domain, &table).await {
+        match iceberg_table_rows(&dependencies, &namespace, &table).await {
             Ok(rows) => {
                 if rows
                     .iter()
@@ -31486,7 +31479,9 @@ async fn rustfs_iceberg_table(
     table: &str,
 ) -> Result<iceberg::table::Table, String> {
     let catalog = rustfs_rest_catalog(dependencies).await?;
-    let table_ident = TableIdent::new(NamespaceIdent::new(domain.to_string()), table.to_string());
+    let namespace = NamespaceIdent::from_strs(domain.split('.'))
+        .map_err(|source| format!("invalid catalog namespace: {source}"))?;
+    let table_ident = TableIdent::new(namespace, table.to_string());
     catalog
         .load_table(&table_ident)
         .await
@@ -31543,7 +31538,7 @@ fn rustfs_iceberg_storage_factory() -> StdArc<dyn iceberg::io::StorageFactory> {
 
 struct IcebergTableFixture {
     dependencies: DependencyEndpoints,
-    domain: String,
+    namespace: String,
     table: String,
     location: String,
     fields: Vec<arrow_schema::Field>,
@@ -31556,7 +31551,7 @@ impl IcebergTableFixture {
     fn from_step(world: &ScenarioWorld, table: String, location: String, columns: &str) -> Self {
         Self {
             dependencies: world.dependencies.endpoints().clone(),
-            domain: world.domain.clone(),
+            namespace: world.domain.clone(),
             table: expand_placeholders(world, &table),
             location: expand_placeholders(world, &location),
             fields: Self::parse_fields(columns),
@@ -31589,7 +31584,8 @@ impl IcebergTableFixture {
 
     async fn ensure_once(&self) -> Result<(), String> {
         let catalog = rustfs_rest_catalog(&self.dependencies).await?;
-        let namespace = NamespaceIdent::new(self.domain.clone());
+        let namespace = NamespaceIdent::from_strs(self.namespace.split('.'))
+            .map_err(|source| format!("invalid catalog namespace: {source}"))?;
         if !catalog
             .namespace_exists(&namespace)
             .await

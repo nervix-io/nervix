@@ -126,7 +126,7 @@ impl SubscriptionDraft {
 
     pub(super) fn build(&self) -> error_stack::Result<CreateSubscription, SubscriptionDraftError> {
         let name = SubscriptionName::parse(self.name.trim())
-            .map_err(|_| Report::new(SubscriptionDraftError::Name))?;
+            .map_err(|cause| cause.change_context(SubscriptionDraftError::Name))?;
         let Some(relay) = &self.relay else {
             return Err(Report::new(SubscriptionDraftError::RelayRequired));
         };

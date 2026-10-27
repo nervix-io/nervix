@@ -313,11 +313,11 @@ impl Runtime {
         self.inner.entity_gate_deadline
     }
 
+    /// The fault controls a coordinator consults with control-plane identities this runtime does
+    /// not know, such as the durable execution that owns a domain's mutation.
     #[cfg(feature = "testing")]
-    pub(crate) fn take_forced_entity_drain_timeout(&self, domain: &DomainName) -> bool {
-        self.inner
-            .fault_injection
-            .take_forced_entity_drain_timeout(domain)
+    pub(crate) fn fault_injection(&self) -> &ConfiguredFaultInjection {
+        &self.inner.fault_injection
     }
 
     #[cfg(feature = "testing")]

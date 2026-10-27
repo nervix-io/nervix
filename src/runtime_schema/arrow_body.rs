@@ -381,10 +381,19 @@ async fn decode_body(
         .checked_mul(2)
         .unwrap_or(decoded_limit)
         .min(decoded_limit);
-    let reservation = executor
-        .reserve(contract.carriage.memory_class(), charge)
-        .await
-        .change_context(ArrowBodyError::Admission)?;
+    // A snapshot's input already occupies this bulk pool. Waiting for scratch while retaining
+    // that input can leave concurrent readers holding all the room each needs to finish.
+    let reservation = match contract.carriage {
+        ArrowBodyCarriage::Relay => {
+            executor
+                .reserve(contract.carriage.memory_class(), charge)
+                .await
+        }
+        ArrowBodyCarriage::SnapshotSection => {
+            executor.try_reserve(contract.carriage.memory_class(), charge)
+        }
+    }
+    .change_context(ArrowBodyError::Admission)?;
     let decoded = executor
         .run_cpu(
             contract.carriage.cpu_class(),
@@ -498,6 +507,7 @@ mod framing_tests {
 
     use arrow_array::{ArrayRef, Int32Array, Int64Array};
     use arrow_schema::{DataType, Field};
+    use futures_util::FutureExt as _;
     use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::{super::ipc_stream::CONTINUATION_MARKER, *};
@@ -624,6 +634,61 @@ mod framing_tests {
                 .checked_add(found[0])
                 .assured("a position inside the section is far below the address width")
         }
+    }
+
+    #[nervix_primitives::test]
+    async fn snapshot_decoder_refuses_bulk_wait_while_retaining_its_arrow_input() {
+        let config = nervix_execution::ExecutionConfig::default();
+        let bulk_bytes = config.budgets.bulk.as_u64();
+        let executor = Executor::new(config).assured("the default executor is valid");
+        let section = SealedSection::sealed(&executor).await;
+        let input = executor
+            .charge_owned(MemoryClass::Bulk, section.bytes.clone())
+            .await
+            .assured("the valid section fits the bulk budget");
+        let input_bytes: u64 = input.len().arch_into();
+        let occupied_bytes = bulk_bytes
+            .checked_sub(input_bytes)
+            .assured("the section is smaller than the bulk budget");
+        let occupied = executor
+            .try_reserve(MemoryClass::Bulk, occupied_bytes)
+            .assured("the test occupies the memory outside the decoder's input");
+
+        let result = RuntimeRecordBatch::decode_arrow_snapshot_section(
+            &executor,
+            section.schema.clone(),
+            input,
+        )
+        .now_or_never();
+        assert!(
+            result.is_some(),
+            "a snapshot decoder must refuse rather than wait while its input holds bulk memory"
+        );
+        let error = result
+            .verified("the decoder returned without waiting for its own input to be released")
+            .expect_err("the full bulk budget cannot admit decoding scratch");
+        assert_eq!(
+            error.downcast_ref::<nervix_execution::AdmissionError>(),
+            Some(&nervix_execution::AdmissionError::BudgetExhausted {
+                class: "bulk",
+                requested: input_bytes
+                    .checked_mul(2)
+                    .assured("the three-row input is far below the section limit"),
+            })
+        );
+        assert_eq!(
+            executor.memory(MemoryClass::Bulk).reserved_bytes,
+            occupied.bytes(),
+            "refusal releases the complete input charge"
+        );
+        drop(occupied);
+
+        let decoded = section
+            .open(&executor, section.bytes.clone())
+            .await
+            .assured("the complete section remains readable once bulk room is available");
+        assert_eq!(decoded.batch, section.batch.batch);
+        assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
     }
 
     struct RecordBatchMessage {

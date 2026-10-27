@@ -92,7 +92,7 @@ ahash = { workspace = true }
 anyhow = { workspace = true }
 apache-avro = { workspace = true }
 arch-into = { workspace = true }
-argon2 = { workspace = true }
+argon2 = { workspace = true, features = ["std"] }
 arrow-arith = { workspace = true }
 arrow-array = { workspace = true }
 arrow-buffer = { workspace = true }
@@ -576,6 +576,7 @@ mongodb = { version = "3.6.0", default-features = false, features = [
 ] }
 multer = "3"
 mysql_async = "0.36.2"
+mysql_common = { version = "0.35.5", default-features = false }
 nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-into" }
 nervix-arbitrary = { package = "nervix-arbitrary", path = "crates/arbitrary" }
 nervix-backup = { package = "nervix-backup", path = "crates/backup" }
@@ -752,6 +753,7 @@ sqlx = { version = "0.9", default-features = false, features = [
 ] }
 storekey = "0.5"
 strum = "0.26"
+sync_wrapper = "1"
 tar = "0.4"
 tempfile = "3"
 testcontainers = { version = "0.27.3", default-features = false, features = [

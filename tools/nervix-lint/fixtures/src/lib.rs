@@ -30,7 +30,12 @@ use indexmap::IndexMap;
 pub use meticulous;
 pub use nervix_primitives::{
     expect_lint,
-    sync::{Arc as SharedValue, blocking::RwLock as StateLock},
+    sync::{
+        Arc as SharedValue, TryAcquireError as PermitRefusal,
+        atomic::{AtomicU64 as Counter, Ordering as MemoryOrdering},
+        blocking::RwLock as StateLock,
+        mpsc::error::SendError as UnsentValue,
+    },
 };
 pub use nervix_recovery;
 use nervix_recovery::Discarded as _;

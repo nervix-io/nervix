@@ -519,13 +519,13 @@ impl SessionServiceImpl {
             if &node == self.inner.consensus.local_node_id() {
                 self.publish_restored_state_generation(&domain.target, &authority, inventory)
                     .await
-                    .map_err(|failure| StepFailure::Failed(failure.to_string()))?;
+                    .map_err(|failure| StepFailure::Failed(format!("{failure:#}")))?;
             } else {
                 let coordination = self
                     .inner
                     .interconnect
                     .next_coordination_identity()
-                    .map_err(|error| StepFailure::Failed(error.to_string()))?;
+                    .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
                 self.send_restored_state_action(
                     &node,
                     &coordination,
@@ -558,13 +558,13 @@ impl SessionServiceImpl {
                     },
                 )
                 .await
-                .map_err(|error| StepFailure::Failed(error.to_string()));
+                .map_err(|error| StepFailure::Failed(format!("{error:#}")));
         }
         let coordination = self
             .inner
             .interconnect
             .next_coordination_identity()
-            .map_err(|error| StepFailure::Failed(error.to_string()))?;
+            .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
         let domain = checkpoint.placement.domain.clone();
         let payload_length = checkpoint.length;
         self.send_restored_state_action(
@@ -598,7 +598,7 @@ impl SessionServiceImpl {
                 );
             let chunk = StagedArtifact::read_window(artifact.clone(), position, length)
                 .await
-                .map_err(|error| StepFailure::Failed(error.to_string()))?;
+                .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
             let length = u64::try_from(chunk.len())
                 .verified("read_window returned at most the requested 64 KiB");
             self.send_restored_state_action(
@@ -649,7 +649,7 @@ impl SessionServiceImpl {
             .await
             .map_err(|error| {
                 StepFailure::Failed(format!(
-                    "failed to send restored state to '{node}': {error}"
+                    "failed to send restored state to '{node}': {error:#}"
                 ))
             })?;
         result.map_err(|failure| {
@@ -698,7 +698,7 @@ impl SessionServiceImpl {
         if let Err(error) = self.wait_for_authoritative_visibility().await {
             return Err(StepFailure::Failed(format!(
                 "domain '{domain}' was created, but authoritative visibility did not complete: \
-                 {error}"
+                 {error:#}"
             )));
         }
         Ok(())

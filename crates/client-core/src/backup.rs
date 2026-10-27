@@ -427,7 +427,7 @@ impl DownloadFile {
         let error = match persisted {
             Ok(Ok(_)) => return Ok(()),
             Ok(Err(error)) => error.error,
-            Err(_) => std::io::Error::other("the task that moved the archive into place stopped"),
+            Err(cause) => std::io::Error::other(cause),
         };
         Err(write_failure(&self.destination, error))
     }
