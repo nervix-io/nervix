@@ -305,7 +305,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | frames read from TCP and TLS connections: at most 64 frames; when full, holds back what fills it |  |
+| Buffers | UDP datagrams admitted after a fixed 65,535-byte receive scratch buffer: set by max_message_size; when full, drops and counts what does not fit<br>TCP and TLS frame assembly across unlimited connections (max_message_size + 11 bytes per connection; an oversized frame closes only that connection): unbounded<br>completed TCP and TLS frames waiting for the intake queue (one frame per connection, at most max_message_size bytes; unlimited connections): unbounded<br>frames read from TCP and TLS connections: at most 64 frames; when full, holds back what fills it |  |
 | Network waits | the TLS handshake of an accepted connection: `connect_timeout_ms`; 30s when omitted<br>reading a connection: `idle_timeout_ms`; unbounded when omitted |  |
 | Driver limits | Datagrams wait in the kernel's UDP receive buffer, which drops what does not fit. |  |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |  |
@@ -720,7 +720,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |  |
 | Network waits | connection: name resolution, TCP and TLS: driver default, connectTimeoutMS, 10 s<br>server selection: driver default, 30 s<br>the handshake, a pool wait and a write: unbounded |  |
-| Driver limits | A document above 16 MiB is rejected. |  |
+| Driver limits | A document above the declared BSON document limit is rejected. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### ICEBERG TABLE emit
@@ -1114,12 +1114,12 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | --- | --- |
 | Kind | MONGODB |
 | Connection pooling | pooled; explicit POOL SIZE MIN &lt;minimum&gt; MAX &lt;maximum&gt; |
-| CONFIG owner class | Nervix |
+| CONFIG owner class | Nervix; address query delegated to driver |
 | Statement options | No entity-specific options. |
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `addr` | required | URL (mongodb or mongodb+srv) | Nervix; strict | no | none |
+| `addr` | required | driver address, including its delegated query options | Nervix; strict | no | none |
 | `database` | optional | string | Nervix; strict | no | none |
 | `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
 

@@ -43,6 +43,8 @@ pub enum OfflineClientConfigError {
          ... on the client"
     )]
     PoolSizing { key: String },
+    #[error("native client configuration inspection did not complete synchronously")]
+    IncompleteInspection,
 }
 
 impl OfflineClientConfigError {

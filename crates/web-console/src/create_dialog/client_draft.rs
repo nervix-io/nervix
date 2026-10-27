@@ -26,6 +26,7 @@ use nervix_models::{
     CreateClientWebsockets, CreateClientZeroMq, Model, ModelKind, NodeRef,
     RequestedResourceVersion, SignalingProtocolName,
 };
+use strum::IntoEnumIterator as _;
 use thiserror::Error;
 
 use super::{
@@ -46,11 +47,18 @@ macro_rules! declare_transports {
         }
 
         impl ClientTransport {
-            pub(super) const ALL: [Self; 22] = [
-                $(Self::$variant,)+
-                $(Self::$pooled,)+
-                Self::Websockets,
-            ];
+            /// Offered clients are exactly the connectors with a current client declaration.
+            pub(super) fn all() -> impl Iterator<Item = Self> {
+                ConnectorKind::iter().filter_map(|connector| {
+                    connector.client()?;
+                    Some(match connector {
+                        $(ConnectorKind::$variant => Self::$variant,)+
+                        $(ConnectorKind::$pooled => Self::$pooled,)+
+                        ConnectorKind::Websockets => Self::Websockets,
+                        ConnectorKind::Client | ConnectorKind::Iceberg => return None,
+                    })
+                })
+            }
 
             pub(super) fn key(self) -> String {
                 self.label().to_ascii_lowercase().replace(' ', "-")
@@ -71,7 +79,7 @@ macro_rules! declare_transports {
             }
 
             pub(super) fn pooled(self) -> bool {
-                matches!(self, $(Self::$pooled)|+)
+                self.connector().client().assured("a client transport has a declaration").pooling == nervix_models::ClientPooling::Pooled
             }
 
             pub(super) fn websockets(self) -> bool {
@@ -352,10 +360,11 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{
-        ClientName, CreateStatement, ModelKind, ModelName, NodeRef, RequestedResourceVersion,
-        ResourceName, Statement,
+        ClientName, ConnectorKind, CreateStatement, ModelKind, ModelName, NodeRef,
+        RequestedResourceVersion, ResourceName, Statement,
     };
     use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
+    use strum::IntoEnumIterator as _;
 
     use super::{ClientConfigDraft, ClientDraft, ClientDraftError, ClientTransport};
 
@@ -379,8 +388,15 @@ mod tests {
 
     #[test]
     fn every_offered_client_transport_builds_its_model_and_round_trips() {
-        assert_eq!(ClientTransport::ALL.len(), 22);
-        for transport in ClientTransport::ALL {
+        assert_eq!(
+            ClientTransport::all()
+                .map(ClientTransport::connector)
+                .collect::<Vec<_>>(),
+            ConnectorKind::iter()
+                .filter(|kind| kind.client().is_some())
+                .collect::<Vec<_>>()
+        );
+        for transport in ClientTransport::all() {
             let draft = ready(transport);
             let completed = draft
                 .build()
@@ -407,7 +423,7 @@ mod tests {
             .with_max_len(1024)
             .for_each(|bytes: &[u8]| {
                 let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
-                for transport in ClientTransport::ALL {
+                for transport in ClientTransport::all() {
                     let mut draft = ready(transport);
                     draft.name = arbitrary.name::<ClientName>().as_str().to_string();
                     if transport.pooled() {

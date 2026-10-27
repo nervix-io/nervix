@@ -902,7 +902,10 @@ impl Application {
                         .seed_cluster_parameters(parameter_seeds)
                         .await
                 {
-                    warn!(error = %error, "failed to seed cluster parameters");
+                    warn!(
+                        error = format!("{error:#}"),
+                        "failed to seed cluster parameters"
+                    );
                 }
                 if let Some(record) = proposer_for_parameter_seeding.cluster_parameters() {
                     cluster_for_membership_reconcile

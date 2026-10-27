@@ -14,6 +14,14 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+MongoDB's explicit-seed URL and delegated options are checked by its native parser without
+network I/O. Pool query options produce the typed `PoolSizing` outcome naming `POOL SIZE`;
+other native refusals retain the driver's error beneath the value-free key context. Its resolved
+database is required, and the collection checks the complete namespace budget before opening.
+Client initialization also preserves the driver cause of option installation and the validation
+ping. Public command refusal projection renders the reviewed key/pool context rather than driver
+input.
+
 The ClickHouse declaration checks a required positive `timeout_ms` and the address/TLS pairing
 before inspecting mounted files or opening a client. Missing timeout or HTTPS trust is a
 `ClientConfigSchemaError::MissingRequired` or `RequiresKey`; a TLS key with an HTTP address is
@@ -292,6 +300,11 @@ sequenceDiagram
     Registry-->>Session: Report with owning node and route context
     Session-->>Client: Failed command with diagnostic and source span
 ```
+
+Connector inspection renders configured error-policy expressions through the same canonical owner
+as Plexus output. A canonical-rendering failure remains `CanonicalPlexusError` until the command
+response boundary; `DESCRIBE INGESTOR` and `DESCRIBE EMITTER` return that failure instead of a
+partially rendered description.
 
 ## Ownership And Propagation
 
@@ -2857,7 +2870,8 @@ Parameter definitions own positive duration and numeric range errors, and struct
 own empty or duplicate-key refusals. The registry names the exact parameter, domain/model or
 resource, actual requirement and candidate maximum when a lowered cap cannot hold committed
 state. Consensus compares captured inputs and reports a typed stale-input conflict before any
-publication. Bootstrap seed refusal names the parameter and `ALTER CLUSTER SET`.
+publication. Bootstrap seed refusal names the parameter and `ALTER CLUSTER SET`. A failed seed
+append is logged with its complete consensus report, including the typed causes beneath it.
 
 A live publication that disagrees with an equal applied revision is a typed installation failure,
 not a default or retry interpretation. Invalid current consensus metadata preserves its decoder

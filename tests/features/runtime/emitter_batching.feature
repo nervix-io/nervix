@@ -240,9 +240,14 @@ Feature: Emitter batching configuration
       """
     Then the last command output contains
       """
-      to: POSTGRES TABLE postgres_main TABLE 'postgres_events' ON CONFLICT ('seq') DO NOTHING
+      to: POSTGRES TABLE postgres_main TABLE 'postgres_events'
+      options: ON CONFLICT ('seq') DO NOTHING
+      mode: ACK RETRY POLICY BACKOFF 10ms MAX 1s
+      quiesce: none
+      envelope: none
       batch: MAX MESSAGES 250 MAX SIZE 4MiB
       flush: FLUSH IMMEDIATE
+      errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       """
     When these Plexus commands are executed on the leader node
       """

@@ -25,8 +25,8 @@ use nervix_models::{
     Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
     RelocationSelection, ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore,
     RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate,
-    ShowIngestors, ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
-    SqsIngestorEntity, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    ShowEmitters, ShowIngestors, ShowPlacements, ShowRelayMaterializedState, ShowTransactions,
+    ShowUdfs, SqsIngestorEntity, StartDomain, Statement, StopDomain, SubscriptionBinding,
     SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
     TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
     WebsocketsIngestorEntity, ZeroMqIngestorEntity,
@@ -149,6 +149,7 @@ pub enum StatementVariant {
     ShowCreate,
     ShowUdfs,
     ShowIngestors,
+    ShowEmitters,
     ShowPlacements,
     ShowRelayMaterializedState,
     ShowClusterStatus,
@@ -216,6 +217,7 @@ impl StatementVariant {
             Statement::ShowCreate(_) => Self::ShowCreate,
             Statement::ShowUdfs(_) => Self::ShowUdfs,
             Statement::ShowIngestors(_) => Self::ShowIngestors,
+            Statement::ShowEmitters(_) => Self::ShowEmitters,
             Statement::ShowPlacements(_) => Self::ShowPlacements,
             Statement::ShowRelayMaterializedState(_) => Self::ShowRelayMaterializedState,
             Statement::ShowClusterStatus(_) => Self::ShowClusterStatus,
@@ -697,6 +699,7 @@ impl Arbitrary<'_> {
             }
             StatementVariant::ShowUdfs => Statement::ShowUdfs(ShowUdfs),
             StatementVariant::ShowIngestors => Statement::ShowIngestors(ShowIngestors),
+            StatementVariant::ShowEmitters => Statement::ShowEmitters(ShowEmitters),
             StatementVariant::ShowPlacements => Statement::ShowPlacements(ShowPlacements),
             StatementVariant::ShowRelayMaterializedState => {
                 Statement::ShowRelayMaterializedState(ShowRelayMaterializedState {

@@ -99,3 +99,86 @@ pub(super) fn collection_body<'src>() -> impl Parser<
             ),
     )
 }
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns MongoDB grammar conformance")
+)]
+mod tests {
+    //! Layer: test harness.
+    //! - **Owns.** Current collection, conflict and completion examples.
+    //! - **Depends on.** The composed emitter grammar and semantic Models.
+    //! - **Must not know.** Drivers or graph execution.
+
+    use meticulous::ResultExt as _;
+
+    use super::*;
+
+    #[test]
+    fn mongodb_collection_names_and_conflicts_follow_the_declaration() {
+        for action in [
+            "",
+            "ON CONFLICT ('id') DO NOTHING",
+            "ON CONFLICT ('id') DO UPDATE",
+        ] {
+            let source = format!(
+                "CREATE MONGODB COLLECTION EMITTER output FROM events TO mongo_client COLLECTION \
+                 'Orders café' MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {{ 'id' = \
+                 input.id, 'value' = input.value }} {action} BATCH MAX MESSAGES 2 MAX SIZE 1MiB \
+                 FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+            );
+            let parsed =
+                parse_create_emitter(&source).assured("the declared collection body parses");
+            let canonical = parsed
+                .to_canonical_plexus()
+                .assured("the current model renders");
+            assert_eq!(
+                parse_create_emitter(&canonical).assured("the rendered model parses"),
+                parsed
+            );
+        }
+    }
+
+    #[test]
+    fn mongodb_conflict_targets_are_required_and_mapped() {
+        for action in [
+            "ON CONFLICT DO NOTHING",
+            "ON CONFLICT ('missing') DO NOTHING",
+            "ON CONFLICT ('id') DO UPDATE",
+        ] {
+            let source = format!(
+                "CREATE MONGODB COLLECTION EMITTER output FROM events TO mongo_client COLLECTION \
+                 'Orders' MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {{ 'id' = input.id }} \
+                 {action} BATCH MAX MESSAGES 2 MAX SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+                 ON GENERAL ERROR LOG;"
+            );
+            assert!(parse_create_emitter(&source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn mongodb_completion_uses_its_declared_locator_and_mode() {
+        for (prefix, expected) in [
+            (
+                "CREATE MONGODB COLLECTION EMITTER output FROM events TO mongo_client ",
+                "COLLECTION",
+            ),
+            (
+                "CREATE MONGODB COLLECTION EMITTER output FROM events TO mongo_client COLLECTION ",
+                "mongodb_collection",
+            ),
+            (
+                "CREATE MONGODB COLLECTION EMITTER output FROM events TO mongo_client COLLECTION \
+                 'Orders' MODE ",
+                "ACK",
+            ),
+        ] {
+            let suggestions = suggest_create_emitter(prefix, prefix.len());
+            assert!(
+                suggestions.iter().any(|item| item == expected),
+                "{suggestions:?}"
+            );
+        }
+    }
+}

@@ -650,6 +650,17 @@ statement's `MAX BODY SIZE`: a response that exceeds it fails the poll, which th
 as its transient error, and the next poll reads again. An `HTTP REQUEST` poll's response body has
 no such bound yet and is declared unbounded.
 
+A per-connection bound does not bound the total when the listener accepts an unlimited number of
+connections. The Syslog listener declares frame assembly and completed frames waiting for its
+intake queue as separate unbounded totals, with their per-connection limits in each description.
+Its assembly buffer holds at most `max_message_size + 11` bytes per connection, and each connection
+may also hold one completed frame of at most `max_message_size` bytes while its queue send waits.
+An oversized stream frame closes only its connection; it neither fails the listener's source read
+nor makes the host reconnect. UDP admission separately drops and counts a datagram above
+`max_message_size`, after receiving it into a fixed 65,535-byte scratch buffer. The shared stream
+intake queue holds at most 64 frames and applies backpressure; that queue does not limit the
+connection count or total connection-local retention.
+
 A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a fixed bound Nervix
 sets, or the driver's own default. A wait that only the host's stop ends is declared unbounded. The
 deadline keys mean the same thing for every connector:
@@ -921,6 +932,24 @@ positions. A name an expression computes is the emitter's to settle at run time 
 `headers: <layout>, <names> names`, or `headers: none`, and the per-entity tables of the
 [ingestor](./ingestors.md) and [emitter](./emitters.md) manuals and of
 [Connector Capabilities](./connector-capabilities.md) state it.
+
+### Shared entity presentation
+
+The vocabulary's `EntityPresentation` projects each configured source or sink once from its
+current Model. Its declaration supplies the connector/entity phrase, locator keywords, option
+order and effective defaults. Canonical Plexus and `DESCRIBE` consume that projection; canonical
+text preserves omitted optional Model fields, while inspection includes their effective defaults.
+`DESCRIBE INGESTOR` and `DESCRIBE EMITTER` begin their configuration block with `from:` or `to:`,
+then `options:`, `mode:`, `quiesce:`, `envelope:`, `batch:`, `flush:` and `errors:`. Empty options,
+unavailable quiesce/envelope and absent batching print `none`. An ingestor's flush and message
+error policies name their output relays; its general error policy belongs to the node. Runtime
+health and counters follow configuration, including Kafka's observed partition assignments.
+
+`SHOW INGESTORS`, `SHOW EMITTERS` and graph transport labels use the same declared entity phrase.
+The console's ingestor choices read the declared entities, locator, options, option choices,
+delivery modes and quiesce modes. Required option choices govern whether delivery and quiesce
+buttons are enabled, and the draft enforces those same requirements before constructing a Model.
+Typed field adapters bind declarations to draft storage; they do not define another allowed list.
 
 ## Ingestor boundary
 
@@ -1881,6 +1910,14 @@ measures. The MySQL property compares the complete statement and bound parameter
 driver's binary serializer, including qualified table names, quoted column keys, nulls and
 nonempty slices of a rotated membership sequence.
 `mongodb-write-answers` checks the rows a failed MongoDB write delivers, rejects and leaves unresolved.
+`mongodb-bson-mapping` checks the complete native document encoding and stored-size measure:
+integer widths, floating-point bits (including non-finite values), native dates at millisecond
+precision, binary subtype, recursive arrays, nulls and field order. The MongoDB declaration owns
+the BSON document limit; the encoder consumes that same constant. Its mapped type family admits
+the current scalars and typed arrays/vectors, and shared validation refuses duplicate keys and
+types outside that family. Collection locators use a MongoDB-specific rule and retain their
+spelling through Models, plans and the connector. The complete namespace is checked with the
+resolved database before opening the emitter.
 `sentry-prepared-envelopes` checks complete event preservation, defaults, framing and attempt
 bytes; the one- and three-node Sentry scenarios qualify those bytes through a reopened connector
 after a mock endpoint's `503` response. See

@@ -14,6 +14,13 @@ refuses TLS file keys on HTTP. The case-preserving `ClickHouseTableName` is cons
 one or two nonempty locator parts; the connector receives that validated name and quotes its parts
 for SQL without reparsing a Plexus statement.
 
+The MongoDB engine resolves a required nonempty database from its explicit key or the URL path
+into one private configuration value. It consumes the driver's optional default rather than
+carrying a second database identity. Collection names are validated vocabulary values that retain
+their original UTF-8 spelling; the resolved database, separator and collection cross the complete
+namespace-budget check before the emitter opens. Missing database configuration and a refused
+namespace return typed errors, never an empty database or a substituted collection.
+
 Nervix represents absence and distinct semantic states in its types. A zero, empty string,
 empty collection, maximum integer, or all-zero digest is a value in its own right; it does not
 stand for a missing value or a different state. The owner of each state decides when a value is
@@ -167,6 +174,10 @@ values. Empty application-state bytes remain present inside the Rust SDK's snaps
 Reset acceptance, reset refusal, an unusable snapshot envelope and rejected application state have
 distinct typed ABI verdicts. Protocol decoding checks the complete size-prefixed header before
 identifier access and verifies offsets and counts before constructing owned values.
+
+Entity presentation distinguishes a written option from its declared effective default. Inspection
+shows both, while canonical Plexus emits only written options, preserving optional Model fields
+through a complete round trip. This is a display projection, never a stored shape or runtime plan.
 
 ## Absence And Distinct States
 

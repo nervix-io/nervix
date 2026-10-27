@@ -101,6 +101,7 @@ pub enum Statement {
     ShowCreate(ShowCreate),
     ShowUdfs(ShowUdfs),
     ShowIngestors(ShowIngestors),
+    ShowEmitters(ShowEmitters),
     ShowPlacements(ShowPlacements),
     ShowRelayMaterializedState(ShowRelayMaterializedState),
     ShowClusterStatus(ShowClusterStatus),
@@ -178,6 +179,7 @@ impl Statement {
             | Self::ShowCreate(_)
             | Self::ShowUdfs(_)
             | Self::ShowIngestors(_)
+            | Self::ShowEmitters(_)
             | Self::ShowPlacements(_)
             | Self::ShowRelayMaterializedState(_)
             | Self::ShowClusterStatus(_)
@@ -411,6 +413,12 @@ pub struct ShowPlacements;
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct ShowIngestors;
+
+/// Lists configured emitters of the selected domain with their declared connector and entity.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ShowEmitters;
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,

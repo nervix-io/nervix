@@ -13,10 +13,10 @@ clause order or connector options from memory.
 
 For Plexus connector choices, read [Connector Capabilities](https://docs.nervix.io/connector-capabilities.md)
 alongside the entity's Ingestors or Emitters section. Its generated tables show modes, option
-requirements, metadata types, each side's header model, batching and the reasons ingest and emit
-differ. Read headers the way the source's model records them, such as lowercase HTTP field names,
-and on an emitter that keeps one value per header name write each literal header name once: a repeated
-literal name is refused when the statement is validated.
+requirements, metadata types, each side's header model, batching, buffer bounds, network waits and
+the reasons ingest and emit differ. Read headers the way the source's model records them, such as
+lowercase HTTP field names, and on an emitter that keeps one value per header name write each literal
+header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, response-header reads, frame metadata and the closed client CONFIG key set.
 
@@ -35,6 +35,8 @@ For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.htm
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
 completion status messages.
+Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
+their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors for every connector and entity pair, junctions, reingestors, and session

@@ -23,6 +23,14 @@ use crate::{
     parser_support::*,
 };
 
+/// SHOW EMITTERS lists the configured emitters of the selected domain.
+pub fn show_emitters_parser<'src>()
+-> impl Parser<'src, &'src [Token], ShowEmitters, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Show, Identifier::Emitters)
+        .to(ShowEmitters)
+        .then_ignore(tok(Token::Semicolon).or_not())
+}
+
 // Typed constructors share lexical patterns; each entity's closed enum owns its mode set.
 macro_rules! broker_mode {
     ($Mode:ident) => {

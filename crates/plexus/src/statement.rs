@@ -144,6 +144,7 @@ pub fn statement_parser<'src>()
         crate::udf::describe_udf_parser().map(Statement::DescribeUdf),
         crate::udf::show_udfs_parser().map(Statement::ShowUdfs),
         crate::ingestor::show_ingestors_parser().map(Statement::ShowIngestors),
+        crate::emitter::show_emitters_parser().map(Statement::ShowEmitters),
         crate::placement::show_placements_parser().map(Statement::ShowPlacements),
     );
 

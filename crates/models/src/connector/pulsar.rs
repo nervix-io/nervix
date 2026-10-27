@@ -158,6 +158,7 @@ pub struct PulsarSubscription {
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
+    strum::EnumIter,
 )]
 pub enum PulsarSubscriptionOwnership {
     /// `OWNED BY INGESTOR`: the ingestor owns the subscription. Joining it creates it when it is

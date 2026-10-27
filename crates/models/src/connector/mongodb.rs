@@ -3,7 +3,7 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The MongoDB client Model with its connection pool, the collection emitter Model with
-//!   its conflict action, and what it declares.
+//!   its conflict action, native BSON mapping, collection namespace budget and what it declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared emitter declarations and the names a body references.
 //! - **Must not know.** The MongoDB driver, or how documents are written.
@@ -13,6 +13,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +24,7 @@ use super::{
     },
     configured_client::configured_client,
     entity_union::connector_emitters,
+    external_name::{ExternalNameError, require_length},
 };
 use crate::{
     ClientName, ConnectorKind, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
@@ -38,7 +40,7 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
     use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
     ClientConfigSchema::new(
         &[
-            K::required("addr", V::Url(&["mongodb", "mongodb+srv"])),
+            K::required("addr", V::DriverAddress),
             K::optional("database", V::String),
             K::TLS_CA,
         ],
@@ -49,7 +51,47 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
 
 pub type MongoDbValueMapping = EmitterValueMapping;
 
+/// The BSON document limit, including an identifier the driver or server adds.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the BSON document limit enforced by MongoDB is 16 MiB"
+    )
+)]
+pub const MONGODB_MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The public Nervix collection contract bounds database, separator and collection together.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Plexus MONGODB COLLECTION namespace contract fixes its UTF-8 budget at 120 \
+                  bytes"
+    )
+)]
+pub const MONGODB_NAMESPACE_MAX_BYTES: usize = 120;
+
+// A database is nonempty and its separator is one byte.
+const MAX_COLLECTION_BYTES: usize = MONGODB_NAMESPACE_MAX_BYTES - 2;
+const _: () = assert!(MAX_COLLECTION_BYTES > 0);
+
 /// One collection a MongoDB client writes documents into.
+///
+/// Its direct-value contract is the native BSON mapping below. Nulls retain their type's null
+/// position, including within sequences. Other mapped types are refused by the column contract.
+///
+/// | Plexus type | BSON representation |
+/// | --- | --- |
+/// | BOOL | Boolean |
+/// | I8, I16, I32, U8, U16 | Int32 |
+/// | I64, U32 | Int64 |
+/// | U64 | Int64 up to i64::MAX; otherwise a permanent row rejection |
+/// | F32, F64 | Double, including non-finite values |
+/// | STRING | String |
+/// | BYTES | Generic Binary |
+/// | DATETIME | Date, rounded down to whole Unix milliseconds |
+/// | ARRAY, VEC | Array, recursively following this table |
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -93,7 +135,7 @@ const MONGODB_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Unbounded,
         },
     ],
-    driver_limits: &["A document above 16 MiB is rejected."],
+    driver_limits: &["A document above the declared BSON document limit is rejected."],
 };
 
 impl EmitterDeclaration for MongoDbCollectionEmitter {
@@ -171,6 +213,46 @@ super::publishing::emitter_modes! {
 
 super::external_name::external_names! {
     /// The case-preserving external collection identifier this connector publishes to.
-    pub struct MongoDbCollectionName => super::external_name::external_identifier,
+    pub struct MongoDbCollectionName => mongodb_collection_rule,
         label "mongodb_collection", example "Orders";
 }
+
+fn mongodb_collection_rule(text: &str) -> Result<(), ExternalNameError> {
+    require_length(text, MAX_COLLECTION_BYTES)?;
+    if let Some(ch) = text.chars().find(|ch| matches!(ch, '\0' | '$')) {
+        return Err(ExternalNameError::InvalidChar { ch });
+    }
+    if text.starts_with("system.") || text.contains(".system.") {
+        return Err(ExternalNameError::Reserved {
+            name: "a system collection",
+        });
+    }
+    Ok(())
+}
+
+impl MongoDbCollectionName {
+    /// Check the complete namespace after the client's database has been resolved.
+    pub fn validate_namespace(&self, database: &str) -> error_stack::Result<(), ExternalNameError> {
+        if database.is_empty() {
+            return Err(error_stack::Report::new(ExternalNameError::Empty));
+        }
+        let bytes = database
+            .len()
+            .checked_add(1)
+            .assured("a Rust string is at most isize::MAX bytes before adding its separator");
+        let bytes = bytes.checked_add(self.as_str().len()).assured(
+            "the database fits isize::MAX and the validated collection holds at most 118 bytes, \
+             so their namespace fits usize",
+        );
+        if bytes > MONGODB_NAMESPACE_MAX_BYTES {
+            return Err(error_stack::Report::new(ExternalNameError::TooLong {
+                max: MONGODB_NAMESPACE_MAX_BYTES,
+                actual: bytes,
+            }));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests;

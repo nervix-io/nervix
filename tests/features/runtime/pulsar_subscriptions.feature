@@ -119,7 +119,7 @@ Feature: Pulsar subscriptions belong to their declared owner
     Then within "30s" Pulsar subscription "owned_{{test_id}}" of topic "owned_{{test_id}}" has 1 consumer
     And within "30s" DESCRIBE INGESTOR "events" on the leader node contains
       """
-      pulsar subscription ownership: OWNED BY INGESTOR
+      options: SUBSCRIPTION 'owned_{{test_id}}' OWNED BY INGESTOR INSTANCES 1
       """
     When these Plexus statements are executed
       """
@@ -154,7 +154,7 @@ Feature: Pulsar subscriptions belong to their declared owner
     Then within "30s" Pulsar subscription "provisioned_{{test_id}}" of topic "provisioned_{{test_id}}" has 1 consumer
     And within "30s" DESCRIBE INGESTOR "events" on the leader node contains
       """
-      pulsar subscription ownership: PROVISIONED
+      options: SUBSCRIPTION 'provisioned_{{test_id}}' PROVISIONED INSTANCES 1
       """
     When these Plexus statements are executed
       """
