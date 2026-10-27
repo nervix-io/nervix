@@ -1478,8 +1478,9 @@ build and the existing tests, and nothing in it changes behavior.
   denied, including each package `just test-shuttle` explores in test mode, so a warning in a check
   fails validation.
 - `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
-  instrumentation: `test-typed-ratchet`, `bench-smoke`, `plexus-completion-walk`, the canonical
-  `test-shuttle` and `test-loom` runners, the canonical `test-turmoil` suite,
+  instrumentation: `test-typed-ratchet`, `bench-smoke`, `plexus-completion-walk`,
+  `validate-connector-matrix`, the canonical `test-shuttle` and `test-loom` runners, the canonical
+  `test-turmoil` suite,
   each `test-primitives-<mode>` conformance recipe,
   `test-deadlock-evidence-order`, `test-deadlock-report`, and the `test-deloxide`,
   `test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore` lanes, which
@@ -1487,9 +1488,11 @@ build and the existing tests, and nothing in it changes behavior.
   workspace crates, through a workspace compiler wrapper beneath kache, so their nodes meet the
   product's deadlines.
   `test-primitives` selects every native conformance mode. CI runs these checks through collection;
-  primitive compile/browser checks, replay qualification and Loom weakening qualification retain
-  independent verdicts outside its instrumentation. Each run writes `lcov.info`, `completion.json`,
-  `executions.jsonl` and `export.log` to a
+  product API doctests, primitive compile/browser checks, replay and Loom weakening qualification,
+  `just test-deloxide-qualification` and `just qualify-typed-ratchet-cache` retain independent
+  verdicts outside its instrumentation. Source-contract fixture doctests belong to the instrumented
+  compiler-fixture producer; its product API doctests finish separately. Each run writes
+  `lcov.info`, `completion.json`, `executions.jsonl` and `export.log` to a
   fresh `target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. A report counts only
   beside a `complete` completion record; a failed, interrupted or incomplete collection never is
   one, and it keeps its evidence. Prerequisites build outside the instrumentation, and the parts
@@ -1498,6 +1501,11 @@ build and the existing tests, and nothing in it changes behavior.
   executing Nervix code natively joins the producer inventory in `scripts/native_coverage.py`, with
   its justfile recipe composed as prepare, instrumented and finish parts. `just test-native-coverage`
   tests the collector.
+  An existing test, property, model or scenario stays with its canonical runner and inventory.
+  A producer change updates its ordinary merge inputs or full-union requirement table, event/label
+  eligibility, workflow downloads and command/artifact tests in the same change. Compile-only,
+  altered-source, replay and supervision checks declare their independent-verdict scope. A retained
+  complete report qualifies only its tested revision and selection, never targets added later.
   Model producers also retain `models.json` with canonical discovery, selection, execution and
   completion, including Shuttle's paired nondeterminism run and Loom's invariant, executions and
   bounds. Missing or incomplete evidence fails collection before export. Each mode uses its own

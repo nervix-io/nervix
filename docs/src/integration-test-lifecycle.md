@@ -1042,8 +1042,12 @@ The harness keeps these boundaries explicit.
   Parallel mutation dispatch also exceeded nine seconds, so adding their latencies was not the
   sole cause. Twenty seconds exceeds 1.5 times that measured maximum; the product's readiness
   propagation and command deadlines remain with their owners.
-  The final retained status must report node-3 connected and name the new relay's scheduled owner
-  before any fault is released. The timed helper also checks each recorded completion instant:
+  The final retained client status must name the new relay's scheduled owner before any fault is
+  released. A direct status request to node-1 checks its node-3 peer while the faults remain held;
+  it asserts the answering node's Raft identity and never replaces the timed client's retained
+  result. A separate controlled leader transfer makes a node-1 client's mutation follow node-3,
+  then checks the returned status names node-3 and lists node-1 as connected. The timed helper also
+  checks each recorded completion instant:
   a timeout future can return an already-ready reply when polled after its deadline. It captures
   that instant before diagnostic logging and names the client, domain and statement position.
   Reached observations prove both revision pauses were exercised before explicit release. The
@@ -1344,6 +1348,21 @@ an expired row visible again. The outline still requires the initial row, an emp
 expiration, and the exact recreated keys and payloads on one- and three-node clusters. These bounds
 belong to the fixture and its observations; product retention and deadline policies keep their own
 contracts.
+
+The remote materialized reuse scenario requires the generator node's relay memory to read zero while
+that node retains the generation it reuses. Relay memory is a node-wide class: a delivery the node
+sends keeps its encoded body charged until the receiving owner admits it and its record storage
+until the outcomes of its records return, and a fan-out grant the node issues for one of its
+sessions' subscriptions reserves the body, the largest decoded batch and decode scratch. While the
+generator delivered each 100-millisecond occurrence to an output relay on another node, a
+200-millisecond poll read zero only between two deliveries, and a loaded runner can stretch each
+delivery until no poll falls between them. The scenario therefore makes the node idle before it
+reads the gauge: the output relay is relocated onto the generator's node, its last subscription is
+deleted, and the source owner fills its relay memory so that it refuses every relay grant, which
+keeps any delivery the generator's node still sends charged. Zero is then the steady state unless
+something retains relay memory, and the scenario also requires the retained generation's charge in
+`state_read_cache`. The 30-second waits and the five complete observations of each round are
+unchanged.
 
 Collection and route-flush timing assertions measure observed row arrival from the HTTP publication
 instant. Concurrent branch posts retain one publication origin, and every expected row must match
@@ -2498,6 +2517,11 @@ and both advisory reports. The `coverage-full` job later reads that report uncha
 modeled, diagnostic and fuzz collections the run selected to form the
 [full workspace union](./coverage-reports.md#the-full-workspace-union); their counters never enter
 the ordinary report, its patch coverage or its CRAP report.
+
+The Deloxide lane's supervision qualification runs outside its coverage collection. Product API
+doctests, compiler-cache qualification, replay and deliberately weakened checks also retain their
+[independent verdicts](./coverage-reports.md#verification-outside-collected-counters).
+No absent counter turns one of those required checks into an optional execution.
 
 The scenario collector also starts coverage in each published Python paced driver using the shared
 `scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed

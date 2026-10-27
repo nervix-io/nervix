@@ -10,6 +10,7 @@ Feature: Materialized backup and archived lifecycle resumption
     And these Plexus statements are executed on the leader node
       """
       RELOCATE RELAY state_0 ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE RELAY summaries ONTO NODE node-2 IGNORE PREFERENCES;
       RELOCATE GENERATOR produce_0 ONTO NODE node-2 IGNORE PREFERENCES;
       """
     And round 1 of 64 KiB materialized rows is submitted for 2 tenants
@@ -20,17 +21,32 @@ Feature: Materialized backup and archived lifecycle resumption
       CREATE SUBSCRIPTION repeated_summaries TO summaries;
       """
     Then node "node-2" reuses its remote materialized generation across five complete observations of round 1 with 64 KiB rows
-    And within "30s" node "node-2" observability metric "nervix_execution_memory_reserved_bytes" with labels eventually equals 0
+    # With no subscription left, node-2 has no relay work: the generator's output relay runs on
+    # node-2 too, and node-1, its source owner, refuses every relay grant, so any delivery node-2
+    # still sent would keep node-2's relay memory charged. The retained generation stays charged
+    # to state_read_cache.
+    When the materialized summary subscription "repeated_summaries" is closed
+    And node "node-1" fills its relay memory, leaving room for no relay grant
+    Then within "30s" node "node-2" observability metric "nervix_execution_memory_reserved_bytes" with labels eventually equals 0
       """
       class="relay"
+      """
+    And within "30s" node "node-2" observability metric "nervix_execution_memory_reserved_bytes" with labels eventually reaches at least 131072
+      """
+      class="state_read_cache"
       """
     And within "30s" node "node-2" observability metric "nervix_execution_memory_capacity_bytes" with labels eventually equals 201326592
       """
       class="state_read"
       """
-    When round 2 of 64 KiB materialized rows is submitted for 2 tenants
+    When node "node-1" releases its filled relay memory
+    And these Plexus statements are executed on the leader node
+      """
+      CREATE SUBSCRIPTION round_two_summaries TO summaries;
+      """
+    And round 2 of 64 KiB materialized rows is submitted for 2 tenants
     Then within "30s" the materialized generators report round 2, 64 KiB, 1 relays and 2 tenants
-    When the materialized summary subscription "repeated_summaries" is closed
+    When the materialized summary subscription "round_two_summaries" is closed
     And these Plexus statements are executed on the leader node
       """
       CREATE SUBSCRIPTION replaced_summaries TO summaries;
