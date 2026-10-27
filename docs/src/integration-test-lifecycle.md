@@ -1026,8 +1026,12 @@ The harness keeps these boundaries explicit.
   Parallel mutation dispatch also exceeded nine seconds, so adding their latencies was not the
   sole cause. Twenty seconds exceeds 1.5 times that measured maximum; the product's readiness
   propagation and command deadlines remain with their owners.
-  The final retained status must report node-3 connected and name the new relay's scheduled owner
-  before any fault is released. The timed helper also checks each recorded completion instant:
+  The final retained client status must name the new relay's scheduled owner before any fault is
+  released. A direct status request to node-1 checks its node-3 peer while the faults remain held;
+  it asserts the answering node's Raft identity and never replaces the timed client's retained
+  result. A separate controlled leader transfer makes a node-1 client's mutation follow node-3,
+  then checks the returned status names node-3 and lists node-1 as connected. The timed helper also
+  checks each recorded completion instant:
   a timeout future can return an already-ready reply when polled after its deadline. It captures
   that instant before diagnostic logging and names the client, domain and statement position.
   Reached observations prove both revision pauses were exercised before explicit release. The
