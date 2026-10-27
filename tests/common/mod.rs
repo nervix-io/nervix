@@ -1,3 +1,4 @@
+pub(crate) mod backup_phase;
 pub(crate) mod broker_observer;
 pub(crate) mod cli_terminal;
 pub(crate) mod client_conformance;
