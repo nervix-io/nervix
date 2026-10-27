@@ -71,20 +71,20 @@ table Diagnostic {
   span: SourceSpan;
 }
 
-/// How clients reach the cluster leader.
-table LeaderEndpoints {
-  /// The leader's cluster node name.
+/// How clients reach one cluster node.
+table NodeEndpoints {
+  /// The node's cluster node name.
   node: string (required);
-  /// The leader's gRPC session URI. Absent when the leader advertises none.
+  /// The node's gRPC session URI. Absent when the node advertises none.
   grpc_uri: string;
-  /// The leader's web console URI. Absent when the leader advertises none.
+  /// The node's web console URI. Absent when the node advertises none.
   web_console_uri: string;
 }
 
 /// The request needs the cluster leader, and the serving node is not the leader.
 table LeaderRedirect {
   /// Absent while no leader is known, for example during an election.
-  leader: LeaderEndpoints;
+  leader: NodeEndpoints;
 }
 
 /// A request failed definitively. The enclosing outcome's message, and its diagnostics where it
@@ -2315,7 +2315,7 @@ table LeaderIsServingNode {
 }
 
 table LeaderIsRemote {
-  leader: LeaderEndpoints (required);
+  leader: NodeEndpoints (required);
 }
 
 table LeaderUnknown {}

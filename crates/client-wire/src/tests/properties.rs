@@ -21,9 +21,7 @@ use nervix_models::{
 };
 
 use super::fixtures::reference;
-use crate::{
-    Diagnostic, LeaderEndpoints, LeaderRedirect, RequestId, SourceSpan, SubscriptionHandle,
-};
+use crate::{Diagnostic, LeaderRedirect, NodeEndpoints, RequestId, SourceSpan, SubscriptionHandle};
 
 mod events;
 mod io;
@@ -95,7 +93,7 @@ impl<'a> WireValues<'a> {
 
     pub(super) fn redirect(&mut self) -> LeaderRedirect {
         let leader = if self.arbitrary.entropy().flag() {
-            Some(LeaderEndpoints {
+            Some(NodeEndpoints {
                 node: self.arbitrary.name(),
                 grpc_uri: self.arbitrary.entropy().pick([
                     None,

@@ -39,7 +39,7 @@ use nervix_primitives::{
 };
 use tracing::{debug, warn};
 
-use super::{SessionShared, SessionTransport, outcome::leader_endpoints};
+use super::{SessionShared, SessionTransport, outcome::node_endpoints};
 use crate::{
     application::{observation::dataflow_metric_target, session_service::SessionServiceImpl},
     runtime::RuntimeEvent,
@@ -269,8 +269,8 @@ impl SessionServiceImpl {
         if &leader == local {
             return Leadership::ServingNode(leader);
         }
-        let location = self.leader_location(leader).await;
-        Leadership::Remote(leader_endpoints(location))
+        let location = self.node_location(leader).await;
+        Leadership::Remote(node_endpoints(location))
     }
 
     async fn cluster_observation(&self) -> ClusterObserved {

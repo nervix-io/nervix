@@ -8,7 +8,7 @@ use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     BackupArchiveStart, BackupDownloadFailed, BackupDownloadFailure, BackupDownloadFrame,
-    BackupDownloadMessage, BackupDownloadRequest, EncodedFrame, LeaderEndpoints, LeaderRedirect,
+    BackupDownloadMessage, BackupDownloadRequest, EncodedFrame, LeaderRedirect, NodeEndpoints,
     websocket::{ServerBackupDownloadWebSocketCodec, WebSocketData},
 };
 use nervix_models::ClusterNodeName;
@@ -75,7 +75,7 @@ fn refused(failure: BackupDownloadFailure) -> Received {
 
 /// A redirect to the leader whose console is `leader_console`, or to no known leader.
 fn redirected(leader_console: Option<&str>) -> Received {
-    let leader = leader_console.map(|console| LeaderEndpoints {
+    let leader = leader_console.map(|console| NodeEndpoints {
         node: ClusterNodeName::parse("node-2").assured("the test node name is valid"),
         grpc_uri: None,
         web_console_uri: Some(url::Url::parse(console).assured("the test URL parses")),
