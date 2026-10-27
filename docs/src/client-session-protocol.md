@@ -504,7 +504,10 @@ Client CONFIG validation uses the ordinary failed-command outcome before configu
 The registry checks declared keys and the composition root runs network-free driver checks for
 standalone mutations and transaction preflight. Refusals name the client and key without rendering
 driver values that may contain credentials. A refused transaction statement leaves the transaction
-available for correction. `SHOW CREATE CLIENT` and structured-choice previews are confidential
+available for correction. `DESCRIBE CLIENT <name>` is an ordinary domain-scoped read on the command
+lane. It returns connector identity and effective CONFIG, marking declared defaults supplied for
+omitted keys; a missing client is a failed command. `SHOW CREATE CLIENT` preserves authored CONFIG.
+Both client inspection commands and structured-choice previews are confidential
 inspection projections: declared secrets, address credentials/query options and undeclared driver
 properties appear as `********`. Complete canonical configuration remains in backup serialization;
 inspection text is not a complete configuration export. See the
