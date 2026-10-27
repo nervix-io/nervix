@@ -15638,6 +15638,15 @@ async fn wait_for_mqtt_ingestors_ready(world: &mut ScenarioWorld) {
 }
 
 async fn open_web_console_page(world: &mut ScenarioWorld, url: &str) -> Result<(), String> {
+    open_recorded_web_console_page(world, url, web_console_connections::InitialSession::Deliver)
+        .await
+}
+
+async fn open_recorded_web_console_page(
+    world: &mut ScenarioWorld,
+    url: &str,
+    initial_session: web_console_connections::InitialSession,
+) -> Result<(), String> {
     let playwright = Playwright::launch()
         .await
         .map_err(|error| error.to_string())?;
@@ -15655,7 +15664,7 @@ async fn open_web_console_page(world: &mut ScenarioWorld, url: &str) -> Result<(
         .await
         .map_err(|error| error.to_string())?;
     page.set_default_timeout(10_000.0).await;
-    web_console_connections::record_console_connections(&page)
+    web_console_connections::record_console_connections(&page, initial_session)
         .await
         .map_err(|error| error.to_string())?;
     page.goto(url, None)
@@ -19505,7 +19514,16 @@ async fn then_selector_exists(world: &mut ScenarioWorld, selector: String) {
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let script = format!(
-        r#"() => document.querySelector({selector}) ? 'OK' : 'selector is absent'"#,
+        r#"() => {{
+            if (document.querySelector({selector})) return 'OK';
+            const text = (selector) => document.querySelector(selector)?.textContent?.trim();
+            return 'selector is absent; ' + JSON.stringify({{
+                domain: text('.domain-select'),
+                scope: text('.create-scope'),
+                choices: Array.from(document.querySelectorAll('.create-choice-state'))
+                    .map((state) => state.textContent.trim()),
+            }});
+        }}"#,
         selector = serde_json::to_string(&selector)
             .assured("the test selector serializes as JavaScript string text")
     );

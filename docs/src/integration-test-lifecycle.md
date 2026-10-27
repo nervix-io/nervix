@@ -1673,6 +1673,22 @@ scenario first waits for the restored clock's `PACED` state, then observes the c
 period and advancing ticks. Leader confirmation and the clock's attach reply are separate events;
 the bounded selector predicate establishes clock readiness before the stability observation starts.
 
+Visual ingestor and processor fixtures wait for the exact domain's active menu item before opening
+their create form. Page load and leader confirmation do not establish that the initial domain
+publication has arrived. A form opened while the domain list is loading captures no
+domain; the later sidebar selection does not replace that retained scope, so its controls correctly
+report a missing prerequisite without issuing a choice lookup. The fixtures keep their original
+ten-second choice probes and their sensitivity, domain-change and repartitioning assertions.
+
+The delayed-initial-domain feature exercises this ordering on one and three nodes through the
+ordinary browser flow. A page-local gate holds actual session frames until the scenario releases
+them, with at most 64 frames and 1 MiB retained. It preserves the bytes and delivery order and fails
+on overflow, a non-binary frame or a connection closed before release. After release, the fixture
+observes the exact selected domain before opening either form and requires its real endpoint or
+input choice. The gate adds no sleep, retry or suite admission rule. Selector-existence failures
+include the sidebar domain, captured form scope and neutral or failed choice states, without
+recording draft input values.
+
 Every console page starts with a connection recorder, a script the harness adds before the page's
 own scripts run. It subclasses the page's `WebSocket` constructor and notes, for each connection the
 console constructs, the console it reached, the call its path names (the session, a backup download
