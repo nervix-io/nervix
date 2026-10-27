@@ -340,6 +340,8 @@ Client CONFIG keys follow the generated schema: lowercase, case-sensitive, prese
 - Redis Pub/Sub separates message read-ahead from the byte-bound quiesce buffer. Check the client
   required capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the source's explicit
   `BUFFER` or `DROP` policy in generated Plexus.
+- Redis Pub/Sub uses `NO ACK` in both directions. Treat `CHANNEL` as a literal, case-preserving
+  name and consult the Redis manual sections for its byte bound and unavailable header operations.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
   `OWNED BY INGESTOR` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and

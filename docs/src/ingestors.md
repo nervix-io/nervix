@@ -1334,6 +1334,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-ingest).
 <!-- connector-matrix:ingest-redis-pubsub:end -->
 
+`CHANNEL` takes a nonempty string literal of at most 1,024 UTF-8 bytes. Nervix preserves its case,
+spaces and punctuation in both directions. For example, `CHANNEL 'Orders:EU/*'` subscribes to that
+exact channel: the star is a literal character. Redis Pub/Sub carries no transport headers, so
+`read_header` and `read_headers` are refused when the ingestor is created.
+
 Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both `ON QUIESCE BUFFER`
 and `ON QUIESCE DROP` keep reading and keep the subscriber healthy. `BUFFER` retains payloads up
 to its byte bound, then applies its declared `DROP OLDEST` or `DROP NEWEST` overflow policy;

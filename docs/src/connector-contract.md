@@ -734,6 +734,14 @@ maximum and its refusal for an emitter that cannot batch are all read from the d
 registry, the planner and the console keep their own copies of some of these facts until the work
 that owns those layers reads the declaration instead.
 
+`REDIS PUBSUB` shares one channel-name rule between ingestion and emission: a nonempty literal
+of at most 1,024 UTF-8 bytes, passed through without normalization or wildcard interpretation.
+Its declaration permits `NO ACK` in both directions and `BUFFER`/`DROP` for intake, since Redis
+retains no Pub/Sub backlog. Pub/Sub carries no transport headers or emitter envelope. Redis's
+own bulk-length refusal stays a record outcome; the emitter declares optional batching without
+a learned size ceiling. The Redis-specific declaration tests, generated grammar conformance and
+one-/three-node public declaration scenarios qualify these facts together.
+
 Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
 endpoint ingestors reference endpoints, while a Syslog listener references a client; all three
 declare every-node execution. Scheduling and placement-reference completion read that capability,
