@@ -118,8 +118,8 @@ Feature: Nervix refuses connector declarations that cannot execute
 
     Examples:
       | nodes | connector  | entity     | pool                  | address                                     | config                  |
-      | 1     | CLICKHOUSE | TABLE      |                       | http://127.0.0.1:8123                       |                         |
-      | 3     | CLICKHOUSE | TABLE      |                       | http://127.0.0.1:8123                       |                         |
+      | 1     | CLICKHOUSE | TABLE      |                       | http://127.0.0.1:8123                       | , 'timeout_ms' = '5000' |
+      | 3     | CLICKHOUSE | TABLE      |                       | http://127.0.0.1:8123                       | , 'timeout_ms' = '5000' |
       | 1     | POSTGRES   | TABLE      | POOL SIZE MIN 1 MAX 2 | postgres://127.0.0.1/events?sslmode=disable |                         |
       | 3     | POSTGRES   | TABLE      | POOL SIZE MIN 1 MAX 2 | postgres://127.0.0.1/events?sslmode=disable |                         |
       | 1     | MYSQL      | TABLE      | POOL SIZE MIN 1 MAX 2 | mysql://127.0.0.1/events                    |                         |

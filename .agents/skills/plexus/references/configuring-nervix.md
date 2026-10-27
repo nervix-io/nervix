@@ -194,7 +194,7 @@ current connection, retry and deadline limits.
   order; `ON EMITTING BATCH` may follow `ON EMITTING` and yields exactly one value per batch. Every `ON INGESTION` output is an object that fits the internal schema, and a payload that
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
 - Every codec using the SYSLOG wire schema uses `FROM SYSLOG` and only the exact fixed fields
-  documented in `Common` → `Syslog`; keep the format separate from the `TYPE SYSLOG` transport,
+  documented in `Common` → `Syslog`; keep the format separate from the `SYSLOG CLIENT` transport,
   use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter, and
   configure TLS identity and framing for the client direction that consumes it.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide

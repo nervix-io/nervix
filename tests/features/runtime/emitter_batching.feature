@@ -61,7 +61,8 @@ Feature: Emitter batching configuration
       CREATE CLICKHOUSE CLIENT clickhouse_main CONFIG {
         'addr' = 'http://127.0.0.1:8123',
         'user' = 'default',
-        'password' = 'nervix'
+        'password' = 'nervix',
+        'timeout_ms' = '5000'
       };
       CREATE POSTGRES CLIENT postgres_main POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = 'postgresql://postgres:nervix@127.0.0.1:5432/postgres?sslmode=disable'

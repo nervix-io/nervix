@@ -95,13 +95,14 @@ pub use command::{
 pub use completion::{BuiltinFunctionScope, SemanticReference};
 pub use connector::{
     AcknowledgementConfirmation, AzureBlobConfigEntry, BufferBound, BufferCapacity, BufferOverflow,
-    CLIENT_CONFIG_REDACTION, ChoiceRequirement, ClickHouseConfigEntry, ClickHouseEmitter,
-    ClickHouseEmitterEntity, ClickHouseTableEmitter, ClickHouseTableEmitterMode,
-    ClickHouseTableName, ClickHouseTablePublishingMode, ClickHouseValueMapping, ClientConfigEntry,
-    ClientConfigFile, ClientConfigKey, ClientConfigNamespace, ClientConfigOwner,
-    ClientConfigPresence, ClientConfigSchema, ClientConfigSchemaError, ClientConfigValue,
-    ClientConsumerEmitter, ClientConsumerPublishingMode, ClientDeadline, ClientDeadlineError,
-    ClientDeclaration, ClientEmitter, ClientEmitterEntity, ClientEmitterMode, ClientIngestMode,
+    CLICKHOUSE_VALUE_ENCODINGS, CLIENT_CONFIG_REDACTION, ChoiceRequirement, ClickHouseConfigEntry,
+    ClickHouseEmitter, ClickHouseEmitterEntity, ClickHouseTableEmitter, ClickHouseTableEmitterMode,
+    ClickHouseTableName, ClickHouseTablePublishingMode, ClickHouseValueEncoding,
+    ClickHouseValueMapping, ClientConfigEntry, ClientConfigFile, ClientConfigKey,
+    ClientConfigNamespace, ClientConfigOwner, ClientConfigPresence, ClientConfigSchema,
+    ClientConfigSchemaError, ClientConfigValue, ClientConsumerEmitter,
+    ClientConsumerPublishingMode, ClientDeadline, ClientDeadlineError, ClientDeclaration,
+    ClientEmitter, ClientEmitterEntity, ClientEmitterMode, ClientIngestMode,
     ClientIngestorAlteration, ClientIngestorEntity, ClientPoolBounds, ClientPoolBoundsError,
     ClientPooling, ClientProducerIngestor, ClientResourceMount, ConfiguredClientRef, ConnectorKind,
     CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
@@ -183,7 +184,7 @@ pub use connector::{
     WebsocketsUpgradeHeadersError, ZeroMqConfigEntry, ZeroMqEmitter, ZeroMqEmitterEntity,
     ZeroMqIngestMode, ZeroMqIngestor, ZeroMqIngestorEntity, ZeroMqPullIngestor,
     ZeroMqPullIngestorAlteration, ZeroMqPushEmitter, ZeroMqPushEmitterMode,
-    ZeroMqPushPublishingMode,
+    ZeroMqPushPublishingMode, validate_clickhouse_client_config,
 };
 pub use domain_clock::{
     DomainAdmissionWindow, DomainClockAdvancement, DomainClockAuthority,

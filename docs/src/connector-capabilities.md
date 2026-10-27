@@ -645,7 +645,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | --- | --- | --- |
 | Entity | CLICKHOUSE TABLE | No ingest entity is declared. The ClickHouse connector inserts mapped rows into an existing table; it declares no change-data-capture or query ingestor. |
 | Reference | CLICKHOUSE client |  |
-| Locator and validation rule | TABLE 'Orders' (clickhouse_table) |  |
+| Locator and validation rule | TABLE 'sales.Orders' (clickhouse_table) |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |  |
@@ -656,7 +656,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | The connector holds no buffer between its transport and the host. |  |
-| Network waits | an insert: connection, TLS, upload and the response: `timeout_ms`; unbounded when omitted |  |
+| Network waits | an insert: connection, TLS, upload and the response: `timeout_ms`; required |  |
 | Driver limits | None declared. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
@@ -1066,8 +1066,8 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `addr` | required | URL (http or https) | Nervix; strict | no | none |
 | `database` | optional | string | Nervix; strict | no | none |
 | `password` | optional | string | Nervix; strict | yes | none |
-| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
-| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `timeout_ms` | required | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | required when `addr` uses `https` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
 | `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
 | `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 | `user` | optional | string | Nervix; strict | no | none |
