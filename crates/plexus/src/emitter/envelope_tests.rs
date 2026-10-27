@@ -287,10 +287,6 @@ fn bolero_envelope_sections_read_back_as_the_envelopes_they_render() {
             let canonical = envelope
                 .to_canonical_plexus()
                 .expect("a generated envelope renders");
-            assert_eq!(
-                read(EVERY_CLAUSE, &canonical),
-                Ok(envelope),
-                "{canonical}"
-            );
+            assert_eq!(read(EVERY_CLAUSE, &canonical), Ok(envelope), "{canonical}");
         });
 }

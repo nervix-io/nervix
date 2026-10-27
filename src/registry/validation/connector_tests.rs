@@ -2398,7 +2398,10 @@ fn an_envelope_clause_its_entity_does_not_declare_is_refused_naming_both() {
 fn an_envelope_duration_is_a_positive_schedulable_duration() {
     let domain: DomainName = named("validation");
     let node = NodeRef::new(ModelKind::Emitter, named::<ModelName>("enveloped"));
-    for setting in [ConnectorDurationSetting::DeliverAfter, ConnectorDurationSetting::Delay] {
+    for setting in [
+        ConnectorDurationSetting::DeliverAfter,
+        ConnectorDurationSetting::Delay,
+    ] {
         assert_eq!(
             setting
                 .parse("5s", &domain, &node)

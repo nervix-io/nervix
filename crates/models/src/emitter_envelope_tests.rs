@@ -187,6 +187,9 @@ fn a_property_set_twice_is_refused() {
 #[test]
 fn every_entity_refuses_each_clause_and_property_it_does_not_declare() {
     for entity in EmitterEntityKind::all() {
+        EmitterEnvelope::default()
+            .check_declared(entity)
+            .expect("an emitter that writes no clause and sets no property declares nothing");
         let declared = entity.capabilities();
         for kind in EnvelopeClauseKind::iter() {
             if declared.declares_envelope_clause(kind) {
@@ -239,15 +242,16 @@ fn a_clause_holds_an_expression_exactly_where_its_form_is_one() {
 
 #[test]
 fn an_emitter_presents_the_envelope_it_writes_among_its_inspection_rows() {
-    let entity = crate::EmitterEntity::ZeroMq(crate::ZeroMqEmitter::Push(crate::ZeroMqPushEmitter {
-        mode: crate::ZeroMqPushPublishingMode::NoAck {
-            retry_policy: crate::RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
+    let entity =
+        crate::EmitterEntity::ZeroMq(crate::ZeroMqEmitter::Push(crate::ZeroMqPushEmitter {
+            mode: crate::ZeroMqPushPublishingMode::NoAck {
+                retry_policy: crate::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
             },
-        },
-        client: crate::ClientName::parse("zeromq_main").expect("valid client name"),
-    }));
+            client: crate::ClientName::parse("zeromq_main").expect("valid client name"),
+        }));
     let envelope = EmitterEnvelope {
         persistent: true,
         delay: Some("1s".to_string()),
@@ -275,7 +279,9 @@ fn an_emitter_presents_the_envelope_it_writes_among_its_inspection_rows() {
         )
     );
     assert_eq!(
-        envelope.to_canonical_plexus().expect("the envelope renders"),
+        envelope
+            .to_canonical_plexus()
+            .expect("the envelope renders"),
         "PERSISTENT DELAY 1s MESSAGE ID 'id' PROPERTIES {'content_type' = 'application/json'}"
     );
     assert_eq!(
@@ -283,5 +289,58 @@ fn an_emitter_presents_the_envelope_it_writes_among_its_inspection_rows() {
             .to_canonical_plexus()
             .expect("the empty envelope renders"),
         ""
+    );
+}
+
+#[test]
+fn an_emitter_statement_writes_its_envelope_after_its_payload() {
+    let emitter = crate::CreateEmitter {
+        name: crate::EmitterName::try_from("publish_events").expect("valid emitter name"),
+        from: crate::ProcessorInputs::single(
+            crate::RelayName::try_from("events").expect("valid relay name"),
+        ),
+        body: crate::EmitterBody::Codec {
+            codec: crate::CodecName::try_from("events_codec").expect("valid codec name"),
+        },
+        envelope: EmitterEnvelope {
+            persistent: true,
+            message_id: Some(text("id")),
+            properties: vec![
+                property("content_type"),
+                EnvelopeProperty {
+                    name: "priority".to_string(),
+                    expression: Expression::Literal(Literal::I64(5)),
+                },
+            ],
+            ..EmitterEnvelope::default()
+        },
+        connector: Box::new(crate::EmitterEntity::ZeroMq(crate::ZeroMqEmitter::Push(
+            crate::ZeroMqPushEmitter {
+                mode: crate::ZeroMqPushPublishingMode::NoAck {
+                    retry_policy: crate::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                client: crate::ClientName::parse("zeromq_main").expect("valid client name"),
+            },
+        ))),
+        batch: None,
+        flush_policy: crate::FlushPolicy::Immediate,
+        mode: crate::AckMode::Attached,
+        error_policies: crate::ErrorPolicies::handled_by_log(),
+        construction: crate::RouteConstruction::default(),
+        materialized_state: Vec::new(),
+    };
+
+    // Each clause takes its own line beside the payload, and the PROPERTIES block follows them,
+    // before the construction a statement would write and the emitter's batching and flush.
+    assert_eq!(
+        emitter.to_canonical_plexus().expect("the emitter renders"),
+        "CREATE ATTACHED ZEROMQ PUSH EMITTER publish_events\n  FROM events\n  TO zeromq_main\n    \
+         MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s\n    ENCODE USING events_codec\n    \
+         PERSISTENT\n    MESSAGE ID 'id'\n    PROPERTIES {\n      'content_type' = \
+         'application/json',\n      'priority' = 5\n    }\n  FLUSH IMMEDIATE\n  ON MESSAGE ERROR \
+         LOG\n  ON GENERAL ERROR LOG;"
     );
 }

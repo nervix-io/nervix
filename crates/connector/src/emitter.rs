@@ -994,3 +994,7 @@ impl EmitterHost {
         self.inner.services.handle_general_error(acks, reason);
     }
 }
+
+#[cfg(test)]
+#[path = "emitter_tests.rs"]
+mod tests;

@@ -419,3 +419,7 @@ impl Display for RuntimeCapability {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "declaration_tests.rs"]
+mod tests;
