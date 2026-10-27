@@ -30,6 +30,7 @@ use nervix_primitives::task::AbortOnDropHandle;
 
 use super::*;
 use crate::common::{
+    backup_phase::BackupPhase,
     cluster::node_name,
     phase_deadline::PhaseDeadline,
     raw_session::{TestRestore, TestRestoreEnd, outcome_awaits_leader, send_restore},
@@ -37,6 +38,13 @@ use crate::common::{
 
 /// How long a restore waits at an armed pause before a scenario gives up on reaching it.
 const RESTORE_PAUSE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A background request retains its immutable execution identity with the task that owns it.
+#[derive(Debug)]
+pub(crate) struct BackgroundRestore {
+    reference: CommandExecutionReference,
+    task: AbortOnDropHandle<TestRestoreEnd>,
+}
 
 #[given("the restore coordinator uses remote placement in a multi-node cluster")]
 async fn given_restore_uses_remote_placement(world: &mut ScenarioWorld) {
@@ -374,18 +382,35 @@ async fn then_first_restore_coordinator_is_saved(
         .background_restore
         .take()
         .assured("the restore request is running before its publication barrier");
-    let coordinator = nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, async {
-        nervix_primitives::select! {
-            biased;
-            (coordinator, _, _) = futures_util::future::select_all(pauses) => coordinator,
-            ended = &mut background => {
-                let ended = ended.assured("the background restore task does not panic");
-                panic!("restore ended before its publication barrier: {ended:?}");
-            }
-        }
-    })
-    .await
-    .assured("restore reaches its publication barrier");
+    let phase = BackupPhase::new(
+        format!(
+            "restore publication domain={domain}, reference={}, candidates={candidates:?}",
+            background.reference
+        ),
+        RESTORE_PAUSE_TIMEOUT,
+    );
+    append_cucumber_log_line(&format!(
+        "restore publication observation started: domain={domain}, reference={}, \
+         candidates={candidates:?}",
+        background.reference
+    ));
+    let (coordinator, background) = phase
+        .observe(async move {
+            let coordinator = nervix_primitives::select! {
+                biased;
+                (coordinator, _, _) = futures_util::future::select_all(pauses) => coordinator,
+                ended = &mut background.task => {
+                    let ended = ended.assured("the background restore task does not panic");
+                    panic!("restore ended before its publication barrier: {ended:?}");
+                }
+            };
+            (coordinator, background)
+        })
+        .await;
+    append_cucumber_log_line(&format!(
+        "restore publication reached: domain={domain}, reference={}, coordinator={coordinator}",
+        background.reference
+    ));
     world.background_restore = Some(background);
     for candidate in candidates {
         if candidate != coordinator {
@@ -1381,6 +1406,12 @@ impl RestoreStreamRequest {
         let mut end = stream_restore(&self, None, None).await;
         loop {
             nervix_primitives::task::consume_budget().await;
+            append_cucumber_log_line(&format!(
+                "restore probe reply: reference={}, route={}, end={end:?}, remaining={:?}",
+                self.reference,
+                self.server,
+                deadline.remaining()
+            ));
             let pending = match &end {
                 TestRestoreEnd::Replied(reply) => match &reply.disposition {
                     RestoreDisposition::Outcome(outcome) => {
@@ -1454,6 +1485,13 @@ async fn stream_restore(
     declared_digest: Option<[u8; 32]>,
     abandon_after_chunks: Option<usize>,
 ) -> TestRestoreEnd {
+    append_cucumber_log_line(&format!(
+        "restore probe sending: reference={}, route={}, bytes={}, statement={}",
+        request.reference,
+        request.server,
+        request.archive.len(),
+        request.statement
+    ));
     send_restore(
         &request.server,
         TestRestore {
@@ -1558,9 +1596,12 @@ async fn when_restore_is_streamed_in_the_background(
         "a background restore stream is already running"
     );
     let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
-    world.background_restore = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
-        async move { stream_restore(&request, None, None).await },
-    )));
+    world.background_restore = Some(BackgroundRestore {
+        reference: request.reference.clone(),
+        task: AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+            stream_restore(&request, None, None).await
+        })),
+    });
 }
 
 #[when(
@@ -1580,9 +1621,10 @@ async fn when_restore_is_streamed_with_outcome_recovery(
     );
     let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
     let servers = restore_outcome_routes(world);
-    world.background_restore = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
-        request.complete(servers),
-    )));
+    world.background_restore = Some(BackgroundRestore {
+        reference: request.reference.clone(),
+        task: AbortOnDropHandle::new(nervix_primitives::task::spawn(request.complete(servers))),
+    });
 }
 
 #[when(
@@ -1620,7 +1662,7 @@ async fn then_background_restore_outcome_is_held(world: &mut ScenarioWorld, node
         nervix_primitives::select! {
             biased;
             () = fault_injection.wait_for_command_finalization_pause(&node) => {},
-            ended = &mut background => {
+            ended = &mut background.task => {
                 let ended = ended.assured("the background restore task does not panic");
                 panic!("restore ended before its outcome was held: {ended:?}");
             }
@@ -1700,6 +1742,7 @@ async fn then_background_restore_stream_outcome(
         .take()
         .expect("a preceding step streamed a restore in the background");
     let end = task
+        .task
         .await
         .expect("the background restore stream does not panic");
     assert_restore_outcome(&end, &disposition, &origin);
@@ -1713,6 +1756,7 @@ async fn then_background_restore_stream_completes(world: &mut ScenarioWorld) {
         .take()
         .assured("a preceding step streamed a restore in the background");
     let end = task
+        .task
         .await
         .assured("the background restore completion probe does not panic");
     let outcome = restore_outcome(&end);
