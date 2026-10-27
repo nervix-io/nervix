@@ -383,6 +383,11 @@ from the committed checkpoint.
 
 ## Failure At Each Boundary
 
+A required export lookup keeps Wasmtime's complete typed engine diagnostic beneath the guest-call
+context. The engine's error does not implement the standard error trait, so a report frame owns
+that value and renders its chain. This diagnostic carrier changes neither the guest-state
+generation nor the checkpoint or acknowledgement boundary.
+
 A checkpoint's stages are durability boundaries, and schedule publications are authority boundaries.
 Where an owner stops relative to them decides which state survives.
 

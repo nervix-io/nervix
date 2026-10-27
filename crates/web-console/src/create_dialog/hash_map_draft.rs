@@ -79,7 +79,7 @@ impl HashMapDraft {
         &self,
     ) -> error_stack::Result<CreateLookup<RequestedResourceVersion>, HashMapDraftError> {
         let name = LookupName::parse(self.name.trim())
-            .map_err(|_| Report::new(HashMapDraftError::Name))?;
+            .map_err(|cause| cause.change_context(HashMapDraftError::Name))?;
         let pin = {
             let mapping_input = self.pin.build();
             match mapping_input {

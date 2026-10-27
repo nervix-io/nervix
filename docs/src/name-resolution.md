@@ -293,7 +293,7 @@ name again for every new connection it opens.
 | --- | --- | --- | --- |
 | Interconnect at startup: the node's own advertised endpoint, its bootstrap endpoint, and the recovered Raft members' endpoints | `PeerResolver`, which calls the resolver directly | The connection setup timeout, five seconds, for each lookup | [Where The Interconnect Resolves](./interconnect.md#where-the-interconnect-resolves) |
 | Interconnect: every pool connection to a discovered peer | `PeerResolver` inside each connection attempt | The attempt's five-second connection setup timeout | [Where The Interconnect Resolves](./interconnect.md#where-the-interconnect-resolves) |
-| HTTP polling and Prometheus sources, Sentry and OTEL HTTP emitters | Reqwest 0.13's `dns_resolver`, installed by the shared `HttpClientConfig` | The client's `timeout_ms` for the whole request when it is set, which a Prometheus client must, otherwise the thirty-second hook budget | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
+| HTTP polling and Prometheus sources, Sentry and OTEL HTTP emitters | Reqwest 0.13's `dns_resolver`, installed by the shared `HttpClientConfig` | The client's `timeout_ms` for the whole request; required for Prometheus and OTEL, otherwise the thirty-second hook budget when unset | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | Iceberg REST catalog and its OAuth token request | Reqwest 0.12's `dns_resolver` on the client given to `RestCatalogBuilder::with_client` | The thirty-second hook budget | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | Iceberg S3, GCS and Azure object storage and its credential providers | Reqwest 0.13's `dns_resolver` on the client the connector installs through OpenDAL's `HttpClientLayer`; one initialized operator survives table metadata refreshes | The storage client's `timeout_ms` bounds an operation or I/O call, DNS, connection and TLS included; without it, the thirty-second hook ceiling sits inside the operator's 60-second metadata/delete and 10-second read/write bounds | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | HTTP request emitter | The connector resolves each request's target host itself | At most half of the request's one physical `timeout_ms`, whose rest bounds the address attempts, TLS and the request | [Request Preparation And Transport Ownership](./http-emitter-architecture.md#request-preparation-and-transport-ownership) |
@@ -303,11 +303,15 @@ name again for every new connection it opens.
 | ClickHouse emitters, using HTTP without TLS files or HTTPS with mounted CA trust | Hyper's resolver service on `hyper-util`'s `HttpConnector` | The insert's required positive `timeout_ms`, including its lookup and connection; the node resolver still caps an individual hook lookup at thirty seconds | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
 | SQS sources and emitters, with and without a custom CA | Smithy's `ResolveDns`, installed with `build_with_resolver` | The SDK's 3.1-second connect timeout, which encloses the lookup, and an emitter's `timeout_ms` as its attempt and operation timeouts | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
 | The node's own OTLP trace export | Tonic 0.14's lazy custom connector, which waits for the node resolver installed during startup | The OTLP export timeout, ten seconds by default, enclosing DNS and TCP attempts after resolver installation; the same timeout bounds the request | [Node Trace Export](#node-trace-export) |
-| OTEL gRPC emitters | Tonic 0.14's lazy channel over `hyper-util`'s `HttpConnector` with Hyper's resolver service | `timeout_ms` when it is set, as the connection and request timeout; otherwise the thirty-second hook budget alone | [DNS for OTEL gRPC](./connector-contract.md#dns-for-otel-grpc) |
+| OTEL gRPC emitters | Tonic 0.14's lazy channel over `hyper-util`'s `HttpConnector` with Hyper's resolver service | Required `timeout_ms`, as the connection and request timeout enclosing DNS | [DNS for OTEL gRPC](./connector-contract.md#dns-for-otel-grpc) |
 | Redis command pools | Redis's `AsyncConnectionConfig::set_dns_resolver`, installed for every new physical `bb8` connection | The thirty-second hook budget, inside the connection timeout the pool sets on the driver and its checkout from the client's `connect_timeout_ms`, 30 seconds by default | [DNS for Redis](./connector-contract.md#dns-for-redis) |
 | Redis Pub/Sub sources | The connector resolves and dials a dedicated stream; its bounded reader uses Redis's encoder and asynchronous parser on that stream | The client's `connect_timeout_ms`, 30 seconds by default, shared with the attempts, TLS, Redis setup and `SUBSCRIBE`; a failed idle probe ends that connection and the next resume resolves again | [DNS for Redis](./connector-contract.md#dns-for-redis) |
 | MQTT sources, emitters and input retirement | The connector's socket connector, installed with `MqttOptions::set_socket_connector`, for every connection the driver's event loop opens | The driver's five-second connect timeout; retirement also encloses its unsubscribe and disconnect within that budget | [DNS for MQTT](./connector-contract.md#dns-for-mqtt), [MQTT session retirement](./connector-contract.md#mqtt-session-retirement) |
 | Native CLI and SDK sessions | The client's resolver, as Hyper's resolver service under Tonic 0.13's connector, for the first connection, seeds, redirects and reconnects | The session's connect timeout, ten seconds by default, which encloses the lookup, the attempts and TLS | [Leader Discovery, Redirect, And Reconnect](./client-session-protocol.md#leader-discovery-redirect-and-reconnect) |
+
+Iceberg's Azure locations use the account's `blob` service for `wasb`/`wasbs` and its `dfs`
+service for `abfs`/`abfss`. Their OpenDAL operator uses the node resolver and the storage-client
+deadline from the table above for either service.
 
 Two interconnect uses are resolved once, when the node starts: the address that identifies the
 node in gossip, which is the first answer for its own advertised endpoint, and its bootstrap seeds,
@@ -375,6 +379,12 @@ the identity of the connection, whichever address accepted it:
   redirect.
 
 ## Failure Ownership
+
+An invalid numeric port supplied to the MQTT dial hook retains the parse cause inside the
+standard-error carrier, beneath the typed invalid-authority context. The carrier renders the
+complete chain when the MQTT driver adds its own report. Resolver failures continue through the
+existing typed lookup report; classifying a parse failure never changes which name,
+port or lookup budget the hook would resolve.
 
 A failed lookup is a connection failure of the path that asked, reported through that owner's
 existing error and handled by its existing policy. It never rejects a record, never acknowledges or

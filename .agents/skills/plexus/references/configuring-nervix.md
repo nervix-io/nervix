@@ -293,6 +293,8 @@ current connection, retry and deadline limits.
   the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
   transient error while the emitter retries.
 - Provision Iceberg table columns with names and types matching the emitter's `VALUES`. A
+  required `NAMESPACE` names the catalog namespace independently of the Nervix domain; provision
+  each of its case-preserving dot-separated levels before starting the emitter. A
   `DATETIME`, at the top level or inside a `VEC` or `ARRAY`, is written at the containing
   microsecond and needs a `timestamptz` column, not `timestamptz_ns`. A commit writes each mapped
   column into the table column of its name, in any `VALUES` order, and a null into each optional
@@ -328,6 +330,9 @@ current connection, retry and deadline limits.
   and only a mode its entity accepts. Every ingestor `ALTER` repeats the stored ingestor's head;
   reading another connector or entity takes `DROP INGESTOR` and a new `CREATE`.
 - Delivery-policy durations and direct-value keys and types are checked at `CREATE` and `ALTER`.
+  For OTEL's per-signal field constraints, histogram types, required client deadline, header
+  decoding, TLS pairing and unsupported features, read the generated `Connector Capabilities`
+  tables and `Emitters` → `OTEL` before constructing mappings.
   Follow `Ingestors` → `Delivery Modes` for duration bounds and retry ordering, and `Emitters` →
   `Direct-emitter values` for exact types and literal-only OTEL resources. For example, supply an
   I32 expression for OTEL `severity_number`; an integer literal is I64. A refused alteration
@@ -351,6 +356,8 @@ current connection, retry and deadline limits.
 - Redis Pub/Sub separates message read-ahead from the byte-bound quiesce buffer. Check the client
   required capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the source's explicit
   `BUFFER` or `DROP` policy in generated Plexus.
+- Redis Pub/Sub uses `NO ACK` in both directions. Treat `CHANNEL` as a literal, case-preserving
+  name and consult the Redis manual sections for its byte bound and unavailable header operations.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
   `OWNED BY INGESTOR` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and

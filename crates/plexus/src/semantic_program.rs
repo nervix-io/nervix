@@ -201,7 +201,7 @@ fn declared_type<'src>()
             .try_map(|raw: String, span| {
                 let not_positive =
                     || Rich::custom(span, "array length must be a positive unsigned integer");
-                let Ok(len) = raw.parse::<u32>() else {
+                let Ok(len) = crate::parser_support::integer_literal::<u32>(&raw) else {
                     return Err(not_positive());
                 };
                 let Some(len) = NonZeroU32::new(len) else {

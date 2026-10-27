@@ -54,7 +54,7 @@ Feature: Syslog support
       CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
       START;
       """
-    When these Plexus commands are executed
+    When these Plexus commands are executed on the active session
       """
       SHOW CREATE CODEC syslog_codec;
       """
@@ -105,6 +105,65 @@ Feature: Syslog support
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 1             |
+
+  Scenario: A Syslog subscription survives a leader change before inspecting its codec
+    Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
+      CREATE SYSLOG CLIENT syslog_listener CONFIG {
+        'protocol' = 'udp',
+        'addr' = '{{syslog_ingest_addr}}'
+      };
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    Then the current leader node is saved as placeholder "subscribed_leader"
+    And a node other than placeholder "subscribed_leader" is saved as placeholder "successor"
+    When leadership is transferred from node "{{subscribed_leader}}" to node "{{successor}}"
+    Then node "{{subscribed_leader}}" eventually reports leader "{{successor}}"
+    When these Plexus commands are executed on the active session
+      """
+      SHOW CREATE CODEC syslog_codec;
+      """
+    Then the last command output contains
+      """
+      CREATE CODEC syslog_codec
+      """
+    Then within "5s" DESCRIBE INGESTOR "syslog_intake" on the leader node contains
+      """
+      ready: true
+      """
+    When Syslog UDP message is published to "{{syslog_ingest_addr}}"
+      """
+      <34>1 2003-10-11T22:14:15.003Z edge-1 orders 123 ID47 - after leadership change
+      """
+    Then the relay subscription receives a payload
+      """
+      "facility":4
+      """
+    And the last relay subscription payload contains
+      """
+      "severity":2
+      "message":"after leadership change"
+      """
 
   Scenario: Syslog UDP listeners follow node lifecycle, leadership, and membership
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
@@ -397,6 +456,63 @@ Feature: Syslog support
       | 3            | 1             | node-2  |
       | 3            | 1             | node-3  |
 
+  Scenario: A forced drain refusal stays a Syslog suspension alteration's outcome when a new leader runs it again
+    Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA syslog_message (message STRING);
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE CODEC syslog_alternate_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED CAPACITY 4;
+      CREATE SYSLOG CLIENT syslog_listener CONFIG {
+        'protocol' = 'tcp',
+        'addr' = '{{syslog_ingest_addr}}'
+      };
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    Given ingestor "syslog_intake" pauses inside dispatch
+    And the entity gate for domain "{{domain}}" pauses after engagement
+    When a Syslog TCP sender publishes 80 numbered frames to node "{{old_leader}}" at "{{syslog_ingest_addr}}"
+    Then ingestor "syslog_intake" reaches the dispatch pause
+    When these Plexus commands begin executing in the background
+      """
+      ALTER SYSLOG LISTENER INGESTOR syslog_intake SET DECODE USING syslog_alternate_codec;
+      """
+    Then within "10s" node "{{old_leader}}" eventually reports describe ingestor "syslog_intake" as "status: quiesced"
+    When ingestor "syslog_intake" leaves the dispatch pause
+    Then the entity gate pause for domain "{{domain}}" is reached
+    And within "10s" node "{{old_leader}}" eventually reports describe ingestor "syslog_intake" as "ready: false"
+    # Leadership moves before the former leader records the refusal, so the command runs again
+    # under its execution reference. The new leader's run waits until the first run has refused.
+    Given transaction commit on node "{{new_leader}}" pauses after 0 statement
+    When leadership is transferred to node "{{new_leader}}"
+    Given the next pending entity drain in domain "{{domain}}" is forced to time out
+    When the entity gate pause for domain "{{domain}}" is released
+    Then within "10s" node "{{old_leader}}" eventually reports describe ingestor "syslog_intake" as "ready: true"
+    And the transaction commit pause on node "{{new_leader}}" after 0 statement is reached
+    When the transaction commit pause on node "{{new_leader}}" after 0 statement is released
+    Then the background Plexus execution fails with "timed out draining domain"
+    And within "30s" the relay subscription receives 80 numbered Syslog frames once
+    And the relay subscription does not receive a payload within "1s"
+
   @syslog_listener_rebind @deloxide_stress
   Scenario Outline: A Syslog accept error keeps an established TCP connection on <cluster_size> nodes via <node_id>
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -643,6 +759,14 @@ Feature: Syslog support
       "message":"beside a stalled handshake"
       """
     And the Syslog client that sends nothing is disconnected no sooner than "1s" after it connected
+    When Syslog TLS message is published to "{{syslog_ingest_addr}}" using identity and CA from resource directory "syslog_tls_dir"
+      """
+      {{syslog_pri}}1 2003-10-11T22:14:15.003Z edge-3 secure 790 ID50 - after a stalled handshake
+      """
+    Then the relay subscription receives a payload
+      """
+      "message":"after a stalled handshake"
+      """
 
     Examples:
       | cluster_size | replica_count |

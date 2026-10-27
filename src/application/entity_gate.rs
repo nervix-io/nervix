@@ -4,7 +4,9 @@
 //!
 //! - **Owns.** Engaging and releasing entity gates on every node, the drain each gate waits for,
 //!   and the report a caller reads while it waits.
-//! - **Depends on.** The interconnect to reach every node and the runtime for the local gate.
+//! - **Depends on.** The interconnect to reach every node, the runtime for the local gate, and
+//!   consensus for the durable owner of a domain's mutation that a test-forced drain timeout
+//!   follows.
 //! - **Must not know.** Why the caller is altering the entity.
 
 #![cfg_attr(
@@ -969,7 +971,9 @@ impl SessionServiceImpl {
             nervix_primitives::task::consume_budget().await;
             polling.tick().await;
             #[cfg(feature = "testing")]
-            let force_timeout = self.inner.runtime.take_forced_entity_drain_timeout(domain);
+            let force_timeout = self
+                .forced_entity_drain_timeout(domain, purpose, relays, affected_entities)
+                .await;
             #[cfg(not(feature = "testing"))]
             let force_timeout = false;
             if !required_live_nodes.is_empty() {
@@ -1069,6 +1073,35 @@ impl SessionServiceImpl {
                 }));
             }
         }
+    }
+
+    /// Whether a scenario forced the entity drain this coordinator observes in `domain` to time
+    /// out. A forced timeout keeps refusing the drain it refused while the durable execution that
+    /// owns the domain's mutation observes it again, which every run of one pending operation
+    /// does, so the domain's lease is read only while a forced timeout waits for or refuses a
+    /// drain there.
+    #[cfg(feature = "testing")]
+    async fn forced_entity_drain_timeout(
+        &self,
+        domain: &DomainName,
+        purpose: EntityGatePurpose,
+        relays: &[RelayName],
+        affected_entities: &[NodeRef],
+    ) -> bool {
+        let faults = self.inner.runtime.fault_injection();
+        if !faults.entity_drain_timeout_is_forced(domain) {
+            return false;
+        }
+        let lease = self.inner.consensus.current_domain_mutation(domain).await;
+        let drain = crate::fault_injection::ObservedEntityDrain {
+            owner: lease
+                .as_ref()
+                .map(nervix_consensus::DomainMutationLease::owner),
+            purpose,
+            relays,
+            affected_entities,
+        };
+        faults.take_forced_entity_drain_timeout(domain, &drain)
     }
 
     pub(in crate::application) async fn release_cluster_entity_gates(

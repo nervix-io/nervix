@@ -185,7 +185,7 @@ Feature: Emitter batching configuration
           MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq } BATCH MAX MESSAGES 100 MAX SIZE 16MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE ICEBERG TABLE EMITTER iceberg_files FROM outgoing
-        TO object_store TABLE 'iceberg_events'
+        TO object_store TABLE 'iceberg_events' NAMESPACE '{{domain}}'
           LOCATION 's3://nervix-iceberg/tables/emitter-batching-{{test_id}}'
           CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq } BATCH MAX MESSAGES 65536 MAX SIZE 128MiB
         FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -366,7 +366,8 @@ Feature: Emitter batching configuration
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE OTEL CLIENT otel_main CONFIG {
         'endpoint' = 'http://127.0.0.1:4317',
-        'protocol' = 'grpc'
+        'protocol' = 'grpc',
+        'timeout_ms' = 5000
       };
       CREATE MONGODB CLIENT mongodb_main POOL SIZE MIN 1 MAX 2 CONFIG {
         'addr' = 'mongodb://127.0.0.1:27017',
@@ -384,7 +385,7 @@ Feature: Emitter batching configuration
       """
       ALTER MONGODB COLLECTION EMITTER row_sink DROP BATCH;
       """
-    When these Plexus statements fail with "BATCH"
+    When these Plexus commands fail with "BATCH"
       """
       CREATE MONGODB COLLECTION EMITTER incomplete_replacement FROM outgoing
         TO mongodb_main COLLECTION 'records'

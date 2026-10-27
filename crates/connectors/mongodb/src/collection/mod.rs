@@ -27,6 +27,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map},
+    fmt,
     ops::Range,
     path::PathBuf,
 };
@@ -189,6 +190,53 @@ fn safe_infrastructure_error(operation: &str) -> Report<EmitterWriteError> {
         .attach_printable(format!("MongoDB {operation} failed"))
 }
 
+/// The driver remains available for typed inspection. Its free-form server and document text
+/// is private; reporting exposes only the operation, I/O class or numeric server code.
+struct MongoRequestFailure {
+    operation: &'static str,
+    driver: DriverError,
+}
+
+impl fmt::Display for MongoRequestFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "MongoDB {} failed", self.operation)?;
+        match self.driver.kind.as_ref() {
+            ErrorKind::Io(cause) => write!(formatter, ": {}", cause.kind()),
+            ErrorKind::Command(cause) => write!(formatter, ": server code {}", cause.code),
+            ErrorKind::Authentication { .. } => formatter.write_str(": authentication failed"),
+            ErrorKind::ServerSelection { .. } => formatter.write_str(": server selection failed"),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl fmt::Debug for MongoRequestFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl std::error::Error for MongoRequestFailure {}
+
+fn driver_failure(operation: &'static str, driver: DriverError) -> Report<EmitterWriteError> {
+    Report::new(MongoRequestFailure { operation, driver })
+        .change_context(EmitterWriteError::Publish { connector: MONGODB })
+        .attach_printable(format!("MongoDB {operation} failed"))
+}
+
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "BSON construction checks whether document field names are representable; a \
+                  refusal becomes the typed record or configuration outcome, without exposing \
+                  document contents"
+    )
+)]
+fn checked_document(document: &Document) -> Result<RawDocumentBuf, mongodb::bson::raw::Error> {
+    RawDocumentBuf::from_document(document)
+}
+
 impl MongoDbCollectionEmitter {
     #[cfg_attr(
         nervix_lint,
@@ -231,7 +279,7 @@ impl MongoDbCollectionEmitter {
             .filter(doc! { "name": self.collection.as_str() })
             .authorized_collections(true)
             .await
-            .map_err(|_| safe_infrastructure_error("collection lookup request"))?;
+            .map_err(|driver| driver_failure("collection lookup request", driver))?;
         if collection_names.is_empty() {
             return Err(
                 Report::new(EmitterWriteError::Publish { connector: MONGODB })
@@ -451,7 +499,7 @@ impl MongoDbCollectionEmitter {
         outcome: &mut PerRecordOutcome<EmitterRecordPosition>,
     ) {
         let ErrorKind::InsertMany(insert_error) = error.kind.as_ref() else {
-            outcome.fail(safe_infrastructure_error("insert_many request"));
+            outcome.fail(driver_failure("insert_many request", error));
             return;
         };
         WriteAnswers::insert_many(insert_error).apply(rows, outcome);
@@ -465,7 +513,7 @@ impl MongoDbCollectionEmitter {
         outcome: &mut PerRecordOutcome<EmitterRecordPosition>,
     ) {
         let ErrorKind::BulkWrite(bulk_error) = error.kind.as_ref() else {
-            outcome.fail(safe_infrastructure_error("bulk_write request"));
+            outcome.fail(driver_failure("bulk_write request", error));
             return;
         };
         WriteAnswers::bulk_write(bulk_error).apply(rows, outcome);
@@ -753,8 +801,7 @@ impl StorableDocument {
         )
     )]
     fn new(row: WrittenRow, document: Document) -> Result<Self, UnstorableDocument> {
-        let raw = RawDocumentBuf::from_document(&document)
-            .map_err(|_| UnstorableDocument::InvalidFieldNames)?;
+        let raw = checked_document(&document).map_err(|_| UnstorableDocument::InvalidFieldNames)?;
         let encoded = u64::try_from(raw.as_bytes().len())
             .assured("Nervix builds for 64-bit targets only, where u64 holds usize");
         let stored_bytes = if document.contains_key("_id") {
@@ -844,7 +891,7 @@ impl ConflictUpsert {
         };
         let mut measured_bytes = 0_u64;
         for part in [&filter, &update] {
-            let raw = RawDocumentBuf::from_document(part).map_err(|_| {
+            let raw = checked_document(part).map_err(|_| {
                 Report::new(EmitterWriteError::Misconfigured { connector: MONGODB })
                     .attach_printable("MongoDB VALUES field names cannot be written as BSON")
             })?;
@@ -1284,6 +1331,33 @@ mod tests {
     use nervix_primitives::sync::StdArc;
 
     use super::*;
+
+    #[test]
+    fn infrastructure_reports_retain_driver_causes_without_document_text() {
+        let mut outcome = PerRecordOutcome::empty();
+        let driver = DriverError::from(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "confidential driver detail",
+        ));
+        MongoDbCollectionEmitter::apply_insert_many_error(&[], driver, &mut outcome);
+        let failure = outcome
+            .into_parts()
+            .infrastructure_error
+            .expect("request failed");
+        let cause = failure
+            .downcast_ref::<MongoRequestFailure>()
+            .expect("typed driver cause");
+        let ErrorKind::Io(io) = cause.driver.kind.as_ref() else {
+            panic!("I/O cause retained")
+        };
+        assert_eq!(io.kind(), std::io::ErrorKind::ConnectionRefused);
+        let rendered = format!("{failure:#}");
+        assert!(rendered.contains("connection refused"), "{rendered}");
+        assert!(
+            !rendered.contains("confidential driver detail"),
+            "{rendered}"
+        );
+    }
 
     #[test]
     fn classifies_only_definitive_document_write_codes_as_record_errors() {

@@ -416,8 +416,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   replacement attempt. Design
   application effects for duplicates and uncertain ACK confirmation. Read `Emitters` → `Client emitters`,
   `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
-- Request/response emitters do not take `ACK TIMEOUT`. A ClickHouse client requires a positive
-  `timeout_ms`; SQS, Sentry, OTEL, or Iceberg object-store clients use it when a request
+- Request/response emitters do not take `ACK TIMEOUT`. ClickHouse and OTEL clients require a positive
+  `timeout_ms`; SQS, Sentry, or Iceberg object-store clients use it when a request
   needs an explicit bound. A ClickHouse HTTPS address also requires `tls_ca_file` from a mounted
   resource, while HTTP refuses TLS file keys. Its table locator has one or two case-preserving
   dot-separated parts, each quoted by the connector when sent. The emitter's declared retry
@@ -532,8 +532,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `CREATE HTTP REQUEST EMITTER`, `CREATE OTEL METRICS EMITTER`, or `CREATE ICEBERG TABLE EMITTER`.
   After `TO`, write its reference, quoted external locator and entity options, then `MODE`, then
   its codec, `VALUES` mapping or `WITHOUT BODY`. Client consumers use `TO SCHEMA <schema> MODE ACK`.
-  Iceberg resolves its storage backend from its client; put `LOCATION`, `CATALOG` and `COMMIT EACH`
-  before `MODE`. Put OTEL attributes, resource and scope with `VALUES` after `MODE`.
+  Iceberg resolves its storage backend from its client; put required `NAMESPACE`, then `LOCATION`,
+  `CATALOG` and `COMMIT EACH` before `MODE`. Put OTEL attributes, resource and scope with `VALUES`
+  after `MODE`.
   Use the stored kind in every emitter ALTER head. `SET TO` requires that entity's complete body,
   including its payload selection; changing the connector or entity requires drop and create.
   External table and collection names retain case. Keep client/schema/codec references as identifiers.

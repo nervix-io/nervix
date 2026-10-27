@@ -94,7 +94,8 @@ Feature: Deduplicator and window restore conversions refused for room
     Then the current leader node is saved as placeholder "leader"
     Given the restore coordinator uses remote placement in a multi-node cluster
     And restoring domain "{{domain}}" pauses before it converts its first deduplicator or window state
-    When restore "DOMAIN {{domain}} RESUME" of backup archive "refused-keyspace.nvxb" is streamed to node "{{leader}}" under execution reference "refused_keyspace" in the background
+    And command finalization on node "{{leader}}" pauses before its outcome is recorded
+    When restore "DOMAIN {{domain}} RESUME" of backup archive "refused-keyspace.nvxb" is streamed to node "{{leader}}" under execution reference "refused_keyspace" in the background with outcome recovery
     Then the restore of domain "{{domain}}" pauses before it converts its first deduplicator or window state
     When bulk execution on node "{{leader}}" is saturated
     And the paused restore conversion of domain "{{domain}}" is released
@@ -103,7 +104,10 @@ Feature: Deduplicator and window restore conversions refused for room
       class="bulk_cpu"
       """
     When bulk execution on node "{{leader}}" is released
-    Then the background restore stream's outcome is "completed" as "executed"
+    Then the background restore's outcome is held on node "{{leader}}" before it is recorded
+    When restore coordinator "{{leader}}" yields leadership in a multi-node cluster
+    And the command finalization pause on node "{{leader}}" is released
+    Then the background restore stream's outcome is "completed" as "<restore_origin>"
     And the restore stream's report shows every step applied
     And within "60s" node "restored-1" accepts http payload for host "backup-branch-room-{{test_id}}.example.com" path "/metrics"
       """
@@ -146,9 +150,9 @@ Feature: Deduplicator and window restore conversions refused for room
     And the relay subscription does not receive a payload within "3s"
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 1             |
+      | cluster_size | replica_count | restore_origin |
+      | 1            | 0             | executed       |
+      | 3            | 1             | recovered      |
 
   Scenario Outline: A window the restoring node refuses for room is converted again and resumes exactly on <cluster_size> nodes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
@@ -191,7 +195,8 @@ Feature: Deduplicator and window restore conversions refused for room
     Then the current leader node is saved as placeholder "leader"
     Given the restore coordinator uses remote placement in a multi-node cluster
     And restoring domain "{{domain}}" pauses before it converts its first deduplicator or window state
-    When restore "DOMAIN {{domain}} RESUME" of backup archive "refused-window.nvxb" is streamed to node "{{leader}}" under execution reference "refused_window" in the background
+    And command finalization on node "{{leader}}" pauses before its outcome is recorded
+    When restore "DOMAIN {{domain}} RESUME" of backup archive "refused-window.nvxb" is streamed to node "{{leader}}" under execution reference "refused_window" in the background with outcome recovery
     Then the restore of domain "{{domain}}" pauses before it converts its first deduplicator or window state
     When bulk execution on node "{{leader}}" is saturated
     And the paused restore conversion of domain "{{domain}}" is released
@@ -200,7 +205,10 @@ Feature: Deduplicator and window restore conversions refused for room
       class="bulk_cpu"
       """
     When bulk execution on node "{{leader}}" is released
-    Then the background restore stream's outcome is "completed" as "executed"
+    Then the background restore's outcome is held on node "{{leader}}" before it is recorded
+    When restore coordinator "{{leader}}" yields leadership in a multi-node cluster
+    And the command finalization pause on node "{{leader}}" is released
+    Then the background restore stream's outcome is "completed" as "<restore_origin>"
     And the restore stream's report shows every step applied
     And within "60s" node "restored-1" accepts http payload for host "backup-branch-room-{{test_id}}.example.com" path "/metrics"
       """
@@ -225,6 +233,6 @@ Feature: Deduplicator and window restore conversions refused for room
       """
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 1             |
+      | cluster_size | replica_count | restore_origin |
+      | 1            | 0             | executed       |
+      | 3            | 1             | recovered      |

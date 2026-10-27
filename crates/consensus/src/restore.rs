@@ -24,7 +24,7 @@
 
 use std::{collections::BTreeSet, num::NonZeroU64};
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
     CommandExecutionReference, DomainName, DomainState, ExistingUserPolicy, ResourceName,
@@ -350,13 +350,16 @@ pub(crate) fn apply_restore_step(
             RestoreStep::ApplyModels(domain),
             RestoreStepEffect::InstalledState { authority, clock },
         ) => {
-            if authority.execution != *reference
-                || validate_restore_state_installation(state, domain, authority).is_err()
-            {
+            if authority.execution != *reference {
                 return Err(Report::new(RestoreStepConflict::Installation {
                     domain: domain.clone(),
                 }));
             }
+            validate_restore_state_installation(state, domain, authority).change_context_lazy(
+                || RestoreStepConflict::Installation {
+                    domain: domain.clone(),
+                },
+            )?;
             let lifecycle = applying_restore(state, reference)?.restore.lifecycle;
             let restored = state
                 .domains

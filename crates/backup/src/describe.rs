@@ -208,11 +208,11 @@ impl SectionVisitor for ContentsReader {
             return self.describer.section(entry, content);
         };
         let bytes = content.read_all(entry, MAX_MODELS_BYTES)?;
-        let Ok(text) = String::from_utf8(bytes) else {
-            return Err(Report::new(ArchiveReadError::InvalidText {
+        let text = String::from_utf8(bytes).map_err(|cause| {
+            Report::new(cause).change_context(ArchiveReadError::InvalidText {
                 path: entry.path.to_string(),
-            }));
-        };
+            })
+        })?;
         self.describer.section(entry, content)?;
         let Some(domain) = self.describer.models_paths.get(&entry.path) else {
             return Err(misplaced(entry));
@@ -592,7 +592,11 @@ impl Describer {
         let group = group_path
             .strip_suffix("/columns.arrow")
             .ok_or_else(|| misplaced(entry))?;
-        let group = group.parse::<u32>().map_err(|_| misplaced(entry))?;
+        let group = group.parse::<u32>().map_err(|cause| {
+            Report::new(cause).change_context(ArchiveReadError::MisplacedSection {
+                path: entry.path.to_string(),
+            })
+        })?;
         let descriptor_path = SectionPath::parse(&format!("{prefix}/descriptor.rkyv"))?;
         let (domain, index) = self
             .materialized_paths
@@ -707,9 +711,11 @@ impl Describer {
         let Some(group) = group_path.strip_suffix(file_name) else {
             return Err(misplaced(entry));
         };
-        let Ok(group) = group.parse::<u32>() else {
-            return Err(misplaced(entry));
-        };
+        let group = group.parse::<u32>().map_err(|cause| {
+            Report::new(cause).change_context(ArchiveReadError::MisplacedSection {
+                path: entry.path.to_string(),
+            })
+        })?;
         let descriptor_path = SectionPath::parse(&format!("{prefix}/descriptor.rkyv"))?;
         let Some((domain, index)) = self.branch_state_paths.get(&descriptor_path) else {
             return Err(misplaced(entry));

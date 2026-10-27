@@ -419,7 +419,7 @@ impl ProcessorDraft {
         &self,
     ) -> error_stack::Result<CreateJunction, ProcessorDraftError> {
         let name = JunctionName::parse(self.name.trim())
-            .map_err(|_| Report::new(ProcessorDraftError::JunctionName))?;
+            .map_err(|cause| cause.change_context(ProcessorDraftError::JunctionName))?;
         let branching = self.branching.build()?;
         let parts = self.build_parts()?;
         Ok(CreateJunction {
@@ -437,7 +437,7 @@ impl ProcessorDraft {
         &self,
     ) -> error_stack::Result<CreateReingestor, ProcessorDraftError> {
         let name = ReingestorName::parse(self.name.trim())
-            .map_err(|_| Report::new(ProcessorDraftError::ReingestorName))?;
+            .map_err(|cause| cause.change_context(ProcessorDraftError::ReingestorName))?;
         let parts = self.build_parts()?;
         Ok(CreateReingestor {
             name,

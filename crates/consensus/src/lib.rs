@@ -1564,7 +1564,10 @@ impl IncomingSnapshotTransfer {
         self.section
             .bytes
             .try_reserve(chunk.bytes.len())
-            .map_err(|_| Report::new(SnapshotTransferError::Allocation { requested: end }))?;
+            .map_err(|cause| {
+                Report::new(cause)
+                    .change_context(SnapshotTransferError::Allocation { requested: end })
+            })?;
         self.section.bytes.extend_from_slice(&chunk.bytes);
         if end < self.section.declared_bytes {
             return Ok(None);
@@ -5660,15 +5663,15 @@ fn apply_consensus_command_at(
                             })),
                             false,
                         )
-                    } else if state
-                        .transaction_reports
-                        .insert(report.as_ref().clone())
-                        .is_err()
+                    } else if let Err(cause) =
+                        state.transaction_reports.insert(report.as_ref().clone())
                     {
                         (
-                            Err(Report::new(TransactionMutationError::ReportConflict {
-                                id: id.clone(),
-                            })),
+                            Err(
+                                cause.change_context(TransactionMutationError::ReportConflict {
+                                    id: id.clone(),
+                                }),
+                            ),
                             false,
                         )
                     } else {
@@ -5787,9 +5790,13 @@ fn apply_consensus_command_at(
             }
             if expected_preview != current_preview {
                 let mut transaction_reports = state.transaction_reports.clone();
-                if transaction_reports.insert(report.as_ref().clone()).is_err() {
-                    return AppliedConsensusCommand::transaction(
-                        Err(TransactionMutationError::ReportConflict { id: id.clone() }),
+                if let Err(cause) = transaction_reports.insert(report.as_ref().clone()) {
+                    return AppliedConsensusCommand::transaction_report(
+                        Err(
+                            cause.change_context(TransactionMutationError::ReportConflict {
+                                id: id.clone(),
+                            }),
+                        ),
                         changes,
                     );
                 }
@@ -5837,13 +5844,18 @@ fn apply_consensus_command_at(
             }
             let mut transaction_reports = state.transaction_reports.clone();
             let mut transaction_commit_plans = state.transaction_commit_plans.clone();
-            if transaction_reports.insert(report.as_ref().clone()).is_err()
-                || transaction_commit_plans.insert(plan).is_err()
+            if let Err(cause) = transaction_reports
+                .insert(report.as_ref().clone())
+                .change_context_lazy(|| TransactionMutationError::ReportConflict { id: id.clone() })
+                .and_then(|_| {
+                    transaction_commit_plans
+                        .insert(plan)
+                        .change_context_lazy(|| TransactionMutationError::ReportConflict {
+                            id: id.clone(),
+                        })
+                })
             {
-                return AppliedConsensusCommand::transaction(
-                    Err(TransactionMutationError::ReportConflict { id: id.clone() }),
-                    changes,
-                );
+                return AppliedConsensusCommand::transaction_report(Err(cause), changes);
             }
             transaction_reports.retain_revision(current_preview);
             state.transaction_reports = transaction_reports;
@@ -5940,11 +5952,13 @@ fn apply_consensus_command_at(
             }
             if failure.expected_preview != *current_preview {
                 let mut transaction_reports = state.transaction_reports.clone();
-                if transaction_reports.insert(failure.report.clone()).is_err() {
-                    return AppliedConsensusCommand::transaction(
-                        Err(TransactionMutationError::ReportConflict {
-                            id: failure.id.clone(),
-                        }),
+                if let Err(cause) = transaction_reports.insert(failure.report.clone()) {
+                    return AppliedConsensusCommand::transaction_report(
+                        Err(
+                            cause.change_context(TransactionMutationError::ReportConflict {
+                                id: failure.id.clone(),
+                            }),
+                        ),
                         changes,
                     );
                 }
@@ -5993,17 +6007,20 @@ fn apply_consensus_command_at(
                 transaction::TransactionCommitFailureDecision::Failed => {}
             }
             let mut transaction_reports = state.transaction_reports.clone();
-            if transaction_reports.insert(failure.report.clone()).is_err()
-                || transaction_reports
-                    .fail_execution_step(current_preview, failure.operation, &failure.error)
-                    .is_err()
+            if let Err(cause) = transaction_reports
+                .insert(failure.report.clone())
+                .change_context_lazy(|| TransactionMutationError::ReportConflict {
+                    id: failure.id.clone(),
+                })
+                .and_then(|_| {
+                    transaction_reports
+                        .fail_execution_step(current_preview, failure.operation, &failure.error)
+                        .change_context_lazy(|| TransactionMutationError::ReportConflict {
+                            id: failure.id.clone(),
+                        })
+                })
             {
-                return AppliedConsensusCommand::transaction(
-                    Err(TransactionMutationError::ReportConflict {
-                        id: failure.id.clone(),
-                    }),
-                    changes,
-                );
+                return AppliedConsensusCommand::transaction_report(Err(cause), changes);
             }
             transaction_reports.retain_revision(current_preview);
             state.transaction_reports = transaction_reports;
@@ -6066,15 +6083,18 @@ fn apply_consensus_command_at(
                     );
                 }
             };
-            let admitted_step = match state.transaction_commit_plans.step(id, plan_step_index) {
-                Ok(step) => step,
-                Err(_) => {
-                    return AppliedConsensusCommand::transaction(
-                        Err(TransactionMutationError::InvalidCommitPlan { id: id.clone() }),
-                        changes,
-                    );
-                }
-            };
+            let admitted_step =
+                match state.transaction_commit_plans.step(id, plan_step_index) {
+                    Ok(step) => step,
+                    Err(cause) => {
+                        return AppliedConsensusCommand::transaction_report(
+                            Err(cause.change_context(
+                                TransactionMutationError::InvalidCommitPlan { id: id.clone() },
+                            )),
+                            changes,
+                        );
+                    }
+                };
             if admitted_step.decision.impact.operations() != result.impact.operations()
                 || admitted_step.decision.impact.planned() != result.impact.planned()
                 || !admitted_step.matches_effect(result.result.success, effect.as_deref())
@@ -6121,13 +6141,16 @@ fn apply_consensus_command_at(
                     changes,
                 );
             };
-            if state
+            if let Err(cause) = state
                 .transaction_reports
                 .replace_execution_step(&preview, result.impact.clone())
-                .is_err()
             {
-                return AppliedConsensusCommand::transaction(
-                    Err(TransactionMutationError::ReportConflict { id: id.clone() }),
+                return AppliedConsensusCommand::transaction_report(
+                    Err(
+                        cause.change_context(TransactionMutationError::ReportConflict {
+                            id: id.clone(),
+                        }),
+                    ),
                     changes,
                 );
             }
@@ -6194,13 +6217,16 @@ fn apply_consensus_command_at(
                 .last()
                 .map(|result| result.impact.clone())
                 .verified("application completion appends the applying step to commit results");
-            if state
+            if let Err(cause) = state
                 .transaction_reports
                 .replace_execution_step(&preview, completed_impact)
-                .is_err()
             {
-                return AppliedConsensusCommand::transaction(
-                    Err(TransactionMutationError::ReportConflict { id: id.clone() }),
+                return AppliedConsensusCommand::transaction_report(
+                    Err(
+                        cause.change_context(TransactionMutationError::ReportConflict {
+                            id: id.clone(),
+                        }),
+                    ),
                     changes,
                 );
             }

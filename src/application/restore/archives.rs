@@ -33,6 +33,7 @@ use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use nervix_models::{CommandExecutionReference, RestoreArchive, Timestamp, UserName};
 use nervix_primitives::sync::{Arc, blocking::Mutex};
+use nervix_recovery::Reported as _;
 use thiserror::Error;
 
 use crate::application::backup::retained::RetainedArtifact;
@@ -70,6 +71,14 @@ pub(in crate::application) trait RestoreStagingWriter: Send {
 
 /// Why a restore stream's archive was not staged. No variant carries archive bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "restore intake projects shape, quota and staging refusals into its fixed stream \
+                  outcome; write and seal failures are reported before that projection"
+    )
+)]
 pub(in crate::application) enum StagingRefusal {
     #[error(
         "a restore stream carries one restore start, followed only by archive chunks: {reason}"
@@ -127,7 +136,11 @@ where
     P: Stream<Item = Result<RestoreStreamPart, E>> + Unpin,
 {
     let total = declared.total_bytes.get();
-    let mut writer = match staging.stage(total).await {
+    let mut writer = match staging
+        .stage(total)
+        .await
+        .inspect_err(|error| Err::<(), _>(error).reported("admit restore archive staging"))
+    {
         Ok(writer) => writer,
         Err(refusal) => return StagingOutcome::Refused(refusal.current_context().clone()),
     };
@@ -148,7 +161,12 @@ where
         if next > total {
             return StagingOutcome::Refused(StagingRefusal::Oversized { declared: total });
         }
-        if writer.write(bytes).await.is_err() {
+        if writer
+            .write(bytes)
+            .await
+            .inspect_err(|error| Err::<(), _>(error).reported("write restore archive staging"))
+            .is_err()
+        {
             return StagingOutcome::Refused(StagingRefusal::StagingFailed);
         }
         received = next;
@@ -159,7 +177,11 @@ where
             received,
         });
     }
-    let artifact = match writer.finish().await {
+    let artifact = match writer
+        .finish()
+        .await
+        .inspect_err(|error| Err::<(), _>(error).reported("finish restore archive staging"))
+    {
         Ok(artifact) => artifact,
         Err(_) => return StagingOutcome::Refused(StagingRefusal::StagingFailed),
     };

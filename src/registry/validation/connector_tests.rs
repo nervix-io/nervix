@@ -23,8 +23,8 @@ use nervix_models::{
     KafkaConsumerGroupName, KafkaEmitter, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode,
     KafkaTopicEmitter, KafkaTopicIngestor, MaterializedRelayState, MessageErrorPolicy,
     MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor, NatsEmitter,
-    NatsSubjectEmitter, OtelLogsEmitter, OtelMetric, OtelValueMapping, OutputBranch,
-    PostgresEmitter, PostgresTableEmitter, ProcessorInputs, ProcessorOutputs,
+    NatsSubjectEmitter, OtelAggregationTemporality, OtelLogsEmitter, OtelMetric, OtelValueMapping,
+    OutputBranch, PostgresEmitter, PostgresTableEmitter, ProcessorInputs, ProcessorOutputs,
     PrometheusApiRootError, PulsarEmitter, PulsarEmitterEntity, PulsarTopicEmitter,
     RabbitMqEmitter, RabbitMqEmitterEntity, RabbitMqQueueEmitter, RetryPolicy, SentryEmitter,
     SentryEventEmitter, SignalingProtobufConfig, SqsEmitterEntity, SyslogCollectorEmitter,
@@ -2182,6 +2182,7 @@ fn an_iceberg_emitter_rejects_a_catalog_client_of_another_connector() {
         },
         client: named("lake"),
         table: named("events"),
+        namespace: named("Analytics.Events"),
         values: vec![nervix_models::IcebergValueMapping {
             column: "value".to_string(),
             expression: nervix_plexus::parse_expression("input.value")
@@ -2192,7 +2193,7 @@ fn an_iceberg_emitter_rejects_a_catalog_client_of_another_connector() {
             client: named("catalog"),
         },
         commit_each: "100ms".to_string(),
-        max_commit_size: "1MiB".to_string(),
+        max_commit_size: "1MiB".parse().expect("valid commit size"),
     }));
 
     let error = registry

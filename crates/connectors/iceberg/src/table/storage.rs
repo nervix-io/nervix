@@ -443,7 +443,7 @@ fn truthy(value: &str) -> bool {
     )
 }
 
-fn s3_config(props: &HashMap<String, String>) -> Result<S3Config> {
+pub(super) fn s3_config(props: &HashMap<String, String>) -> Result<S3Config> {
     let mut config = S3Config::default();
     config.enable_virtual_host_style = true;
     config.endpoint = props.get(S3_ENDPOINT).cloned();
@@ -517,7 +517,7 @@ fn gcs_config(props: &HashMap<String, String>) -> GcsConfig {
     config
 }
 
-fn azure_config(props: &HashMap<String, String>) -> Result<AzdlsConfig> {
+pub(super) fn azure_config(props: &HashMap<String, String>) -> Result<AzdlsConfig> {
     if props.contains_key(ADLS_CONNECTION_STRING) {
         return Err(Error::new(
             ErrorKind::FeatureUnsupported,

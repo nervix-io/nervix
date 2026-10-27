@@ -190,7 +190,7 @@ Feature: Emitter publishing modes
           MODE ACK RETRY POLICY BACKOFF 210ms MAX 21s VALUES { 'seq' = input.seq } BATCH MAX MESSAGES 5 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE ICEBERG TABLE EMITTER iceberg_ack FROM outgoing
-        TO object_store TABLE 'iceberg_events'
+        TO object_store TABLE 'iceberg_events' NAMESPACE '{{domain}}'
           LOCATION 's3://nervix-iceberg/tables/publishing-modes-{{test_id}}'
           CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY POLICY BACKOFF 220ms MAX 22s VALUES { 'seq' = input.seq } FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """

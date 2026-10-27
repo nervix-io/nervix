@@ -106,6 +106,14 @@ pub(crate) enum TextFailure {
 
 /// Why a text cannot be read as a date and time in its format.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "datetime reading returns one bounded semantic row refusal, such as a \
+                  nonexistent date, rather than a library operation failure"
+    )
+)]
 pub enum UnreadableText {
     /// The text stops matching its format at a byte.
     Mismatch {

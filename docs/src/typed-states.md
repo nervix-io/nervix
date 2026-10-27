@@ -179,6 +179,12 @@ ordinary prefix; that original deadline then survives cancellation. The connecti
 most one discard and clears it only when it returns the size outcome after confirmation. See
 [MQTT source connections](./connector-contract.md#mqtt-source-connections).
 
+**Iceberg catalog identity.** The namespace is required configuration, represented by one shared
+validated name type from parsing through connector opening. Dot-separated levels are nonempty and
+retain case. No absent namespace is filled from the Nervix domain, and no layer invents another
+namespace key. A commit-size limit is the same positive whole-byte value that bounds a batch;
+decoding validates that value rather than storing text for the runtime to parse.
+
 The Core NATS emitter's buffer is either empty or pending with a nonzero record count and its
 connection expectation. A pending write that began connected requires that same successful
 connection; one queued while disconnected requires the next connection. The state is consumed
@@ -640,6 +646,11 @@ current representation, qualification policy and coverage limits.
 
 ## Validation And Failure Boundaries
 
+Configuration-backup round-trip validation names an unpinned resource binding with its own typed
+refusal, rather than using a resource name itself as the error. Its exact outcome classification
+applies to that validity check. Generic resource-version mapping still forwards the callback's
+actual error type and does not classify every callback failure as a refusal.
+
 Native connection options validate every timeout at setup: one millisecond through 24 hours.
 The backup command wait has its own required duration, distinct from an optional per-domain
 quiesce override and the ordinary request and retry bounds. Backup execution identity projects
@@ -936,3 +947,8 @@ emitter plans, configurations and concrete types. `IngestorConnector::KIND` and
 `EmitterLifecycle::kind()` expose the vocabulary identity; composition asserts the declared kind
 at compile time. Shared private encoding or endpoint intake state does not add an entity selector
 to those public configurations. A new entity adds a typed variant and implementation.
+
+OTEL field rules carry their exact type with the constraint that requires it: a histogram count
+cannot be declared with a floating-point descriptor. Required, optional and required-for-DELTA
+presence are distinct vocabulary states. Opening an OTEL client validates its required positive
+deadline before constructing settings; the installed settings hold a duration with no absent state.

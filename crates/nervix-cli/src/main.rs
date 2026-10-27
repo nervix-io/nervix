@@ -811,7 +811,7 @@ fn print_json_inspection_error(code: &str, message: &str) {
 fn create_line_editor(completer: GrpcCompleter) -> Result<Reedline, StackReport<ClientError>> {
     let history = Box::new(
         FileBackedHistory::with_file(200, HISTORY_FILE.into())
-            .map_err(|_| StackReport::new(ClientError::InitHistory))?,
+            .map_err(|cause| StackReport::new(cause).change_context(ClientError::InitHistory))?,
     );
     let completion_menu = ListMenu::default()
         .with_name("completion_menu")
@@ -1108,7 +1108,7 @@ fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<
     let password = match args.password.clone() {
         Some(password) => password,
         None => rpassword::prompt_password(format!("Password for {}: ", args.username))
-            .map_err(|_| StackReport::new(ClientError::ReadPassword))?,
+            .map_err(|cause| StackReport::new(cause).change_context(ClientError::ReadPassword))?,
     };
     Ok(ConnectOptions {
         dns: ConnectDns::Configuration(DnsConfiguration {

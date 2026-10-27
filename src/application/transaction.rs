@@ -1773,8 +1773,8 @@ impl SessionServiceImpl {
                     .current_transaction_commit_step(id, plan_step_index),
             )
             .await
-            .map_err(|_| {
-                Report::new(TransactionCommitError::InvalidProgress {
+            .map_err(|cause| {
+                cause.change_context(TransactionCommitError::InvalidProgress {
                     id: transaction.id.clone(),
                 })
             })?;
@@ -1825,8 +1825,8 @@ impl SessionServiceImpl {
             let preview = &commit_plan.preview;
             let report = Box::pin(self.inner.consensus.current_transaction_report(preview))
                 .await
-                .map_err(|_| {
-                    Report::new(TransactionCommitError::InvalidProgress {
+                .map_err(|cause| {
+                    cause.change_context(TransactionCommitError::InvalidProgress {
                         id: transaction.id.clone(),
                     })
                 })?;
@@ -2431,6 +2431,12 @@ impl SessionServiceImpl {
             && self
                 .wait_for_runtime_revision(runtime_revision)
                 .await
+                .inspect_err(|error| {
+                    nervix_recovery::Reported::reported(
+                        Err::<(), _>(error),
+                        "wait for committed transaction runtime revision",
+                    )
+                })
                 .is_err()
         {
             return Ok(advanced);

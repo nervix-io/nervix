@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use thiserror::Error;
 
 /// Why the value of a client's deadline key cannot bound a wait.
@@ -48,9 +48,9 @@ impl ClientDeadline {
         }
         // Only ASCII digits remain, so the one way the count can fail to parse is by exceeding a
         // `u64`, which is longer than the longest timeout too.
-        let Ok(count) = milliseconds.parse::<u64>() else {
-            return Err(Report::new(ClientDeadlineError::Unschedulable));
-        };
+        let count = milliseconds
+            .parse::<u64>()
+            .change_context(ClientDeadlineError::Unschedulable)?;
         if count == 0 {
             return Err(Report::new(
                 ClientDeadlineError::NotPositiveWholeMilliseconds,

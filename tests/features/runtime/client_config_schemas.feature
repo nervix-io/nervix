@@ -116,7 +116,7 @@ Feature: Declared connector client configuration
       | 1            |
       | 3            |
 
-  Scenario Outline: Public client inspection redacts a delegated cloud endpoint query
+  Scenario Outline: Public client inspection redacts a cloud endpoint query
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -124,8 +124,8 @@ Feature: Declared connector client configuration
       """
     When these Plexus commands are executed on the leader node
       """
-      CREATE AZURE_BLOB CLIENT checked CONFIG {
-        'endpoint' = 'https://account.blob.example.com/?sig=private-cloud-signature'
+      CREATE S3 CLIENT checked CONFIG {
+        'endpoint' = 'https://objects.example.com/?sig=private-cloud-signature'
       };
       SHOW CREATE CLIENT checked;
       """

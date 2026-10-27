@@ -418,8 +418,8 @@ impl WasmOutputValidator<'_> {
             columns,
             acks,
         } = output;
-        let output_identifier = RelayName::parse(&output_relay).map_err(|_| {
-            Report::new(WasmOutputError::UnknownOutputRelay {
+        let output_identifier = RelayName::parse(&output_relay).map_err(|cause| {
+            cause.change_context(WasmOutputError::UnknownOutputRelay {
                 output_relay: output_relay.clone(),
             })
         })?;

@@ -61,6 +61,7 @@ use nervix_approx_into::ApproxInto as _;
 use nervix_execution::{Cancellation, CpuClass, ExecutionError, Executor, MemoryClass};
 use nervix_models::Timestamp;
 use nervix_primitives::sync::StdArc;
+use nervix_recovery::Reported as _;
 use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
 
 use crate::{
@@ -475,7 +476,13 @@ macro_rules! impl_register_bank {
                         .map(Register::is_scalar),
                     RegisterType::Generic => self.register::<ArrayRef>(reg).map(Register::is_scalar),
                 };
-                register_is_scalar.unwrap_or(false)
+                match register_is_scalar {
+                    Ok(is_scalar) => is_scalar,
+                    Err(error) => {
+                        Err::<(), _>(error).reported("inspect VM register shape");
+                        false
+                    }
+                }
             }
 
             /// Copies `src` into `dst`, shape included.

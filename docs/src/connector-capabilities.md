@@ -581,9 +581,13 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | the export request of a publish without BATCH: unbounded |  |
-| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |  |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; required |  |
 | Driver limits | gRPC responses above 4 MiB are refused. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
+| VALUES fields, exact types and constraints | LOGS `time`: DATETIME; required; not before the Unix epoch<br>LOGS `severity_text`: STRING; optional; no additional value constraint<br>LOGS `severity_number`: I32; optional; 0..=24<br>LOGS `body`: STRING; required; no additional value constraint<br>LOGS `trace_id`: STRING; optional; 32 hexadecimal characters; not all zero<br>LOGS `span_id`: STRING; optional; 16 hexadecimal characters; not all zero |  |
+| ATTRIBUTES values | a string, boolean, number, datetime or an ARRAY or VEC of those; DATETIME becomes RFC 3339 text; ARRAY and VEC may nest; NULL attributes are omitted; BYTES and maps are refused |  |
+| RESOURCE values | a literal string, boolean, I64, F64, null or ARRAY; literal expressions only, including nested literal arrays; one resource for the emitter |  |
+| Unsupported OTLP features and reasons | exponential histograms and summaries: METRIC declares only GAUGE, SUM and explicit HISTOGRAM<br>per-record resource and scope: RESOURCE is literal-only and SCOPE is fixed for the emitter<br>span events and links: the closed span VALUES table has no event or link mapping<br>trace_state: the closed span VALUES table does not map trace state<br>log event_name and flags: the closed log VALUES table maps neither field<br>exemplars: metric points expose values and attributes without exemplar mappings<br>non-string log bodies: the log body field requires STRING<br>bytes_value and map attributes: attributes admit scalars and nested ARRAY or VEC values; BYTES and maps are unavailable<br>scope attributes: SCOPE declares only a name and optional version<br>OTLP/JSON: the client declares only grpc and http/protobuf |  |
 
 ### OTEL TRACES emit
 
@@ -602,9 +606,13 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | the export request of a publish without BATCH: unbounded |  |
-| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |  |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; required |  |
 | Driver limits | gRPC responses above 4 MiB are refused. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
+| VALUES fields, exact types and constraints | TRACES `trace_id`: STRING; required; 32 hexadecimal characters; not all zero<br>TRACES `span_id`: STRING; required; 16 hexadecimal characters; not all zero<br>TRACES `parent_span_id`: STRING; optional; 16 hexadecimal characters; not all zero<br>TRACES `name`: STRING; required; no additional value constraint<br>TRACES `kind`: STRING; optional; SERVER, CLIENT, INTERNAL, PRODUCER or CONSUMER; case-sensitive<br>TRACES `start_time`: DATETIME; required; not before the Unix epoch<br>TRACES `end_time`: DATETIME; required; not before the Unix epoch<br>TRACES `status_code`: STRING; optional; OK, ERROR or UNSET; case-sensitive<br>TRACES `status_message`: STRING; optional; no additional value constraint |  |
+| ATTRIBUTES values | a string, boolean, number, datetime or an ARRAY or VEC of those; DATETIME becomes RFC 3339 text; ARRAY and VEC may nest; NULL attributes are omitted; BYTES and maps are refused |  |
+| RESOURCE values | a literal string, boolean, I64, F64, null or ARRAY; literal expressions only, including nested literal arrays; one resource for the emitter |  |
+| Unsupported OTLP features and reasons | exponential histograms and summaries: METRIC declares only GAUGE, SUM and explicit HISTOGRAM<br>per-record resource and scope: RESOURCE is literal-only and SCOPE is fixed for the emitter<br>span events and links: the closed span VALUES table has no event or link mapping<br>trace_state: the closed span VALUES table does not map trace state<br>log event_name and flags: the closed log VALUES table maps neither field<br>exemplars: metric points expose values and attributes without exemplar mappings<br>non-string log bodies: the log body field requires STRING<br>bytes_value and map attributes: attributes admit scalars and nested ARRAY or VEC values; BYTES and maps are unavailable<br>scope attributes: SCOPE declares only a name and optional version<br>OTLP/JSON: the client declares only grpc and http/protobuf |  |
 
 ### OTEL METRICS emit
 
@@ -623,9 +631,13 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | the export request of a publish without BATCH: unbounded |  |
-| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |  |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; required |  |
 | Driver limits | gRPC responses above 4 MiB are refused. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
+| VALUES fields, exact types and constraints | GAUGE / SUM `time`: DATETIME; required; not before the Unix epoch<br>GAUGE / SUM `start_time`: DATETIME; required for DELTA; optional otherwise; not before the Unix epoch<br>GAUGE / SUM `value`: an integer-family, F32, or F64 value; required; integer values must fit I64; floating-point values use OTLP as_double<br>HISTOGRAM `time`: DATETIME; required; not before the Unix epoch<br>HISTOGRAM `start_time`: DATETIME; required for DELTA; optional otherwise; not before the Unix epoch<br>HISTOGRAM `count`: U64; required; the complete U64 range<br>HISTOGRAM `sum`: F32 or F64; optional; no additional value constraint<br>HISTOGRAM `bucket_counts`: a U64 ARRAY or VEC; required; no NULL elements; length equals explicit_bounds length plus one<br>HISTOGRAM `explicit_bounds`: an F32 or F64 ARRAY or VEC; required; no NULL elements<br>HISTOGRAM `min`: F32 or F64; optional; no additional value constraint<br>HISTOGRAM `max`: F32 or F64; optional; no additional value constraint |  |
+| ATTRIBUTES values | a string, boolean, number, datetime or an ARRAY or VEC of those; DATETIME becomes RFC 3339 text; ARRAY and VEC may nest; NULL attributes are omitted; BYTES and maps are refused |  |
+| RESOURCE values | a literal string, boolean, I64, F64, null or ARRAY; literal expressions only, including nested literal arrays; one resource for the emitter |  |
+| Unsupported OTLP features and reasons | exponential histograms and summaries: METRIC declares only GAUGE, SUM and explicit HISTOGRAM<br>per-record resource and scope: RESOURCE is literal-only and SCOPE is fixed for the emitter<br>span events and links: the closed span VALUES table has no event or link mapping<br>trace_state: the closed span VALUES table does not map trace state<br>log event_name and flags: the closed log VALUES table maps neither field<br>exemplars: metric points expose values and attributes without exemplar mappings<br>non-string log bodies: the log body field requires STRING<br>bytes_value and map attributes: attributes admit scalars and nested ARRAY or VEC values; BYTES and maps are unavailable<br>scope attributes: SCOPE declares only a name and optional version<br>OTLP/JSON: the client declares only grpc and http/protobuf |  |
 
 ### CLICKHOUSE TABLE emit
 
@@ -719,7 +731,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Reference | S3 \| GCS \| AZURE_BLOB store and catalog clients |  |
 | Locator and validation rule | TABLE 'Orders' (iceberg_table) |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `LOCATION 's3://warehouse/orders'` (string literal); required<br>`CATALOG catalog` (ICEBERG_REST client); required<br>`COMMIT EACH 10s MAX SIZE 64MiB` (composed clause); required |  |
+| Options in statement order | `NAMESPACE 'Analytics.Events'` (string literal); required<br>`LOCATION 's3://warehouse/orders'` (string literal); required<br>`CATALOG catalog` (ICEBERG_REST client); required<br>`COMMIT EACH 10s MAX SIZE 64MiB` (composed clause); required |  |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |  |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |  |
 | BATCH | optional |  |
@@ -1029,12 +1041,16 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `endpoint` | required | URL (http or https) | Nervix; strict | no | none |
 | `headers` | optional | string | Nervix; strict | yes | none |
 | `protocol` | required | grpc or http/protobuf | Nervix; strict | no | none |
-| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `timeout_ms` | required | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 | `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
 | `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
 | `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
+
+| Capability | Declaration |
+| --- | --- |
+| Additional declared constraints | comma-separated key=value pairs; split at the first '='; trim surrounding whitespace; lowercase keys; preserve values literally without percent-decoding; empty input means no headers<br>tls_ca_file, tls_cert_file and tls_key_file require an https endpoint for both grpc and http/protobuf; tls_cert_file and tls_key_file must occur together |
 
 ### CLICKHOUSE client
 
@@ -1120,18 +1136,19 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `access_key_id` | optional | string | driver; best effort | yes | none |
-| `allow_anonymous` | optional | boolean | driver; best effort | no | none |
-| `client_region` | optional | string | driver; best effort | no | none |
-| `disable_ec2_metadata` | optional | boolean | driver; best effort | no | none |
-| `endpoint` | optional | URL (http or https) | driver; best effort | no | none |
-| `path_style_access` | optional | boolean | driver; best effort | no | none |
-| `region` | optional | string | driver; best effort | no | none |
-| `secret_access_key` | optional | string | driver; best effort | yes | none |
-| `session_token` | optional | string | driver; best effort | yes | none |
+| `access_key_id` | optional | string | Nervix; strict | yes | none |
+| `allow_anonymous` | optional | boolean | Nervix; strict | no | none |
+| `client_region` | optional | string | Nervix; strict | no | none |
+| `disable_config_load` | optional | boolean | Nervix; strict | no | none |
+| `disable_ec2_metadata` | optional | boolean | Nervix; strict | no | none |
+| `endpoint` | optional | URL (http or https) | Nervix; strict | no | none |
+| `path_style_access` | optional | boolean | Nervix; strict | no | none |
+| `region` | optional | string | Nervix; strict | no | none |
+| `secret_access_key` | optional | string | Nervix; strict | yes | none |
+| `session_token` | optional | string | Nervix; strict | yes | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 
-Delegated property namespaces: all driver property names. Reserved keys: none.
+Delegated property namespaces: s3.*, client.*. Reserved keys: none.
 
 ### GCS client
 
@@ -1144,13 +1161,16 @@ Delegated property namespaces: all driver property names. Reserved keys: none.
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `credential_path` | optional | file path, with resource mount templates resolved before use | driver; best effort | yes | driver file |
-| `no_auth` | optional | boolean | driver; best effort | no | none |
-| `service_path` | optional | URL (http or https) | driver; best effort | no | none |
+| `allow_anonymous` | optional | boolean | Nervix; strict | no | none |
+| `credentials_json` | optional | string | Nervix; strict | yes | none |
+| `disable_config_load` | optional | boolean | Nervix; strict | no | none |
+| `disable_vm_metadata` | optional | boolean | Nervix; strict | no | none |
+| `no_auth` | optional | boolean | Nervix; strict | no | none |
+| `service_path` | optional | URL (http or https) | Nervix; strict | no | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
-| `token` | optional | string | driver; best effort | yes | none |
+| `token` | optional | string | Nervix; strict | yes | none |
 
-Delegated property namespaces: all driver property names. Reserved keys: none.
+Delegated property namespaces: gcs.*. Reserved keys: none.
 
 ### AZURE_BLOB client
 
@@ -1163,18 +1183,16 @@ Delegated property namespaces: all driver property names. Reserved keys: none.
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `account_key` | optional | string | driver; best effort | yes | none |
-| `account_name` | optional | string | driver; best effort | no | none |
-| `authority_host` | optional | string | driver; best effort | no | none |
-| `client_id` | optional | string | driver; best effort | no | none |
-| `client_secret` | optional | string | driver; best effort | yes | none |
-| `connection_string` | optional | string | driver; best effort | yes | none |
-| `endpoint` | optional | URL (http or https) | driver; best effort | no | none |
-| `sas_token` | optional | string | driver; best effort | yes | none |
-| `tenant_id` | optional | string | driver; best effort | no | none |
+| `account_key` | optional | string | Nervix; strict | yes | none |
+| `account_name` | optional | string | Nervix; strict | no | none |
+| `authority_host` | optional | string | Nervix; strict | no | none |
+| `client_id` | optional | string | Nervix; strict | no | none |
+| `client_secret` | optional | string | Nervix; strict | yes | none |
+| `sas_token` | optional | string | Nervix; strict | yes | none |
+| `tenant_id` | optional | string | Nervix; strict | no | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 
-Delegated property namespaces: all driver property names. Reserved keys: none.
+Delegated property namespaces: adls.*. Reserved keys: none.
 
 ### ICEBERG_REST client
 
@@ -1187,11 +1205,18 @@ Delegated property namespaces: all driver property names. Reserved keys: none.
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
+| `audience` | optional | string | driver; best effort | no | none |
 | `credential` | optional | string | driver; best effort | yes | none |
-| `oauth2-server-uri` | optional | URL (http or https) | driver; best effort | no | none |
+| `disable-header-redaction` | optional | boolean | driver; best effort | no | none |
+| `oauth2-server-uri` | optional | URL (http or https) | Nervix; strict | no | none |
+| `prefix` | optional | string | driver; best effort | no | none |
+| `resource` | optional | string | driver; best effort | no | none |
 | `scope` | optional | string | driver; best effort | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 | `token` | optional | string | driver; best effort | yes | none |
-| `uri` | required | URL (http or https) | driver; best effort | no | none |
-| `warehouse` | optional | string | driver; best effort | no | none |
+| `uri` | required | URL (http or https) | Nervix; strict | no | none |
+| `warehouse` | optional | string | Nervix; strict | no | none |
 
-Delegated property namespaces: all driver property names. Reserved keys: none.
+Delegated property namespaces: header.*, s3.*, client.*, gcs.*, adls.*. Reserved keys: none.

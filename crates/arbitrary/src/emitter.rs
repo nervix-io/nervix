@@ -14,6 +14,18 @@ use crate::{Arbitrary, Domain, route::RouteShape};
 const ITEMS: usize = 3;
 
 impl Arbitrary<'_> {
+    /// A case-preserving catalog namespace, including multiple levels and the length boundary.
+    pub fn iceberg_namespace(&mut self) -> IcebergNamespace {
+        let text = self.entropy.pick([
+            "Analytics".to_string(),
+            "Analytics.Events".to_string(),
+            "a.B-c.d_e~f".to_string(),
+            "N".repeat(128),
+        ]);
+        IcebergNamespace::try_from(text)
+            .verified("all generated catalog namespaces satisfy their rule")
+    }
+
     /// An emitter publishing to any emitter, in a publishing mode and with a body that emitter accepts,
     /// batching where the emitter requires it and optionally where it allows it.
     pub fn create_emitter(&mut self) -> CreateEmitter {
@@ -203,22 +215,28 @@ impl Arbitrary<'_> {
                 EmitterEntity::from(OtelLogsEmitter {
                     mode: self.otel_logs_publication(),
                     client: self.name(),
-                    mappings: self.otel_mappings(),
+                    mappings: self.otel_mappings(OTEL_LOG_VALUE_FIELDS, false),
                 })
             }
             EmitterEntityKind::Otel(OtelEmitterEntity::Traces) => {
                 EmitterEntity::from(OtelTracesEmitter {
                     mode: self.otel_traces_publication(),
                     client: self.name(),
-                    mappings: self.otel_mappings(),
+                    mappings: self.otel_mappings(OTEL_TRACE_VALUE_FIELDS, false),
                 })
             }
             EmitterEntityKind::Otel(OtelEmitterEntity::Metrics) => {
+                let metric = self.otel_metric();
+                let fields = match metric.kind {
+                    OtelMetricKind::Gauge | OtelMetricKind::Sum { .. } => OTEL_NUMBER_VALUE_FIELDS,
+                    OtelMetricKind::Histogram { .. } => OTEL_HISTOGRAM_VALUE_FIELDS,
+                };
+                let mappings = self.otel_mappings(fields, metric.kind.is_delta());
                 EmitterEntity::from(OtelMetricsEmitter {
                     mode: self.otel_metrics_publication(),
                     client: self.name(),
-                    metric: self.otel_metric(),
-                    mappings: self.otel_mappings(),
+                    metric,
+                    mappings,
                 })
             }
             EmitterEntityKind::ClickHouse(ClickHouseEmitterEntity::Table) => {
@@ -279,19 +297,28 @@ impl Arbitrary<'_> {
                     table: self.emitter_table_name(),
                     values: self.value_mappings(1),
                     location: self.string(),
+                    namespace: self.iceberg_namespace(),
                     catalog: IcebergCatalog::Rest {
                         client: self.name(),
                     },
                     commit_each: self.duration(),
-                    max_commit_size: self.byte_size(),
+                    max_commit_size: self.payload_size_limit(),
                 }))
             }
         }
     }
 
     /// The mappings every OTEL signal shares, with an optional instrumentation scope.
-    fn otel_mappings(&mut self) -> OtelMappings {
-        let values = self.value_mappings(1);
+    fn otel_mappings(&mut self, fields: &[OtelValueField], delta: bool) -> OtelMappings {
+        let mut values = Vec::new();
+        for field in fields {
+            if field.presence.is_required(delta) || self.entropy.flag() {
+                values.push(EmitterValueMapping {
+                    column: field.key.to_owned(),
+                    expression: self.expression(),
+                });
+            }
+        }
         let attributes = self.value_mappings(0);
         let resource = self.literal_mappings();
         let scope = if self.entropy.flag() {

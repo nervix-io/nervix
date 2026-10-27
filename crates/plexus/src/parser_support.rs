@@ -13,6 +13,7 @@
 use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::Range,
+    str::FromStr,
 };
 
 use chumsky::{
@@ -45,6 +46,22 @@ use crate::{
         read_expression_prefix, read_route_construction_prefix,
     },
 };
+
+/// Whether source text fits the integer literal's declared range. The grammar supplies its
+/// span-bound diagnostic when this validity check refuses the text.
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "integer literal validation answers whether text fits a grammar value; the \
+                  composed parser owns the syntax diagnostic at that source span"
+    )
+)]
+pub(crate) fn integer_literal<T: FromStr<Err = std::num::ParseIntError>>(
+    text: &str,
+) -> Result<T, std::num::ParseIntError> {
+    text.parse()
+}
 
 macro_rules! boxed_choice {
     ($($parser:expr),+ $(,)?) => {
@@ -372,7 +389,7 @@ pub fn u64_value<'src>(
         word_raw().labelled(label),
     ))
     .try_map(|raw, span| {
-        raw.parse::<u64>()
+        integer_literal::<u64>(&raw)
             .map_err(|_| Rich::custom(span, format!("invalid integer '{raw}'")))
     })
     .boxed()
@@ -427,7 +444,7 @@ pub fn u32_value<'src>(
         word_raw().labelled(label),
     ))
     .try_map(|raw, span| {
-        raw.parse::<u32>().map_err(|_| {
+        integer_literal::<u32>(&raw).map_err(|_| {
             Rich::custom(
                 span,
                 format!("invalid integer '{raw}'; expected 0 through {}", u32::MAX),
@@ -1035,7 +1052,7 @@ pub fn domain_clock_period_lit<'src>()
     })
 }
 
-pub fn byte_size_lit<'src>()
+fn byte_size_literal_text<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     choice((
         select! { Token::NumberLiteral(value) => value }
@@ -1043,18 +1060,38 @@ pub fn byte_size_lit<'src>()
             .map(|(number, unit)| format!("{number}{unit}")),
         word_raw(),
     ))
-    .try_map(|value, span| {
-        let mapping_input = value.parse::<ubyte::ByteUnit>().map(|_| value);
-        match mapping_input {
-            Ok(mapped_value) => Ok(mapped_value),
-            Err(error) => Err(Rich::custom(
-                span,
-                format!("invalid byte_size_literal: {error}"),
-            )),
-        }
-    })
-    .labelled("byte_size_literal")
     .boxed()
+}
+
+pub fn byte_size_lit<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    byte_size_literal_text()
+        .try_map(|value, span| {
+            let mapping_input = value.parse::<ubyte::ByteUnit>().map(|_| value);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err(Rich::custom(
+                    span,
+                    format!("invalid byte_size_literal: {error}"),
+                )),
+            }
+        })
+        .labelled("byte_size_literal")
+        .boxed()
+}
+
+/// A positive whole-byte limit, shared by payload, batch and commit clauses.
+pub fn payload_size_lit<'src>(
+    clause: &'static str,
+) -> impl Parser<'src, &'src [Token], PayloadSizeLimit, extra::Err<ParseError<'src>>> + Clone {
+    byte_size_literal_text()
+        .labelled("byte_size_literal")
+        .try_map(move |literal, span| {
+            literal
+                .parse::<PayloadSizeLimit>()
+                .map_err(|issue| Rich::custom(span, format!("{clause} {issue}")))
+        })
+        .boxed()
 }
 
 pub fn max_batch_size_clause<'src>()

@@ -50,6 +50,9 @@ mod backup_cut;
 mod consensus;
 mod domain_clock;
 mod domain_resume;
+mod entity_drain;
+#[cfg(test)]
+mod entity_drain_tests;
 mod execution;
 mod handoff_gate_link;
 mod model_publication;
@@ -60,6 +63,9 @@ mod restarted_voter;
 mod restore_publication;
 #[cfg(test)]
 mod restore_publication_tests;
+mod restore_staging;
+#[cfg(test)]
+mod restore_staging_tests;
 mod shutdown_handoff;
 mod standalone_transaction;
 #[cfg(test)]
@@ -70,6 +76,8 @@ mod wasm_reset_publication;
 pub use backup_cut::BackupCutBoundary;
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
+use entity_drain::ForcedEntityDrainTimeout;
+pub(crate) use entity_drain::ObservedEntityDrain;
 use execution::NodeExecution;
 use handoff_gate_link::HandoffGateLink;
 use model_publication::ModelPublicationRefusal;
@@ -79,6 +87,8 @@ use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
 use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
 use restore_publication::RestorePublicationFailure;
+pub use restore_staging::RestoreStagingKind;
+use restore_staging::{RestoreStagingFailure, RestoreStagingTarget};
 pub use standalone_transaction::StandaloneTransactionBoundary;
 use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublicationFailure};
 
@@ -156,8 +166,9 @@ struct FaultInjectionState {
     /// One-shot, domain-scoped leader refusals of the next transaction model step publication and
     /// of the pause release after it, each keeping how far it was delivered.
     refused_model_publications: DashMap<DomainName, ModelPublicationRefusal, RandomState>,
-    /// One-shot, domain-scoped failures consumed at the entity drain observation boundary.
-    forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
+    /// Domain-scoped failures met at the entity drain observation boundary, each refusing the drain
+    /// that met it first whenever the execution owning it observes that drain again.
+    forced_entity_drain_timeouts: DashMap<DomainName, ForcedEntityDrainTimeout, RandomState>,
     /// A stale drain observation on one node omits already buffered relay-owner batches.
     stale_owner_buffer_drain_reports: DashMap<(DomainName, ClusterNodeName), (), RandomState>,
     /// One-shot, domain-scoped timeouts consumed after the durable domain pause engages.
@@ -178,8 +189,10 @@ struct FaultInjectionState {
     delayed_stopped_branch_state_writes: DashMap<DomainNodeRef, Duration, RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
-    /// One-shot failures after earlier restore checkpoints have reached the receiving node.
-    failed_restore_state_installations: DashMap<DomainName, RestoreStagingFailure, RandomState>,
+    /// Failures of every staging of one kind of a restored domain's checkpoints until cleared,
+    /// each keeping whether a staging met it.
+    failed_restore_checkpoint_stagings:
+        DashMap<RestoreStagingTarget, RestoreStagingFailure, RandomState>,
     /// Failures of every durable publication of a restored domain's state until cleared, each
     /// keeping whether a publication met it.
     failed_restore_state_publications: DashMap<DomainName, RestorePublicationFailure, RandomState>,
@@ -486,7 +499,7 @@ impl Default for FaultInjection {
                 delayed_source_confirmations: DashMap::default(),
                 delayed_stopped_branch_state_writes: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
-                failed_restore_state_installations: DashMap::default(),
+                failed_restore_checkpoint_stagings: DashMap::default(),
                 failed_restore_state_publications: DashMap::default(),
                 native_metadata_interruptions: DashMap::default(),
                 guest_save_interruptions: DashMap::default(),
@@ -537,32 +550,7 @@ impl Default for FaultInjection {
     }
 }
 
-/// One precise checkpoint staging boundary of a stopped-domain restore installation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RestoreStagingFailure {
-    Guest,
-    Materialized,
-    BranchState,
-}
-
 impl FaultInjection {
-    pub fn fail_restored_materialized_checkpoint(&self, domain: DomainName) {
-        self.inner
-            .failed_restore_state_installations
-            .insert(domain, RestoreStagingFailure::Materialized);
-    }
-    pub fn fail_restored_wasm_checkpoint(&self, domain: DomainName) {
-        self.inner
-            .failed_restore_state_installations
-            .insert(domain, RestoreStagingFailure::Guest);
-    }
-
-    pub fn fail_restored_branch_state_checkpoint(&self, domain: DomainName) {
-        self.inner
-            .failed_restore_state_installations
-            .insert(domain, RestoreStagingFailure::BranchState);
-    }
-
     /// Interrupt the next branch lifecycle or Kafka offset section of `entity` that a backup of
     /// `domain` streams, once, after it has asked for `entries` of its entries.
     pub fn interrupt_native_metadata_capture(
@@ -729,31 +717,6 @@ impl FaultInjection {
         };
         let (_, chunks) = self.inner.guest_save_interruptions.remove(&owner)?;
         Some(chunks)
-    }
-
-    pub(crate) fn restored_wasm_checkpoint_fails(&self, domain: &DomainName) -> bool {
-        self.inner
-            .failed_restore_state_installations
-            .remove_if(domain, |_, fault| *fault == RestoreStagingFailure::Guest)
-            .is_some()
-    }
-
-    pub(crate) fn restored_materialized_checkpoint_fails(&self, domain: &DomainName) -> bool {
-        self.inner
-            .failed_restore_state_installations
-            .remove_if(domain, |_, fault| {
-                *fault == RestoreStagingFailure::Materialized
-            })
-            .is_some()
-    }
-
-    pub(crate) fn restored_branch_state_checkpoint_fails(&self, domain: &DomainName) -> bool {
-        self.inner
-            .failed_restore_state_installations
-            .remove_if(domain, |_, fault| {
-                *fault == RestoreStagingFailure::BranchState
-            })
-            .is_some()
     }
 
     pub(crate) fn register_wasm_state_reset_coordinator(
@@ -1146,13 +1109,6 @@ impl FaultInjection {
             return false;
         };
         *failure == HandoffEngagementTransportFailure::Delivered
-    }
-
-    /// Forces the next entity drain in `domain` to report its normal timeout outcome after one
-    /// complete status observation. The one-shot seam lets timeout recovery tests exercise that
-    /// outcome without making successful cluster work race a short duration.
-    pub fn force_next_entity_drain_timeout(&self, domain: DomainName) {
-        self.inner.forced_entity_drain_timeouts.insert(domain, ());
     }
 
     /// Simulates an incomplete drain observation so a scenario can exercise the local schedule
@@ -2185,14 +2141,6 @@ impl FaultInjection {
         }
         *failure = HandoffEngagementTransportFailure::Delivered;
         true
-    }
-
-    /// Consumes the domain-scoped timeout only at the coordinator's drain-observation seam.
-    pub(crate) fn take_forced_entity_drain_timeout(&self, domain: &DomainName) -> bool {
-        self.inner
-            .forced_entity_drain_timeouts
-            .remove(domain)
-            .is_some()
     }
 
     pub(crate) fn report_no_owner_buffered_batches(
