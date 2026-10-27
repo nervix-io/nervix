@@ -454,6 +454,18 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn observe_client_inspection_admission<F: Future>(
+        &self,
+        domain: &DomainName,
+        future: F,
+    ) -> F::Output {
+        self.inner
+            .fault_injection
+            .observe_client_inspection_admission(domain, future)
+            .await
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_restore_step_if_armed(
         &self,
         node_id: &ClusterNodeName,

@@ -510,6 +510,11 @@ properties appear as `********`. Complete canonical configuration remains in bac
 inspection text is not a complete configuration export. See the
 [Connector Contract](connector-contract.md) for the validation boundary and initialization limits.
 
+Inspection preflight can refuse a request when local capacity is full. After a transaction or
+restore has been accepted, its model application waits for client-inspection command memory and a
+filesystem worker-queue place. Temporary pressure supplies no failed configuration verdict; the
+existing execution identity, outcome recovery and node-shutdown rules continue to govern the command.
+
 A command's reply is a `CommandOutcome`: the execution reference it answers, whether the outcome was
 produced now or recovered from the durable record of an earlier attempt, one typed disposition, a
 message for display, diagnostics with optional source spans, and, for a request of several

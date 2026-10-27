@@ -27,9 +27,11 @@ use nervix_client_wire::{
 };
 use nervix_models::{ResourceName, RestoreStep, SchemaFingerprint};
 use nervix_primitives::task::AbortOnDropHandle;
+use nervix_server::RestoreStagingKind;
 
 use super::*;
 use crate::common::{
+    backup_phase::BackupPhase,
     cluster::node_name,
     phase_deadline::PhaseDeadline,
     raw_session::{TestRestore, TestRestoreEnd, outcome_awaits_leader, send_restore},
@@ -37,6 +39,13 @@ use crate::common::{
 
 /// How long a restore waits at an armed pause before a scenario gives up on reaching it.
 const RESTORE_PAUSE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A background request retains its immutable execution identity with the task that owns it.
+#[derive(Debug)]
+pub(crate) struct BackgroundRestore {
+    reference: CommandExecutionReference,
+    pub(super) task: AbortOnDropHandle<TestRestoreEnd>,
+}
 
 #[given("the restore coordinator uses remote placement in a multi-node cluster")]
 async fn given_restore_uses_remote_placement(world: &mut ScenarioWorld) {
@@ -253,45 +262,87 @@ fn then_restore_state_publication_failure_state(
     domain: String,
     state: String,
 ) {
-    let expected = match state.as_str() {
-        "pending" => Some(false),
-        "delivered" => Some(true),
-        "disabled" => None,
-        _ => panic!("unknown durable state publication failure state: {state}"),
-    };
     assert_eq!(
         world
             .fault_injection
             .restore_state_publication_failure_delivered(&scenario_domain(world, &domain)),
-        expected,
+        injected_restore_failure_delivery(&state),
         "the durable state publication failure of restoring domain '{domain}' is {state}"
     );
 }
 
-#[given(expr = "restoring domain {string} fails before installing its first WASM checkpoint")]
-fn given_restored_wasm_checkpoint_fails(world: &mut ScenarioWorld, domain: String) {
-    world
-        .fault_injection
-        .fail_restored_wasm_checkpoint(scenario_domain(world, &domain));
+/// Arms a failure that every staging of the domain's restored checkpoints of one kind meets until
+/// a step clears it, so a restore that recovery resumes under the same execution reference fails
+/// again rather than completing after a failure that was never recorded.
+#[given(
+    regex = "^(WASM|materialized|deduplicator and window) checkpoint stagings of restoring domain \
+             \"([^\"]*)\" fail$"
+)]
+fn given_restore_checkpoint_stagings_fail(world: &mut ScenarioWorld, kind: String, domain: String) {
+    world.fault_injection.fail_restore_checkpoint_stagings(
+        scenario_domain(world, &domain),
+        restore_staging_kind(&kind),
+    );
 }
 
-#[given(
-    expr = "restoring domain {string} fails before installing its first materialized checkpoint"
+#[when(
+    regex = "^the (WASM|materialized|deduplicator and window) checkpoint staging failure of \
+             restoring domain \"([^\"]*)\" is cleared$"
 )]
-fn given_restored_materialized_checkpoint_fails(world: &mut ScenarioWorld, domain: String) {
+fn when_restore_checkpoint_staging_failure_is_cleared(
+    world: &mut ScenarioWorld,
+    kind: String,
+    domain: String,
+) {
     world
         .fault_injection
-        .fail_restored_materialized_checkpoint(scenario_domain(world, &domain));
+        .clear_restore_checkpoint_staging_failure(
+            &scenario_domain(world, &domain),
+            restore_staging_kind(&kind),
+        );
 }
 
-#[given(
-    expr = "restoring domain {string} fails before installing its first deduplicator or window \
-            checkpoint"
+#[then(
+    regex = "^restoring domain \"([^\"]*)\" has (WASM|materialized|deduplicator and window) \
+             checkpoint staging failure state (\\w+)$"
 )]
-fn given_restored_branch_state_checkpoint_fails(world: &mut ScenarioWorld, domain: String) {
-    world
-        .fault_injection
-        .fail_restored_branch_state_checkpoint(scenario_domain(world, &domain));
+fn then_restore_checkpoint_staging_failure_state(
+    world: &mut ScenarioWorld,
+    domain: String,
+    kind: String,
+    state: String,
+) {
+    assert_eq!(
+        world
+            .fault_injection
+            .restore_checkpoint_staging_failure_delivered(
+                &scenario_domain(world, &domain),
+                restore_staging_kind(&kind),
+            ),
+        injected_restore_failure_delivery(&state),
+        "the {kind} checkpoint staging failure of restoring domain '{domain}' is {state}"
+    );
+}
+
+/// The checkpoint kind a staging failure step names.
+fn restore_staging_kind(kind: &str) -> RestoreStagingKind {
+    match kind {
+        "WASM" => RestoreStagingKind::Guest,
+        "materialized" => RestoreStagingKind::Materialized,
+        "deduplicator and window" => RestoreStagingKind::BranchState,
+        _ => panic!("unknown restore checkpoint staging kind: {kind}"),
+    }
+}
+
+/// The delivery an injected restore failure control reports in the state a step names: pending
+/// once armed, delivered once a restore met it, and disabled while nothing arms it.
+fn injected_restore_failure_delivery(state: &str) -> Option<bool> {
+    match state {
+        "pending" => Some(false),
+        "delivered" => Some(true),
+        "disabled" => None,
+        _ => panic!("unknown injected restore failure state: {state}"),
+    }
 }
 
 #[then(expr = "client {string} observes resumed clock progress beyond backup {string}'s frontier")]
@@ -374,18 +425,35 @@ async fn then_first_restore_coordinator_is_saved(
         .background_restore
         .take()
         .assured("the restore request is running before its publication barrier");
-    let coordinator = nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, async {
-        nervix_primitives::select! {
-            biased;
-            (coordinator, _, _) = futures_util::future::select_all(pauses) => coordinator,
-            ended = &mut background => {
-                let ended = ended.assured("the background restore task does not panic");
-                panic!("restore ended before its publication barrier: {ended:?}");
-            }
-        }
-    })
-    .await
-    .assured("restore reaches its publication barrier");
+    let phase = BackupPhase::new(
+        format!(
+            "restore publication domain={domain}, reference={}, candidates={candidates:?}",
+            background.reference
+        ),
+        RESTORE_PAUSE_TIMEOUT,
+    );
+    append_cucumber_log_line(&format!(
+        "restore publication observation started: domain={domain}, reference={}, \
+         candidates={candidates:?}",
+        background.reference
+    ));
+    let (coordinator, background) = phase
+        .observe(async move {
+            let coordinator = nervix_primitives::select! {
+                biased;
+                (coordinator, _, _) = futures_util::future::select_all(pauses) => coordinator,
+                ended = &mut background.task => {
+                    let ended = ended.assured("the background restore task does not panic");
+                    panic!("restore ended before its publication barrier: {ended:?}");
+                }
+            };
+            (coordinator, background)
+        })
+        .await;
+    append_cucumber_log_line(&format!(
+        "restore publication reached: domain={domain}, reference={}, coordinator={coordinator}",
+        background.reference
+    ));
     world.background_restore = Some(background);
     for candidate in candidates {
         if candidate != coordinator {
@@ -1381,6 +1449,12 @@ impl RestoreStreamRequest {
         let mut end = stream_restore(&self, None, None).await;
         loop {
             nervix_primitives::task::consume_budget().await;
+            append_cucumber_log_line(&format!(
+                "restore probe reply: reference={}, route={}, end={end:?}, remaining={:?}",
+                self.reference,
+                self.server,
+                deadline.remaining()
+            ));
             let pending = match &end {
                 TestRestoreEnd::Replied(reply) => match &reply.disposition {
                     RestoreDisposition::Outcome(outcome) => {
@@ -1454,6 +1528,13 @@ async fn stream_restore(
     declared_digest: Option<[u8; 32]>,
     abandon_after_chunks: Option<usize>,
 ) -> TestRestoreEnd {
+    append_cucumber_log_line(&format!(
+        "restore probe sending: reference={}, route={}, bytes={}, statement={}",
+        request.reference,
+        request.server,
+        request.archive.len(),
+        request.statement
+    ));
     send_restore(
         &request.server,
         TestRestore {
@@ -1558,9 +1639,12 @@ async fn when_restore_is_streamed_in_the_background(
         "a background restore stream is already running"
     );
     let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
-    world.background_restore = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
-        async move { stream_restore(&request, None, None).await },
-    )));
+    world.background_restore = Some(BackgroundRestore {
+        reference: request.reference.clone(),
+        task: AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+            stream_restore(&request, None, None).await
+        })),
+    });
 }
 
 #[when(
@@ -1580,9 +1664,10 @@ async fn when_restore_is_streamed_with_outcome_recovery(
     );
     let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
     let servers = restore_outcome_routes(world);
-    world.background_restore = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
-        request.complete(servers),
-    )));
+    world.background_restore = Some(BackgroundRestore {
+        reference: request.reference.clone(),
+        task: AbortOnDropHandle::new(nervix_primitives::task::spawn(request.complete(servers))),
+    });
 }
 
 #[when(
@@ -1620,7 +1705,7 @@ async fn then_background_restore_outcome_is_held(world: &mut ScenarioWorld, node
         nervix_primitives::select! {
             biased;
             () = fault_injection.wait_for_command_finalization_pause(&node) => {},
-            ended = &mut background => {
+            ended = &mut background.task => {
                 let ended = ended.assured("the background restore task does not panic");
                 panic!("restore ended before its outcome was held: {ended:?}");
             }
@@ -1700,6 +1785,7 @@ async fn then_background_restore_stream_outcome(
         .take()
         .expect("a preceding step streamed a restore in the background");
     let end = task
+        .task
         .await
         .expect("the background restore stream does not panic");
     assert_restore_outcome(&end, &disposition, &origin);
@@ -1713,6 +1799,7 @@ async fn then_background_restore_stream_completes(world: &mut ScenarioWorld) {
         .take()
         .assured("a preceding step streamed a restore in the background");
     let end = task
+        .task
         .await
         .assured("the background restore completion probe does not panic");
     let outcome = restore_outcome(&end);

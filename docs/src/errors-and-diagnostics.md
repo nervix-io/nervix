@@ -14,6 +14,12 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+Client inspection during incoming preflight may refuse full command-memory or filesystem queue
+capacity. An accepted transaction or restore model step waits for that capacity instead: temporary
+pressure is not an invalid configuration or a failed restore step. Oversized charges and closed
+executors retain their typed admission causes beneath the inspection context. Existing service-task
+cancellation ends a waiting inspection without converting it into an invalid-key diagnosis.
+
 The ClickHouse declaration checks a required positive `timeout_ms` and the address/TLS pairing
 before inspecting mounted files or opening a client. Missing timeout or HTTPS trust is a
 `ClientConfigSchemaError::MissingRequired` or `RequiresKey`; a TLS key with an HTTP address is
@@ -1194,6 +1200,13 @@ attributes, and invalid Iceberg commit settings. Each report names the emitter a
 predicate, its relay. The decision fails before a new emitter plan or remote consumer edge is
 published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
 opening an external emitter may fail independently and follows the emitter's retry policy.
+
+OTEL's field declarations supply exact-type and missing-key diagnostics to the registry, including
+the required start time of a DELTA metric. Histogram count and bucket-count mappings require U64;
+sum, min and max require floating-point mappings. Every OTEL client requires its positive
+`timeout_ms` before commit. The connector also validates the rendered client schema when opening
+and keeps its `ClientConfigSchemaError` report beneath `EmitterOpenError::InvalidConfiguration`,
+so an offline refusal retains the offending key and its declared constraint.
 
 The Iceberg emitter plans how its commits write the mapped columns into the table, matching them to
 the table's columns by name, once while opening and again against the table's current schema before

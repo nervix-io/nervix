@@ -24,6 +24,7 @@ use nervix_consensus::{
     ConsensusError, DomainMutationLease, DomainPlanningInputs, ReplicatedTransaction,
     TransactionStepEffect,
 };
+use nervix_execution::QueueAdmission;
 use nervix_interconnect::EntityGatePurpose;
 use nervix_models::{
     DomainName, DomainSchedule, DomainStatus, ExecutionStepImpactReport, ImpactDiagnosticKind,
@@ -1147,10 +1148,16 @@ impl SessionServiceImpl {
                     }
                 }
             };
+            let client_admission = if domain_mutation.is_some() {
+                QueueAdmission::WaitForPlace
+            } else {
+                QueueAdmission::RefuseWhenFull
+            };
             if let Err(error) = Box::pin(self.validate_changed_model_bindings(
                 &domain,
                 domain_state.config.pace,
                 &planned,
+                client_admission,
             ))
             .await
             {

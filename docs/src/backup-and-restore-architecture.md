@@ -526,6 +526,13 @@ A step that fails ends the restore. The steps recorded before it stay applied, a
 restore created stays stopped with what it committed; when the domain was created but did not become
 usable on every live node, the create step itself stays applied and is reported as failed.
 
+Client configuration inspection within the accepted apply-models step waits for command-memory
+capacity and a filesystem worker-queue place. Temporary admission pressure does not fail a step
+after its earlier effects have committed. The node retains the restore's archive and domain lease
+through this wait; it holds no inspection copy before its memory charge is admitted. The service
+task's shutdown cancellation drops the wait, and a worker already running retains its charge until
+it exits. Oversized charges, a closed executor and actual configuration failures still fail the step.
+
 Only the leader the archive was streamed to holds it. When leadership moves while a restore applies,
 the restore stays applying. A leader that holds the restore's archive resumes it at its first step
 not recorded; otherwise a client that sends the archive again under the same execution reference
@@ -899,7 +906,7 @@ keyspaces' disk allocation; until the first sweep completes they read zero.
 | Capture fence | The Loom models `server.backup.cut-includes-publication` and `server.backup.cut-generation`, each qualified by weakenings that must fail, and the Shuttle checks of the fence, of forced deduplicator and window publication at the cut, and of materialized capture against eviction. |
 | Downloads and retention | `backup.feature` and `backup_delivery.feature`, and the Shuttle checks that a download stays bounded, a lost client releases its hold once, and concurrent downloads collect an archive once. |
 | Restore progress | `restore.feature` on one and three nodes: verification refusals, a failed step, an interrupted upload, joined retries and a leader change while applying; the Shuttle checks that a resumed restore never repeats a recorded effect, an abandoned upload releases its quota once, and concurrent retries join one execution. |
-| Complete-set publication and the gate | `backup_generation.feature`, `backup_materialized.feature`, `backup_branch_state.feature` and `backup_branch_state_large.feature`: interrupted installation, durable-publication failure, including one whose coordinator loses leadership before recording it and whose recovery under the same execution reference fails again, restart and delayed coordinators; the consensus Shuttle checks that publication and handle clearing precede resume and fence delayed publishers. |
+| Complete-set publication and the gate | `backup.feature`, `backup_generation.feature`, `backup_materialized.feature`, `backup_branch_state.feature` and `backup_branch_state_large.feature`: interrupted installation through a checkpoint staging failure, durable-publication failure, each including one whose coordinator loses leadership before recording it and whose recovery under the same execution reference fails again, restart and delayed coordinators; the consensus Shuttle checks that publication and handle clearing precede resume and fence delayed publishers. |
 | Staging quota and maintenance | `backup_staging.feature`, the state store's storage regressions, the kept-measurement property, and the consensus Shuttle check that reclamation holds its revision through queued installation. |
 | Interconnect operations | The Turmoil scenarios for a fenced section fetch across a partition, window sections above the bulk budget, a bounded inventory under a held link, and a restart during transfer, with their committed seeds; [Deterministic Interconnect Simulation](./interconnect-simulation.md) lists them. |
 | Tracked locks | The restore storage owner tests and the `@restore_installation` and `@backup_wait` scenarios in the Deloxide selections, with their `stress.` twins in the stress selections; [Data-Plane Concurrency](./data-plane-concurrency.md) records what the detector does and does not see. |

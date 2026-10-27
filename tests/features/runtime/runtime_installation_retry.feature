@@ -1,7 +1,11 @@
 @runtime_installation_retry @deloxide_stress
 Feature: Committed runtime installation recovers without another configuration change
+  This single-node full-cluster restart isolates installation retries from peer-driven updates.
+  The only node must install its unchanged persisted revision and retain its relay ownership.
+
   Scenario: A restarted node retries refused installations of its committed runtime
-    Given Syslog UDP emission endpoint "{{syslog_emit_addr}}" is observed
+    Given the production sticky scheduler is configured
+    And Syslog UDP emission endpoint "{{syslog_emit_addr}}" is observed
     And a 1 node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """

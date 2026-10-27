@@ -106,6 +106,7 @@ kind = "cucumber"
 package = "nervix-server"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@restore_client_inspection",
   "@runtime_installation_retry",
   "@kafka_start_generation",
   "@kafka_start_generation_restore",
@@ -2486,6 +2487,26 @@ invariant = "A restarted node retries refused installations of its committed run
 invocation = "stress-scenarios"
 scenario = "A restarted node retries refused installations of its committed runtime"
 selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Accepted restore model application reaches a full real filesystem queue before its first-poll observation; after capacity is released every step and the configured client are preserved. Async executor waits and test worker parking are untracked."
+examples = 2
+feature = "tests/features/cluster/restore_client_inspection.feature"
+id = "scenario.restore-client-inspection"
+invariant = "An accepted restore waits for client-inspection capacity, then applies every step and preserves the configured client on one and three nodes."
+invocation = "scenarios"
+scenario = "An accepted restore waits for client inspection capacity on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Accepted restore model application reaches a full real filesystem queue before its first-poll observation; after capacity is released every step and the configured client are preserved. Async executor waits and test worker parking are untracked."
+examples = 2
+feature = "tests/features/cluster/restore_client_inspection.feature"
+id = "stress.restore-client-inspection"
+invariant = "An accepted restore waits for client-inspection capacity, then applies every step and preserves the configured client on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "An accepted restore waits for client inspection capacity on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
 
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
