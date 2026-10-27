@@ -50,6 +50,7 @@ mod backup_cut;
 mod consensus;
 mod domain_clock;
 mod domain_resume;
+mod entity_drain;
 mod execution;
 mod handoff_gate_link;
 mod model_publication;
@@ -1148,13 +1149,6 @@ impl FaultInjection {
         *failure == HandoffEngagementTransportFailure::Delivered
     }
 
-    /// Forces the next entity drain in `domain` to report its normal timeout outcome after one
-    /// complete status observation. The one-shot seam lets timeout recovery tests exercise that
-    /// outcome without making successful cluster work race a short duration.
-    pub fn force_next_entity_drain_timeout(&self, domain: DomainName) {
-        self.inner.forced_entity_drain_timeouts.insert(domain, ());
-    }
-
     /// Simulates an incomplete drain observation so a scenario can exercise the local schedule
     /// fence independently of the coordinator's normal quiescence check.
     pub fn report_no_owner_buffered_batches_for_entity_drain(
@@ -2185,14 +2179,6 @@ impl FaultInjection {
         }
         *failure = HandoffEngagementTransportFailure::Delivered;
         true
-    }
-
-    /// Consumes the domain-scoped timeout only at the coordinator's drain-observation seam.
-    pub(crate) fn take_forced_entity_drain_timeout(&self, domain: &DomainName) -> bool {
-        self.inner
-            .forced_entity_drain_timeouts
-            .remove(domain)
-            .is_some()
     }
 
     pub(crate) fn report_no_owner_buffered_batches(
