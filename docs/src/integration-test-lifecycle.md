@@ -9,17 +9,26 @@ node. Its listener takes the existing advertised endpoint and forwards opaque by
 interconnect listener on the restarted node. The advertised endpoint stays fixed so retained peer
 routes also reach the pacer. Its port remains reserved for the test run, as for other retired test
 endpoints. The host, TLS identity, resolver policy and product deadlines stay fixed. Each accepted
-connection uses a 1024-byte inbound buffer, delays each chunk
-by its configured byte rate before forwarding, and forwards responses promptly. A scenario-owned
-task set retains and reaps connections. Cancellation or fixture drop closes the listener and aborts
-all its connections; the fixture cannot survive its node specification.
+connection uses a 1024-byte inbound buffer. The first chunk waits for its byte-rate interval;
+later chunks follow one monotonic byte schedule, so a late timer wake is not charged again on the
+next chunk. After a source has been idle, one available chunk can go promptly and the schedule
+resumes at its configured rate. Responses go promptly. A scenario-owned task set retains and reaps
+connections. Cancellation or fixture drop closes the listener and aborts all its connections; the
+fixture cannot survive its node specification.
 
-The scenario starts the follower without the harness's catch-up retries, records append
-stream opening baselines before that start, and waits for the applied Plexus domain backlog within
-its explicit assertion bound. The opening count is a diagnostic observation because normal initial
-catch-up probes can also open streams. An atomic maximum of bytes forwarded on one connection proves
-that the paced path carried more than one production progress interval. This observation does not inspect TLS or frame bytes
-and establishes no ordering the product relies on.
+The rate-limited case transfers leadership to node-2 while the stopped follower has only its
+initial log, making the new leader recover an unconfirmed previous-log boundary. The scenario
+starts the follower without the harness's catch-up retries, records append-stream
+opening and setup-attempt baselines before that start, and waits for the applied domain backlog
+within its explicit assertion bound. Every five seconds it records applied domains, both stream
+counters for each source, bytes forwarded by the pacer, and each node's applied revision and log,
+snapshot and purged indexes. On failure it also records a concise status for initialization,
+leader and voter membership. The opening count is a diagnostic observation of data streams;
+initial empty probes use the management path. An atomic maximum of bytes forwarded on one
+connection proves that the paced path carried more than one production progress interval. The
+pacer also counts accepted, connected, failed, cancelled and completed connections, and total
+bytes. These observations do not inspect TLS or frame bytes or establish ordering the product
+relies on.
 
 A focused startup scenario occupies the observability port to force the first launch to fail
 before runtime initialization.
@@ -883,6 +892,15 @@ paused-clock reader that resumes at or beyond either the 500 ms or 800 ms bound 
 when its final row is ready. Offloading removes runner polling gaps; it neither extends the budget
 nor proves that runtime workers cannot be delayed.
 
+The slow historical-domain Immediate-flush outline keeps its 500 ms receipt budget, physical
+batching minimum, both exact tenant keys and payloads, and one- and three-node topology. It
+delays only collection of the observation result for one second. The reader must start and
+capture its deadline before the caller first polls the result. Its paused-clock control
+supplies both rows at 100 ms and requires receipt signals inside the original 500 ms window
+before the caller resumes after one second. A missing or late row still fails; the existing
+one-second cadence control covers both the 500 ms and 800 ms budgets. The public receive bound
+qualifies the physical clock choice without changing domain time or the batching minimum.
+
 The duration window outline establishes its observation boundary through a public subscription:
 it first waits for a probe branch's window to emit, then submits all four interleaved tenant rows
 as one HTTP payload unfolded into a decoded batch. Explicit source timestamps are already due
@@ -1166,6 +1184,12 @@ The harness keeps these boundaries explicit.
   Its initial burst of domain creation also uses one production client, retaining each command's
   execution identity across a leadership change during finalization. A raw session's recoverable
   disposition cannot end the fixture before follower catch-up starts.
+  The domain write load fixture keeps several production client sessions committing domain
+  creations through the leader, each waiting for its previous command. With slow consensus commits,
+  another storage operation then keeps waiting behind the one that commits while a scenario acts.
+  Stopping it finishes each session's submitted command and then requires every session to have
+  committed at least one domain without a failed write. A session that reaches its write limit
+  fails instead of filling the cluster.
   A listener bind failure retries only that listener family: the gRPC pair, HTTP, HTTPS,
   observability, web console, or interconnect. A readiness timeout may still move all listeners
   within the same startup budget. A changed interconnect address remains reserved while a peer
@@ -1801,8 +1825,8 @@ The after hook runs every scenario's cleanup through the phases above.
 body complete
      |
 teardown started      release paused health responses, domain-clock progress pauses, and
-     |                command pauses; stop durable catch-up writers and clear consensus
-     |                commit delays
+     |                command pauses; stop durable catch-up writers and domain write load
+     |                sessions, and clear consensus commit delays
 teardown diagnostics  every node's status at once within 10 s; the scenario's context
      |
 stopping              abort CLI output readers and kill their child processes;
@@ -1882,6 +1906,22 @@ while a keeper gives it back on a runtime worker. The close never waits for a wo
 compaction failed; see [Terminal Teardown](./shutdown.md#terminal-teardown).
 
 ### What Cleanup Releases
+
+The resource-source-discovery fixture uses the existing node-scoped command-pause registry. Once
+reconciliation finds a usable source for an absent local copy, the fixture hides the source view
+and records that it was consumed. It leaves the node, transport and all other scenarios running.
+The public regression waits for that observation and the pending replica, explicitly restores
+source visibility, and verifies upload completion and a lookup from the replicated file. Its
+observation wait is bounded at 120 seconds; its public pending-state probe keeps a 30-second bound.
+The source view changes only in a testing build. Explicit release removes the control, and the
+ordinary scenario cleanup releases and clears it with the other command pauses after failure.
+
+The resource upload-publication fixture retains its selected node's refusal in a watch channel.
+It refuses one publication after the local archive is installed, then holds that upload's reply
+until reconciliation takes the applying upload up. The client therefore cannot supply the archive
+again before the recovery observation. The retained `TakenUp` state permits the scenario's positive
+assertion and is disposed with that world's injector. Active, order and stressed selections include
+both cluster sizes of this existing public recovery outline.
 
 Harness state goes back only after the tasks that used it have ended, so the next scenario never
 finds a port, a fault, or a proxy taken. What a node left stopping still uses stays with its keeper
@@ -2170,7 +2210,11 @@ it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
 
-The RabbitMQ fixture publishes its management HTTP port beside the AMQP endpoints. A scenario's
+The RabbitMQ fixture publishes its management HTTP port beside the AMQP endpoints. Its AMQP TLS
+listener requires a client certificate the scenario certificate authority issued, so an `amqps`
+client that presents none is refused by the broker. The scenario server certificate also carries
+the client-authentication usage, and the TLS scenarios mount it with its key as their client
+identity. The management listener requests no client certificate. A scenario's
 `RabbitMqQueueProbe` observes its explicitly provisioned queue with the fixture credentials:
 consumer acknowledgement mode and prefetch, unacknowledged deliveries, or total outstanding
 messages. Each observation uses the shared status budget and bounded polling. These are broker
@@ -2188,6 +2232,16 @@ sharing the server keep running. Each scenario provisions its own collection and
 server kind with that collection for later assertions; standalone and TLS collections keep their
 own server kinds.
 
+MongoDB mutual-TLS resource scenarios use a separate `mongodb-mutual-tls` service and endpoint.
+Its TLS connections require a client certificate signed by the fixture CA. Setup and observation
+clients use the fixture's private combined identity, while Nervix receives the certificate and key
+as separate mounted files. A CA-only setup client must fail its ping within a two-second server
+selection budget, while the same endpoint accepts the setup client with its identity. Both
+one- and three-node examples assert a document written through
+that authenticated transport. The ordinary MongoDB endpoint retains its own authentication mode.
+The BSON declaration refusal outline substitutes an actual NUL from a named fixture placeholder;
+Plexus string literals remain verbatim, so the fixture does not invent a language escape.
+
 The write-concern outline connects a named public client to the emitter's reported owner before
 publishing. That client retains the server's error notices independently of the sessions used by
 readiness and `DESCRIBE` probes. After checking all six documents and delaying the observer, the
@@ -2197,7 +2251,7 @@ code `100` (`UnsatisfiableWriteConcern`). The notice proves that the failure occ
 the live status has cleared. The scenario preserves its retry policy, write concern and exact
 document oracle.
 
-Both MongoDB test servers set `GLIBC_TUNABLES=glibc.pthread.rseq=1`, enabling glibc's restartable
+All MongoDB test servers set `GLIBC_TUNABLES=glibc.pthread.rseq=1`, enabling glibc's restartable
 sequence registration. This avoids the MongoDB/TCMalloc crash on affected Linux kernels when the
 image's default disables that registration; the [image maintainers document the setting and kernel
 issue](https://github.com/docker-library/mongo/discussions/748). The fixed container environment is

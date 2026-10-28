@@ -427,6 +427,51 @@ async fn capture_missing_materialized_state(
     }
 }
 
+/// Holds the node's next materialized snapshot fetch once its first received chunk is charged to
+/// the node's bulk memory, until the node's restore checkpoint maintenance next asks bulk memory for
+/// its working set, so the maintenance meets a fetch that holds part of the free room.
+#[when(
+    expr = "node {string} holds its next materialized snapshot fetch on its first chunk until \
+            restore maintenance asks for bulk memory"
+)]
+async fn when_node_holds_its_next_materialized_snapshot_fetch(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .hold_materialized_snapshot_fetch_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(
+    expr = "within {string} node {string} resumes its held materialized snapshot fetch after \
+            restore maintenance asked for bulk memory"
+)]
+async fn then_held_materialized_snapshot_fetch_resumes(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+) {
+    let duration = parse_duration_text(&duration).assured("the wait is a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    nervix_primitives::time::timeout(
+        duration,
+        world
+            .fault_injection
+            .wait_for_materialized_snapshot_fetch_resumption(&node_name),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "node '{node_id}' never resumed its held materialized snapshot fetch within \
+             {duration:?}: its restore maintenance did not ask for bulk memory while the fetch \
+             held its first chunk"
+        )
+    });
+}
+
 #[when(expr = "the materialized summary subscription {string} is closed")]
 async fn when_materialized_summary_subscription_is_closed(world: &mut ScenarioWorld, name: String) {
     let mut session = world

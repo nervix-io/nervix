@@ -2,8 +2,9 @@ Feature: RabbitMQ name resolution
 
   A RabbitMQ source or emitter resolves the host of its client's `addr` through the node's resolver
   each time it opens a connection, dials the answers in order, and verifies an `amqps` broker's
-  certificate against that host. These scenarios point every node at a DNS fixture the scenario
-  controls, and provision every queue explicitly.
+  certificate against that host. The test broker requires a client certificate on its TLS listener,
+  so `amqps` clients present the mounted scenario identity. These scenarios point every node at a
+  DNS fixture the scenario controls, and provision every queue explicitly.
 
   Scenario Outline: RabbitMQ sources and emitters reach a broker named by the node DNS fixture over <scheme>
     Given RabbitMQ is running
@@ -33,7 +34,9 @@ Feature: RabbitMQ name resolution
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RABBITMQ CLIENT rabbit_main MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}',
-        'tls_ca_file' = '{{dev_tls}}/ca.pem'
+        'tls_ca_file' = '{{dev_tls}}/ca.pem',
+        'tls_cert_file' = '{{dev_tls}}/node.pem',
+        'tls_key_file' = '{{dev_tls}}/node-key.pem'
       };
       CREATE RABBITMQ QUEUE INGESTOR rabbit_in
       FROM rabbit_main QUEUE 'dns_in_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
@@ -98,7 +101,9 @@ Feature: RabbitMQ name resolution
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RABBITMQ CLIENT rabbit_main MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{rabbitmq_tls_dns_addr}}',
-        'tls_ca_file' = '{{dev_tls}}/ca.pem'
+        'tls_ca_file' = '{{dev_tls}}/ca.pem',
+        'tls_cert_file' = '{{dev_tls}}/node.pem',
+        'tls_key_file' = '{{dev_tls}}/node-key.pem'
       };
       CREATE RABBITMQ QUEUE INGESTOR rabbit_in
       FROM rabbit_main QUEUE 'dns_in_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s

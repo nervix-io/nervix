@@ -92,6 +92,12 @@ impl ConfiguredFaultInjection {
     ) {
     }
 
+    pub(in crate::runtime) async fn hold_materialized_snapshot_fetch_if_armed(
+        &self,
+        _node_id: &ClusterNodeName,
+    ) {
+    }
+
     pub(in crate::runtime) fn emitter_client_is_unavailable(&self, _emitter: &EmitterName) -> bool {
         false
     }

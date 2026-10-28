@@ -24,6 +24,10 @@ carrying a second database identity. Collection names are validated vocabulary v
 their original UTF-8 spelling; the resolved database, separator and collection cross the complete
 namespace-budget check before the emitter opens. Missing database configuration and a refused
 namespace return typed errors, never an empty database or a substituted collection.
+Its BSON field-name predicate rejects NUL at admission. Its private TLS plan distinguishes native
+driver TLS options from a complete split-file identity awaiting preparation; a partial identity
+is a configuration error. Preparation returns native options together with their private combined
+PEM guard. One shared client owner retains both driver and guard until its last handle ends.
 
 Nervix represents absence and distinct semantic states in its types. A zero, empty string,
 empty collection, maximum integer, or all-zero digest is a value in its own right; it does not
@@ -199,6 +203,15 @@ the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
 
+**Installed resource manifests.** The resource store returns an optional manifest: a filesystem
+`NotFound` means the local copy is absent, while other filesystem and decoding failures keep their
+typed reports. Replica reconciliation records an absent copy as pending while no live source is visible;
+an installation has not failed merely because source discovery has not converged. A real read or
+metadata failure remains distinct, and a matching local manifest proves the copy ready.
+Recovery of an unpublished upload consumes the same absence outcome: without the admitting
+node's installed copy, the admitted archive is unavailable. Its read failures retain their causes,
+while an executor refusal or cancellation leaves that upload applying for another reconciliation.
+
 **MQTT size admission.** A source packet is either an admitted publish with independently owned
 bytes or an oversized outcome with an optional prepared acknowledgement. Absence means that QoS
 requires none or the client acknowledges automatically. A discard is explicitly deferred for
@@ -245,10 +258,11 @@ after obtaining that request remains a failure naming its peer; it is not inferr
 input. The caller's retry and cancellation gate runs before this distinction is resolved.
 
 **Consensus log chunks.** An unread chunk, a buffered chunk owning decoded entries and their
-reservation, and an exhausted chunk boundary are distinct states. Taking the last entry replaces
-the buffered state with the exhausted boundary and drops both its iterator allocation and charge
-before returning. The exhausted state carries the need to yield before the next read without
-retaining memory on behalf of an empty chunk. A consumer need not poll again to release that memory.
+working set, the reservation and the store's Commands turn, and an exhausted chunk boundary are
+distinct states. Taking the last entry replaces the buffered state with the exhausted boundary and
+drops its iterator allocation, its charge and then its turn before returning. The exhausted state
+carries the need to yield before the next read without retaining memory on behalf of an empty
+chunk. A consumer need not poll again to release that memory.
 
 **Runtime checkpoint exchange.** A state synchronization answer uses `None` only when the
 requester already holds the owner's current revision. `Some` carries a typed revision, byte length

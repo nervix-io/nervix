@@ -117,10 +117,10 @@ use crate::common::{
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
         ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
-        MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_REPLICA_SET_ADDR, MONGODB_TLS_ADDR,
-        MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, NATS_ADDR, PULSAR_ADDR,
-        RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT,
-        SQS_TLS_ENDPOINT, TestDependencies,
+        MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_MTLS_ADDR, MONGODB_REPLICA_SET_ADDR,
+        MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, NATS_ADDR,
+        PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR,
+        SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -211,6 +211,12 @@ const DURABLE_CATCH_UP_STORAGE_COMMITS_PER_ENTRY: u32 = 2;
 const DURABLE_CATCH_UP_MARGIN: Duration = Duration::from_secs(5);
 const DURABLE_CATCH_UP_WRITE_CADENCE: Duration = Duration::from_millis(100);
 const MAX_DURABLE_CATCH_UP_WRITES: usize = 128;
+/// Each load session commits at most this many domains, so a load nothing stops ends with a
+/// failure instead of filling the cluster.
+const MAX_DOMAIN_WRITE_LOAD_WRITES: usize = 256;
+/// A stopped load session first collects the command it already submitted, which slow commits
+/// keep in flight for a while.
+const DOMAIN_WRITE_LOAD_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 /// The execution class a follower charges its decoded append batches to.
 const COMMANDS_MEMORY_LABEL: &str = "class=\"commands\"";
 const BULK_MEMORY_LABEL: &str = "class=\"bulk\"";
@@ -274,6 +280,15 @@ struct DurableCatchUpWriter {
     cancellation: CancellationToken,
     prefix: String,
     task: AbortOnDropHandle<Result<usize, String>>,
+}
+
+/// Client sessions that keep committing domain creations through the leader, each waiting for its
+/// previous command, until a step stops them.
+struct DomainWriteLoad {
+    cancellation: CancellationToken,
+    prefix: String,
+    /// Each session's task answers how many domains it committed.
+    sessions: Vec<AbortOnDropHandle<Result<usize, String>>>,
 }
 
 /// HTTPS posts to every node that keep running until a step collects what the listeners answered.
@@ -527,6 +542,7 @@ struct ScenarioWorld {
     append_setup_observation: Option<AppendSetupObservation>,
     moving_catch_up: Option<paced_replication::MovingCatchUp>,
     durable_catch_up_writer: Option<DurableCatchUpWriter>,
+    domain_write_load: Option<DomainWriteLoad>,
     follower_commands_memory: Option<FollowerCommandsMemoryObservation>,
     transaction_qualification: Option<TransactionQualificationObservation>,
     cluster_config: TestClusterConfig,
@@ -840,10 +856,14 @@ impl ScenarioWorld {
         ));
     }
 
-    fn stop_durable_catch_up_work(&mut self) {
+    fn stop_consensus_load(&mut self) {
         if let Some(writer) = self.durable_catch_up_writer.take() {
             writer.cancellation.cancel();
             drop(writer.task);
+        }
+        if let Some(load) = self.domain_write_load.take() {
+            load.cancellation.cancel();
+            drop(load.sessions);
         }
         for node_id in self.consensus_commit_delays.keys() {
             self.fault_injection.set_consensus_storage_commit_delay(
@@ -1411,16 +1431,11 @@ async fn then_the_silent_endpoint_eventually_accepts_a_connection(
     .unwrap_or_else(|_| panic!("no client connected to the endpoint '{name}'"));
 }
 
-/// A client that reconnects after a failed attempt opens another connection to the endpoint.
-#[then(expr = "the silent endpoint {string} eventually accepts {int} connections")]
-async fn then_the_silent_endpoint_eventually_accepts_connections(
-    world: &mut ScenarioWorld,
-    name: String,
-    count: u64,
-) {
+/// Wait until clients have opened `count` connections to the endpoint `name` the scenario stood.
+async fn wait_for_endpoint_connections(world: &ScenarioWorld, name: &str, count: usize) {
     let proxy = world
         .stallable_tcp_proxies
-        .get(&name)
+        .get(name)
         .unwrap_or_else(|| panic!("no endpoint '{name}' was stood"));
     nervix_primitives::time::timeout(
         STALLABLE_ENDPOINT_CONNECTION_TIMEOUT,
@@ -1430,6 +1445,75 @@ async fn then_the_silent_endpoint_eventually_accepts_connections(
     .unwrap_or_else(|_| {
         panic!("clients did not open {count} connections to the endpoint '{name}'")
     });
+}
+
+/// A client that reconnects after a failed attempt opens another connection to the endpoint.
+#[then(expr = "the silent endpoint {string} eventually accepts {int} connections")]
+async fn then_the_silent_endpoint_eventually_accepts_connections(
+    world: &mut ScenarioWorld,
+    name: String,
+    count: usize,
+) {
+    wait_for_endpoint_connections(world, &name, count).await;
+}
+
+/// A client that retires its connections opens replacements through the endpoint in front of its
+/// dependency.
+#[then(expr = "the stallable endpoint {string} eventually accepts {int} connections")]
+async fn then_the_stallable_endpoint_eventually_accepts_connections(
+    world: &mut ScenarioWorld,
+    name: String,
+    count: usize,
+) {
+    wait_for_endpoint_connections(world, &name, count).await;
+}
+
+/// When the endpoint `name` accepted its connection `ordinal`, counting from one in the order it
+/// accepted them.
+fn endpoint_connection_accepted_at(world: &ScenarioWorld, name: &str, ordinal: usize) -> Instant {
+    let proxy = world
+        .stallable_tcp_proxies
+        .get(name)
+        .unwrap_or_else(|| panic!("no endpoint '{name}' was stood"));
+    let Some(index) = ordinal.checked_sub(1) else {
+        panic!("connections to the endpoint '{name}' are counted from 1");
+    };
+    proxy
+        .accepted_at(index)
+        .unwrap_or_else(|| panic!("the endpoint '{name}' has not accepted connection {ordinal}"))
+}
+
+/// A measured delay between two connections the endpoint accepted, which load only lengthens: the
+/// endpoint records each one when it accepts it.
+#[then(
+    expr = "the stallable endpoint {string} accepted connection {int} at least {string} after \
+            connection {int}"
+)]
+async fn then_the_stallable_endpoint_accepted_connection_after(
+    world: &mut ScenarioWorld,
+    name: String,
+    later: usize,
+    minimum: String,
+    earlier: usize,
+) {
+    let minimum = parse_duration_text(&minimum)
+        .unwrap_or_else(|error| panic!("the minimum delay '{minimum}' is invalid: {error}"));
+    let earlier_at = endpoint_connection_accepted_at(world, &name, earlier);
+    let later_at = endpoint_connection_accepted_at(world, &name, later);
+    let Some(measured) = later_at.checked_duration_since(earlier_at) else {
+        panic!("the endpoint '{name}' accepted connection {later} before connection {earlier}");
+    };
+    append_cucumber_log_line(&format!(
+        "endpoint '{name}' accepted connection {later} {} after connection {earlier}",
+        humantime::format_duration(measured)
+    ));
+    assert!(
+        measured >= minimum,
+        "the endpoint '{name}' accepted connection {later} {} after connection {earlier}, \
+         expected at least {}",
+        humantime::format_duration(measured),
+        humantime::format_duration(minimum)
+    );
 }
 
 #[given("ClickHouse is running")]
@@ -1484,6 +1568,17 @@ async fn given_mongodb_replica_set_is_running(world: &mut ScenarioWorld) {
         .start_mongodb_replica_set(&world.test_id)
         .await
         .expect("MongoDB replica set test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("MongoDB mutual TLS is running")]
+async fn given_mongodb_mutual_tls_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_mongodb_mutual_tls(&world.test_id)
+        .await
+        .expect("MongoDB mutual TLS test container should start");
     refresh_dependency_configuration(world);
 }
 
@@ -6489,6 +6584,8 @@ enum MongoDbServer {
     Standalone,
     /// The authenticated standalone server, reached over TLS.
     StandaloneTls,
+    /// The authenticated standalone server, whose TLS listener requires a client identity.
+    MutualTls,
     /// The single-member replica set, whose one member is its primary.
     ReplicaSet,
 }
@@ -6507,20 +6604,28 @@ impl MongoDbServer {
         let addr = match self {
             Self::Standalone => dependencies.get(MONGODB_ADDR),
             Self::StandaloneTls => dependencies.get(MONGODB_TLS_ADDR),
+            Self::MutualTls => dependencies.get(MONGODB_MTLS_ADDR),
             Self::ReplicaSet => dependencies.get(MONGODB_REPLICA_SET_ADDR),
         }
         .map_err(|error| error.to_string())?;
         let mut options = MongoDbClientOptions::parse(addr)
             .await
             .map_err(|source| source.to_string())?;
-        if let Self::StandaloneTls = self {
+        if matches!(self, Self::StandaloneTls | Self::MutualTls) {
             let ca_file = dependencies
                 .tls_ca_path()
                 .map_err(|error| error.to_string())?
                 .to_path_buf();
-            options.tls = Some(MongoDbTls::Enabled(
-                MongoDbTlsOptions::builder().ca_file_path(ca_file).build(),
-            ));
+            let mut tls = MongoDbTlsOptions::builder().ca_file_path(ca_file).build();
+            if let Self::MutualTls = self {
+                tls.cert_key_file_path = Some(
+                    dependencies
+                        .tls_identity_path()
+                        .map_err(|error| error.to_string())?
+                        .to_path_buf(),
+                );
+            }
+            options.tls = Some(MongoDbTls::Enabled(tls));
         }
         MongoDbClient::with_options(options).map_err(|source| source.to_string())
     }
@@ -6597,6 +6702,122 @@ fn given_consensus_commits_take(world: &mut ScenarioWorld, node_id: String, dura
         .fault_injection
         .set_consensus_storage_commit_delay(&crate::common::cluster::node_name(&node_id), duration);
     world.consensus_commit_delays.insert(node_id, duration);
+}
+
+#[given(expr = "consensus commits on every node take {string}")]
+fn given_consensus_commits_on_every_node_take(world: &mut ScenarioWorld, duration: String) {
+    let duration = parse_duration_text(&duration)
+        .assured("the Cucumber expression supplies a valid consensus commit duration");
+    for node_id in world.cluster().node_ids() {
+        world.fault_injection.set_consensus_storage_commit_delay(
+            &crate::common::cluster::node_name(&node_id),
+            duration,
+        );
+        world.consensus_commit_delays.insert(node_id, duration);
+    }
+}
+
+#[given(expr = "{int} sessions keep creating domains named {string} through the leader node")]
+async fn given_sessions_keep_creating_domains(
+    world: &mut ScenarioWorld,
+    session_count: usize,
+    prefix: String,
+) {
+    assert!(
+        world.domain_write_load.is_none(),
+        "a domain write load is already running"
+    );
+    let prefix = expand_placeholders(world, &prefix);
+    let leader = current_leader_node(world).await;
+    let leader_uri = world
+        .cluster()
+        .grpc_uri(&leader)
+        .unwrap_or_else(|error| panic!("failed to resolve leader '{leader}': {error}"));
+    let cancellation = CancellationToken::new();
+    let mut sessions = Vec::with_capacity(session_count);
+    for session in 0..session_count {
+        let connect_options = client_connect_options(&leader_uri).unwrap_or_else(|error| {
+            panic!("failed to configure domain write load session {session}: {error}")
+        });
+        let client = Client::connect_with_options(
+            &leader_uri,
+            client_domain(&world.domain),
+            connect_options,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to open domain write load session {session}: {error}")
+        });
+        let session_cancellation = cancellation.clone();
+        let session_prefix = format!("{prefix}_{session}");
+        let task = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+            let mut written = 0_usize;
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                if session_cancellation.is_cancelled() {
+                    return Ok(written);
+                }
+                if written >= MAX_DOMAIN_WRITE_LOAD_WRITES {
+                    return Err(format!(
+                        "the load was not stopped while it committed {written} domains"
+                    ));
+                }
+
+                let name = burst_domain_name(&session_prefix, written);
+                // A stop ends the next iteration, so the command already submitted answers first.
+                let outcome = client.execute(format!("CREATE DOMAIN {name};")).await;
+                let outcome = outcome.map_err(|error| format!("{error:#}"))?;
+                if !outcome.succeeded() {
+                    return Err(format!(
+                        "command failed with {:?}: {}; diagnostics: {:?}",
+                        outcome.disposition, outcome.message, outcome.diagnostics
+                    ));
+                }
+                written = written
+                    .checked_add(1)
+                    .verified("the write limit above returned before the count could overflow");
+            }
+        }));
+        sessions.push(task);
+    }
+    world.domain_write_load = Some(DomainWriteLoad {
+        cancellation,
+        prefix,
+        sessions,
+    });
+}
+
+#[then(expr = "the sessions creating domains named {string} stop with every domain committed")]
+async fn then_domain_write_load_stops_with_every_domain_committed(
+    world: &mut ScenarioWorld,
+    prefix: String,
+) {
+    let prefix = expand_placeholders(world, &prefix);
+    let load = world
+        .domain_write_load
+        .take()
+        .verified("the scenario started its domain write load in an earlier step");
+    assert_eq!(
+        load.prefix, prefix,
+        "the running domain write load creates other domains"
+    );
+    load.cancellation.cancel();
+    for (session, task) in load.sessions.into_iter().enumerate() {
+        let joined = nervix_primitives::time::timeout(DOMAIN_WRITE_LOAD_STOP_TIMEOUT, task)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("domain write load session {session} did not stop: {error}")
+            });
+        let result = joined
+            .unwrap_or_else(|error| panic!("domain write load session {session} failed: {error}"));
+        let written = result.unwrap_or_else(|error| {
+            panic!("a domain write of load session {session} failed: {error}")
+        });
+        assert!(
+            written > 0,
+            "domain write load session {session} committed no domain while it ran"
+        );
+    }
 }
 
 #[given(expr = "the next start of node {string} has an occupied observability port")]
@@ -12371,6 +12592,41 @@ async fn given_resource_installation_pause(world: &mut ScenarioWorld, node_id: S
     world
         .fault_injection
         .pause_resource_installation_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[given(expr = "resource source discovery on node {string} is deferred")]
+fn given_resource_source_discovery_is_deferred(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    world
+        .fault_injection
+        .defer_resource_source_discovery_on(crate::common::cluster::node_name(&node));
+}
+
+#[then(expr = "the deferred resource source discovery on node {string} is observed")]
+async fn then_deferred_resource_source_discovery_is_observed(
+    world: &mut ScenarioWorld,
+    node: String,
+) {
+    let node = expand_placeholders(world, &node);
+    let node_name = crate::common::cluster::node_name(&node);
+    let observed = nervix_primitives::time::timeout(
+        Duration::from_secs(120),
+        world
+            .fault_injection
+            .wait_for_deferred_resource_source_discovery(&node_name),
+    )
+    .await;
+    if let Err(error) = observed {
+        panic!("resource source discovery on '{node}' was not deferred: {error}");
+    }
+}
+
+#[when(expr = "resource source discovery on node {string} resumes")]
+fn when_resource_source_discovery_resumes(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    world
+        .fault_injection
+        .resume_resource_source_discovery_on(&crate::common::cluster::node_name(&node));
 }
 
 #[given(expr = "resource installation on node {string} fails before promotion")]
@@ -24390,6 +24646,8 @@ async fn then_within_duration_node_eventually_reports_describe_resource_as(
     #[step] step: &Step,
 ) {
     let timeout = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let expected = expand_placeholders(world, &expected);
     let commands = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + timeout;
 
@@ -25587,6 +25845,40 @@ async fn given_mongodb_collection_recording_insert_command_sizes_exists(
 #[given(expr = "MongoDB TLS collection {string} exists")]
 async fn given_mongodb_tls_collection_exists(world: &mut ScenarioWorld, collection: String) {
     prepare_mongodb_collection(world, collection, MongoDbServer::StandaloneTls).await;
+}
+
+#[given(expr = "MongoDB mutual TLS collection {string} exists")]
+async fn given_mongodb_mutual_tls_collection_exists(world: &mut ScenarioWorld, collection: String) {
+    prepare_mongodb_collection(world, collection, MongoDbServer::MutualTls).await;
+}
+
+#[given("MongoDB mutual TLS refuses a client without an identity")]
+async fn given_mongodb_mutual_tls_requires_identity(world: &mut ScenarioWorld) {
+    let endpoints = world.dependencies.endpoints();
+    let address = endpoints
+        .get(MONGODB_MTLS_ADDR)
+        .expect("mutual TLS server is running");
+    let mut options = MongoDbClientOptions::parse(address)
+        .await
+        .expect("fixture address is valid");
+    options.tls = Some(MongoDbTls::Enabled(
+        MongoDbTlsOptions::builder()
+            .ca_file_path(
+                endpoints
+                    .tls_ca_path()
+                    .expect("fixture CA is available")
+                    .to_path_buf(),
+            )
+            .build(),
+    ));
+    options.server_selection_timeout = Some(Duration::from_secs(2));
+    let client =
+        MongoDbClient::with_options(options).expect("CA-only client configuration is valid");
+    client
+        .database("admin")
+        .run_command(mongodb_doc! { "ping": 1 })
+        .await
+        .expect_err("the mutual TLS fixture must refuse a client without an identity");
 }
 
 async fn prepare_mongodb_collection(
@@ -29570,6 +29862,11 @@ async fn given_repeated_text_placeholder(
     world.placeholders.insert(placeholder, "a".repeat(bytes));
 }
 
+#[given(expr = "a NUL character placeholder {string} is prepared")]
+async fn given_nul_character_placeholder(world: &mut ScenarioWorld, placeholder: String) {
+    world.placeholders.insert(placeholder, "\0".to_string());
+}
+
 #[then(expr = "timestamp placeholder {string} is not before timestamp placeholder {string}")]
 async fn then_timestamp_placeholder_is_not_before(
     world: &mut ScenarioWorld,
@@ -33080,7 +33377,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.enter_phase(ScenarioPhase::BodyComplete, &format!("result={body}"));
 
                 world.enter_phase(ScenarioPhase::TeardownStarted, "");
-                world.stop_durable_catch_up_work();
+                world.stop_consensus_load();
                 world.fault_injection.release_all_health_responses();
                 world.fault_injection.release_all_domain_clock_progress();
                 world.fault_injection.release_all_command_pauses();

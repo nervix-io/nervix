@@ -879,6 +879,8 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `addr` | required | driver address, including its delegated query options | Nervix; strict | no | none |
 | `connect_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 | `idle_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `pool_idle_timeout_ms` | optional; default `600000` | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `pool_max_lifetime_ms` | optional; default `1800000` | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 | `subscription_buffer_messages` | optional | positive integer | Nervix; strict | no | none |
 | `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
 | `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
@@ -1124,6 +1126,8 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `addr` | required | driver address, including its delegated query options | Nervix; strict | no | none |
 | `database` | optional | string | Nervix; strict | no | none |
 | `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 

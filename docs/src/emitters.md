@@ -1111,7 +1111,7 @@ CREATE [IF NOT EXISTS] <kind> CLIENT <name>
 Transport-specific expectations:
 
 - `KAFKA`: pass-through to librdkafka, except `allow.auto.create.topics`, which `CREATE KAFKA CLIENT` refuses. The emitter's producer keeps librdkafka's producer default, so a broker that allows auto-creation creates a missing topic on the first publish; provision topics explicitly. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and optional `'ssl.certificate.location'` plus `'ssl.key.location'`.
-- `RABBITMQ`: use `amqps://...` in `addr`; Nervix honors `tls_ca_file`.
+- `RABBITMQ`: use `amqps://...` in `addr`; Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](./ingestors.md#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
@@ -1394,7 +1394,10 @@ under `ACK` and checking the queue share the client's `connect_timeout_ms`, 30 s
 left out; the broker certificate must name the host `addr` names. A connection that fails or runs
 out of that deadline, including a name that does not resolve, leaves the emitter unavailable with
 the failure as its transient error; it confirms nothing, so its input stays unacknowledged, and it
-reopens on its `RETRY POLICY` backoff.
+reopens on its `RETRY POLICY` backoff. The emitter reads the client's `addr`, trusts its
+`tls_ca_file` and presents its `tls_cert_file` and `tls_key_file` as a RabbitMQ source does; see
+[RabbitMQ](./ingestors.md#rabbitmq). A broker that refuses the TLS session leaves the emitter
+unavailable with that refusal as its transient error.
 
 ### Redis Pub/Sub
 
@@ -1445,10 +1448,15 @@ Redis Pub/Sub has no subscriber delivery acknowledgment. The awaited `PUBLISH` r
 server acceptance only. A record-specific server rejection follows `ON MESSAGE ERROR`; connection
 failures retry the undelivered work. A `REDIS CLIENT` declares its connection-pool bounds; see
 [Database Client Connection Pools](database-client-pools.md).
+A publish checks a command connection out within the client's `connect_timeout_ms`. The client's
+`pool_idle_timeout_ms` and `pool_max_lifetime_ms`, 10 and 30 minutes by default, retire a command
+connection that sat idle or grew old; see
+[Connection lifetimes](database-client-pools.md#connection-lifetimes).
 Each physical pooled command connection resolves the `addr` hostname through the node's
 asynchronous DNS resolver when it opens. A replacement connection can use a changed DNS answer;
-an established connection stays open until Redis or the network closes it. For `rediss://`, TLS
-still verifies the configured hostname and uses its configured CA and optional client identity.
+an established connection stays open until Redis or the network closes it or the pool retires it.
+For `rediss://`, TLS still verifies the configured hostname and uses its configured CA and optional
+client identity.
 
 ### MQTT
 
@@ -2609,8 +2617,9 @@ inside arrays, and BSON field order follows `VALUES` order.
 
 These integer widths and native dates are the current encoding contract. Recreate collections
 whose validators, indexes or queries require another stored representation; Nervix provides no
-conversion of existing documents. Unsupported mapped types and repeated `VALUES` keys are refused
-before a graph starts.
+conversion of existing documents. Unsupported mapped types, repeated `VALUES` keys and keys
+containing a NUL byte are refused at `CREATE` and `ALTER`, before a graph starts. BSON keys retain
+their spelling, including dots, dollar signs and Unicode; Nervix does not rewrite them.
 
 A `U64` value above the signed 64-bit range has no BSON integer. Such a record is rejected before its document is written: it follows
 `ON MESSAGE ERROR` with a `validation` error whose affected field is `mongodb.<column>`, it is never
@@ -2688,7 +2697,18 @@ URL are refused with a `POOL SIZE` diagnostic: the clause owns both bounds. `dat
 when the URL supplies a database path; an explicit value overrides that path. Unknown CONFIG keys
 are refused. Public inspection redacts address credentials and query options.
 
-For TLS connections, include `tls=true`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path.
+For TLS connections, include `tls=true`, mount a TLS resource, and set `'tls_ca_file'` to the
+mounted CA path. For mutual TLS, also set `'tls_cert_file'` to the PEM certificate chain and
+`'tls_key_file'` to its PEM private key. Supply both identity keys together. Explicit TLS files
+enable TLS when the URL does not choose a mode; a URL with `tls=false` refuses them. Each explicit
+file replaces only its corresponding URL TLS setting, preserving the driver's other TLS options.
+
+The MongoDB driver reads a combined certificate/key PEM. Nervix prepares that file privately on
+its filesystem executor and retains it for the shared client's lifetime, including all clones;
+the final client drop removes it. The mounted source files remain separate. This preparation and
+the driver's certificate parsing happen on the filesystem executor when the client opens. The connector's offline
+configuration check performs no filesystem or network I/O; resource binding keeps its own
+validation boundary.
 
 ### Iceberg
 

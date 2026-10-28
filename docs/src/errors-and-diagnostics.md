@@ -28,6 +28,16 @@ Client initialization also preserves the driver cause of option installation and
 ping. Public command refusal projection renders the reviewed key/pool context rather than driver
 input.
 
+MongoDB TLS preparation retains `MongoDbTlsError` beneath the client-initialization context
+and preserves filesystem, executor and native driver causes. Its contexts name the operation and
+certificate/key role without copying PEM contents or configured paths into diagnostic text.
+Native client construction uses filesystem-worker admission before the driver reads or parses
+TLS files. Admission/cancellation stays an initialization failure; a native TLS refusal retains
+the driver's typed cause beneath its configuration context.
+Explicit files combined with `tls=false` fail offline under the value-free `addr` key context.
+The registry's `ConnectorDeclarationIssue::MongoDbFieldName` refuses a NUL byte in a mapped BSON
+key at CREATE and ALTER; its debug-formatted key escapes control characters in the diagnostic.
+
 The ClickHouse declaration checks a required positive `timeout_ms` and the address/TLS pairing
 before inspecting mounted files or opening a client. Missing timeout or HTTPS trust is a
 `ClientConfigSchemaError::MissingRequired` or `RequiresKey`; a TLS key with an HTTP address is
@@ -541,6 +551,15 @@ source composition with the protocol encoder's typed cause retained beneath the 
 
 ### Stored Shapes And Archives
 
+The resource store treats a missing installed manifest as ordinary absence. Other filesystem and
+manifest decoding failures retain their typed causes. Resource reconciliation renders the complete
+report only when it records a failed replica, so an upload refusal and `DESCRIBE RESOURCE` can
+distinguish a filesystem failure from malformed JSON. An absent local copy of a published version
+is pending while it awaits a live source and supplies no failure reason. Recovery of an unpublished
+upload instead reports the admitted archive unavailable when that local copy is absent; a genuine
+read failure keeps its cause. [Resource Versions And Bindings](./resource-versions.md#publication-and-transfer)
+owns those installation states and their retry behavior.
+
 The native Kafka checkpoint decoder checks its required format signature before exposing offsets
 or the optional applied-start generation. A mismatched signature retains the typed
 `KafkaOffsetCheckpointError::FormatSignature` cause beneath `RuntimePersistenceError::DecodeState`.
@@ -680,18 +699,25 @@ is `FeatureUnsupported`. Building the storage HTTP client or an OpenDAL operatio
 emitter failure and retry path; they do not release a staged record's acknowledgement before commit.
 
 A RabbitMQ connection that fails is a `RabbitMqConnectError`, owned by the connector's connection
-module: an invalid address or CA file, a lookup failure that keeps the resolver's `DnsLookupFailure`
-as a typed field, no address that accepted a connection, a socket the node could not hold the
-second handle on that ends an unopened connection, a failed or overdue TLS handshake, a Lapin
-runtime that could not be created, or a failed or overdue AMQP handshake, each naming the broker
-host where one is involved. An overdue step keeps the elapsed `connect_timeout_ms` as its typed
-cause. A step of opening the entity's channel that fails or runs out of the same deadline is
+module: an invalid address, with the address owner's typed reason beneath it, such as an address
+that names no host or port 0; an invalid CA file; an incomplete client identity; a client
+certificate or private key file that cannot be read, keeping the connector contract's file failure
+beneath it, or that holds no PEM certificate or key, naming which; a lookup failure that keeps the
+resolver's `DnsLookupFailure` as a typed field; no address that accepted a connection; a socket the
+node could not hold the second handle on that ends an unopened connection; a failed or overdue TLS
+handshake; a broker that refused the TLS session, carrying the TLS alert it sent as a typed field
+whether that alert ended the handshake or, under TLS 1.3, the first read of the AMQP handshake; a
+Lapin runtime that could not be created; or a failed or overdue AMQP handshake, each naming the
+broker host where one is involved. An overdue step keeps the elapsed `connect_timeout_ms` as its
+typed cause. The address refusal never repeats the address, which can carry credentials, and the
+CREATE-time check of the same address keeps the same typed reason beneath the client's key error. A step of opening the entity's channel that fails or runs out of the same deadline is
 reported beneath the source's or emitter's own context for that step, with the elapsed deadline as its
 typed cause and its text leading the report. The source keeps these beneath its connect and resume
 contexts, so `DESCRIBE INGESTOR` shows the deepest cause, such as the resolver's own lookup error or
 the deadline that ran out. The emitter changes them into a configuration failure for an invalid
-address, CA file or deadline key and an initialization failure otherwise, leading with the failure's
-chain, down to a `connect_timeout_ms` it ran out of, which `DESCRIBE EMITTER` shows. Neither
+address, CA file, client identity or deadline key and an initialization failure otherwise, leading
+with the failure's chain, down to a `connect_timeout_ms` it ran out of, which `DESCRIBE EMITTER`
+shows. Neither
 attaches credentials from the address. A `NO ACK` round trip that runs out of the client's
 `timeout_ms` fails the write as a publish failure with the elapsed deadline as its typed cause and
 its text leading the report.
@@ -734,6 +760,13 @@ A missing key is `RedisPubSubIngestorError::MissingConfiguration`, naming only t
 outside the bounded channel's range is `InvalidBufferCapacity`, and an invalid idle deadline keeps
 `ClientConfigError::InvalidDeadline` beneath `InvalidIdleTimeout`. These are source configuration
 failures before a subscription opens, not record rejections.
+
+A Redis client's command-pool lifetimes, `pool_idle_timeout_ms` and `pool_max_lifetime_ms`, are
+refused at `CREATE CLIENT` unless they are positive, schedulable whole milliseconds. The pool reads
+them from the client's effective entries and checks them again: an invalid value fails opening the
+pool with `RedisClientError::InvalidPoolLifetime`, naming the key above the schema's
+`ClientConfigSchemaError::InvalidValue`, which the node reports as
+`OpenClientError::InvalidPoolLifetime`. It is a configuration failure, not a record rejection.
 
 Redis subscription protocol and read failures retain their driver causes beneath
 `RedisPubSubIngestorError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps

@@ -1031,6 +1031,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/rabbitmq/src/address/__fuzz__/address__tests__bolero_addresses_name_the_broker_written_into_them/corpus"
+domain_version = 1
+features = []
+id = "rabbitmq-client-address"
+invariant = "Every generated amqp or amqps address, with percent-encoded credentials and virtual host, a name, IPv4 or IPv6 host, an optional nonzero port and Lapin's query options, names exactly the scheme, credentials, host, port, virtual host and options it was written from, through the one owner that reads it before commit and for every connection."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-connector-rabbitmq"
+random_iterations = 256
+source = "crates/connectors/rabbitmq/src/address/tests.rs"
+test = "address::tests::bolero_addresses_name_the_broker_written_into_them"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime_schema/__fuzz__/runtime_schema__syslog__tests__bolero_structured_data_and_headers_match_the_per_byte_reading/corpus"
 domain_version = 1
 features = []
@@ -2220,7 +2235,7 @@ corpus = "src/resource/__fuzz__/resource__layout_properties__bolero_resource_ver
 domain_version = 3
 features = []
 id = "resource-store-layout"
-invariant = "Resource versions named across the whole name rule, including names spelled like the store's own directories, read back their complete manifests and archives after every installation, staging cleanup and the removal of another version."
+invariant = "Resource versions named across the whole name rule, including names spelled like the store's own directories, read back their complete manifests and archives after every installation, staging cleanup and the removal of another version; a deleted version has an absent manifest."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-server"
@@ -3282,7 +3297,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 9
+domain_version = 10
 features = []
 id = "client-config-schema"
 invariant = "Bounded entries drawn from every current client key schema preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."

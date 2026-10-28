@@ -3,7 +3,7 @@
 //!
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
-//! - **Owns.** One loopback listener, how many connections it accepted, the connections it forwards
+//! - **Owns.** One loopback listener, when it accepted each connection, the connections it forwards
 //!   to its dependency or holds unanswered, the gate that pauses both directions of every forwarded
 //!   one, resetting them, and rewriting the broker address a Pulsar topic lookup answers with.
 //! - **Depends on.** Tokio's TCP sockets and codecs, the primitives boundary's watch channel and
@@ -19,7 +19,6 @@ use std::{
 };
 
 use futures_util::SinkExt;
-use meticulous::OptionExt as _;
 use nervix_primitives::{
     net::{TcpListener as TokioTcpListener, TcpStream},
     stream::StreamExt,
@@ -40,9 +39,9 @@ const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 #[derive(Debug)]
 pub(crate) struct StallableTcpProxy {
     local_addr: std::net::SocketAddr,
-    /// How many connections the proxy has accepted. Each follows the pause and reset controls from
-    /// the moment it is counted.
-    accepted: watch::Sender<u64>,
+    /// When the proxy accepted each connection, in the order it accepted them. Each follows the
+    /// pause and reset controls from the moment it is recorded.
+    accepted: watch::Sender<Vec<Instant>>,
     paused: watch::Sender<bool>,
     /// Signalled to reset every connection the proxy forwards at that moment.
     resets: watch::Sender<()>,
@@ -106,7 +105,7 @@ impl StallableTcpProxy {
     async fn listen(target: ProxyTarget) -> io::Result<Self> {
         let listener = TokioTcpListener::bind((HOST, 0)).await?;
         let local_addr = listener.local_addr()?;
-        let (accepted, _) = watch::channel(0_u64);
+        let (accepted, _) = watch::channel(Vec::new());
         let (paused, paused_rx) = watch::channel(false);
         let (resets, resets_rx) = watch::channel(());
         let cancellation = CancellationToken::new();
@@ -127,11 +126,7 @@ impl StallableTcpProxy {
                 let mut resets = resets_rx.clone();
                 resets.mark_unchanged();
                 let connection_cancellation = task_cancellation.child_token();
-                task_accepted.send_modify(|accepted| {
-                    *accepted = accepted
-                        .checked_add(1)
-                        .assured("a scenario connects to one proxy far fewer than 2^64 times");
-                });
+                task_accepted.send_modify(|accepted| accepted.push(Instant::now()));
                 match target.clone() {
                     ProxyTarget::Dependency {
                         host,
@@ -193,12 +188,18 @@ impl StallableTcpProxy {
     }
 
     /// Wait until the proxy has accepted `count` connections.
-    pub(crate) async fn accepted_at_least(&self, count: u64) {
+    pub(crate) async fn accepted_at_least(&self, count: usize) {
         let mut accepted = self.accepted.subscribe();
         accepted
-            .wait_for(|accepted| *accepted >= count)
+            .wait_for(|accepted| accepted.len() >= count)
             .await
             .discarded("the proxy holds the sender for as long as it can be asked");
+    }
+
+    /// When the proxy accepted the connection at `index` in the order it accepted them, counting
+    /// from zero, or nothing while it has accepted fewer.
+    pub(crate) fn accepted_at(&self, index: usize) -> Option<Instant> {
+        self.accepted.borrow().get(index).copied()
     }
 
     pub(crate) fn local_port(&self) -> u16 {

@@ -644,6 +644,13 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) fn resource_source_discovery_is_deferred(&self, node: &ClusterNodeName) -> bool {
+        self.inner
+            .fault_injection
+            .resource_source_discovery_is_deferred(node)
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_ownership_handoff_after_preparation_if_armed(
         &self,
         domain: &DomainName,

@@ -394,6 +394,14 @@ fn validate_emitter_value_keys(
     }
     let mut keys = HashSet::default();
     for mapping in mappings.values {
+        if let EmitterEntity::MongoDb(nervix_models::MongoDbEmitter::Collection(mongodb)) =
+            emitter.connector.as_ref()
+            && !mongodb.admits_value_key(&mapping.column)
+        {
+            return Err(invalid(ConnectorDeclarationIssue::MongoDbFieldName {
+                key: mapping.column.clone(),
+            }));
+        }
         if !keys.insert(&mapping.column) {
             return Err(invalid(ConnectorDeclarationIssue::DuplicateValue {
                 key: mapping.column.clone(),
