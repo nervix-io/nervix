@@ -19,6 +19,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+mod admission;
 mod archived_count;
 #[cfg(feature = "arrow")]
 mod arrow_types;
@@ -65,6 +66,7 @@ mod wasm_state_generation;
 mod wasm_state_inspection;
 mod window_model_digest;
 
+pub use admission::{AdmissionVerdict, AdmissionVerdicts, AdmissionVerdictsTextError};
 pub use archived_count::{ArchivedCountError, CountAsU64};
 pub use backup::{
     ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupCutKind,
@@ -173,15 +175,15 @@ pub use connector::{
     RedisEmitter, RedisEmitterEntity, RedisIngestor, RedisIngestorAlteration, RedisIngestorEntity,
     RedisPubSubEmitter, RedisPubSubEmitterMode, RedisPubSubIngestMode, RedisPubSubIngestor,
     RedisPubSubPublishingMode, ReplacedHeaderWrite, RuntimeCapability, S3ConfigEntry,
-    SentryConfigEntry, SentryEmitter, SentryEmitterEntity, SentryEventEmitter,
-    SentryEventEmitterMode, SentryEventPublishingMode, SqsConfigEntry, SqsEmitter,
-    SqsEmitterEntity, SqsFifoGroup, SqsIngestMode, SqsIngestor, SqsIngestorEntity, SqsQueueEmitter,
-    SqsQueueEmitterMode, SqsQueueIngestor, SqsQueueIngestorAlteration, SqsQueueName,
-    SqsQueuePublishingMode, SyslogCollectorEmitter, SyslogCollectorEmitterMode,
-    SyslogCollectorPublishingMode, SyslogConfigEntry, SyslogEmitter, SyslogEmitterEntity,
-    SyslogIngestMode, SyslogIngestor, SyslogIngestorEntity, SyslogListenerIngestor,
-    SyslogListenerIngestorAlteration, WEBSOCKETS_CONTROL_FRAME_BUDGET, WaitBound,
-    WebsocketsClientConfig, WebsocketsClientConfigError, WebsocketsClientKey,
+    SENTRY_DEFAULT_PLATFORM, SENTRY_MAX_EVENT_BYTES, SentryConfigEntry, SentryEmitter,
+    SentryEmitterEntity, SentryEventEmitter, SentryEventEmitterMode, SentryEventPublishingMode,
+    SqsConfigEntry, SqsEmitter, SqsEmitterEntity, SqsFifoGroup, SqsIngestMode, SqsIngestor,
+    SqsIngestorEntity, SqsQueueEmitter, SqsQueueEmitterMode, SqsQueueIngestor,
+    SqsQueueIngestorAlteration, SqsQueueName, SqsQueuePublishingMode, SyslogCollectorEmitter,
+    SyslogCollectorEmitterMode, SyslogCollectorPublishingMode, SyslogConfigEntry, SyslogEmitter,
+    SyslogEmitterEntity, SyslogIngestMode, SyslogIngestor, SyslogIngestorEntity,
+    SyslogListenerIngestor, SyslogListenerIngestorAlteration, WEBSOCKETS_CONTROL_FRAME_BUDGET,
+    WaitBound, WebsocketsClientConfig, WebsocketsClientConfigError, WebsocketsClientKey,
     WebsocketsConfigEntry, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
     WebsocketsFrameType, WebsocketsIngestMode, WebsocketsIngestor, WebsocketsIngestorAlteration,
     WebsocketsIngestorEntity, WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders,
