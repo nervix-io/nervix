@@ -10,7 +10,6 @@ use arrow_array::{Int64Array, StringArray};
 use arrow_schema::Field;
 use error_stack::{AttachmentKind, FrameKind};
 use futures_util::TryStreamExt as _;
-use meticulous::ResultExt as _;
 use nervix_execution::{AdmissionError, ExecutionConfig, Reservation};
 use nervix_primitives::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

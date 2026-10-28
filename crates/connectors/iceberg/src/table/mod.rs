@@ -1697,7 +1697,6 @@ mod tests {
         TimestampNanosecondBuilder,
     };
     use arrow_schema::Field;
-    use meticulous::ResultExt as _;
     use nervix_dns::{DnsConfiguration, NameServers};
     use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
     use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};

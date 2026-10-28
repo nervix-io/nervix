@@ -9,7 +9,6 @@ use ::iceberg::{
 use arrow_array::{Int64Array, StringArray};
 use arrow_schema::Field;
 use futures_util::TryStreamExt as _;
-use meticulous::ResultExt as _;
 use serde_json::json;
 
 use super::{
