@@ -134,9 +134,12 @@ pub(in crate::runtime) struct LastWriteSignal {
 }
 
 impl LastWriteSignal {
-    /// Returns once either stop has arrived.
+    /// Returns once either stop has arrived. Both tell the writer the same thing, so the order in
+    /// which they are polled decides nothing, and a fixed order asks no scheduler, a model
+    /// checker's included, for a random choice it would have to replay.
     pub(in crate::runtime) async fn arrived(&self) {
         nervix_primitives::select! {
+            biased;
             _ = self.placement_stopped.cancelled() => {}
             _ = self.runtime_stopping.cancelled() => {}
         }
