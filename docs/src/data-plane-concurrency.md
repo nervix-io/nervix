@@ -418,6 +418,14 @@ factory initializes one operator for the configured object-store root; data, man
 files use that same initialized storage after refreshes, successful commits and ambiguous-result
 reconciliation. This reuses the library's existing storage lifetime and adds no synchronization
 protocol or shared map. The emitter task remains the sole owner of commit retry pacing.
+Its declared `BATCH` file division measures Parquet bytes on the node's bounded bulk CPU workers
+before staging Arrow IPC segments; the emitter task still owns those segments and the one retained
+carrier acknowledgement until their catalog commit. The CPU queue and catalog I/O are asynchronous
+and outside Deloxide's tracked blocking locks. The one- and three-node Iceberg file-bound scenarios
+run in the active, order and lifecycle-stress selections to exercise the tracked host state beside
+that staging and commit path. The restore-stress lane remains part of the required four-lane
+qualification when this lifecycle changes, though it owns restore workloads rather than an
+Iceberg-specific scenario.
 
 Every pooled Redis or SQL emitter registers a wait slot once. The connector serializes its connection
 borrows. A ready borrow writes nothing; the first Pending poll publishes its wait and owns a guard

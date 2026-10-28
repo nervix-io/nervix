@@ -111,6 +111,9 @@ An Iceberg plan carries the statement's validated catalog namespace with its tab
 Local opening uses exactly those namespace levels, independently of the Nervix domain name.
 Its commit-size value has already crossed the same positive whole-byte validation boundary as a
 batch-size value; plan construction reads its byte count without interpreting another string.
+The plan also carries the optional validated `BATCH` row and byte limits unchanged into the
+Iceberg-specific connector starter. The connector owns the Parquet measurement and staged-file
+division; the host applies no second Iceberg batching policy.
 
 A Sentry event plan carries the effective platform as a required string. Planning resolves an
 omitted `PLATFORM` from the entity's declared default once; composition passes that value into

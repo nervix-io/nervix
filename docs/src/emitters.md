@@ -3013,9 +3013,21 @@ together; the maximum batch and commit sizes, the commit retry backoff, and a dr
 independent of domain pace. The temporary-file root defaults to `/tmp` and can be changed with
 `--temp-dir` or `NERVIX_TEMP_DIR`.
 
+With `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, the emitter measures the complete Parquet encoding
+of each candidate file, including its footer, against the table schema it has loaded. It stages
+accepted rows in segments of at most `n` rows and the declared encoded file bytes, then writes
+each segment as one data file. A single row whose own Parquet file exceeds `MAX SIZE` is rejected
+with a `validation` error of the `encode` operation through `ON MESSAGE ERROR`; rows around it
+continue to staging. The file's actual size and row count are checked before the catalog append.
+If the table schema changes between staging and commit so that a staged segment no longer fits,
+the commit fails and retains its staged rows for retry rather than appending an over-limit file.
+Without `BATCH`, the Parquet writer uses its 512 MiB rollover target; `DESCRIBE EMITTER` prints
+`data file target: 512MiB` alongside `batch: none`. The commit's `MAX SIZE` continues to count
+the sum of local staged Arrow IPC file bytes, independently of each Parquet file's bound.
+
 The emitter completion point for `MODE ACK` is the successful catalog commit. Local staging is not an
-ACK boundary. Record-level expression and construction errors are attributed through `ON MESSAGE
-ERROR` before staging. See [ACK Semantics And Effective
+ACK boundary. Record-level expression and construction errors, and a row too large for its own
+Parquet file, are attributed through `ON MESSAGE ERROR` before staging. See [ACK Semantics And Effective
 Delivery](#ack-semantics-and-effective-delivery) for attachment and fan-out behavior.
 
 A commit holds the rows it reads back in memory until it has written them into data files, so it
@@ -3028,8 +3040,9 @@ the class's queue, where a commit's charge would take every byte the class frees
 node's other bulk work behind it. When the class has no room, the commit keeps its staged files and
 their acknowledgements, `DESCRIBE EMITTER` shows `Iceberg commit waits for room in the bulk memory
 class for <bytes> staged bytes` as the emitter's transient error, and the emitter retries the
-commit on its declared retry policy. A single staged file holds the mapped rows of one input batch,
-which can be larger than the class when a route on the same node flushes batches above 32 MiB.
+commit on its declared retry policy. A single staged file holds one input carrier's mapped rows,
+or one bounded segment of them when `BATCH` is declared. Without `BATCH` it can be larger than the
+class when a route on the same node flushes batches above 32 MiB.
 Such a file is read alone once the whole class is free, charged with the whole class: that is every
 byte of it the class can account for, and it leaves no room for other bulk work beside the read.
 Until then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole bulk memory class of
