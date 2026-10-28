@@ -19,6 +19,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+mod admission;
 mod archived_count;
 #[cfg(feature = "arrow")]
 mod arrow_types;
@@ -65,6 +66,7 @@ mod wasm_state_generation;
 mod wasm_state_inspection;
 mod window_model_digest;
 
+pub use admission::{AdmissionVerdict, AdmissionVerdicts, AdmissionVerdictsTextError};
 pub use archived_count::{ArchivedCountError, CountAsU64};
 pub use backup::{
     ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupCutKind,
