@@ -163,8 +163,7 @@ pub(super) enum InferencerError {
 static ONNX_ENVIRONMENT: OnceLock<Result<Environment, ort::Error>> = OnceLock::new();
 
 /// The environment this process creates its ONNX sessions in.
-pub(crate) fn onnx_environment() -> error_stack::Result<&'static Environment, &'static ort::Error>
-{
+pub(crate) fn onnx_environment() -> error_stack::Result<&'static Environment, &'static ort::Error> {
     match ONNX_ENVIRONMENT.get_or_init(|| ort::init().build()) {
         Ok(environment) => Ok(environment),
         Err(refusal) => Err(Report::new(refusal)),
