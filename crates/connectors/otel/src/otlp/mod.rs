@@ -2,7 +2,7 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** OTLP client and TLS configuration, the exact types each signal accepts, the OTLP
+//! - **Owns.** OTLP client and TLS configuration, prepared-schema assertions, the OTLP
 //!   record every mapped row becomes, its resource and scope, the Export requests it prepares once
 //!   from those records and the observed timestamp they carry, sending a prepared request's exact
 //!   bytes over gRPC or HTTP with optional gzip, and OTLP status classification.
@@ -45,7 +45,10 @@ use nervix_connector::{
     RejectedEmitterMember, RowRequest, RowRequestLimits, RowRequestPreparation,
     client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
 };
-use nervix_models::{ClientConfigEntry, EmitterBatchPolicy, FieldPath, Timestamp};
+use nervix_models::{
+    ClientConfigEntry, EmitterBatchPolicy, FieldPath, HeaderPair, OtelValueRule,
+    PercentEncodedHeaders, Timestamp,
+};
 use nervix_primitives::{sync::StdArc, time::Instant};
 use opentelemetry_proto::tonic::{
     collector::{
@@ -122,8 +125,7 @@ pub(super) struct OtlpEncoderConfig {
     pub attributes: Vec<String>,
     pub resource: Vec<OtelResourceAttribute>,
     pub scope: Option<OtelScope>,
-    /// The mapped columns the host projects, whose exact types this emitter validates before it
-    /// accepts its first batch.
+    /// The mapped columns the host projects, whose exact types registry admission guarantees.
     pub mapped_schema: StdArc<arrow_schema::Schema>,
 }
 
@@ -229,7 +231,7 @@ enum OtelCompression {
 struct OtelClientSettings {
     endpoint: url::Url,
     protocol: OtelProtocol,
-    headers: Vec<(String, String)>,
+    headers: Vec<HeaderPair>,
     compression: OtelCompression,
     timeout: Duration,
 }
@@ -564,10 +566,10 @@ impl OtelClientSettings {
             .change_context(EmitterOpenError::InvalidConfiguration { connector: OTEL })?
             .verified("the OTEL schema above requires a positive timeout_ms")
             .bound();
-        let headers = optional_client_config_value(config, "headers")
-            .map(Self::parse_headers)
-            .transpose()?
-            .unwrap_or_default();
+        let headers = match optional_client_config_value(config, "headers") {
+            Some(raw) => Self::parse_headers(raw)?,
+            None => Vec::new(),
+        };
 
         Ok(Self {
             endpoint,
@@ -578,25 +580,10 @@ impl OtelClientSettings {
         })
     }
 
-    fn parse_headers(raw: &str) -> EmitterStartResult<Vec<(String, String)>> {
-        if raw.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-        raw.split(',')
-            .map(|entry| {
-                let (key, value) = entry.split_once('=').ok_or_else(|| {
-                    invalid_configuration("invalid OTEL headers entry; expected k=v")
-                })?;
-                let key = key.trim().to_ascii_lowercase();
-                let value = value.trim().to_string();
-                if key.is_empty() {
-                    return Err(invalid_configuration(
-                        "OTEL headers entries require a non-empty key",
-                    ));
-                }
-                Ok((key, value))
-            })
-            .collect()
+    fn parse_headers(raw: &str) -> EmitterStartResult<Vec<HeaderPair>> {
+        let headers = PercentEncodedHeaders::parse(raw)
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: OTEL })?;
+        Ok(headers.into_pairs())
     }
 }
 
@@ -623,7 +610,7 @@ impl OtlpEncoder {
             transport: Self::transport_from_config(&config, &dns)?,
         };
         Self::validate_mapped_types(&signal, &values, &attributes, &mapped_schema)
-            .map_err(|error| invalid_configuration(format!("{error:?}")))?;
+            .verified("registry validation and mapped projection establish exact OTEL plan types");
         // A key mapped twice keeps its first column, which is the one the signal reads.
         let mut value_columns = HashMap::with_capacity(values.len());
         for (index, key) in values.iter().enumerate() {
@@ -750,35 +737,31 @@ impl OtlpEncoder {
         }
     }
 
-    fn grpc_metadata(headers: &[(String, String)]) -> EmitterStartResult<MetadataMap> {
+    fn grpc_metadata(headers: &[HeaderPair]) -> EmitterStartResult<MetadataMap> {
         let mut metadata = MetadataMap::new();
-        for (key, value) in headers {
-            let key = MetadataKey::<Ascii>::from_bytes(key.as_bytes()).map_err(|error| {
-                invalid_configuration(format!("invalid OTEL gRPC header name '{key}': {error}"))
-            })?;
-            let value = MetadataValue::<Ascii>::from_str(value).map_err(|error| {
-                invalid_configuration(format!("invalid OTEL gRPC header value: {error}"))
-            })?;
+        for pair in headers {
+            let key = MetadataKey::<Ascii>::from_bytes(pair.name().as_bytes())
+                .change_context(EmitterOpenError::InvalidConfiguration { connector: OTEL })?;
+            let value = MetadataValue::<Ascii>::from_str(pair.value())
+                .change_context(EmitterOpenError::InvalidConfiguration { connector: OTEL })?;
             metadata.insert(key, value);
         }
         Ok(metadata)
     }
 
-    fn http_headers(headers: &[(String, String)]) -> EmitterStartResult<HeaderMap> {
+    fn http_headers(headers: &[HeaderPair]) -> EmitterStartResult<HeaderMap> {
         let mut parsed = HeaderMap::new();
-        for (key, value) in headers {
-            let name = HeaderName::from_bytes(key.as_bytes()).map_err(|error| {
-                invalid_configuration(format!("invalid OTEL HTTP header name '{key}': {error}"))
-            })?;
-            let value = HeaderValue::from_str(value).map_err(|error| {
-                invalid_configuration(format!("invalid OTEL HTTP header value: {error}"))
-            })?;
+        for pair in headers {
+            let name = HeaderName::from_bytes(pair.name().as_bytes())
+                .change_context(EmitterOpenError::InvalidConfiguration { connector: OTEL })?;
+            let value = HeaderValue::from_str(pair.value())
+                .change_context(EmitterOpenError::InvalidConfiguration { connector: OTEL })?;
             parsed.insert(name, value);
         }
         Ok(parsed)
     }
 
-    /// Checks the exact type of every mapped column before the first batch arrives.
+    /// Verifies the plan's established exact types before the first batch arrives.
     ///
     /// The signal's own keys come first and its attributes follow, in the order the host projects
     /// them, so a column is read by position rather than by a name a mapping may have used twice.
@@ -1901,7 +1884,7 @@ fn aggregation_temporality(value: OtelAggregationTemporality) -> i32 {
 }
 
 fn parse_severity_number(value: i32) -> error_stack::Result<i32, OtelRecordError> {
-    if (0..=24).contains(&value) {
+    if OtelValueRule::SeverityNumber.admits_integer(i128::from(value)) {
         Ok(value)
     } else {
         Err(OtelRecordError::new(
@@ -2680,7 +2663,11 @@ mod tests {
     }
 
     #[test]
-    fn client_settings_use_the_declared_required_deadline_and_literal_header_encoding() {
+    fn client_settings_use_the_declared_deadline_and_percent_decoded_headers() {
+        struct ExpectedHeader {
+            name: &'static str,
+            value: &'static str,
+        }
         for protocol in ["grpc", "http/protobuf"] {
             let missing = config(&[("endpoint", "http://127.0.0.1:1"), ("protocol", protocol)]);
             let error = OtelClientSettings::parse(&missing)
@@ -2695,18 +2682,29 @@ mod tests {
                 ("timeout_ms", "5000"),
                 (
                     "headers",
-                    " X-Trace = a%2Cb , Authorization=Bearer token=1 ",
+                    " X-Trace = a%2Cb , Authorization=Bearer%20token=1,x-plus=a+b%2Bc%252C ",
                 ),
             ]))
             .assured("both protocols use the same positive deadline and header decoder");
             assert_eq!(settings.timeout, Duration::from_millis(5000));
-            assert_eq!(
-                settings.headers,
-                [
-                    ("x-trace".to_owned(), "a%2Cb".to_owned()),
-                    ("authorization".to_owned(), "Bearer token=1".to_owned())
-                ]
-            );
+            assert_eq!(settings.headers.len(), 3);
+            for (actual, expected) in settings.headers.iter().zip([
+                ExpectedHeader {
+                    name: "x-trace",
+                    value: "a,b",
+                },
+                ExpectedHeader {
+                    name: "authorization",
+                    value: "Bearer token=1",
+                },
+                ExpectedHeader {
+                    name: "x-plus",
+                    value: "a+b+c%2C",
+                },
+            ]) {
+                assert_eq!(actual.name(), expected.name);
+                assert_eq!(actual.value(), expected.value);
+            }
         }
     }
 

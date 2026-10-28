@@ -1023,6 +1023,7 @@ fn direct_value_mappings_cover_all_external_value_sections() {
 
     let emitter_without_values = EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
         client,
+        platform: None,
         mode: nervix_models::SentryEventPublishingMode::Ack {
             retry_policy: retry_policy(),
         },

@@ -213,8 +213,7 @@ impl SnapshotStaging {
             .run_storage(
                 StorageClass::Filesystem,
                 self.executor
-                    .reserve(MemoryClass::Bulk, 1)
-                    .await
+                    .try_reserve(MemoryClass::Bulk, 1)
                     .change_context(SnapshotStagingError::Admission)?,
                 move |_charge, cancellation| {
                     if cancellation.is_cancelled() {
@@ -284,8 +283,7 @@ impl StagedSnapshotWriter {
         }
         let reservation = self
             .executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
+            .try_reserve(MemoryClass::Bulk, 1)
             .change_context(SnapshotStagingError::Admission)?;
         let file = self
             .file
@@ -348,8 +346,7 @@ impl StagedSnapshotWriter {
         }
         let reservation = self
             .executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
+            .try_reserve(MemoryClass::Bulk, 1)
             .change_context(SnapshotStagingError::Admission)?;
         let file = self
             .file
@@ -411,8 +408,7 @@ impl StagedSnapshotWriter {
         }
         let reservation = self
             .executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
+            .try_reserve(MemoryClass::Bulk, 1)
             .change_context(SnapshotStagingError::Admission)?;
         let file = self
             .file

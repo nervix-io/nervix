@@ -368,6 +368,23 @@ impl Runtime {
         };
         LocalDomainDrainStatus::observe(domain.clone(), &sources)
     }
+
+    /// Takes the draining step a remote drain coordinator asks of this node, and reports the
+    /// domain as it reads afterwards.
+    ///
+    /// As a local drain's draining step does, a node that still holds admitted work requests a
+    /// force-flush generation to release it, unless one is already in flight. A node that holds
+    /// none requests nothing: the coordinator confirms the drain with a generation of its own,
+    /// and a participant that had taken a generation the confirmation superseded would re-read
+    /// the dependency of every message parked on `REQUIRED WAIT` for both.
+    pub(crate) fn flush_held_domain_work(&self, domain: &DomainName) -> LocalDomainDrainStatus {
+        let status = self.local_domain_drain_status(domain);
+        if !status.holds_admitted_work() {
+            return status;
+        }
+        self.force_flush_domain_if_idle(domain);
+        self.local_domain_drain_status(domain)
+    }
 }
 
 /// One domain's work as this node's runtime holds it.
@@ -549,6 +566,65 @@ mod tests {
         status.force_flush_obligations = 0;
         assert_eq!(progress.advance(&status), LocalDomainDrainStep::Confirm);
         assert_eq!(progress.advance(&status), LocalDomainDrainStep::Done);
+    }
+
+    /// A remote drain coordinator confirms a quiet domain with a generation of its own. A draining
+    /// step that also requested one from a node holding no admitted work would make a participant
+    /// that took that generation re-read a parked message's dependency for it, and then again for
+    /// the confirmation, so the slow read held the cut twice.
+    #[test]
+    fn a_draining_step_requests_no_generation_from_a_node_holding_no_admitted_work() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let counters = runtime.node_quiesce_counters(
+            &domain,
+            NodeRef::new(ModelKind::Junction, named::<ModelName>("wait_for_state")),
+        );
+        let mut participant = runtime.force_flush_participant(&domain, counters);
+
+        let status = runtime.flush_held_domain_work(&domain);
+
+        assert!(!status.holds_admitted_work());
+        assert_eq!(status.force_flush_obligations, 0);
+        assert!(
+            participant
+                .pending_completion()
+                .assured("the participant stays registered while the test holds it")
+                .is_none(),
+            "a node holding no admitted work requested a force-flush generation"
+        );
+    }
+
+    #[test]
+    fn a_draining_step_requests_one_generation_while_a_node_holds_admitted_work() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let counters = runtime.node_quiesce_counters(
+            &domain,
+            NodeRef::new(ModelKind::Junction, named::<ModelName>("route_orders")),
+        );
+        let mut participant = runtime.force_flush_participant(&domain, counters.clone());
+        counters.admit(1);
+
+        let status = runtime.flush_held_domain_work(&domain);
+
+        assert!(status.holds_admitted_work());
+        assert_eq!(status.force_flush_obligations, 1);
+        let completion = participant
+            .pending_completion()
+            .assured("the participant stays registered while the test holds it")
+            .assured("a node holding admitted work requested a force-flush generation");
+        let again = runtime.flush_held_domain_work(&domain);
+        assert_eq!(again.force_flush_obligations, 1);
+        assert!(
+            participant
+                .pending_completion()
+                .assured("the participant stays registered while the test holds it")
+                .is_none(),
+            "a draining step requested another generation while one was in flight"
+        );
+        counters.withdraw_admitted(1);
+        assert!(completion.complete());
     }
 
     #[nervix_primitives::test]

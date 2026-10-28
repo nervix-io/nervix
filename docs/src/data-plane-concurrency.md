@@ -110,7 +110,11 @@ live work and never to a fixed capacity.
 Record allocation and receiver batch watcher tasks reserve relay memory before creating their
 retained rows. A batch task multiplexes row progress and keepalive polls every 100 milliseconds;
 each row and the single task have fixed charges. The cadence remains shorter than a one-second
-source ACK timeout while task cardinality stays bounded by admitted batches. A receiver whose relay
+source ACK timeout while task cardinality stays bounded by admitted batches. Before admission, the
+delivering side reports the batch's records alive from inside the delivery itself: the task that
+runs the delivery races it against a 100-millisecond timer and, each time the timer wins, publishes
+progress on each record's own acknowledgement root. That adds no task, no shared state and no
+wait-and-notify protocol, and a delivery admitted within one interval publishes nothing. A receiver whose relay
 budget has no room for a batch's watches holds the unadmitted batch on its own channel lane and
 reads the budget again every 10 milliseconds; it registers for no release notification and never
 queues in the budget's semaphore, whose released permits would otherwise go to the held charge
@@ -358,9 +362,11 @@ Bolero byte comparisons cover those boundaries. The capture fence's Shuttle and 
 retain ownership of its unchanged publication and ordering invariants.
 
 The backup coordinator waits for each node's admitted-work counters to reach zero, then orders one
-confirming force-flush generation across the cluster. The generation's obligations use the same
-atomic counters as shutdown; a parked `REQUIRED WAIT` batch stays visible separately and cannot
-hold the cut open. Rows a window retains park their shares too, and the cut captures them as
+confirming force-flush generation across the cluster. A polled node starts a draining generation
+only while its own counters show admitted work, as the shutdown drain's draining step does, so a
+quiet domain's participants take the confirming generation alone. The generation's obligations use
+the same atomic counters as shutdown; a parked `REQUIRED WAIT` batch stays visible separately and
+cannot hold the cut open. Rows a window retains park their shares too, and the cut captures them as
 window state.
 | Metric series handles | Each relay, node, ingestor, emitter, or concrete branch resolves its label set, internal series, and Prometheus child when its owning task or branch is created. | Recording uses the retained series directly. Counters update atomically; a histogram records through its already-resolved per-series accumulator without a registry lookup, key construction, or map guard. A node input folds a whole batch's delivery latencies in one kernel pass over the batch's high-watermark column before recording, so each latency series locks its accumulator and reads the wall clock once per batch rather than once per row, and its Prometheus child takes the batch in one flush. Whether a series was ever observed is an atomic flag set under that lock and read without it. Registration and removal stay on lifecycle paths. |
 | MQTT broker packet limit | Each MQTT emitter's event-loop task stores the Maximum Packet Size of every `CONNACK` its client receives, or the broker's silence about one, as one atomic scalar. A reconnect replaces it. | A publish loads the scalar once per record to reject a packet the broker would refuse before handing it to the client. The value stands alone, so relaxed ordering is its whole contract, and a record published before the first `CONNACK` is measured only against the protocol's largest packet. |
@@ -2630,14 +2636,21 @@ allowing the retirement reservations that live Kafka consumers retain.
 The semaphore waits are asynchronous and outside Deloxide's tracked-lock detection; the diagnostic
 restore workloads exercise the surrounding storage and restore lifecycle.
 
-Consensus storage admits each Commands working set through one of the store's turns before it asks
-the Commands class, and a working set returns its bytes before its turn passes. Its Shuttle check
-holds one working set while a second admission waits for its turn and a source control call races
-both, then ends the held working set: the control call finds room at every interleaving, the second
-working set is admitted, and the class ends with nothing reserved. The real-storage owner tests
+Consensus storage admits each Commands or Bulk working set through independent class-specific
+turns before asking its memory class, and a working set returns its bytes before its turn passes.
+Each Shuttle check holds one working set while a second admission waits for its turn and a progress
+charge races both, then ends the held working set: the progress charge finds room at every
+interleaving, the second working set is admitted, and the class ends with nothing reserved. The
+Commands check charges a source control call; the Bulk check charges snapshot progress. The real-storage owner tests
 hold a chunk with an unread entry while a log read and a storage job wait behind it, and require
 the control call's room while they wait. Like the chunk check, this is a control-plane admission
 check without a memory-ordering claim, and its waits are outside Deloxide's detection.
+Ordinary owner tests additionally poll request-envelope, staging and captured-reader admission
+under held and queued Bulk charges: each additional allocation refuses without waiting and
+releases its input. The public stopped-materialized-capture scenario exercises refusal, memory
+release, a fresh successful backup and complete branch-local generator recovery on one and three
+nodes. Its diagnostic workloads reach the surrounding storage lifecycle; Deloxide does not
+observe the asynchronous admission waits themselves.
 
 The checks below hold the scheduler-visible parts of each protocol to their invariants. Test
 names are given relative to their owning module; the `shuttle` feature selects the modeled build.

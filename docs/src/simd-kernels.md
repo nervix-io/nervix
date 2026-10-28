@@ -287,12 +287,13 @@ mean error bound is `B = 4ε|μ| + [2(n + 16)ε]² S/n`. The M2 bound is
 Independent sliced null masks select paired contributions. Separate constant runs at `1e308`,
 `-1e308`, and `f64::MAX` check that overflow of an intermediate sum preserves the exact constant
 mean and zero centered moments. Histogram cases check each edge, both clamps and null positions.
-Every applicable property must remain registered in `tests/bolero-targets.toml`. Ordinary runs
-remain required on PRs; sanitizer CI runs only for PRs labeled `fuzz`. Scheduled,
-`workflow_dispatch`, and unlabeled PR runs expect a sanitizer skip. A skip is neither execution
-nor coverage evidence. Explicit qualification uses `just fuzz <target> <seconds>` or
-`just fuzz-all <seconds>` and records the actual inventory executed. See
-[Property Testing And Fuzzing](./property-testing-and-fuzzing.md).
+Every applicable property must remain registered in `tests/bolero-targets.toml`. The properties
+run as ordinary tests in the ordinary suites; CI's randomized Bolero job runs only for PRs labeled
+`bolero-random`, and sanitizer CI, the preferred Bolero evidence, only for PRs labeled `fuzz`.
+Scheduled, `workflow_dispatch`, and unlabeled PR runs expect a sanitizer skip, and unlabeled PRs a
+randomized skip. A skip is neither execution nor coverage evidence. Explicit qualification uses
+`just fuzz <target> <seconds>` or `just fuzz-all <seconds>` and records the actual inventory
+executed. See [Property Testing And Fuzzing](./property-testing-and-fuzzing.md).
 
 Current Rust API restrictions use source-adjacent `compile_fail` doctests paired with compiling
 examples of supported imports and signatures, run in normal tests and CI. Retain compiler-resolved

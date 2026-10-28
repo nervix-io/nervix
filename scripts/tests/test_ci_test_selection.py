@@ -356,11 +356,13 @@ class SourceSelectionTests(unittest.TestCase):
             self.assertFalse(actual.documentation_only)
             self.assertTrue(actual.bolero_required)
 
-    def test_label_events_preserve_explicit_fuzz_requests(self) -> None:
+    def test_label_events_preserve_explicit_bolero_requests(self) -> None:
         for advanced in (False, True):
             for action, labels, required in (
                 ("opened", (), False), ("labeled", ("no-docker",), False),
                 ("labeled", ("fuzz",), True), ("synchronize", ("fuzz", "no-docker"), True),
+                ("labeled", ("bolero-random",), True), ("synchronize", ("bolero-random", "no-docker"), True),
+                ("labeled", ("bolero-random", "fuzz"), True),
                 ("unlabeled", (), False), ("reopened", (), False),
             ):
                 with self.subTest(advanced=advanced, action=action, labels=labels), \
@@ -473,6 +475,12 @@ class CheckWorkflowSelectionTests(unittest.TestCase):
         self.assertIn("name: ci-test-selection", job)
         self.assertIn("if-no-files-found: error", job)
 
+    def test_every_pull_request_whose_diff_requires_suites_measures_the_selection(self) -> None:
+        extras = self.job("extra-tests")
+        self.assertIn("run: just coverage-ci-selection\n", extras)
+        upload = extras.split("- name: Upload native extra coverage\n", 1)[1].split("- name:", 1)[0]
+        self.assertIn("            target/ci-selection/python.lcov\n", upload)
+
     def test_mode_labels_remain_independent_of_ordinary_prose_exclusion(self) -> None:
         for job, label in (("deloxide", "deloxide"), ("client-conformance", "client-conformance"),
                            ("shuttle", "shuttle"), ("loom", "loom"),
@@ -483,20 +491,23 @@ class CheckWorkflowSelectionTests(unittest.TestCase):
     def test_validation_only_rerun_keeps_source_selection_and_required_cancellation_fails(self) -> None:
         gate = test_bolero_coverage.WorkflowTests()
         gate.setUp()
-        for documentation_only in (False, True):
-            with self.subTest(documentation_only=documentation_only), tempfile.TemporaryDirectory() as directory:
+        for documentation_only, labels in ((False, ()), (False, ("bolero-random",)), (True, ())):
+            with self.subTest(documentation_only=documentation_only, labels=labels), \
+                    tempfile.TemporaryDirectory() as directory:
                 current = selection.TestSelection(
                     event="pull_request", action="opened", tested_sha="a" * 40, event_base_sha="b" * 40,
                     tested_base_sha="b" * 40, head_sha="c" * 40,
-                    paths=("README.md",) if documentation_only else ("src/runtime.rs",), labels=(),
+                    paths=("README.md",) if documentation_only else ("src/runtime.rs",), labels=labels,
                 )
                 # Re-evaluating unrelated always() jobs must not call a source-excluded workflow.
                 self.assertIn("needs: [test-selection]", self.job("bolero"))
                 self.assertIn("if: needs.test-selection.outputs.bolero-required == 'true'", self.job("bolero"))
                 if current.bolero_required:
+                    # A cancelled randomized job is neither the requested success nor a deliberate skip.
+                    requested = "bolero-random" in current.labels
                     result = subprocess.run(["bash", "-e", "-c", gate.script], cwd=directory, env={
-                        **os.environ, "RANDOM_RESULT": "cancelled", "FUZZ_RESULT": "skipped",
-                        "COMBINED_RESULT": "skipped", "FUZZ_REQUIRED": "false",
+                        **os.environ, "RANDOM_RESULT": "cancelled", "RANDOM_REQUIRED": str(requested).lower(),
+                        "FUZZ_RESULT": "skipped", "COMBINED_RESULT": "skipped", "FUZZ_REQUIRED": "false",
                     }, capture_output=True)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertFalse((Path(directory) / "selection.json").exists())

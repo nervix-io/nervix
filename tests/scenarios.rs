@@ -382,6 +382,8 @@ struct ScenarioWorld {
     /// the registry sees the work in flight rather than the last work that finished.
     active_scenario: Option<ActiveScenarioRegistration>,
     cluster: Option<Cluster>,
+    /// Bulk-worker holds that cleanup releases even when a step fails before explicit release.
+    occupied_bulk_nodes: BTreeSet<nervix_models::ClusterNodeName>,
     active_session: Option<TestSession>,
     /// A bounded next-row reader installed before the publication whose delay it measures.
     subscription_arrival: Option<ArrivalObservation<SubscriptionReceipt>>,
@@ -2390,6 +2392,13 @@ enum CapturedExport {
 }
 
 impl CapturedExport {
+    fn header_values(&self, name: &str) -> Vec<&[u8]> {
+        match self {
+            Self::Http(request) => request.header_values(name),
+            Self::Grpc(call) => call.header_values(name),
+        }
+    }
+
     /// The path the request was sent to: an OTLP/HTTP path such as `/v1/logs`, or an OTLP/gRPC
     /// method.
     fn path(&self) -> &str {
@@ -2589,6 +2598,30 @@ async fn then_otlp_receiver_eventually_receives_requests(
                 panic!("OTLP receiver '{name}': {error}");
             }
         }
+    }
+}
+
+#[then(
+    expr = "every export request at OTLP receiver {string} has header {string} equal to {string}"
+)]
+fn then_otlp_receiver_exports_have_header(
+    world: &mut ScenarioWorld,
+    receiver: String,
+    header: String,
+    expected: String,
+) {
+    let expected = expand_placeholders(world, &expected);
+    let exports = captured_exports(world, &receiver);
+    assert!(
+        !exports.is_empty(),
+        "the OTLP receiver must have captured an export"
+    );
+    for export in exports {
+        assert_eq!(
+            export.header_values(&header),
+            [expected.as_bytes()],
+            "OTLP receiver '{receiver}' captured a different '{header}' header"
+        );
     }
 }
 
@@ -11364,14 +11397,15 @@ impl WasmLifecycleFailureFixture {
 fn ensure_onnx_runtime_loaded() {
     let result = ONNX_RUNTIME_INIT.get_or_init(|| {
         let dylib_path = resolve_onnxruntime_dylib()?;
-        ort::init_from(&dylib_path)
-            .map_err(|error| {
-                format!(
-                    "failed to initialize ONNX Runtime from '{}': {error}",
-                    dylib_path.display()
-                )
-            })?
-            .commit();
+        // Only load the library: the nodes create the process's one ONNX Runtime environment on
+        // first use, and ONNX Runtime refuses a second.
+        let environment_builder = ort::init_from(&dylib_path).map_err(|error| {
+            format!(
+                "failed to load ONNX Runtime from '{}': {error}",
+                dylib_path.display()
+            )
+        })?;
+        drop(environment_builder);
         Ok(())
     });
 
@@ -11982,6 +12016,28 @@ async fn given_junction_reads_materialized_state_slowly(
         nervix_models::DomainNodeRef::node_in(domain, nervix_models::ModelKind::Junction, junction),
         delay,
     );
+}
+
+/// The junction's first read of a message's dependency is slowed too, so a payload that reached
+/// the junction's input may still be read rather than parked. This waits until the junction, whose
+/// reads the scenario slowed, has parked a message on `REQUIRED WAIT`.
+#[then(expr = "junction {string} has parked a message on its materialized state")]
+async fn then_junction_parked_a_message(world: &mut ScenarioWorld, junction: String) {
+    let junction = expand_placeholders(world, &junction);
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let junction = nervix_models::ModelName::try_from(junction.as_str())
+        .assured("the scenario junction is an identifier-shaped name");
+    let processor =
+        nervix_models::DomainNodeRef::node_in(domain, nervix_models::ModelKind::Junction, junction);
+    // A loaded runner delays the slowed read and the delivery before it; the wait ends as soon as
+    // the junction parks the message.
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world.fault_injection.wait_for_materialized_wait(&processor),
+    )
+    .await
+    .expect("the junction parks the message on its materialized state");
 }
 
 #[then(expr = "the last shutdown of node {string} reports its drain-support phase {string}")]
@@ -18489,6 +18545,7 @@ async fn when_these_plexus_commands_are_executed_on_node(
 async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     let node_name = crate::common::cluster::node_name(&node_id);
+    world.occupied_bulk_nodes.insert(node_name.clone());
     let fault_injection = world.fault_injection.clone();
     nervix_primitives::time::timeout(
         Duration::from_secs(30),
@@ -18498,6 +18555,15 @@ async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: Str
     .unwrap_or_else(|error| {
         panic!("bulk execution on '{node_id}' never filled its workers: {error}")
     });
+}
+
+/// Hold every node's bulk class so a management client's leader redirect stays under the fault.
+#[when("bulk execution on every node is occupied")]
+async fn when_bulk_execution_is_occupied_on_every_node(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        nervix_primitives::task::consume_budget().await;
+        when_bulk_execution_is_occupied(world, node_id).await;
+    }
 }
 
 /// Fill every bulk worker on every node, and give them all back once `duration` has passed. The
@@ -19203,9 +19269,9 @@ async fn then_the_unacknowledged_source_ingestor_eventually_counts_refused_paylo
 #[when(expr = "bulk execution on node {string} is released")]
 async fn when_bulk_execution_is_released(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
-    world
-        .fault_injection
-        .release_execution(&crate::common::cluster::node_name(&node_id));
+    let node_name = crate::common::cluster::node_name(&node_id);
+    world.fault_injection.release_execution(&node_name);
+    world.occupied_bulk_nodes.remove(&node_name);
 }
 
 /// Run Plexus on a node and require it to finish inside a bound, which is how a scenario states that
@@ -33475,6 +33541,10 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.fault_injection.release_all_domain_clock_progress();
                 world.fault_injection.release_all_command_pauses();
                 world.fault_injection.release_all_wasm_checkpoint_pauses();
+                for node in std::mem::take(&mut world.occupied_bulk_nodes) {
+                    world.fault_injection.release_execution(&node);
+                    append_cucumber_log_line(&format!("bulk execution cleanup: node={node}"));
+                }
 
                 if let Some(broker) = &world.kafka_mock_broker {
                     broker

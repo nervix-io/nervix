@@ -231,13 +231,15 @@ class Run:
         return directory
 
     def bolero_selection(self, labels: Sequence[str] = (), /, **changes: object) -> Path:
-        """The Bolero call's record of its randomized result and its sanitizer outcome."""
+        """The Bolero call's record of its randomized and sanitizer outcomes."""
+        randomized = "bolero-random" in labels
         requested = "fuzz" in labels
         outcome = "success" if requested else "skipped"
         content: dict[str, object] = {
             "producer": "bolero-selection", "verdict": "complete", "tested_sha": self.revision,
             "run": RUN, "attempt": "1", "event": "pull_request", "labels": list(labels),
-            "randomized": "success", "sanitizer": outcome, "sanitizer_combined": outcome, "sanitizer_required": requested,
+            "randomized": "success" if randomized else "skipped", "randomized_required": randomized,
+            "sanitizer": outcome, "sanitizer_combined": outcome, "sanitizer_required": requested,
         }
         content.update(changes)
         directory = self.inputs / "bolero-selection"
@@ -417,11 +419,13 @@ class SelectionTests(unittest.TestCase):
                 run.selection(("fuzz",), event=event)
                 path = run.inputs / "bolero-selection/selection.json"
                 content = json.loads(path.read_text())
-                content.update(event=event, labels=["fuzz"])
+                # A Bolero run of any other event runs the randomized properties whatever its labels.
+                content.update(event=event, labels=["fuzz"], randomized="success", randomized_required=True)
                 path.write_text(json.dumps(content))
                 status, record, _, _ = run.union()
                 self.assertEqual(status, 0, problems(record))
                 self.assertFalse(record["selection"]["fuzz_requested"])
+                self.assertTrue(record["selection"]["randomized_requested"])
                 self.assertNotIn("bolero-fuzz", [item["producer"] for item in record["contributions"]])
 
     def test_missing_label_enabled_producers_fail_naming_their_job_and_artifact(self) -> None:
@@ -471,10 +475,31 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("records unrequested sanitizer campaigns as ('success', 'success')", problems(record))
 
-    def test_the_bolero_selection_must_record_passed_randomized_properties_of_this_snapshot(self) -> None:
+    def test_requested_randomized_properties_must_pass(self) -> None:
+        for result in ("failure", "cancelled", "skipped"):
+            with self.subTest(result=result):
+                run = Run(self)
+                run.complete(("bolero-random",))
+                shutil.rmtree(run.inputs / "bolero-selection")
+                run.bolero_selection(("bolero-random",), randomized=result)
+                status, record, _, _ = run.union()
+                self.assertEqual(status, 1)
+                self.assertIn(f"records the requested randomized properties as {result}", problems(record))
+
+    def test_requested_randomized_properties_join_the_bolero_selection(self) -> None:
+        run = Run(self)
+        run.complete(("bolero-random",))
+        status, record, _, _ = run.union()
+        self.assertEqual(status, 0, problems(record))
+        self.assertTrue(record["selection"]["randomized_requested"])
+        self.assertFalse(record["selection"]["fuzz_requested"])
+
+    def test_the_bolero_selection_must_record_a_deliberate_randomized_skip_of_this_snapshot(self) -> None:
         cases = {
             "verdict": ({"verdict": "failed"}, "the Bolero selection is failed, not complete"),
-            "randomized": ({"randomized": "failure"}, "records the randomized properties as failure"),
+            "randomized": ({"randomized": "success"}, "records unrequested randomized properties as success"),
+            "cancelled": ({"randomized": "cancelled"}, "records unrequested randomized properties as cancelled"),
+            "randomized-required": ({"randomized_required": True}, "records the randomized properties as required: True"),
             "labels": ({"labels": ["shuttle"]}, "with labels ['shuttle'], not for this run's selection"),
             "run": ({"run": "76"}, "comes from run 76, not from this run 77"),
             "required": ({"sanitizer_required": True}, "records the sanitizer campaigns as required: True"),

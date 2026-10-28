@@ -305,8 +305,8 @@ impl IngestorAcknowledgement {
     fn read_ahead(self) -> NonZeroUsize {
         let headroom = usize::try_from(MQTT_SOURCE_READ_AHEAD_HEADROOM)
             .assured("MQTT's read-ahead headroom fits every supported native target");
-        let headroom = NonZeroUsize::new(headroom)
-            .assured("MQTT's declared read-ahead headroom is nonzero");
+        let headroom =
+            NonZeroUsize::new(headroom).assured("MQTT's declared read-ahead headroom is nonzero");
         match self {
             Self::OnReceipt => headroom,
             Self::Manual { receive_maximum } => {

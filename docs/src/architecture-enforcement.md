@@ -274,9 +274,11 @@ gate passed. `just ratchet` requires the gate. Cache qualification remains
 configuration invalidate evidence.
 
 The registered `typed-source-syntax` Bolero property uses bounded current Rust syntax, complete
-source input/site equality and deliberate cast/field counts. Ordinary corpus/randomized checks
-are required; `just fuzz typed-source-syntax` is actual sanitizer-backed fuzzing, and CI runs that
-mode only for a PR labeled `fuzz`. A sanitizer skip supplies no fuzz or coverage evidence.
+source input/site equality and deliberate cast/field counts. Its ordinary corpus/randomized test
+runs in `just test-typed-ratchet`, and CI's randomized Bolero job runs it only for a PR labeled
+`bolero-random`. `just fuzz typed-source-syntax` is actual sanitizer-backed fuzzing, the preferred
+Bolero evidence, and CI runs that mode only for a PR labeled `fuzz`. A skip supplies no evidence of
+its mode.
 Compiler mode qualification checks analysis, not execution of the runtime's concurrency models.
 The sanitizer compiler adapter preserves the source parser's span contract as described in
 [Property Testing And Fuzzing](property-testing-and-fuzzing.md).

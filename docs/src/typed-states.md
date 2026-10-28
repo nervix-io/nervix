@@ -13,6 +13,13 @@ Defaulted keys carry their declared value in their presence variant. The effecti
 adds it only when the authored key is absent; an invalid explicit value still fails validation.
 `DESCRIBE CLIENT` distinguishes these effective defaults from authored values, with the same
 confidential projection, while canonical configuration preserves omission.
+Scheme-dependent presence distinguishes a key required by an address scheme from an optional key
+permitted only with that scheme. OTEL TLS file keys use the latter state for HTTPS. The same
+vocabulary validation runs on authored and rendered entries, deferring an unresolved address
+template until rendering. Percent-encoded header pairs retain their encoded client configuration;
+validation and the connector use one decoder into ordered named pairs, without feeding a decoded
+value back through that decoder. OTEL's field rules own exact types and literal value constraints;
+the registry establishes them before planning, and the connector verifies the prepared schema.
 ClickHouse's rendered CONFIG validation requires a positive request deadline and HTTPS trust or
 refuses TLS file keys on HTTP. The case-preserving `ClickHouseTableName` is constructed only from
 one or two nonempty locator parts; the connector receives that validated name and quotes its parts
@@ -198,6 +205,14 @@ identifier access and verifies offsets and counts before constructing owned valu
 Entity presentation distinguishes a written option from its declared effective default. Inspection
 shows both, while canonical Plexus emits only written options, preserving optional Model fields
 through a complete round trip. This is a display projection, never a stored shape or runtime plan.
+
+The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an explicitly
+written string, including an empty string or `other`. Its serialized field is required and holds
+either that string or an explicit null. Planning resolves the declared default into a required
+platform string; connector preparation uses it only when the codec's event omits the field.
+The registry's `NERVIX MODEL SEP` archive signature and consensus's `raft_platform_` keyspaces
+identify this current shape before decoding. An unrecognized signature or namespace fails with
+the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
 

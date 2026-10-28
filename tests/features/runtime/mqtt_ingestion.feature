@@ -599,9 +599,11 @@ Feature: MQTT ingestion
       """
     And the relay subscription does not receive a payload within "1s"
     And node "{{mqtt_owner}}" observability metric "nervix_ingestor_read_ahead_dropped_payloads_total" with labels eventually equals 64
-      | domain           | {{domain}}         |
-      | ingestor         | mqtt_notifications |
-      | physical_node_id | {{mqtt_owner}}     |
+      """
+      domain="{{domain}}"
+      ingestor="mqtt_notifications"
+      physical_node_id="{{mqtt_owner}}"
+      """
     And within "10s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
       """
       nervix_ingestor_transport_redeliveries_total: 0

@@ -194,6 +194,7 @@ fn validate_driver(
         ConnectorKind::RabbitMq => nervix_connector_rabbitmq::validate_client_configuration(config),
         ConnectorKind::Nats => nervix_connector_nats::validate_client_configuration(config),
         ConnectorKind::ZeroMq => nervix_connector_zeromq::validate_client_configuration(config),
+        ConnectorKind::Sentry => nervix_connector_sentry::validate_client_configuration(config),
         _ => Ok(()),
     }
 }
