@@ -347,6 +347,7 @@ class InventoryTests(unittest.TestCase):
             "iceberg-nested-datetime-staging",
             "iceberg-table-projection",
             "sentry-prepared-envelopes",
+            "sentry-event-models",
             "http-request-heads",
             "mqtt-publish-packets",
             "postgres-insert-measures",

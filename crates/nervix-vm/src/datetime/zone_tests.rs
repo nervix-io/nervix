@@ -25,7 +25,7 @@ use crate::program::Disambiguation;
 /// The IANA release the documentation names. A dependency update that bundles another release
 /// changes local times for some zones, so it must update the Time Zones section of the expression
 /// function reference together with this constant.
-const DOCUMENTED_DATABASE_VERSION: &str = "2026c";
+const DOCUMENTED_DATABASE_VERSION: &str = "2026e";
 
 fn nanoseconds(instant: &str) -> i64 {
     NervixTimestamp::from_str(instant)

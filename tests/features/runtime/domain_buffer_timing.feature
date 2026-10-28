@@ -5,7 +5,7 @@ Feature: Domain-paced branch buffering
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
-      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 6s SKEW 6s;
       """
     When these Plexus commands are executed
       """
@@ -23,7 +23,7 @@ Feature: Domain-paced branch buffering
         FROM WIRE JSON SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5h;
       CREATE RELAY fast_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY observed SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE VHOST edge fast-buffering-{{test_id}}.example.com;
@@ -39,19 +39,19 @@ Feature: Domain-paced branch buffering
           INHERIT ALL
           BRANCHED BY by_tenant
           SET tenant = message.tenant
-          FLUSH EACH 1s MAX BATCH SIZE 1MiB
+          FLUSH EACH 1m MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE REINGESTOR fast_buffering_reingestor
         FROM fast_ingested
-        COLLECT FOR 1s MAX BATCH SIZE 1MiB
+        COLLECT FOR 1m MAX BATCH SIZE 1MiB
         TO observed
           INHERIT ALL
           BRANCHED BY by_tenant
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       CREATE SUBSCRIPTION observed_subscription TO observed;
-      START AT '2000-01-01T00:00:00Z' TIME RATE 20.0;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 1200.0;
       """
     And http payload is posted to host "fast-buffering-{{test_id}}.example.com" path "/events"
       """
@@ -69,9 +69,98 @@ Feature: Domain-paced branch buffering
       """
       {"tenant":"beta","sequence":2,"path":"fast"}
       """
-    # The caller deliberately resumes after the receive budget. The independent reader must
-    # still collect all rows before 800ms, below either one-second physical cadence.
-    Then within "800ms" the relay subscription receives payloads with its caller delayed by "1s"
+    # Every logical duration is sixty times the physical time it takes at rate 1200, so the flush
+    # and the collection each still close 50ms after they open, while a physical clock would hold
+    # each for a minute. The caller deliberately resumes after the receive budget; the independent
+    # reader must still collect every row within it.
+    Then within "5s" the relay subscription receives payloads with its caller delayed by "6s"
+      """
+      key={"tenant":"alpha"} payload={"path":"fast","sequence":1,"tenant":"alpha"}
+      key={"tenant":"alpha"} payload={"path":"fast","sequence":2,"tenant":"alpha"}
+      key={"tenant":"beta"} payload={"path":"fast","sequence":1,"tenant":"beta"}
+      key={"tenant":"beta"} payload={"path":"fast","sequence":2,"tenant":"beta"}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @domain_buffer_timing
+  Scenario Outline: Paced branch windows keep logical time while relay owners fan out slowly
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 6s SKEW 6s;
+      """
+    And relay owner fan-out for domain "{{domain}}" waits "250ms" before each batch
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA timed_event (
+        tenant STRING,
+        sequence I64,
+        path STRING
+      );
+      CREATE WIRE JSON SCHEMA timed_event_wire MODE STRICT (
+        tenant string,
+        sequence integer,
+        path string
+      );
+      CREATE CODEC timed_event_codec
+        FROM WIRE JSON SCHEMA timed_event_wire
+        TO SCHEMA timed_event;
+      CREATE SCHEMA tenant_branch (tenant STRING);
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5h;
+      CREATE RELAY fast_ingested SCHEMA timed_event BRANCHED BY by_tenant;
+      CREATE RELAY observed SCHEMA timed_event BRANCHED BY by_tenant;
+      CREATE VHOST edge fast-buffering-{{test_id}}.example.com;
+      CREATE ENDPOINT fast_buffering_endpoint
+        ON edge
+        PATH '/events'
+        TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR fast_buffering_source
+        FROM fast_buffering_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
+        TIMESTAMP NOW
+        TO fast_ingested
+          INHERIT ALL
+          BRANCHED BY by_tenant
+          SET tenant = message.tenant
+          FLUSH EACH 1m MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE REINGESTOR fast_buffering_reingestor
+        FROM fast_ingested
+        COLLECT FOR 1m MAX BATCH SIZE 1MiB
+        TO observed
+          INHERIT ALL
+          BRANCHED BY by_tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION observed_subscription TO observed;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 1200.0;
+      """
+    And http payload is posted to host "fast-buffering-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1,"path":"fast"}
+      """
+    And http payload is posted to host "fast-buffering-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":1,"path":"fast"}
+      """
+    And http payload is posted to host "fast-buffering-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2,"path":"fast"}
+      """
+    And http payload is posted to host "fast-buffering-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":2,"path":"fast"}
+      """
+    # Each relay owner fans out one batch at a time, every branch included, so each batch waits
+    # for the owner's delay on both relays. The rows still arrive well inside the budget, while a
+    # physical clock would hold the first window alone for a minute.
+    Then within "5s" the relay subscription receives payloads with its caller delayed by "6s"
       """
       key={"tenant":"alpha"} payload={"path":"fast","sequence":1,"tenant":"alpha"}
       key={"tenant":"alpha"} payload={"path":"fast","sequence":2,"tenant":"alpha"}

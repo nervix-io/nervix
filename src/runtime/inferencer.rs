@@ -18,9 +18,13 @@ use nervix_models::{
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorMapping, InferencerTensorSchema,
 };
-use nervix_primitives::sync::{Arc, blocking::Mutex};
+use nervix_primitives::{
+    sync::{Arc, blocking::Mutex},
+    unmodeled::sync::OnceLock,
+};
 use ordered_float::OrderedFloat;
 use ort::{
+    environment::Environment,
     session::{Session, SessionInputValue},
     value::Tensor,
 };
@@ -149,6 +153,23 @@ pub(super) enum InferencerError {
     },
 }
 
+/// The process's ONNX Runtime environment, or ONNX Runtime's refusal to create it.
+///
+/// ONNX Runtime creates every session in an environment and allows a process one, refusing another
+/// even after the first is dropped. Every node the process runs and every model inspection share
+/// this one, created on first use and kept until the process exits, so its outcome is final. A
+/// panic while it is created, such as a native library that does not load, leaves no outcome, and
+/// the next use tries again.
+static ONNX_ENVIRONMENT: OnceLock<Result<Environment, ort::Error>> = OnceLock::new();
+
+/// The environment this process creates its ONNX sessions in.
+pub(crate) fn onnx_environment() -> error_stack::Result<&'static Environment, &'static ort::Error> {
+    match ONNX_ENVIRONMENT.get_or_init(|| ort::init().build()) {
+        Ok(environment) => Ok(environment),
+        Err(refusal) => Err(Report::new(refusal)),
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct OnnxInferencerSession {
     session: Arc<Mutex<Session>>,
@@ -184,8 +205,10 @@ impl OnnxInferencerSession {
                 cancellation
                     .check()
                     .change_context(InferencerError::Cancelled)?;
-                let mut builder =
-                    Session::builder().change_context(InferencerError::InitializeSession)?;
+                let environment =
+                    onnx_environment().change_context(InferencerError::InitializeSession)?;
+                let mut builder = Session::builder(environment)
+                    .change_context(InferencerError::InitializeSession)?;
                 builder
                     .commit_from_file(&path)
                     .change_context_lazy(|| InferencerError::LoadModel { path: path.clone() })

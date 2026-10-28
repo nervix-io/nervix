@@ -1516,6 +1516,44 @@ async fn then_the_stallable_endpoint_accepted_connection_after(
     );
 }
 
+/// A client that keeps a fixed number of connections to the endpoint opens no other one. That
+/// connection must never arrive, so the window only strengthens the assertion; one that arrived
+/// earlier fails it at once.
+#[then(expr = "the stallable endpoint {string} accepts no connection beyond {int} within {string}")]
+async fn then_the_stallable_endpoint_accepts_no_connection_beyond(
+    world: &mut ScenarioWorld,
+    name: String,
+    count: usize,
+    window: String,
+) {
+    let window = parse_duration_text(&window)
+        .unwrap_or_else(|error| panic!("the window '{window}' is invalid: {error}"));
+    let proxy = world
+        .stallable_tcp_proxies
+        .get(&name)
+        .unwrap_or_else(|| panic!("no endpoint '{name}' was stood"));
+    let Some(beyond) = count.checked_add(1) else {
+        panic!("the endpoint '{name}' cannot be held to {count} connections");
+    };
+    let arrived = nervix_primitives::time::timeout(window, proxy.accepted_at_least(beyond)).await;
+    if arrived.is_ok() {
+        let first = endpoint_connection_accepted_at(world, &name, 1);
+        let further = endpoint_connection_accepted_at(world, &name, beyond);
+        let Some(after) = further.checked_duration_since(first) else {
+            panic!("the endpoint '{name}' accepted connection {beyond} before connection 1");
+        };
+        panic!(
+            "the endpoint '{name}' accepted connection {beyond} {} after connection 1, expected \
+             no more than {count}",
+            humantime::format_duration(after)
+        );
+    }
+    append_cucumber_log_line(&format!(
+        "endpoint '{name}' accepted no connection beyond {count} within {}",
+        humantime::format_duration(window)
+    ));
+}
+
 #[given("ClickHouse is running")]
 async fn given_clickhouse_is_running(world: &mut ScenarioWorld) {
     initialize_scenario_identity(world);
@@ -11326,14 +11364,15 @@ impl WasmLifecycleFailureFixture {
 fn ensure_onnx_runtime_loaded() {
     let result = ONNX_RUNTIME_INIT.get_or_init(|| {
         let dylib_path = resolve_onnxruntime_dylib()?;
-        ort::init_from(&dylib_path)
-            .map_err(|error| {
-                format!(
-                    "failed to initialize ONNX Runtime from '{}': {error}",
-                    dylib_path.display()
-                )
-            })?
-            .commit();
+        // Only load the library: the nodes create the process's one ONNX Runtime environment on
+        // first use, and ONNX Runtime refuses a second.
+        let environment_builder = ort::init_from(&dylib_path).map_err(|error| {
+            format!(
+                "failed to load ONNX Runtime from '{}': {error}",
+                dylib_path.display()
+            )
+        })?;
+        drop(environment_builder);
         Ok(())
     });
 

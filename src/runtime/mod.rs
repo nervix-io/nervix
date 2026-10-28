@@ -972,6 +972,7 @@ pub(crate) use entity_gate::{
 pub(crate) use error::RuntimeError;
 pub(crate) use events::RuntimeEvent;
 use execution_build_error::{ExecutionBuildError, ExecutionStep};
+pub(crate) use inferencer::onnx_environment;
 pub(crate) use ingest_metadata::IngestFilterMapMetadata;
 use ingest_task_handles::IngestTaskHandles;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
