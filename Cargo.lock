@@ -6931,9 +6931,12 @@ dependencies = [
  "meticulous",
  "mongodb",
  "nervix-connector",
+ "nervix-execution",
  "nervix-models",
  "nervix-primitives",
+ "rcgen",
  "strum 0.26.3",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -7121,6 +7124,7 @@ version = "0.1.0-dev"
 dependencies = [
  "async-rs",
  "async-trait",
+ "bolero",
  "error-stack",
  "futures-util",
  "humantime",
@@ -7133,11 +7137,14 @@ dependencies = [
  "nervix-primitives",
  "nervix-recovery",
  "nervix-test-environment",
+ "rcgen",
+ "rustls",
  "shuttle",
  "socket2 0.6.5",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-rustls",
  "url",
 ]
 

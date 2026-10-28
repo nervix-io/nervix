@@ -3,7 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The MongoDB client Model with its connection pool, the collection emitter Model with
-//!   its conflict action, native BSON mapping, collection namespace budget and what it declares.
+//!   its conflict action, native BSON mapping, field-name admission, collection namespace budget
+//!   and what it declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared emitter declarations and the names a body references.
 //! - **Must not know.** The MongoDB driver, or how documents are written.
@@ -43,6 +44,8 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
             K::required("addr", V::DriverAddress),
             K::optional("database", V::String),
             K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
         ],
         &[],
         &[],
@@ -50,6 +53,14 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
 };
 
 pub type MongoDbValueMapping = EmitterValueMapping;
+
+impl MongoDbCollectionEmitter {
+    /// BSON encodes a field name as a NUL-terminated string. Other characters retain their
+    /// external spelling; server-side query and index restrictions are separate contracts.
+    pub fn admits_value_key(&self, key: &str) -> bool {
+        !key.contains('\0')
+    }
+}
 
 /// The BSON document limit, including an identifier the driver or server adds.
 #[cfg_attr(

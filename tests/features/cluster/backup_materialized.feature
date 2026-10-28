@@ -77,6 +77,10 @@ Feature: Materialized backup and archived lifecycle resumption
       class="bulk"
       """
     When runtime installation on node "node-3" is paused
+    # The relocated generator's first fetch holds a received chunk of the free room while node-3's
+    # restore maintenance asks for its whole working set, as a fetch did when maintenance began a
+    # sweep between two of its charges.
+    And node "node-3" holds its next materialized snapshot fetch on its first chunk until restore maintenance asks for bulk memory
     And this Plexus command request begins executing in the background on the leader node
       """
       RELOCATE GENERATOR produce_0 ONTO NODE node-3 IGNORE PREFERENCES;
@@ -85,6 +89,7 @@ Feature: Materialized backup and archived lifecycle resumption
     When bulk memory on node "node-3" keeps only "2097152" bytes free
     And runtime installation on node "node-3" is released
     Then the background command request succeeds
+    And within "60s" node "node-3" resumes its held materialized snapshot fetch after restore maintenance asked for bulk memory
     Then within "60s" node "node-3" observability metric "nervix_interconnect_bulk_bytes_total" with labels eventually reaches at least 1048576
       """
       class="bulk",direction="received"

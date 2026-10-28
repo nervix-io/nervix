@@ -378,6 +378,7 @@ impl Runtime {
                 target: target_node_id.clone(),
                 placement: placement.clone(),
             })?;
+        let mut held_first_chunk = false;
         while let Some(chunk) =
             body.next_chunk()
                 .await
@@ -387,6 +388,15 @@ impl Runtime {
                 })?
         {
             nervix_primitives::task::consume_budget().await;
+            if !held_first_chunk {
+                held_first_chunk = true;
+                // A scenario can hold one fetch here, with the chunk it just received charged to
+                // the bulk class.
+                self.inner
+                    .fault_injection
+                    .hold_materialized_snapshot_fetch_if_armed(dispatcher.local_node_id())
+                    .await;
+            }
             staged.write_chunk(chunk).await.change_context(
                 MaterializedSnapshotExchangeError::WriteChunk {
                     target: target_node_id.clone(),

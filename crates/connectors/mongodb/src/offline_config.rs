@@ -1,7 +1,7 @@
 //! MongoDB configuration interpretation before a client opens.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Native address/option parsing, the resolved database and pool-option refusals.
+//! - **Owns.** Native address/option parsing, the resolved database and pool/TLS-option refusals.
 //! - **Depends on.** The connector contract, vocabulary declarations and MongoDB driver.
 //! - **Must not know.** Models, transaction admission, resource installation or graph execution.
 
@@ -25,6 +25,8 @@ use nervix_connector::{
 };
 use nervix_models::{ClientConfigEntry, ConnectorKind};
 
+use crate::tls_identity::MongoDbClientOptions;
+
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
@@ -36,7 +38,7 @@ const MAX_DATABASE_BYTES: usize = 63;
 
 /// A successfully parsed driver configuration and its required, validated database.
 pub(crate) struct MongoDbClientConfiguration {
-    options: ClientOptions,
+    options: MongoDbClientOptions,
     database: String,
 }
 
@@ -97,10 +99,12 @@ impl MongoDbClientConfiguration {
         // The emitter selects this required database explicitly. The driver holds no second
         // independently optional copy of the database this configuration already resolved.
         options.default_database = None;
+        let options = MongoDbClientOptions::new(options, config)
+            .change_context(OfflineClientConfigError::key("addr"))?;
         Ok(Self { options, database })
     }
 
-    pub(crate) fn into_options(self) -> ClientOptions {
+    pub(crate) fn into_options(self) -> MongoDbClientOptions {
         self.options
     }
 
@@ -201,5 +205,37 @@ mod tests {
             validate_client_configuration(&config("mongodb://unresolvable.invalid/Events%202026"))
                 .expect_err("a percent-decoded database must satisfy the same contract");
         assert_eq!(refusal.to_string(), "invalid client config key 'addr'");
+    }
+
+    #[test]
+    fn identity_keys_are_paired_and_validated_without_reading_files() {
+        let mut settings = config("mongodb://unresolvable.invalid/events?tls=true");
+        for (key, value) in [
+            ("tls_cert_file", "unavailable-cert.pem"),
+            ("tls_key_file", "unavailable-key.pem"),
+        ] {
+            settings.push(ClientConfigEntry {
+                key: key.to_owned(),
+                value: value.to_owned(),
+            });
+        }
+        validate_client_configuration(&settings)
+            .assured("complete identity declaration needs neither files nor a server");
+        settings[0].value = "mongodb://unresolvable.invalid/events?tls=false".to_owned();
+        let report = validate_client_configuration(&settings)
+            .expect_err("explicit identity files cannot override disabled TLS");
+        assert!(matches!(
+            report.downcast_ref::<crate::tls_identity::MongoDbTlsError>(),
+            Some(crate::tls_identity::MongoDbTlsError::Disabled)
+        ));
+        assert_eq!(report.to_string(), "invalid client config key 'addr'");
+        settings.pop();
+        let report = validate_client_configuration(&settings)
+            .expect_err("the key must accompany the certificate");
+        assert!(
+            report
+                .downcast_ref::<nervix_models::ClientConfigSchemaError>()
+                .is_some()
+        );
     }
 }

@@ -121,6 +121,8 @@ tags = [
   "@client_ingestor_alter_drain",
   "@syslog_suspend_handoff",
   "@syslog_listener_rebind",
+  "@resource_source_discovery",
+  "@resource_upload_publication",
   "@deadlock_reports",
   "@memory_pressure_pause",
   "@client_io_03_consumer_restore",
@@ -134,6 +136,7 @@ tags = [
   "@domain_clock_takeover",
   "@udf_column_builder",
   "@vhost_tls_rebinding",
+  "@mongodb_client_identity",
   "@inferencer_branch_batches",
   "@inferencer_inspection_admission",
   "@shutdown_cordon_release",
@@ -1032,11 +1035,11 @@ scenario = "Remote materialized generators reuse each complete generation and ob
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "A generator moves to a remote source reader with constrained bulk room, refuses snapshot decoding, releases its input and resumes both branches after the hold ends. Existing snapshot assignment and sealed-cache locks are tracked; async memory admission and transport waits are outside Deloxide."
+coverage = "A generator moves to a remote source reader with constrained bulk room, holds its first fetch on a received chunk until restore maintenance asks for bulk memory, refuses snapshot decoding, releases its input and resumes both branches after the hold ends. Existing snapshot assignment and sealed-cache locks and the maintenance installation barrier are tracked; async memory admission and transport waits are outside Deloxide."
 examples = 1
 feature = "tests/features/cluster/backup_materialized.feature"
 id = "scenario.materialized-read-admission"
-invariant = "A refused snapshot read retains no bulk input; releasing contention lets the relocated generator emit every original and replacement branch."
+invariant = "A refused snapshot read retains no bulk input and restore maintenance takes no queue place ahead of it; releasing contention lets the relocated generator emit every original and replacement branch."
 invocation = "scenarios"
 scenario = "A relocated materialized generator releases refused snapshot reads and resumes after bulk contention"
 selections = ["deloxide", "deloxide-order"]
@@ -1170,6 +1173,46 @@ invariant = "One-node and every three-node Syslog listener delivers every number
 invocation = "scenarios"
 scenario = "A full Syslog TCP intake keeps every frame through source suspension on <cluster_size> nodes via <node_id>"
 selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Resource publication, a replica's temporarily empty source view, pending observation, archive installation and a lookup through the replicated file. The test-control map and watch are untracked; consensus persistence and node lifecycle use tracked owners."
+examples = 1
+feature = "tests/features/cluster/resource_source_discovery.feature"
+id = "scenario.resource-source-discovery"
+invariant = "A missing local resource copy stays pending until source discovery resumes, then the admitted upload completes and its replicated contents serve the lookup."
+invocation = "scenarios"
+scenario = "A resource upload waits for a replica to discover its source"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: resource publication, pending source discovery, archive installation and a lookup through the replicated file; the scenario control remains untracked."
+examples = 1
+feature = "tests/features/cluster/resource_source_discovery.feature"
+id = "stress.resource-source-discovery"
+invariant = "A missing local resource copy stays pending until source discovery resumes, then the admitted upload completes and its replicated contents serve the lookup."
+invocation = "stress-scenarios"
+scenario = "A resource upload waits for a replica to discover its source"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "The leader's installed manifest is read after its upload publication is refused, then reconciliation publishes the matching copy and completes the original upload on one and three nodes. The refusal map and watch are untracked; consensus storage and node lifecycle use tracked owners."
+examples = 2
+feature = "tests/features/cluster/resource_describe.feature"
+id = "scenario.resource-upload-publication"
+invariant = "An applying upload whose publication was refused is completed from its matching installed copy under the same identity, with exactly one published version."
+invocation = "scenarios"
+scenario = "A leader resumes an upload whose publication it refused from its own installed copy"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: one- and three-node recovery reads the installed manifest, republishes the matching copy and completes the original upload. The scenario refusal map and watch remain untracked."
+examples = 2
+feature = "tests/features/cluster/resource_describe.feature"
+id = "stress.resource-upload-publication"
+invariant = "An applying upload whose publication was refused is completed from its matching installed copy under the same identity, with exactly one published version."
+invocation = "stress-scenarios"
+scenario = "A leader resumes an upload whose publication it refused from its own installed copy"
+selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Syslog accept failure injection while an established connection streams; the source retains its connection tasks and rebinds the listening socket."
@@ -1942,11 +1985,11 @@ scenario = "Remote materialized generators reuse each complete generation and ob
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
-coverage = "Under scheduling stress: a relocated generator releases a refused snapshot's input and resumes complete remote generations. Existing snapshot assignment and sealed-cache locks are tracked; async memory admission and transport waits are outside Deloxide."
+coverage = "Under scheduling stress: a relocated generator holds its first fetch on a received chunk until restore maintenance asks for bulk memory, releases a refused snapshot's input and resumes complete remote generations. Existing snapshot assignment and sealed-cache locks and the maintenance installation barrier are tracked; async memory admission and transport waits are outside Deloxide."
 examples = 1
 feature = "tests/features/cluster/backup_materialized.feature"
 id = "stress.materialized-read-admission"
-invariant = "A refused snapshot read retains no bulk input; releasing contention lets the relocated generator emit every original and replacement branch."
+invariant = "A refused snapshot read retains no bulk input and restore maintenance takes no queue place ahead of it; releasing contention lets the relocated generator emit every original and replacement branch."
 invocation = "stress-restore-scenarios"
 scenario = "A relocated materialized generator releases refused snapshot reads and resumes after bulk contention"
 selections = ["deloxide-stress-restore"]
@@ -2632,6 +2675,26 @@ scenario = "Occupied bulk execution leaves management work responsive"
 selections = ["deloxide-stress"]
 
 
+[[workload]]
+coverage = "Filesystem-class queue admission and drain fences while MongoDB prepares a private combined identity and constructs native TLS on one and three nodes. Driver-internal locks, certificate I/O and network waits remain untracked, and callbacks execute outside the queue fence."
+examples = 2
+feature = "tests/features/runtime/mongodb_tls_resource_mounts.feature"
+id = "scenario.mongodb-client-identity"
+invariant = "A client with a mounted split identity opens and writes through the real mutual-TLS transport, while a CA-only client is refused by the same server."
+invocation = "scenarios"
+scenario = "MongoDB emitter inserts over mutual TLS with a mounted client identity"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: filesystem-class queue admission and drain fences during MongoDB identity preparation and native TLS construction on one and three nodes. Driver-internal locks, certificate I/O and network waits remain outside the diagnostic claim."
+examples = 2
+feature = "tests/features/runtime/mongodb_tls_resource_mounts.feature"
+id = "stress.mongodb-client-identity"
+invariant = "A client with a mounted split identity opens and writes through the real mutual-TLS transport, while a CA-only client is refused by the same server."
+invocation = "stress-scenarios"
+scenario = "MongoDB emitter inserts over mutual TLS with a mounted client identity"
+selections = ["deloxide-stress"]
+
 [[owner]]
 gap = "CPU-worker interruption between simulated callbacks belongs to the mutually exclusive Turmoil mode. Native blocking-task teardown before its first callback is not deterministically reached by these public scenarios. Native workloads reach normal FIFO admission, cancellation and draining; the ordinary interrupted-worker regression covers selected and queued destructor cleanup without claiming tracked-lock interleavings."
 path = "crates/execution/src/workers.rs"
@@ -2640,6 +2703,8 @@ workloads = [
   "stress.execution-class-drain",
   "scenario.materialized-bulk-generations",
   "stress.materialized-bulk-generations",
+  "scenario.mongodb-client-identity",
+  "stress.mongodb-client-identity",
 ]
 
 [[owner]]
@@ -2788,6 +2853,10 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/storage.rs"
 workloads = [
+  "scenario.resource-source-discovery",
+  "stress.resource-source-discovery",
+  "scenario.resource-upload-publication",
+  "stress.resource-upload-publication",
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
   "stress.diagnostic-nodes",
@@ -3004,6 +3073,10 @@ workloads = [
 [[owner]]
 path = "src/cluster.rs"
 workloads = [
+  "scenario.resource-source-discovery",
+  "stress.resource-source-discovery",
+  "scenario.resource-upload-publication",
+  "stress.resource-upload-publication",
   "scenario.clock-takeover-local",
   "scenario.clock-takeover-observer",
   "stress.clock-takeover-local",

@@ -77,6 +77,8 @@ pub(crate) enum ConnectorDeclarationIssue {
     },
     #[error("duplicate VALUES key '{key}'")]
     DuplicateValue { key: String },
+    #[error("{} VALUES key {key:?} contains a NUL byte", ConnectorKind::MongoDb)]
+    MongoDbFieldName { key: String },
     #[error("VALUES requires at least one mapping")]
     EmptyValues,
     #[error("{entity} declares no direct value type contract")]

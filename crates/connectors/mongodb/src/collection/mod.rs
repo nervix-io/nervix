@@ -29,7 +29,6 @@ use std::{
     collections::{BTreeMap, BTreeSet, btree_map},
     fmt,
     ops::Range,
-    path::PathBuf,
 };
 
 use arrow_array::{
@@ -48,24 +47,24 @@ use mongodb::{
         BulkWriteError, Error as DriverError, ErrorKind, InsertManyError, PartialBulkWriteResult,
         WriteConcernError,
     },
-    options::{
-        Tls, TlsOptions, UpdateOneModel as MongoDbUpdateOneModel, WriteModel as MongoDbWriteModel,
-    },
+    options::{UpdateOneModel as MongoDbUpdateOneModel, WriteModel as MongoDbWriteModel},
 };
 use nervix_connector::{
     EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle, EmitterOpenError,
     EmitterRecordPosition, EmitterStartResult, EmitterWriteError, EmitterWriteResult,
     MappedEmitterMember, MappedEmitterRows, MeasuredRequest, PerRecordOutcome,
-    RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits, optional_client_config_value,
+    RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits,
 };
+use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_models::{
     ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, FieldPath, MONGODB_MAX_DOCUMENT_BYTES,
     MongoDbCollectionName, Timestamp,
 };
-use nervix_primitives::time::Instant;
+use nervix_primitives::{sync::Arc, time::Instant};
+use tempfile::NamedTempFile;
 use tracing::{debug, trace};
 
-use crate::offline_config::MongoDbClientConfiguration;
+use crate::{offline_config::MongoDbClientConfiguration, tls_identity::PreparedMongoDbClient};
 
 const MONGODB: &str = "mongodb";
 
@@ -80,9 +79,19 @@ const GENERATED_ID_BYTES: u64 = 17;
 #[cfg(test)]
 mod mapping_tests;
 
+#[cfg(test)]
+mod tls_tests;
+
 /// The node's shared MongoDB client for one named client, whose driver pools per server.
 #[derive(Clone)]
-pub struct MongoDbClient(DriverClient);
+pub struct MongoDbClient(Arc<MongoDbClientInner>);
+
+struct MongoDbClientInner {
+    driver: DriverClient,
+    /// Every client handle retains this client's private combined identity file; its final drop
+    /// removes the file together with the native client.
+    _identity: Option<NamedTempFile>,
+}
 
 /// The node-owned client this emitter writes through while its host holds the lease.
 pub trait MongoDbClientProvider: Send + Sync + 'static {
@@ -124,27 +133,63 @@ impl MongoDbClient {
     pub async fn open(
         config: &[ClientConfigEntry],
         bounds: ClientPoolBounds,
+        executor: &Executor,
     ) -> EmitterStartResult<Self> {
-        let mut options = MongoDbClientConfiguration::parse(config)
+        let options = MongoDbClientConfiguration::parse(config)
             .change_context(EmitterOpenError::InvalidConfiguration { connector: MONGODB })?
             .into_options();
-        if let Some(ca_file) = optional_client_config_value(config, "tls_ca_file") {
-            options.tls = Some(Tls::Enabled(
-                TlsOptions::builder()
-                    .ca_file_path(PathBuf::from(ca_file))
-                    .build(),
-            ));
-        }
-        options.min_pool_size = Some(bounds.minimum());
-        options.max_pool_size = Some(bounds.maximum().get());
-        let client = DriverClient::with_options(options)
-            .change_context(EmitterOpenError::InvalidConfiguration { connector: MONGODB })?;
+        let mut prepared = options
+            .prepare(executor)
+            .await
+            .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
+        prepared.options.min_pool_size = Some(bounds.minimum());
+        prepared.options.max_pool_size = Some(bounds.maximum().get());
+        let client = Self::from_prepared(prepared, executor).await?;
         client
+            .0
+            .driver
             .database("admin")
             .run_command(doc! { "ping": 1 })
             .await
             .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
-        Ok(Self(client))
+        Ok(client)
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "constructs one named client's native TLS and pool state"
+        )
+    )]
+    async fn from_prepared(
+        prepared: PreparedMongoDbClient,
+        executor: &Executor,
+    ) -> EmitterStartResult<Self> {
+        // Charge the prepared job envelope. The driver's client, TLS and pool allocations remain
+        // driver-owned; this reservation is not a claim about the driver's internal working set.
+        let bytes = u64::try_from(std::mem::size_of::<PreparedMongoDbClient>())
+            .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
+        let charge = executor
+            .try_reserve(MemoryClass::Management, bytes)
+            .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
+        executor
+            .run_storage(StorageClass::Filesystem, charge, move |_, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
+                let PreparedMongoDbClient { options, identity } = prepared;
+                // The native constructor synchronously reads CA/identity files and parses PEM.
+                let driver = DriverClient::with_options(options).change_context(
+                    EmitterOpenError::InvalidConfiguration { connector: MONGODB },
+                )?;
+                Ok(Self(Arc::new(MongoDbClientInner {
+                    driver,
+                    _identity: identity,
+                })))
+            })
+            .await
+            .change_context(EmitterOpenError::Initialize { connector: MONGODB })?
     }
 }
 
@@ -246,7 +291,7 @@ impl MongoDbCollectionEmitter {
         &self,
         client: &MongoDbClient,
     ) -> EmitterWriteResult<mongodb::Database> {
-        let database = client.0.database(&self.database);
+        let database = client.0.driver.database(&self.database);
         let collection_names = database
             .list_collection_names()
             .filter(doc! { "name": self.collection.as_str() })
@@ -397,6 +442,7 @@ impl MongoDbCollectionEmitter {
             }
             let written = client
                 .0
+                .driver
                 .bulk_write(models)
                 .ordered(false)
                 .verbose_results()

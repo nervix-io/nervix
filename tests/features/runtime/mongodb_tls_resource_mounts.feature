@@ -1,7 +1,8 @@
 Feature: MongoDB TLS resource mounts
-  Scenario Outline: MongoDB emitter inserts over TLS with a mounted resource directory
+  @mongodb_client_identity @deloxide_stress
+  Scenario Outline: MongoDB emitter inserts over mutual TLS with a mounted client identity
     Given MQTT is running
-    And MongoDB is running
+    And MongoDB mutual TLS is running
     Given runtime replication is configured with replica count <replicas> and snapshot interval "100ms"
     And a <nodes> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -9,7 +10,8 @@ Feature: MongoDB TLS resource mounts
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has dev TLS resource directory "dev_tls"
-    And MongoDB TLS collection "tls_notifications_mongodb_out_{{test_id}}" exists
+    And MongoDB mutual TLS collection "tls_notifications_mongodb_out_{{test_id}}" exists
+    And MongoDB mutual TLS refuses a client without an identity
     When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
@@ -53,9 +55,11 @@ Feature: MongoDB TLS resource mounts
         POOL SIZE MIN 2 MAX 8
         MOUNT dev_tls VERSION 1
         CONFIG {
-          'addr' = '{{mongodb_tls_addr}}',
+          'addr' = '{{mongodb_mtls_addr}}',
           'database' = 'nervix',
-          'tls_ca_file' = '{{dev_tls}}/ca.pem'
+          'tls_ca_file' = '{{dev_tls}}/ca.pem',
+          'tls_cert_file' = '{{dev_tls}}/node.pem',
+          'tls_key_file' = '{{dev_tls}}/node-key.pem'
         };
         CREATE MONGODB COLLECTION EMITTER to_mongodb FROM notifications TO mongodb_client COLLECTION 'tls_notifications_mongodb_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -64,7 +68,19 @@ Feature: MongoDB TLS resource mounts
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
-    Then within "10s" repeatedly publishing MQTT message to topic "mongodb_tls_notifications_in_{{test_id}}" yields a relay subscription payload
+    And these Plexus commands are executed on the leader node
+      """
+      SHOW CREATE CLIENT mongodb_client;
+      """
+    Then the last command output contains
+      """
+      'tls_cert_file'
+      """
+    And the last command output contains
+      """
+      'tls_key_file'
+      """
+    And within "10s" repeatedly publishing MQTT message to topic "mongodb_tls_notifications_in_{{test_id}}" yields a relay subscription payload
       """
       {"user_id":42,"action":"OPEN"}
       """
