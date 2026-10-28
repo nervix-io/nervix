@@ -2062,6 +2062,13 @@ exact durable discard, activation, or schedule-based reconciliation resolves tha
 
 ## Observability
 
+Backup capture and inventory remain terminal request/reply operations. Their administrative
+handlers log owner-local phase boundaries at `info`, correlated by domain, owner node and capture
+coordination identity. Revision catch-up, cluster-state application, lifecycle checkpoints, storage
+capture, staging and inventory are distinguishable in those logs; no progress frames or additional
+wire state are sent. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
+owns the coordinator's timeout phases and elapsed measurements.
+
 Each node exports interconnect measurements through its local metrics endpoint. The main groups
 cover connection and stream occupancy, pending operations, setup failures and resets, quota
 exhaustion, request latency, relay channels and grants, grant refusals by direction and reason,
