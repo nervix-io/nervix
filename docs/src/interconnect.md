@@ -1252,8 +1252,10 @@ Consensus separates traffic according to the progress it protects:
 
 The ordered append stream can keep multiple batches in flight while preserving follower order. Its
 consensus-level window bounds a follower to 16 outstanding batches and 16 MiB of unacknowledged log
-data. Heartbeats and elections remain on management capacity, so a full append window does not block
-leadership traffic.
+data. Each batch stops at 256 entries or the 1 MiB byte target, so a newly elected leader can
+learn that a lagging follower rejects its previous-log boundary without first transferring a larger
+speculative entry batch over a slow link. Heartbeats and elections remain on management capacity,
+so a full append window does not block leadership traffic.
 
 The consensus adapter obtains its first append request before opening the duplex transport. This
 lets the caller's retry and cancellation gate pace a setup attempt even when the transport refuses
