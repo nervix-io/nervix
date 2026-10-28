@@ -1,6 +1,67 @@
 Feature: MongoDB collection declarations
   Stopped declarations validate names and driver configuration without connecting to MongoDB.
 
+  Scenario Outline: MongoDB refuses NUL bytes in VALUES keys
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (value I64);
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE MONGODB CLIENT mongo_client POOL SIZE MIN 0 MAX 1 CONFIG {
+        'addr' = 'mongodb://127.0.0.1:27017/events'
+      };
+      """
+    And a NUL character placeholder "nul" is prepared
+    When these Plexus commands fail with "NUL"
+      """
+      CREATE MONGODB COLLECTION EMITTER output FROM events
+        TO mongo_client COLLECTION 'events' MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        VALUES { 'bad{{nul}}key' = input.value } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: MongoDB refuses NUL bytes when altering VALUES keys
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (value I64);
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE MONGODB CLIENT mongo_client POOL SIZE MIN 0 MAX 1 CONFIG {
+        'addr' = 'mongodb://127.0.0.1:27017/events'
+      };
+      CREATE MONGODB COLLECTION EMITTER output FROM events
+        TO mongo_client COLLECTION 'events' MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        VALUES { 'good.key' = input.value } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    And a NUL character placeholder "nul" is prepared
+    When these Plexus commands fail with "NUL"
+      """
+      ALTER MONGODB COLLECTION EMITTER output
+        SET TO mongo_client COLLECTION 'events' MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        VALUES { 'bad{{nul}}key' = input.value };
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      SHOW CREATE EMITTER output;
+      """
+    Then the last command output contains
+      """
+      'good.key' = input.value
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: MongoDB collection locators preserve external spelling
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands

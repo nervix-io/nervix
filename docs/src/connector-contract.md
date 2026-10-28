@@ -1915,9 +1915,18 @@ integer widths, floating-point bits (including non-finite values), native dates 
 precision, binary subtype, recursive arrays, nulls and field order. The MongoDB declaration owns
 the BSON document limit; the encoder consumes that same constant. Its mapped type family admits
 the current scalars and typed arrays/vectors, and shared validation refuses duplicate keys and
-types outside that family. Collection locators use a MongoDB-specific rule and retain their
+types outside that family. MongoDB's vocabulary field-name predicate also refuses NUL bytes in
+`VALUES` keys during CREATE and ALTER; every other key retains its external spelling.
+Collection locators use a MongoDB-specific rule and retain their
 spelling through Models, plans and the connector. The complete namespace is checked with the
 resolved database before opening the emitter.
+The MongoDB client accepts paired `tls_cert_file`/`tls_key_file` entries. Its offline configuration
+owner merges explicit CA and identity paths into native URL TLS options without losing other
+options, and refuses explicit files with `tls=false`. Runtime preparation streams the identity
+parts into a private combined PEM on the bounded filesystem executor, preserving typed I/O causes.
+The shared client owns that file through its last clone because the driver may reopen the path
+for later connections; its final drop deletes the file. No identity bytes are persisted as Nervix
+control-plane state.
 `sentry-prepared-envelopes` checks complete event preservation, defaults, framing and attempt
 bytes; the one- and three-node Sentry scenarios qualify those bytes through a reopened connector
 after a mock endpoint's `503` response. See

@@ -37,7 +37,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
 | Timed generation from materialized state | `Plexus Overview` and `Examples` |
 | Emitter transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
-| MongoDB collection names, native BSON widths/date precision, conflict filters and client URL configuration | `Emitters` → `MongoDB`, then `Connector Capabilities` |
+| MongoDB collection names, BSON field-name admission, native widths/date precision, conflict filters, client URL configuration and paired TLS identity files | `Emitters` → `MongoDB`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions and client pool options | `Emitters` → `MySQL`, and `Database Client Connection Pools` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
@@ -265,6 +265,8 @@ current connection, retry and deadline limits.
   that range is rejected through `ON MESSAGE ERROR` instead of being written or used as an
   `ON CONFLICT` target, so map such a column to `STRING` when the full unsigned range must reach
   the collection.
+  BSON `VALUES` keys cannot contain NUL. Mutual TLS uses paired `tls_cert_file` and `tls_key_file`
+  entries alongside optional `tls_ca_file`; explicit files cannot be combined with `tls=false`.
 - Every optional `COLLECT FOR` policy follows the complete relay input list, has a positive
   duration, and is absent when immediate input execution is intended. Correlator sides are checked
   independently; ingestors never declare input collection. Treat the duration as domain-logical

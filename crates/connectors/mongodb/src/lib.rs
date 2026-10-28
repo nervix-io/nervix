@@ -21,4 +21,5 @@ pub mod collection;
 pub use collection::*;
 
 mod offline_config;
+mod tls_identity;
 pub use offline_config::validate_client_configuration;
