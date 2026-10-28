@@ -883,6 +883,15 @@ paused-clock reader that resumes at or beyond either the 500 ms or 800 ms bound 
 when its final row is ready. Offloading removes runner polling gaps; it neither extends the budget
 nor proves that runtime workers cannot be delayed.
 
+The slow historical-domain Immediate-flush outline keeps its 500 ms receipt budget, physical
+batching minimum, both exact tenant keys and payloads, and one- and three-node topology. It
+delays only collection of the observation result for one second. The reader must start and
+capture its deadline before the caller first polls the result. Its paused-clock control
+supplies both rows at 100 ms and requires receipt signals inside the original 500 ms window
+before the caller resumes after one second. A missing or late row still fails; the existing
+one-second cadence control covers both the 500 ms and 800 ms budgets. The public receive bound
+qualifies the physical clock choice without changing domain time or the batching minimum.
+
 The duration window outline establishes its observation boundary through a public subscription:
 it first waits for a probe branch's window to emit, then submits all four interleaved tenant rows
 as one HTTP payload unfolded into a decoded batch. Explicit source timestamps are already due
