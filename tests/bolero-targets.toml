@@ -101,6 +101,36 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/models/src/connector/header_pairs/__fuzz__/connector__header_pairs__tests__bolero_percent_encoded_headers_decode_to_complete_pairs/corpus"
+domain_version = 1
+features = []
+id = "models-header-pairs"
+invariant = "One through four percent-encoded OTLP header pairs decode to every original UTF-8 value, including whitespace, percent signs, commas, equals signs and plus signs, with normalized names and complete pair order. Empty input decodes to no pairs."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/connector/header_pairs/tests.rs"
+test = "connector::header_pairs::tests::bolero_percent_encoded_headers_decode_to_complete_pairs"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/src/connector/otel/__fuzz__/connector__otel__tests__bolero_otel_mappings_round_trip_with_literal_domains/corpus"
+domain_version = 1
+features = ["arrow"]
+id = "models-otel-mappings"
+invariant = "Complete OTEL mappings, attributes, resource and scope round-trip through JSON and archives; every declared field admits exactly its reference Arrow type, and signed severity and identifier literals obey independent domain references."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/connector/otel/tests.rs"
+test = "connector::otel::tests::bolero_otel_mappings_round_trip_with_literal_domains"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/interconnect/src/connection/__fuzz__/connection__retained_slots_tests__bolero_pool_slot_generations_have_one_worker_and_fixed_capacity/corpus"
 domain_version = 1
 features = []
@@ -3327,7 +3357,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 10
+domain_version = 11
 features = []
 id = "client-config-schema"
 invariant = "Bounded entries drawn from every current client key schema preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."

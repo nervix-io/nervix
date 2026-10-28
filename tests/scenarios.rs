@@ -2390,6 +2390,13 @@ enum CapturedExport {
 }
 
 impl CapturedExport {
+    fn header_values(&self, name: &str) -> Vec<&[u8]> {
+        match self {
+            Self::Http(request) => request.header_values(name),
+            Self::Grpc(call) => call.header_values(name),
+        }
+    }
+
     /// The path the request was sent to: an OTLP/HTTP path such as `/v1/logs`, or an OTLP/gRPC
     /// method.
     fn path(&self) -> &str {
@@ -2589,6 +2596,30 @@ async fn then_otlp_receiver_eventually_receives_requests(
                 panic!("OTLP receiver '{name}': {error}");
             }
         }
+    }
+}
+
+#[then(
+    expr = "every export request at OTLP receiver {string} has header {string} equal to {string}"
+)]
+fn then_otlp_receiver_exports_have_header(
+    world: &mut ScenarioWorld,
+    receiver: String,
+    header: String,
+    expected: String,
+) {
+    let expected = expand_placeholders(world, &expected);
+    let exports = captured_exports(world, &receiver);
+    assert!(
+        !exports.is_empty(),
+        "the OTLP receiver must have captured an export"
+    );
+    for export in exports {
+        assert_eq!(
+            export.header_values(&header),
+            [expected.as_bytes()],
+            "OTLP receiver '{receiver}' captured a different '{header}' header"
+        );
     }
 }
 
@@ -11364,14 +11395,15 @@ impl WasmLifecycleFailureFixture {
 fn ensure_onnx_runtime_loaded() {
     let result = ONNX_RUNTIME_INIT.get_or_init(|| {
         let dylib_path = resolve_onnxruntime_dylib()?;
-        ort::init_from(&dylib_path)
-            .map_err(|error| {
-                format!(
-                    "failed to initialize ONNX Runtime from '{}': {error}",
-                    dylib_path.display()
-                )
-            })?
-            .commit();
+        // Only load the library: the nodes create the process's one ONNX Runtime environment on
+        // first use, and ONNX Runtime refuses a second.
+        let environment_builder = ort::init_from(&dylib_path).map_err(|error| {
+            format!(
+                "failed to load ONNX Runtime from '{}': {error}",
+                dylib_path.display()
+            )
+        })?;
+        drop(environment_builder);
         Ok(())
     });
 

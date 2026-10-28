@@ -14,6 +14,14 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+An OTEL literal outside its declared field domain is a typed registry mapping issue that names
+the signal, key and required constraint. It carries no literal value. A TLS file key with a
+plaintext endpoint is a typed client-schema scheme refusal before file inspection, for either
+OTLP protocol. Header-pair parsing retains its typed cause beneath the value-free client key
+context. Neither path includes configured header values, file paths or endpoint credentials.
+The encoder verifies mapped types as a plan invariant; a violated invariant does not become a
+repeated connector initialization attempt.
+
 Sentry's offline DSN check retains `sentry_types::ParseDsnError` beneath
 `OfflineClientConfigError` for `dsn`, and connector initialization retains that same report
 beneath its open context. Public command refusals render the reviewed key context, never the

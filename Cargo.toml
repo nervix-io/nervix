@@ -547,7 +547,7 @@ jaq-std = "3"
 # The VM resolves time zone names only against the IANA database `jiff-tzdb` bundles, never against
 # the host, so every node running one build computes the same local times.
 jiff = { version = "0.2.35", default-features = false, features = ["std"] }
-jiff-tzdb = "0.1.8"
+jiff-tzdb = "0.1.9"
 js-sys = "0.3"
 # The RabbitMQ connector resolves its broker through the node resolver and hands Lapin the
 # established transport through `Connection::connector`. The `hickory-dns` feature stays off: it
@@ -644,7 +644,7 @@ opentelemetry-otlp = { version = "0.31", default-features = false }
 opentelemetry-proto = { version = "0.31", default-features = false }
 opentelemetry_sdk = "0.31"
 ordered-float = "4"
-ort = { version = "2.0.0-rc.13", default-features = false }
+ort = { version = "2.0.0-rc.15", default-features = false }
 otel-prost = { package = "prost", version = "0.14" }
 otel-tonic = { package = "tonic", version = "0.14", features = [
   "gzip",
@@ -702,10 +702,7 @@ reqwest_iceberg = { package = "reqwest", version = "0.12.28", default-features =
 ] }
 resolv-conf = "0.7.6"
 rkyv = { version = "0.8", features = ["indexmap-2"] }
-# The fork raises Roto's Cranelift floor from 0.127 to 0.136, which carries the x86_64 JIT fixes
-# the workspace previously supplied by patching Cranelift itself.
-# https://codeberg.org/glebpom/roto/src/branch/cranelift-upgrade-0.136
-roto = { branch = "cranelift-upgrade-0.136", git = "https://codeberg.org/glebpom/roto.git", version = "0.12" }
+roto = "0.13"
 rpassword = "7"
 rstest = "0.26.1"
 # This rumqttc-next line exposes the MQTT 5 facade with explicit AWS-LC selection.

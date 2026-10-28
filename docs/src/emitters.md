@@ -676,6 +676,11 @@ container shape, such as a one-element array, and a carrier with no eligible row
 Batching adds no timer: `FLUSH` alone decides when records leave, and a partial payload is published
 exactly like a full one.
 
+Arrival order is established at the emitter. Each input queue keeps its own order, and ready
+inputs can interleave. Sequential `MODE NO ACK` HTTP responses from different ingestors do
+not establish a common receive order at the emitter. Compatible rows separated by another source
+stay in separate payloads even when their requests were accepted consecutively.
+
 `MAX SIZE` is the exact length of the payload: escaping, UTF-8, base64, field names, separators,
 length prefixes and the container's own brackets all count, and a batch transformation is measured
 by the bytes of its output. Nervix never estimates the size. It encodes the candidate into a buffer
@@ -2078,7 +2083,7 @@ CREATE OTEL CLIENT otel_main
   CONFIG {
     'endpoint' = 'http://127.0.0.1:4317',
     'protocol' = 'grpc',
-    'headers' = 'authorization=Bearer <token>',
+    'headers' = 'authorization=Bearer%20<token>',
     'compression' = 'gzip',
     'timeout_ms' = 5000
   };
@@ -2086,13 +2091,17 @@ CREATE OTEL CLIENT otel_main
 
 `endpoint`, `protocol`, and `timeout_ms` are required. `protocol` is exactly `grpc` or
 `http/protobuf`. `headers` is comma-separated `key=value`: Nervix splits each pair at its first
-`=`, trims surrounding whitespace, lowercases keys, and preserves values literally without
-percent-decoding. Empty input supplies no headers. `compression` accepts only `gzip`, and an
+`=`, trims surrounding whitespace, lowercases keys, and percent-decodes each value once.
+A literal `+` remains `+`; `%2B` also decodes to `+`, and `%252C` decodes to the literal `%2C`.
+Encode a comma inside a value as `%2C` and a space as `%20`. Encoded leading and trailing spaces
+belong to the value. This follows the [OTLP header format](https://opentelemetry.io/docs/specs/otel/protocol/exporter/#specifying-headers-via-environment-variables).
+Empty input supplies no headers. `compression` accepts only `gzip`, and an
 absent compression key sends an uncompressed request. `timeout_ms` is a positive request bound.
 For `http/protobuf`, Nervix appends `/v1/logs`, `/v1/traces`, or `/v1/metrics` to the endpoint path.
 Mount TLS files and use `tls_ca_file`, `tls_cert_file`, and `tls_key_file` in the same client; the
 certificate and key must be supplied together, and TLS files require an `https` endpoint on either
-protocol. Both protocols resolve the endpoint's host through
+protocol. CREATE and ALTER CLIENT check this relationship before inspecting files or opening a
+transport. Both protocols resolve the endpoint's host through
 the node's configured DNS resolver for every new connection, and keep the endpoint's host for the
 HTTP authority and the TLS server name. A `timeout_ms` covers the lookup and connection setup as
 well as the response, and for `grpc` it is also the connection timeout. A failed lookup is an
@@ -2135,7 +2144,10 @@ Normal sensitivity rules apply to every expression, including `ATTRIBUTES`.
 Each signal's generated table above gives its closed `VALUES` keys, exact types, requiredness,
 and record constraints. Those tables also list the unsupported OTLP features and their reasons.
 Timestamps cannot precede the Unix epoch. Key/type and required-mapping checks happen at CREATE
-and ALTER; record-dependent ranges and histogram cardinality are checked while encoding each row.
+and ALTER. Literal severities, identifiers and enum names are also checked against the declared
+value domains before the statement is accepted. For example, `(25 AS I32)` is outside the severity
+range even though it has the required type. Record-dependent ranges and histogram cardinality
+are checked while encoding each row.
 
 Each metric emitter defines exactly one metric stream:
 

@@ -1528,6 +1528,21 @@ coverage-visual-create-report output="target/visual-create.lcov":
 coverage-lib output *args:
     cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
 
+# Append the OTEL and related connector-admission scenarios to current-source ordinary profiles.
+# Start a new source generation with coverage-clean-workspace before collecting its owners.
+coverage-otel output="target/otel.lcov": build-web-console
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --no-clean --features testing --test scenarios \
+        --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/otel*.feature") }} \
+        --concurrency 4 --retry 0
+    cargo llvm-cov --no-clean --features testing --test scenarios \
+        --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/connector_validation*.feature") }} \
+        --concurrency 4 --retry 0
+
 # Complete public archive representation and restore/re-export coverage, including test sources.
 coverage-backup-archives output="target/backup-archives.lcov": tests-deps
     #!/usr/bin/env bash
