@@ -154,6 +154,7 @@ mod cli;
 mod cli_completions;
 mod cli_values;
 mod client_consumers;
+mod client_description;
 mod client_producers;
 mod cluster_description;
 mod cluster_status;
@@ -193,6 +194,7 @@ mod session_service;
 mod shutdown;
 mod startup;
 mod state_replication_requests;
+mod statement_routing;
 mod subscription;
 mod termination_signals;
 #[cfg(test)]

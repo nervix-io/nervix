@@ -349,15 +349,30 @@ at most 128 GiB of artifacts at once, archives and snapshot transfers alike.
 
 A finished backup records its outcome in its command execution: the archive's size, digest, capture
 time, retention deadline, whether resources are included, its user count and each domain's
-revision, cut, section count and section bytes. The archive itself, the staged sections and the
-manifest are never written to consensus.
+revision, cut, section count and section bytes, and the process incarnation of the node that
+assembled the archive and retains it. The archive itself, the staged sections and the manifest are
+never written to consensus.
 
 The coordinator retains the archive in memory, under the execution reference, until the first
 download that queues its last frame or until the reference's retry validity ends: 15 minutes by
 default, counted from the time the reference was issued. A restart loses every archive a node
-retained. A download is served only to the user who ran the backup. A node that does not hold the
-archive redirects the download to the leader, which answers from the recorded outcome: the archive,
-or why it is not retained. The download streams chunks of at most 256 KiB with four frames queued
+retained. A download is served only to the user who ran the backup, and only by the node the
+recorded outcome names: leadership can move after a backup completes, and the client can recover
+the outcome from any node, so the leader is not necessarily the node that holds the archive.
+
+- A node that the recorded outcome names streams the archive while it retains it, and refuses the
+  download once a download collected it.
+- Any other node that applied the outcome sends the client to the named node, with that node's
+  endpoints, while the named process incarnation is live, and refuses the download once it
+  restarted or left the cluster.
+- A node that has not applied the outcome redirects the download to the leader, which answers from
+  it. An outcome reaches a client only once every live node applied it, so this happens only for a
+  reference no backup recorded or one still applying.
+- An archive a node retains under a reference whose recorded outcome names another node belongs to
+  a run whose outcome was not recorded. It is released when a download asks for it, and never
+  streamed. A run whose outcome the cluster refuses to record releases its archive at once.
+
+The download streams chunks of at most 256 KiB with four frames queued
 ahead of the client, and each frame must reach the client within its request timeout; the
 download as a whole has no deadline, because an archive can take far longer to transfer than a
 command takes to run. [Sessions](./sessions.md#backup-downloads) and the [Client Session
@@ -819,6 +834,7 @@ A retained archive's read failure is reported before its download sends the fixe
 | Owner capture | An owner cannot apply the revision, convert a checkpoint, or stage a section | No archive is assembled. The coordinator's copies and the failing owner's partial files are dropped; other owners' staged sections expire after 600 seconds | Send the backup again; it takes a new cut. |
 | Section transfer or assembly | A fetch fails, or the archive cannot be staged or encoded | No archive is retained | Send the backup again. |
 | Retained archive | The node restarts, the retry validity ends, or a download collects it | The recorded outcome remains; its download is refused | Take a new backup. |
+| Archive download from another node | Leadership moved after the outcome was recorded, or another run lost the race to record it, and the client asks a node that does not hold the archive | The archive stays retained on the node the outcome names. A losing run's archive is never streamed; it is released when a download asks for it, or at once when the cluster refuses its outcome | The download is sent on to the named node while its process is live; once that process restarted or left the cluster, the download is refused: take a new backup. |
 | Restore intake | The stream is abandoned, oversized, truncated or has another digest, or staging cannot hold it | Nothing changed; staging quota returned | Send the archive again from its first byte. |
 | Restore preparation and planning | Verification, preparation memory, parsing, the plan, a branch key or a conversion is refused | Nothing changed | Correct the archive, the target or the options; a refusal for room alone is retried for 30 seconds first. |
 | A step | A consensus refusal, a version that does not install, a model batch the leader refuses, or state that does not convert or install | The recorded steps stay applied; a created domain stays stopped with its gate closed if installation did not complete | Restore the archive again under another name. |

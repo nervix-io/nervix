@@ -2548,7 +2548,7 @@ mod tests {
 
     fn leader(grpc_uri: Option<&str>) -> LeaderRedirect {
         LeaderRedirect {
-            leader: Some(nervix_client_core::LeaderEndpoints {
+            leader: Some(nervix_client_core::NodeEndpoints {
                 node: ClusterNodeName::parse("node-2").assured("a valid node name"),
                 grpc_uri: grpc_uri
                     .map(|uri| url::Url::parse(uri).assured("the test URI is a valid URL")),
