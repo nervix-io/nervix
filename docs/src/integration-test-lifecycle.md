@@ -1689,19 +1689,28 @@ scenario first waits for the restored clock's `PACED` state, then observes the c
 period and advancing ticks. Leader confirmation and the clock's attach reply are separate events;
 the bounded selector predicate establishes clock readiness before the stability observation starts.
 
-Visual ingestor and processor fixtures wait for the exact domain's active menu item before opening
-their create form. Page load and leader confirmation do not establish that the initial domain
-publication has arrived. A form opened while the domain list is loading captures no
-domain; the later sidebar selection does not replace that retained scope, so its controls correctly
-report a missing prerequisite without issuing a choice lookup. The fixtures keep their original
-ten-second choice probes and their sensitivity, domain-change and repartitioning assertions.
+A visual creation fixture whose scenario has already provisioned its domain waits for that exact
+domain's active menu item before it opens a domain-scoped form or types a domain-scoped statement,
+such as `BEGIN`. The visual creation and connector presentation features follow this rule, as does
+the console REPL case that opens a resource form inside a transaction. Every create form except the
+domain and user forms is domain-scoped. Page load and leader confirmation do not establish that the
+initial domain publication has arrived: `CONNECTED` follows the server's leadership event, a frame
+independent of the domain list. A form opened while the domain list is loading captures no domain.
+The later sidebar selection does not replace that retained scope, so its controls correctly report
+a missing prerequisite without issuing a choice lookup, and its local validation refuses the
+submission for want of a domain. A statement typed in that interval is sent without a domain, and
+the server refuses it when the statement needs one. The fixtures keep their original ten-second choice probes and their
+sensitivity, domain-change, transaction, leader-following and repartitioning assertions. Fixtures
+that provision no domain keep their no-domain refusals and cluster-scoped domain forms unchanged.
 
 The delayed-initial-domain feature exercises this ordering on one and three nodes through the
 ordinary browser flow. A page-local gate holds actual session frames until the scenario releases
 them, with at most 64 frames and 1 MiB retained. It preserves the bytes and delivery order and fails
 on overflow, a non-binary frame or a connection closed before release. After release, the fixture
-observes the exact selected domain before opening either form and requires its real endpoint or
-input choice. The gate adds no sleep, retry or suite admission rule. Selector-existence failures
+observes the exact selected domain before opening a form, then requires the form's captured scope
+and a real choice from each scoped form family: an ingestor's endpoint, a processor's input, a
+branch's schema, a subscription's relay, a codec's internal schema, an endpoint's VHOST and a hash
+map's resource. The gate adds no sleep, retry or suite admission rule. Selector-existence failures
 include the sidebar domain, captured form scope and neutral or failed choice states, without
 recording draft input values.
 
