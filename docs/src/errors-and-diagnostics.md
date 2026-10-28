@@ -1274,6 +1274,8 @@ the declared `MAX SIZE` is instead a definitive per-row `validation` message err
 operation; `ON MESSAGE ERROR` routes it before the other rows are staged. A data file whose
 physical count or byte length violates a bound after a table schema change is a commit failure:
 the emitter does not append it and keeps the staged rows and acknowledgements for retry.
+Cleanup failures for incomplete staged files or a rejected data file are logged with their paths
+without replacing the original publish or commit failure.
 
 An Iceberg commit charges the bulk memory class for the staged files it reads back with
 `Executor::try_reserve`, so a charge the class has no room for is refused rather than queued. The

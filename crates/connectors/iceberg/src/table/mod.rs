@@ -96,7 +96,7 @@ use parquet_bounds::measured_file_size;
 use storage::DnsStorageFactory;
 use table_projection::{IcebergColumnError, IcebergTableProjection};
 use tempfile::TempDir;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 use url::Url;
 
 const ICEBERG: &str = "iceberg";
@@ -1153,10 +1153,22 @@ impl IcebergTableEmitter {
             let bytes = match Self::write_ipc_batch(&self.executor, path.clone(), batch).await {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    let _ = tokio::fs::remove_file(&path).await;
+                    if let Err(cleanup_error) = tokio::fs::remove_file(&path).await {
+                        debug!(
+                            path = %path.display(),
+                            error = %cleanup_error,
+                            "failed to remove incomplete Iceberg staged batch"
+                        );
+                    }
                     for file in new_files {
                         let file: IcebergStagedBatch = file;
-                        let _ = tokio::fs::remove_file(file.path).await;
+                        if let Err(cleanup_error) = tokio::fs::remove_file(&file.path).await {
+                            debug!(
+                                path = %file.path.display(),
+                                error = %cleanup_error,
+                                "failed to remove staged batch after Iceberg publish error"
+                            );
+                        }
                     }
                     return Err(error);
                 }
@@ -1463,7 +1475,14 @@ impl IcebergTableEmitterClient {
                         file.file_size_in_bytes(),
                         policy.max_size
                     );
-                    let _ = self.table.file_io().delete(file.file_path()).await;
+                    if let Err(cleanup_error) = self.table.file_io().delete(file.file_path()).await
+                    {
+                        warn!(
+                            path = file.file_path(),
+                            error = %cleanup_error,
+                            "failed to remove Iceberg data file rejected by BATCH bounds"
+                        );
+                    }
                     return Err(commit_failure(&reason));
                 }
                 written.push(file);
