@@ -342,6 +342,7 @@ class InventoryTests(unittest.TestCase):
             "sqs-batch-requests",
             "iceberg-nested-datetime-staging",
             "iceberg-table-projection",
+            "iceberg-staged-file-encoding",
             "sentry-prepared-envelopes",
             "http-request-heads",
             "mqtt-publish-packets",
