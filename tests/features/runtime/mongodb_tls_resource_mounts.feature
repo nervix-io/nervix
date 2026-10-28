@@ -1,4 +1,5 @@
 Feature: MongoDB TLS resource mounts
+  @mongodb_client_identity @deloxide_stress
   Scenario Outline: MongoDB emitter inserts over mutual TLS with a mounted client identity
     Given MQTT is running
     And MongoDB mutual TLS is running

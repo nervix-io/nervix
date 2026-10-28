@@ -134,6 +134,7 @@ tags = [
   "@domain_clock_takeover",
   "@udf_column_builder",
   "@vhost_tls_rebinding",
+  "@mongodb_client_identity",
   "@inferencer_branch_batches",
   "@inferencer_inspection_admission",
   "@shutdown_cordon_release",
@@ -2632,6 +2633,26 @@ scenario = "Occupied bulk execution leaves management work responsive"
 selections = ["deloxide-stress"]
 
 
+[[workload]]
+coverage = "Filesystem-class queue admission and drain fences while MongoDB prepares a private combined identity and constructs native TLS on one and three nodes. Driver-internal locks, certificate I/O and network waits remain untracked, and callbacks execute outside the queue fence."
+examples = 2
+feature = "tests/features/runtime/mongodb_tls_resource_mounts.feature"
+id = "scenario.mongodb-client-identity"
+invariant = "A client with a mounted split identity opens and writes through the real mutual-TLS transport, while a CA-only client is refused by the same server."
+invocation = "scenarios"
+scenario = "MongoDB emitter inserts over mutual TLS with a mounted client identity"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: filesystem-class queue admission and drain fences during MongoDB identity preparation and native TLS construction on one and three nodes. Driver-internal locks, certificate I/O and network waits remain outside the diagnostic claim."
+examples = 2
+feature = "tests/features/runtime/mongodb_tls_resource_mounts.feature"
+id = "stress.mongodb-client-identity"
+invariant = "A client with a mounted split identity opens and writes through the real mutual-TLS transport, while a CA-only client is refused by the same server."
+invocation = "stress-scenarios"
+scenario = "MongoDB emitter inserts over mutual TLS with a mounted client identity"
+selections = ["deloxide-stress"]
+
 [[owner]]
 gap = "CPU-worker interruption between simulated callbacks belongs to the mutually exclusive Turmoil mode. Native blocking-task teardown before its first callback is not deterministically reached by these public scenarios. Native workloads reach normal FIFO admission, cancellation and draining; the ordinary interrupted-worker regression covers selected and queued destructor cleanup without claiming tracked-lock interleavings."
 path = "crates/execution/src/workers.rs"
@@ -2640,6 +2661,8 @@ workloads = [
   "stress.execution-class-drain",
   "scenario.materialized-bulk-generations",
   "stress.materialized-bulk-generations",
+  "scenario.mongodb-client-identity",
+  "stress.mongodb-client-identity",
 ]
 
 [[owner]]
