@@ -54,11 +54,12 @@ pub(super) fn measured_file_size(batch: &RecordBatch) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Cursor, sync::Arc};
+    use std::io::Cursor;
 
     use arrow_array::{Int64Array, RecordBatch, StringArray};
     use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
     use arrow_schema::{DataType, Field, Schema};
+    use nervix_primitives::sync::StdArc;
     use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
 
     use super::measured_file_size;
@@ -73,7 +74,7 @@ mod tests {
             .with_max_len(512)
             .with_generator(rows)
             .for_each(|values| {
-                let schema = Arc::new(Schema::new(vec![
+                let schema = StdArc::new(Schema::new(vec![
                     Field::new("user_id", DataType::Int64, false),
                     Field::new("action", DataType::Utf8, false),
                 ]));
@@ -87,8 +88,8 @@ mod tests {
                 let batch = RecordBatch::try_new(
                     schema.clone(),
                     vec![
-                        Arc::new(Int64Array::from(ids)),
-                        Arc::new(StringArray::from(actions)),
+                        StdArc::new(Int64Array::from(ids)),
+                        StdArc::new(StringArray::from(actions)),
                     ],
                 )
                 .expect("generated rows match their staged schema");
