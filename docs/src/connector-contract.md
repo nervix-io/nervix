@@ -306,12 +306,19 @@ policy and do not create application-level probes or acknowledgements.
 
 Composition also passes the node resolver into every RabbitMQ source plan and emitter configuration.
 The connector reads the client's `addr` as an AMQP URI and takes its host from the URL grammar,
-because Lapin's own grammar substitutes `localhost` for an IPv6 literal host. Every connection resolves that host again through the node resolver: an emitter's start, its
+because Lapin's own grammar substitutes `localhost` for an IPv6 literal host and for an address that
+names no host. One owner reads the address before a client is committed and again for every
+connection: it refuses an address whose scheme is not `amqp` or `amqps`, that names no host or that
+names port 0, leaves the credentials, virtual host and query options to Lapin's grammar, and never
+repeats the address in a refusal. Every connection resolves that host again through the node resolver: an emitter's start, its
 reopening after a failed publish, and each source instance's resume. A literal IPv4 or IPv6 address
 is its own answer. The connector tries the answers in resolution order, each within an equal share
 of what remains of the client's `connect_timeout_ms`, 30 seconds by default, and for `amqps`
 completes the TLS handshake within what is left. The handshake verifies the broker certificate against the host `addr` names, whichever of its
-addresses was dialled, trusting the platform roots and the client's `tls_ca_file`. The connector
+addresses was dialled, trusting the platform roots and the client's `tls_ca_file`, and presents the
+client certificate chain and private key of `tls_cert_file` and `tls_key_file` when the client names
+them. The connector reads those files for every connection before it dials, and refuses a file that
+holds no PEM certificate or private key there rather than in the handshake. The connector
 then hands the established transport to Lapin through `Connection::connector`. Lapin's own
 reconnection stays off, so it asks that hook for a transport exactly once and runs the AMQP
 handshake over it, within what remains of the same budget. The source then opens its channel, sets
@@ -331,11 +338,15 @@ stays on AWS-LC.
 A failed connection is a `RabbitMqConnectError`. A lookup failure keeps its `DnsLookupFailure`, and
 unreachable addresses, a failed or overdue TLS handshake, and a failed or overdue AMQP handshake are
 their own variants, as are a Lapin runtime that could not be created and a socket the node could not
-hold a second handle on. A channel step that fails or runs out of the budget is reported beneath the
-source's or emitter's own context for that step, with the elapsed deadline as its typed cause. A source
-reports the failure as a resume failure and retries on its declared `RETRY POLICY`. A emitter reports
-an invalid address, CA file or deadline key as a configuration failure and every other connection
-failure as an initialization failure, and the emitter host reopens it on its backoff. Neither path
+hold a second handle on. A broker that ends the TLS session with an alert, such as one that requires
+a client certificate and receives none, is `TlsRefused`, naming the host and the alert. Under TLS
+1.3 that alert can arrive after the client's side of the handshake completed, on the first read of
+the AMQP handshake, and it is classified the same way there. A channel step that fails or runs out
+of the budget is reported beneath the source's or emitter's own context for that step, with the
+elapsed deadline as its typed cause. A source reports the failure as a resume failure and retries on
+its declared `RETRY POLICY`. A emitter reports an invalid address, CA file, client certificate,
+private key or deadline key as a configuration failure and every other connection failure as an
+initialization failure, and the emitter host reopens it on its backoff. Neither path
 acknowledges undelivered data: a source that cannot connect holds no delivery, and an emitter that
 cannot connect confirms nothing, so the input stays unacknowledged until a later connection
 delivers it.
@@ -356,7 +367,14 @@ Composition gives the node resolver to the shared Redis command pool and to each
 plan. Redis 1.7.1 exposes `AsyncConnectionConfig::set_dns_resolver` for command connections. The
 connector's `bb8` manager installs that hook whenever it opens a physical pooled connection;
 pool bounds, health checks and lease ownership remain with the existing pool and host. A pooled
-socket may remain open past an answer's TTL. A replacement socket resolves the host again.
+socket may remain open past an answer's TTL until the pool retires it. The pool reads the client's
+`pool_idle_timeout_ms` and `pool_max_lifetime_ms` from the vocabulary's client schema, whose
+defaults are 10 and 30 minutes: it closes a connection idle that long, the ones it keeps for
+`POOL SIZE MIN` included, and a connection that old when a publish returns it or while it is idle,
+then opens connections again to keep the minimum. The pool checks idle connections every 30
+seconds, `bb8`'s reaper interval, so an idle connection closes up to 30 seconds after it reaches
+either lifetime. A replacement socket resolves the host again. Neither lifetime closes a Pub/Sub source's dedicated
+connection.
 
 The driver's Pub/Sub convenience connection does not accept that DNS hook. A source instead
 resolves the configured `redis://` or `rediss://` hostname through the node resolver on every
@@ -953,7 +971,8 @@ order and effective defaults. Canonical Plexus and `DESCRIBE` consume that proje
 text preserves omitted optional Model fields, while inspection includes their effective defaults.
 `DESCRIBE INGESTOR` and `DESCRIBE EMITTER` begin their configuration block with `from:` or `to:`,
 then `options:`, `mode:`, `quiesce:`, `envelope:`, `batch:`, `flush:` and `errors:`. Empty options,
-unavailable quiesce/envelope and absent batching print `none`. An ingestor's flush and message
+unavailable quiesce, an absent envelope and absent batching print `none`. An emitter's `envelope:`
+is the envelope section it writes, as one line of canonical Plexus. An ingestor's flush and message
 error policies name their output relays; its general error policy belongs to the node. Runtime
 health and counters follow configuration, including Kafka's observed partition assignments.
 
@@ -1496,12 +1515,12 @@ host. That revision carries placement, entrypoint and emitter plans, and the exa
 fingerprint of the committed schedule. It decides one typed emitter execution plan per scheduled
 emitter before publishing the domain execution. The plan resolves its emitter clients and codec,
 retains its ordered source relay edges and lowered source predicates, and lowers its route, HTTP
-request fields, SQS ordering group and the mappings of row and row request emitters. It also converts
-OTEL resource literals and the Iceberg commit cadence and size into connector values. Initial startup,
-reassignment and an entity swap use that same plan. A swap publishes new source and remote
-consumer edges from the new plan; it does not reconstruct the emitter from a Model in the host.
-The host resolves resource mounts and binds the lowered VM programs to installed schemas and UDFs
-when it starts the task. A retry reopens the emitter with the same typed configuration.
+request fields, SQS ordering group, envelope and the mappings of row and row request emitters. It
+also converts OTEL resource literals and the Iceberg commit cadence and size into connector values.
+Initial startup, reassignment and an entity swap use that same plan. A swap publishes new source and
+remote consumer edges from the new plan; it does not reconstruct the emitter from a Model in the
+host. The host resolves resource mounts and binds the lowered VM programs to installed schemas and
+UDFs when it starts the task. A retry reopens the emitter with the same typed configuration.
 
 A `CLIENT CONSUMER EMITTER ... TO SCHEMA` is a native emitter plan, not an external connector plan. Its typed
 plan carries the exact output schema, declared `BATCH` limit and required ACK window, timeout and
@@ -1514,8 +1533,8 @@ continues to own flush, branch routing, quiesce, source ACK propagation and mess
 connector crate reads the native output or chooses its graph semantics.
 
 The host prepares one write for one of four emitter contracts. A **record emitter** receives
-keys, prepared payloads, headers, optional ordering groups, timestamps, and the identity the
-host assigned each record of the write. For each new payload, the host calls
+keys, prepared payloads, headers, optional ordering groups, envelopes, timestamps, and the identity
+the host assigned each record of the write. For each new payload, the host calls
 `RecordEmitter::prepare_payload` with the codec's bytes and the payload's execution time.
 The connector either returns its external bytes or refuses the payload with a definitive
 structured message error. The ordinary preparation returns the codec's bytes unchanged. The host
@@ -1559,6 +1578,31 @@ through the rows the emitter's route keeps, so each record keeps the group of it
 record without a group is rejected by the host under the emitter's message error policy and never
 reaches the connector, which receives each remaining record's group already evaluated. An emitter
 whose plan declares no group carries nothing beside its batches.
+
+An envelope exists only where the emitter's statement writes
+[envelope clauses](emitters.md#envelope-clauses) or properties, and the registry refuses any its
+entity does not declare. The plan fixes the flag and duration clauses and lowers the expression
+clauses and properties into one program that writes each value into a non-null field of its exact
+type. The host compiles that program once for the task, over the source record as `input`, the
+published record as `message` and, where the route constructs the published record, that output
+as `output`, with the materialized state and lookups the emitter reaches. It evaluates the program
+once per admitted batch, after the route, and carries each row's `RecordEnvelope` beside the batch:
+the fixed clauses with the row's own values, or the reason the row has none. Where the envelope
+computes no value, every row of every batch shares the one envelope its fixed clauses form. A record
+without an envelope is rejected by the host under the emitter's message error policy, as an
+`evaluation` error of the `publish` operation, and never reaches the connector. Packing seals a
+batch payload where two members' envelopes differ. A payload shares its members' envelope with the
+batch they came from rather than copying it, and a retained payload keeps it with its bytes. An
+emitter that writes no envelope carries nothing beside its batches or in its payloads.
+
+A record emitter reads its record's envelope from `EmitterRecord::envelope`: the three flags, the
+timestamp, the two durations, the reply target, the message and deduplication identities, and the
+properties in written order, each a `RecordProperty` under the name its entity declares with a
+`PropertyValue` of exactly the declared `PropertyType`. A property is never a float, so equal
+envelopes always compare equal. A connector receives only what its entity declares, and an entity
+that declares nothing always receives the empty envelope. Only an entity whose body is a codec,
+whose records a record emitter publishes, declares envelope clauses or properties, so no envelope
+is evaluated for a row, row request, HTTP request or native client emitter.
 
 Each connector classifies definite delivery and rejection per record, and may report one
 infrastructure failure for the attempt. A record emitter answers for a record under the identity the
@@ -1863,7 +1907,7 @@ its last digit. Both classify a definite local refusal as a record rejection;
 their transport and service failures retain their existing retry boundaries.
 
 The host owns that membership. It keeps every payload it offers the emitter, with its exact bytes,
-key, headers, ordering group and member positions, in the emitter buffer beside the batches the
+key, headers, ordering group, envelope and member positions, in the buffer beside the batches the
 members came from, and marks the members prepared so that no later attempt packs them again. A
 confirmation delivers every member at the completion point `MODE` selects. A rejection routes every
 member through `ON MESSAGE ERROR` with the emitter's one error reference, each member keeping its own
@@ -1927,9 +1971,21 @@ integer widths, floating-point bits (including non-finite values), native dates 
 precision, binary subtype, recursive arrays, nulls and field order. The MongoDB declaration owns
 the BSON document limit; the encoder consumes that same constant. Its mapped type family admits
 the current scalars and typed arrays/vectors, and shared validation refuses duplicate keys and
-types outside that family. Collection locators use a MongoDB-specific rule and retain their
+types outside that family. MongoDB's vocabulary field-name predicate also refuses NUL bytes in
+`VALUES` keys during CREATE and ALTER; every other key retains its external spelling.
+Collection locators use a MongoDB-specific rule and retain their
 spelling through Models, plans and the connector. The complete namespace is checked with the
 resolved database before opening the emitter.
+The MongoDB client accepts paired `tls_cert_file`/`tls_key_file` entries. Its offline configuration
+owner merges explicit CA and identity paths into native URL TLS options without losing other
+options, and refuses explicit files with `tls=false`. Runtime preparation streams the identity
+parts into a private combined PEM on the bounded filesystem executor, preserving typed I/O causes.
+Native client construction runs on that executor too: the driver synchronously reads TLS files
+and parses PEM there, before its asynchronous validation ping. The admitted job charges its
+prepared envelope; driver-owned TLS, client and pool allocations retain their driver contract.
+The shared client owns that file through its last clone; its final drop deletes the file.
+The generated path and combined contents
+are not added to stored client configuration. Uploaded resources keep their own storage contract.
 `sentry-prepared-envelopes` checks complete event preservation, defaults, framing and attempt
 bytes; the one- and three-node Sentry scenarios qualify those bytes through a reopened connector
 after a mock endpoint's `503` response. See

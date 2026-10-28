@@ -153,10 +153,11 @@ captured. A live cut and a configuration-only capture take no lease.
 
 A stopped cut reads what the domain's stop left on disk. That stop completes only once every
 deduplicator and window branch it ended has written what it published last, including a branch
-ended at its stop grace whose snapshot task was still writing, as [Draining Admitted
-Work](./shutdown.md#draining-admitted-work) describes. A stopped cut that begins as soon as `STOP`
-returns therefore holds the same keyspaces and windows a quiesced cut taken just before the stop
-held.
+ended at its stop grace whose snapshot task was still writing, and every materialized relay has
+written what it held once the tasks that change it ended, however long that write outlasts their
+stop grace, as [Draining Admitted Work](./shutdown.md#draining-admitted-work) describes. A stopped
+cut that begins as soon as `STOP` returns therefore holds the same keyspaces, windows and
+materialized generations a quiesced cut taken just before the stop held.
 
 ## The Quiesced Cut
 
@@ -711,22 +712,34 @@ query, for instance, can still read and cache a value maintenance only measures.
 ## Restore Staging Maintenance
 
 Every node runs restore checkpoint maintenance, independently of leadership: once at startup, then
-again one second after each sweep ends, whether it succeeded or not. A sweep reserves its 2 MiB,
-borrows one applied consensus revision under the applied-state read guard, and takes the installation
-barrier. It retains the selected publication, the exact generation of an installation that belongs
-to a restore still applying, even when leadership or its lease has changed, every generation ahead
-of the node's applied log, and, on a node without an applied log, every generation. It reclaims
-every other restored namespace: terminal, expired, missing and superseded attempts, including chunks
-written before their receipt existed. In the selected namespace it removes receipts, and checks one
-header per placement and revision to remove chunk sets the selected header does not reference,
-because the header is absent, inline or names another revision; ordinary checkpoints, replica
-installation, handoff, forced recovery and purge therefore release unreachable restored chunks
-without another restore. Its cursors seek past the initial and selected headers, indices and
-receipts and past retained generations, and in the selected chunk namespace one header check lets a
-cursor skip a whole referenced set. Deletion runs in bounded batches and synchronizes what it
-removed, and a cancelled or interrupted sweep resumes from the keys that remain. Maintenance never releases a
-gate or changes a selected publication, and never removes a domain's initial namespace, which only a
-publication's cleanup removes.
+again one second after each sweep ends, whether it succeeded, failed or was deferred. A sweep takes
+its 2 MiB only from room the bulk class has free when it begins, and otherwise is deferred: it
+reclaims and measures nothing, publishes no series, and the next sweep tries again. It never waits
+in the class's queue. A place there takes every byte the class releases until it is satisfied, so
+it would hold every other bulk charge on the node behind it, including the next charge of an
+operation that holds part of the room it waits for. Such an operation can never release what it
+holds, and the sweep never gets its room: a materialized snapshot fetch that holds its encoded
+request while it charges the request's envelope, or a received chunk while it charges the write
+that stages it, would stall for as long as the rest of the class stays occupied. Under sustained
+bulk contention, reclamation therefore waits for room instead of delaying the node's bulk work. A
+bulk class smaller than the working set refuses every sweep at once instead, counting the refusal
+and logging it as a warning, because no free room could ever admit one.
+
+An admitted sweep borrows one applied consensus revision under the applied-state read guard, and
+takes the installation barrier. It retains the selected publication, the exact generation of an
+installation that belongs to a restore still applying, even when leadership or its lease has
+changed, every generation ahead of the node's applied log, and, on a node without an applied log,
+every generation. It reclaims every other restored namespace: terminal, expired, missing and
+superseded attempts, including chunks written before their receipt existed. In the selected
+namespace it removes receipts, and checks one header per placement and revision to remove chunk sets
+the selected header does not reference, because the header is absent, inline or names another
+revision; ordinary checkpoints, replica installation, handoff, forced recovery and purge therefore
+release unreachable restored chunks without another restore. Its cursors seek past the initial and
+selected headers, indices and receipts and past retained generations, and in the selected chunk
+namespace one header check lets a cursor skip a whole referenced set. Deletion runs in bounded
+batches and synchronizes what it removed, and a cancelled or interrupted sweep resumes from the keys
+that remain. Maintenance never releases a gate or changes a selected publication, and never removes
+a domain's initial namespace, which only a publication's cleanup removes.
 
 The restore staging quota, `--restore-staging-max-bytes`, by default the smaller of 128 GiB and the
 size of the volume that holds the node database, bounds the key and value bytes of every
@@ -820,7 +833,7 @@ A retained archive's read failure is reported before its download sends the fixe
 | Boundary | Failure | What remains | Recovery |
 | --- | --- | --- | --- |
 | Backup admission | The statement is batched, queued in a transaction, or sent to a follower | Nothing admitted | Send it alone, to the leader the redirect names. |
-| Cut lease and drain | The lease or the drain does not finish within the cut's budget | A pause is undone and the lease released; a failed drain names what each node still held | Send the backup again, with a longer `TIMEOUT` or after the stalled emitter recovers. |
+| Cut budget | A lease, guard, counters read, drain, configuration capture or owner capture does not finish within the cut's budget | The refusal names its typed active phase, that phase's age, total elapsed cut time and completed phase durations. A pause is undone and the lease released; a failed drain also retains what each node still held | Inspect the phase and owner logs, then send the backup again with an appropriate `TIMEOUT` or after the stalled operation recovers. |
 | Cut reach | A node the schedule assigns the domain's work to is not reported live when a quiesced cut starts, a scheduled state owner is not reported live when any cut captures, or the schedule places an entity whose state the archive captures on no node | Nothing paused when a quiesced cut refused before its pause, otherwise the pause is undone; the lease is released and no archive is assembled | Send the backup again once the node is back, or once failover has moved its placements or a node can host the entity again. |
 | Leader change during a cut | The tenure check fails | The domain is resumed, by the coordinator or by the next leader's reconciliation, and the command stays applying | The next leader re-executes the backup under the same reference; the client retries the reference to receive its archive. |
 | Outcome recording | Leadership moves, or the leader cannot confirm that it still leads, before the backup's outcome is recorded | The command stays applying, and the client receives `OutcomeUnknown` | The leader that resumes the command, or the client's retry of the reference, runs the backup again with new cuts; the client receives that run's outcome and archive. |
@@ -920,6 +933,20 @@ cause chain. A coordinator's direct checkpoint calls retain the same runtime-sta
 causes as an installation through the interconnect; interrupted guest and native-metadata captures
 retain their cause in the backup failure. These diagnostics name operations and entities without
 including archive contents.
+
+Each domain cut logs its administrative phase entry and completion at `info`, with the domain,
+execution reference, phase duration and total elapsed time. The timeout refusal retains the active
+phase and ordered completed durations, including lease admission, alteration guard, opening
+counters and drain. The controlled boundary after drain is `capture`; configuration capture, owner
+capture and closing counters have distinct phases. Resume and lease release remain cleanup outside
+the cut's deadline and do not receive a new capture budget.
+
+Owner capture logs identify the node and coordination identity and distinguish revision wait,
+cluster-state application, lifecycle checkpoints, storage capture, staging and inventory. The
+capture operation returns a terminal reply, so a coordinator waiting for an owner reports owner
+capture rather than claiming to know that node's current internal phase. Retained owner logs give
+that finer attribution. Phase diagnostics carry no archive contents or branch-key values and do not
+change archive records or node-to-node messages.
 
 The leader logs at `info` when it assembled an archive, when a download collected one and when a
 restore completed, with the execution reference and the domains; skipped state is logged at `warn`

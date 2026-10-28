@@ -153,7 +153,7 @@ pub(in crate::runtime) struct RuntimeInner {
     /// branch published last after that branch's task is gone. Closing it after domain drain has
     /// each task write that state, and waiting for it keeps this runtime's storage from being
     /// released under one of them.
-    pub(in crate::runtime) branch_snapshot_tasks: state_replication::BranchSnapshotTasks,
+    pub(in crate::runtime) state_snapshot_tasks: state_replication::StateSnapshotTasks,
     /// The copy of each branch checkpoint this node installed as a replica, taken when it is
     /// promoted and dropped when its branch lifecycle stops naming the branch.
     pub(in crate::runtime) passive_runtime_state_snapshots:

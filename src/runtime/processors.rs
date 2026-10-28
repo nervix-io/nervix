@@ -1120,6 +1120,8 @@ pub(super) enum PlannedGeneralError {
     OrderingGroupRow { row: usize },
     #[error("failed to prepare the HTTP requests of the batch")]
     HttpRequests,
+    #[error("failed to evaluate the envelopes of the batch")]
+    Envelope,
 }
 
 pub(super) type PlannedGeneralResult<T> = error_stack::Result<T, PlannedGeneralError>;

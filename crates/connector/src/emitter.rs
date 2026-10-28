@@ -23,6 +23,7 @@
 
 use std::{num::NonZeroUsize, path::PathBuf, time::Duration};
 
+use arch_into::ArchInto as _;
 use arrow_array::RecordBatch;
 use async_trait::async_trait;
 use error_stack::Report;
@@ -81,6 +82,105 @@ impl EmitterRecordId {
     }
 }
 
+/// What one record carries beside its payload, as its emitter's envelope clauses and properties
+/// set it.
+///
+/// A flag clause the statement writes is set for every record, and a value clause holds what the
+/// host evaluated for this record when it admitted it. The host retains the envelope with the
+/// payload, so every attempt to publish the record carries the envelope the first attempt carried.
+/// The registry refuses a clause or property the emitter's entity does not declare, so a connector
+/// receives only what its entity declares, and everything else is unset.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordEnvelope {
+    /// `PERSISTENT`.
+    pub persistent: bool,
+    /// `MANDATORY`.
+    pub mandatory: bool,
+    /// `RETAIN`.
+    pub retain: bool,
+    /// `TIMESTAMP <expression>`.
+    pub timestamp: Option<Timestamp>,
+    /// `DELIVER AFTER <duration>`.
+    pub deliver_after: Option<Duration>,
+    /// `DELAY <duration>`.
+    pub delay: Option<Duration>,
+    /// `REPLY TO <expression>`.
+    pub reply_to: Option<String>,
+    /// `MESSAGE ID <expression>`.
+    pub message_id: Option<String>,
+    /// `DEDUPLICATION ID <expression>`.
+    pub deduplication_id: Option<String>,
+    /// The properties the statement sets, in the order it writes them.
+    pub properties: Vec<RecordProperty>,
+}
+
+impl RecordEnvelope {
+    /// The bytes the envelope's values hold beyond its fixed fields, which a host counts with the
+    /// record that carries them.
+    pub fn held_bytes(&self) -> u64 {
+        let mut bytes = 0_u64;
+        let texts = [&self.reply_to, &self.message_id, &self.deduplication_id];
+        for text in texts.into_iter().flatten() {
+            let length: u64 = text.len().arch_into();
+            bytes = bytes.checked_add(length).assured(HELD_IN_MEMORY);
+        }
+        for property in &self.properties {
+            bytes = bytes
+                .checked_add(property.value.held_bytes())
+                .assured(HELD_IN_MEMORY);
+        }
+        bytes
+    }
+}
+
+/// The bound every byte count of an envelope relies on: each term counts bytes of a value this
+/// node already holds in memory.
+const HELD_IN_MEMORY: &str = "every term counts bytes of a value this node already holds in memory";
+
+/// One property a record carries, under the name its entity declares for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordProperty {
+    pub name: &'static str,
+    pub value: PropertyValue,
+}
+
+/// The value of one property, of exactly the type its entity declares for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PropertyValue {
+    U8(u8),
+    I8(i8),
+    U16(u16),
+    I16(i16),
+    U32(u32),
+    I32(i32),
+    U64(u64),
+    I64(i64),
+    Bool(bool),
+    String(String),
+    Datetime(Timestamp),
+    Bytes(Vec<u8>),
+}
+
+impl PropertyValue {
+    /// The bytes the value holds beyond its fixed size.
+    fn held_bytes(&self) -> u64 {
+        match self {
+            Self::String(text) => text.len().arch_into(),
+            Self::Bytes(bytes) => bytes.len().arch_into(),
+            Self::U8(_)
+            | Self::I8(_)
+            | Self::U16(_)
+            | Self::I16(_)
+            | Self::U32(_)
+            | Self::I32(_)
+            | Self::U64(_)
+            | Self::I64(_)
+            | Self::Bool(_)
+            | Self::Datetime(_) => 0,
+        }
+    }
+}
+
 /// One codec-encoded record ready for a connector to write.
 ///
 /// A record carries no runtime acknowledgement. The host retains the acknowledgements of the
@@ -95,6 +195,9 @@ pub struct EmitterRecord {
     /// The group a service that delivers records in order per group writes this one under, as the
     /// host evaluated it for this record. Absent where the emitter declares no group.
     pub message_group: Option<String>,
+    /// What the record carries beside its payload, as the emitter's envelope clauses and
+    /// properties set it. Empty where the emitter writes none.
+    pub envelope: RecordEnvelope,
     pub occurred_at: Timestamp,
 }
 
@@ -112,6 +215,7 @@ impl EmitterRecord {
             payload,
             headers,
             message_group: None,
+            envelope: RecordEnvelope::default(),
             occurred_at,
         }
     }
@@ -119,6 +223,12 @@ impl EmitterRecord {
     /// This record written under the ordering group the host evaluated for it.
     pub fn with_message_group(mut self, message_group: String) -> Self {
         self.message_group = Some(message_group);
+        self
+    }
+
+    /// This record carrying the envelope the host evaluated for it.
+    pub fn with_envelope(mut self, envelope: RecordEnvelope) -> Self {
+        self.envelope = envelope;
         self
     }
 
@@ -884,3 +994,7 @@ impl EmitterHost {
         self.inner.services.handle_general_error(acks, reason);
     }
 }
+
+#[cfg(test)]
+#[path = "emitter_tests.rs"]
+mod tests;

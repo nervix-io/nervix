@@ -1165,6 +1165,7 @@ impl Arbitrary<'_> {
                 AlterEmitterOperation::SetTo {
                     destination: emitter.connector,
                     body: emitter.body,
+                    envelope: emitter.envelope,
                     construction,
                 }
             }

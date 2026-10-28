@@ -1465,6 +1465,45 @@ mod shuttle_checks {
     fn shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit() {
         check_random_and_pct(consensus_admission_order_invariant);
     }
+
+    #[test]
+    fn shuttle_submission_racing_worker_exit_never_strands_an_admitted_job() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let executor = small_executor();
+                let mut submissions = Vec::new();
+                for value in 0..3 {
+                    nervix_primitives::task::consume_budget().await;
+                    let submitted = executor.clone();
+                    let charge = executor
+                        .try_reserve(MemoryClass::Management, 1)
+                        .assured("three bytes fit in the management budget");
+                    submissions.push(nervix_primitives::task::spawn(async move {
+                        submitted
+                            .run_cpu_with(
+                                CpuClass::Control,
+                                QueueAdmission::WaitForPlace,
+                                charge,
+                                move |_, _| value,
+                            )
+                            .await
+                    }));
+                }
+                for (value, submission) in submissions.into_iter().enumerate() {
+                    nervix_primitives::task::consume_budget().await;
+                    assert_eq!(
+                        submission
+                            .await
+                            .assured("the submitter completes")
+                            .assured("an admitted job is never stranded"),
+                        value
+                    );
+                }
+                assert_eq!(executor.snapshot().control_cpu.completed, 3);
+                assert_every_permit_returned(&executor);
+            });
+        });
+    }
 }
 
 #[nervix_primitives::test]

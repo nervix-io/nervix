@@ -1179,8 +1179,12 @@ build and the existing tests, and nothing in it changes behavior.
   such as Tokio's locks, channels and `Notify`, DashMap, atomic protocols or network waits, records
   that the detector does not see it and keeps its Shuttle, Loom, Turmoil, Chaos and Bolero
   evidence, and documentation-only or unrelated work records that the rule does not apply. The rule
-  binds concurrent work from the moment it lands. A clean diagnostic run never proves an untracked
-  path, or an interleaving the run did not take, free of deadlocks.
+  binds concurrent work from the moment it lands. An applicable task and pull request record the
+  tested revision and inventory digest, each selection's discovered, selected, executed and completed
+  counts, its retained attempt and evidence artifacts, and which registered workloads reached the
+  changed owner. A result from an earlier revision does not qualify a later change to that owner.
+  A clean diagnostic run never proves an untracked path, or an interleaving the run did not take,
+  free of deadlocks.
 - [Integration Test Lifecycle](docs/src/integration-test-lifecycle.md) is the authoritative
   architecture reference for the lifecycle of the Cucumber scenario harness. Any change to how the
   harness starts, observes, diagnoses, or stops in-process nodes, server processes, scenarios, or

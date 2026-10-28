@@ -203,7 +203,7 @@ pub(super) struct DomainExecution {
     pub(super) reingestor_tasks: HashMap<NodeRef, Vec<JoinHandle<()>>>,
     /// Placement-derived tasks grouped by the scheduled node whose assignment owns them, so a
     /// reassignment can replace one node's replication runtime without disturbing its siblings.
-    pub(super) placement_tasks: HashMap<NodeRef, Vec<JoinHandle<()>>>,
+    pub(super) placement_tasks: HashMap<NodeRef, PlacementTasks>,
     /// The task maintaining each locally owned materialized relay, keyed by that relay.
     pub(super) relay_state_tasks: HashMap<RelayName, RelayStateTask>,
     /// The single buffer-and-fan-out task for every relay owned by this cluster node.

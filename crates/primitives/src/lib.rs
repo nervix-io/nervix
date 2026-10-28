@@ -15,7 +15,7 @@
 //! | Async synchronization: locks, notification, waker registration, semaphores, channels, cancellation | [`sync`] | `native` |
 //! | Thread-blocking synchronization: locks, condition variables, barriers, one-time initialization, channels | `sync::blocking` | `native` |
 //! | Deadlock findings among the thread-blocking locks, and the detector a `deloxide` build installs | [`deadlock`] | Portable findings; the detector is `native` |
-//! | Tasks: spawning, joining, yielding, aborting, tracking, cooperative budgeting, and the mechanism that runs an admitted CPU job | `task` | `native` |
+//! | Tasks: spawning, joining, yielding, aborting, tracking, cooperative budgeting, and the mechanism that drains an admitted CPU worker | `task` | `native` |
 //! | Timers and the monotonic clock: sleeps, deadlines, timeouts, intervals and instants | `time` | `native` |
 //! | Sockets: TCP listeners and streams, UDP and local sockets | `net` | `native` |
 //! | The async runtime, and the attributes and macro that build and drive it | `runtime`, `test`, `main`, `select!` | `native` |
@@ -33,8 +33,8 @@
 //!
 //! Turmoil replaces the network and the clock, not synchronization. A Turmoil build takes the
 //! ordinary primitives, running on the simulated host whose task uses them; its sockets and its
-//! name lookup are Turmoil's, its timers follow the simulated host's clock, and an admitted CPU job
-//! runs as one task of that host's scheduler.
+//! name lookup are Turmoil's, its timers follow the simulated host's clock, and an admitted CPU worker
+//! runs as one task of that host's scheduler, yielding between its bounded job callbacks.
 //!
 //! Deloxide models nothing. A `deloxide` build takes the ordinary primitives except the thread-blocking
 //! locks and their condition variable, which `sync::blocking` selects as adapters over Deloxide's
@@ -45,8 +45,9 @@
 //! artifact rather than a test artifact: it runs as a product does, and its tracked locks refuse to
 //! run in a process that has not installed the detector, so a cycle can never pass unreported.
 //!
-//! Ordinary execution pays nothing for the boundary: every path is a direct re-export of the
-//! library item, with no wrapper, allocation, dispatch or scheduling point. A modeled primitive
+//! Ordinary primitive families directly re-export their library items, with no additional
+//! allocation, dispatch or scheduling point. The CPU-worker mechanism drains the executor's
+//! callbacks on one blocking-pool task; it adds no queue or admission policy. A modeled primitive
 //! exists only inside a run of its model, and using one outside that run is a test configuration
 //! failure that the backend reports; there is no fallback to a real primitive. A real primitive
 //! that must stay outside every model is reached through [`unmodeled`] and nowhere else. A build

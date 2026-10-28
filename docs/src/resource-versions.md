@@ -142,8 +142,13 @@ metadata is recorded as ready without another transfer, which is how a restarted
 it installed before. Otherwise the node records a pending replica, fetches the archive from a live
 node whose replica is ready with the same digest, installs it through the steps above, and records a
 ready or failed replica with the reason. A node fetches at most four versions at a time, and when no
-live node holds a ready copy it records a failed replica. The leader accepts a replica record only
-from the node that record describes.
+live node holds a ready copy an absent local copy stays pending. Source discovery and catalog
+publication can arrive in different orders, so that observation does not fail the installation.
+The next ordinary reconciliation checks for a source again. An existing manifest that cannot be
+read or decoded, or whose metadata differs from the published version, records a failed replica
+when no source is available to repair it. Its reason retains the complete error chain, including
+the filesystem or decoding cause. The leader accepts a replica record only from the node that
+record describes.
 
 Archives travel as streamed bulk transfers with an exact declared length, in bounded chunks under
 HTTP/2 flow control, so neither end holds a whole archive in memory. An interrupted transfer is not
@@ -223,7 +228,7 @@ version `LATEST` would select at that moment as `latest:`.
 ```mermaid
 stateDiagram-v2
     [*] --> Assigned: leader admits the complete archive and takes the next number
-    Assigned --> Failed: the leader's own installation fails or its installing task is lost
+    Assigned --> Failed: installation fails or the admitted archive is unavailable
     Assigned --> Published: the leader installed its copy and published the metadata
     Published --> Published: a live incarnation installs, restarts, or joins
     Published --> Completed: every live incarnation holds the same digest

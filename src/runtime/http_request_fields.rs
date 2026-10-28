@@ -147,7 +147,7 @@ impl SourceRecords {
 
     /// The rows `rows` names, in that order. Rows that are every row in order share this batch's
     /// columns.
-    fn selected(
+    pub(in crate::runtime) fn selected(
         &self,
         rows: &[usize],
     ) -> error_stack::Result<Arc<RuntimeRecordBatch>, RuntimeSchemaError> {

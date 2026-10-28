@@ -1,12 +1,26 @@
 Feature: Bounded execution and transient memory
 
+  @execution_class_drain @deloxide_stress
   Scenario Outline: Occupied bulk execution leaves management work responsive
     Given a <cluster_size> node nervix cluster is started
     When bulk execution on node "<node_id>" is occupied
     Then node "<node_id>" observability path "/readyz" eventually responds with 200 and "ready"
     And within "10s" these Plexus commands complete on node "<node_id>"
       """
-      CREATE DOMAIN bounded_execution;
+      CREATE DOMAIN {{domain}};
+      CREATE DOMAIN {{domain}}_first;
+      CREATE DOMAIN {{domain}}_second;
+      CREATE DOMAIN {{domain}}_third;
+      CREATE DOMAIN {{domain}}_fourth;
+      CREATE DOMAIN {{domain}}_fifth;
+      """
+    And within "10s" these Plexus commands complete on node "<node_id>"
+      """
+      LIST DOMAINS;
+      """
+    And the last command output contains
+      """
+      {{domain}}_fifth
       """
     When bulk execution on node "<node_id>" is released
     Then node "<node_id>" eventually observes a stable leader

@@ -25,6 +25,7 @@
 
 mod assembly;
 mod branch_state_sections;
+pub(in crate::application) mod cut_progress;
 pub(in crate::application) mod cut_reach;
 pub(in crate::application) mod interconnect;
 mod materialized_sections;
@@ -62,6 +63,7 @@ use tracing::info;
 
 use self::{
     assembly::{PlannedContent, PlannedScope, PlannedSection, plan_sections},
+    cut_progress::{CaptureContext, CompletedPhases, CutPhase, CutProgress},
     cut_reach::{CutReach, RequiredNode},
     interconnect::{
         CaptureDomainStateRequest, CaptureInventoryRequest, CapturedSectionInventory,
@@ -155,8 +157,17 @@ pub(in crate::application) enum BackupError {
     MissingOwner,
     #[error("the backup's command execution has no request digest")]
     MissingRequestDigest,
-    #[error("timed out waiting to capture domain '{domain}': {reason}")]
-    CaptureTimeout { domain: DomainName, reason: String },
+    #[error(
+        "timed out waiting to capture domain '{domain}': phase={phase}, elapsed={elapsed:?}, \
+         phase_elapsed={phase_elapsed:?}, completed={completed}"
+    )]
+    CaptureTimeout {
+        domain: DomainName,
+        phase: CutPhase,
+        elapsed: Duration,
+        phase_elapsed: Duration,
+        completed: CompletedPhases,
+    },
     #[error("failed to capture domain '{domain}': {reason}")]
     CaptureDomain { domain: DomainName, reason: String },
     #[error(
@@ -476,7 +487,16 @@ impl SessionServiceImpl {
             unreachable!()
         };
         let timeout = timeout.unwrap_or_else(|| self.inner.runtime.domain_drain_timeout());
-        let deadline = nervix_primitives::time::Instant::now() + timeout;
+        let started = nervix_primitives::time::Instant::now();
+        let deadline = started + timeout;
+        let mut progress = CutProgress::at(
+            domain.clone(),
+            CaptureContext::Coordinator {
+                execution: execution.reference.clone(),
+            },
+            CutPhase::MutationLease,
+            started,
+        );
         let owner = execution
             .owner()
             .cloned()
@@ -493,6 +513,7 @@ impl SessionServiceImpl {
             }
         };
         let acquired = loop {
+            nervix_primitives::task::consume_budget().await;
             match self
                 .inner
                 .consensus
@@ -510,10 +531,7 @@ impl SessionServiceImpl {
                     nervix_primitives::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(error) => {
-                    return Err(error.change_context(BackupError::CaptureTimeout {
-                        domain: domain.clone(),
-                        reason: "domain mutation admission failed".to_string(),
-                    }));
+                    return Err(error.change_context(progress.timeout()));
                 }
             }
         };
@@ -524,6 +542,7 @@ impl SessionServiceImpl {
             }));
         };
         let captured = async {
+            progress.enter_within(CutPhase::ConfigurationRead, deadline)?;
             let before_cut = self
                 .inner
                 .consensus
@@ -536,6 +555,7 @@ impl SessionServiceImpl {
                 }));
             };
             if domain_state.status == DomainStatus::Stopped {
+                progress.enter_within(CutPhase::Capture, deadline)?;
                 #[cfg(feature = "testing")]
                 self.inner
                     .runtime
@@ -545,9 +565,12 @@ impl SessionServiceImpl {
                     )
                     .await;
                 let domain_captured_at = current_timestamp();
+                progress.enter_within(CutPhase::OwnerCapture, deadline)?;
                 let inventories = self
                     .capture_owner_state(domain, &before_cut, CaptureHold::Stopped, deadline)
                     .await?;
+                progress.ensure_within(deadline)?;
+                progress.log_completed();
                 return Ok((
                     before_cut,
                     BackupCut::Stopped,
@@ -555,15 +578,14 @@ impl SessionServiceImpl {
                     inventories,
                 ));
             }
+            progress.enter_within(CutPhase::AlterationGuard, deadline)?;
             let _alter_guard = loop {
+                nervix_primitives::task::consume_budget().await;
                 if let Some(guard) = self.inner.runtime.try_begin_domain_alter(domain) {
                     break guard;
                 }
                 if nervix_primitives::time::Instant::now() >= deadline {
-                    return Err(Report::new(BackupError::CaptureTimeout {
-                        domain: domain.clone(),
-                        reason: "domain alteration guard is busy".to_string(),
-                    }));
+                    return Err(Report::new(progress.timeout()));
                 }
                 nervix_primitives::time::sleep(std::time::Duration::from_millis(50)).await;
             };
@@ -572,21 +594,18 @@ impl SessionServiceImpl {
                 .runtime
                 .pause_backup_cut_if_armed(domain, crate::fault_injection::BackupCutBoundary::Lease)
                 .await;
+            progress.enter_within(CutPhase::Reach, deadline)?;
             let schedule = self.inner.consensus.current_schedule().await;
             self.refuse_unreached_quiesced_cut(domain, schedule.domain(domain))
                 .await?;
-            let timed_out = || {
-                Report::new(BackupError::CaptureTimeout {
-                    domain: domain.clone(),
-                    reason: "quiesced cut exceeded its timeout".to_string(),
-                })
-            };
+            progress.enter_within(CutPhase::OpeningCounters, deadline)?;
             let before = nervix_primitives::time::timeout_at(
                 deadline,
                 self.read_backup_quiesce_counters(domain, schedule.domain(domain)),
             )
             .await
-            .map_err(|_| timed_out())??;
+            .map_err(|_| Report::new(progress.timeout()))??;
+            progress.enter_within(CutPhase::Drain, deadline)?;
             let engaged_at = current_timestamp();
             let now = nervix_primitives::time::Instant::now();
             let remaining = if deadline > now {
@@ -595,7 +614,7 @@ impl SessionServiceImpl {
                 std::time::Duration::ZERO
             };
             if remaining.is_zero() {
-                return Err(timed_out());
+                return Err(Report::new(progress.timeout()));
             }
             self.pause_and_drain_domain_for_alter_with_timeout(
                 domain,
@@ -605,13 +624,9 @@ impl SessionServiceImpl {
                 DomainDrainMode::Backup,
             )
             .await
-            .map_err(|error| {
-                Report::new(BackupError::CaptureDomain {
-                    domain: domain.clone(),
-                    reason: format!("{error:#}"),
-                })
-            })?;
+            .map_err(|error| progress.drain_failure(error))?;
             let cut_result = nervix_primitives::time::timeout_at(deadline, async {
+                progress.enter_within(CutPhase::Capture, deadline)?;
                 #[cfg(feature = "testing")]
                 self.inner
                     .runtime
@@ -627,6 +642,7 @@ impl SessionServiceImpl {
                         domain: domain.clone(),
                     }));
                 }
+                progress.enter_within(CutPhase::ConfigurationCapture, deadline)?;
                 let capture = self
                     .inner
                     .consensus
@@ -634,9 +650,20 @@ impl SessionServiceImpl {
                     .await
                     .ok_or_else(|| Report::new(BackupError::NoConfiguration))?;
                 let domain_captured_at = current_timestamp();
+                progress.enter_within(CutPhase::OwnerCapture, deadline)?;
                 let inventories = self
                     .capture_owner_state(domain, &capture, CaptureHold::Quiesced, deadline)
-                    .await?;
+                    .await;
+                let inventories = match inventories {
+                    Ok(inventories) => inventories,
+                    Err(error) => {
+                        if nervix_primitives::time::Instant::now() >= deadline {
+                            return Err(error.change_context(progress.timeout()));
+                        }
+                        return Err(error);
+                    }
+                };
+                progress.enter_within(CutPhase::ClosingCounters, deadline)?;
                 let after = self
                     .read_backup_quiesce_counters(domain, schedule.domain(domain))
                     .await?;
@@ -647,17 +674,19 @@ impl SessionServiceImpl {
                         domain: domain.clone(),
                     }));
                 }
+                progress.ensure_within(deadline)?;
+                progress.log_completed();
                 Ok::<_, Report<BackupError>>((capture, domain_captured_at, inventories, after))
             })
             .await
-            .map_err(|_| timed_out());
+            .map_err(|_| Report::new(progress.timeout()));
             let resumed = self
                 .resume_domain_after_alter(domain, Some(&mutation))
                 .await
                 .map_err(|error| {
-                    Report::new(BackupError::CaptureDomain {
+                    error.change_context(BackupError::CaptureDomain {
                         domain: domain.clone(),
-                        reason: format!("{error:#}"),
+                        reason: "domain resume failed".to_string(),
                     })
                 });
             let (capture, domain_captured_at, inventories, after) = cut_result??;
@@ -702,9 +731,9 @@ impl SessionServiceImpl {
             )
             .await
             .map_err(|error| {
-                Report::new(BackupError::CaptureDomain {
+                error.change_context(BackupError::CaptureDomain {
                     domain: domain.clone(),
-                    reason: format!("failed to release mutation lease: {error}"),
+                    reason: "mutation lease release failed".to_string(),
                 })
             })?;
         if captured.is_ok()
@@ -844,6 +873,15 @@ impl SessionServiceImpl {
             let coordination = coordination.clone();
             let domain = domain.clone();
             async move {
+                let mut progress = CutProgress::at(
+                    domain.clone(),
+                    CaptureContext::Owner {
+                        node: node.clone(),
+                        coordination: coordination.clone(),
+                    },
+                    CutPhase::OwnerCapture,
+                    nervix_primitives::time::Instant::now(),
+                );
                 let failed = |reason: &str| BackupError::CaptureDomain {
                     domain: domain.clone(),
                     reason: reason.to_string(),
@@ -871,6 +909,7 @@ impl SessionServiceImpl {
                         .change_context_lazy(|| failed("capture request failed"))?
                 };
                 captured.change_context_lazy(|| failed("owner capture failed"))?;
+                progress.enter_within(CutPhase::OwnerInventory, deadline)?;
                 let inventory_request = CaptureInventoryRequest {
                     coordination: coordination.clone(),
                     domain: domain.clone(),
@@ -887,6 +926,8 @@ impl SessionServiceImpl {
                 };
                 let sections =
                     inventory.change_context_lazy(|| failed("owner inventory failed"))?;
+                progress.ensure_within(deadline)?;
+                progress.log_completed();
                 Ok::<_, Report<BackupError>>(StateInventory {
                     node,
                     coordination,

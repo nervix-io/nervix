@@ -100,6 +100,26 @@ and topology records. An applied command therefore reserves 16 MiB from the Comm
 and moving batch descriptors. The reservation is released after synchronization. This keeps a
 multi-mebibyte report atomic without making storage memory proportional to retained history.
 
+### Storage Working Sets
+
+Every storage operation charged to the Commands class reserves the same 16 MiB working set: an
+appended batch, an applied range, a log chunk, a full log read, a truncation and a purge. The
+default 24 MiB Commands budget holds one such working set with 8 MiB beside it. The store admits
+these operations through turns of its own, as many as the budget holds working sets while keeping
+room beside them, which is one with the default budgets. An operation takes a turn first and asks
+the Commands class for its working set only while it holds one.
+
+An operation waiting for a turn holds no place in the class's queue. A place in that queue takes
+every byte the class releases until it is satisfied, so a storage operation waiting there would
+hold the class's remaining room for itself until the store's own earlier working set ended. Storage
+operations instead wait for each other at the turn, and the rest of the class stays with its other
+work: a source's control call, a replication frame being encoded and a follower's answer find room
+beside the working set the store holds. A working set returns its bytes before its turn passes, so
+the next one is admitted without waiting in the class.
+
+The turns hold no more working sets than the budget already held at once, and they do not change
+the order in which the ordered storage worker runs admitted operations.
+
 A crash after a log write and before application does not lose an acknowledged command. If the
 entry was committed, recovery streams it from the log and applies it. If it was not committed, a
 later leader may discard it. In either case, the client had not yet received an applied response.
@@ -189,8 +209,10 @@ once after setup succeeds. Subsequent empty commit updates stay on that ordered 
 data batches. Setup retains its five-second deadline; waiting for the caller's next request belongs
 to the caller's lifecycle, rather than to connection setup.
 
-One replication batch targets 1 MiB and stops at 1,024 entries. Commands remain whole, so the first
-command may take a batch past the target; the encoded replication operation is bounded at 2 MiB.
+One replication batch targets 1 MiB and stops at 256 entries. The entry cap also bounds how many
+speculative entries cross a slow link before a new leader learns that its previous-log boundary
+conflicts with a lagging follower. Commands remain whole, so the first command may take a batch
+past the target; the encoded replication operation is bounded at 2 MiB.
 Submissions and answers stay in log order. A conflict, higher vote, partial acceptance, stream
 failure, or liveness failure ends that stream generation after its first result. Raft resumes from
 the last progress the follower confirmed.
@@ -295,14 +317,17 @@ learner or voter role and recorded address.
 ## Bounded Log Reading
 
 Committed-range application, startup replay, and leader-bounded replication streams read the log in
-successive admitted chunks. A chunk targets 1 MiB or 1,024 entries, whichever is reached first, and
+successive admitted chunks. A chunk targets 1 MiB or 256 entries, whichever is reached first, and
 one oversized first entry travels alone. The reader releases the ordered storage worker between
-chunks and retains the chunk's memory charge until its entries have been handed to the consumer.
-Handing out the final entry releases the exhausted iterator allocation and its charge before that
-poll returns. A consumer that parks with its final entry therefore holds no empty chunk that could
-keep another reader or a source control call out of the Commands class. The reader retains an
-explicit exhausted boundary, without the allocation, so a subsequent chunk still yields before
-requesting the ordered storage worker.
+chunks and retains the chunk's working set, its memory charge and the store's Commands turn, until
+its entries have been handed to the consumer. Handing out the final entry releases the exhausted
+iterator allocation, its charge and its turn before that poll returns. A consumer that parks with
+its final entry therefore holds no empty chunk that could keep another reader or a source control
+call out of the Commands class. A chunk that still holds entries, such as a replication stream's
+while its follower has not answered, keeps its working set; another reader or storage operation
+then waits for the turn rather than in the Commands class, so a source control call still finds
+room. The reader retains an explicit exhausted boundary, without the allocation, so a subsequent
+chunk still yields before requesting the ordered storage worker.
 
 There is no range-size failure at 2 MiB or at any other aggregate backlog size. A committed range
 and a startup backlog may span any number of chunks. The state-machine worker applies the entries
@@ -486,10 +511,13 @@ ordinary stream-stop decision. That diagnostic changes neither retry admission n
 | `nervix_interconnect_requests_total{operation="snapshot"}` and `nervix_interconnect_request_seconds_total{operation="snapshot"}` | On the sending node, the snapshot transfer requests a lagging follower answered or failed: the transfer's start, its 64 KiB chunks, and its finish. A transfer moves as these bounded requests in the Bulk pool rather than as a streamed body, so `nervix_interconnect_bulk_bytes_total` does not count it. |
 | `nervix_consensus_snapshot_pinned_generations`, `nervix_consensus_snapshot_pinned_readers`, `nervix_consensus_snapshot_unreferenced_generations` | Generations retained for outgoing transfers and generations awaiting durable deletion. |
 
-Normal membership changes appear at `info`. Append generation endings and invalid or foreign batches
-appear at `debug`; a stalled generation reports that the stream neither answered nor accepted bytes
-for five seconds. Snapshot requests caused by the byte threshold appear at `info`, and byte-retention
-purge requests appear at `debug`.
+Normal membership changes appear at `info`. The first batch of a data stream logs its previous-log
+boundary, first and last entry, and entry count at `debug`. A generation also logs whether a
+follower conflict or a transport or liveness failure ended it. Compare those boundaries with the
+follower's applied log and the public catch-up samples to distinguish repeated conflict search
+from a stream that stalled. Invalid or foreign batches appear at `debug`; a stalled generation
+reports that the stream neither answered nor accepted bytes for five seconds. Snapshot requests
+caused by the byte threshold appear at `info`, and byte-retention purge requests appear at `debug`.
 
 ## Tuning
 
@@ -520,12 +548,13 @@ does not expose flags for them:
 
 | Limit | Current value |
 | --- | --- |
-| Replication batch target | 1 MiB or 1,024 entries; whole commands are never split |
+| Replication batch target | 1 MiB or 256 entries; whole commands are never split |
 | Encoded replication operation | 2 MiB |
 | Leader window per follower | 16 batches and a 16 MiB target byte budget |
 | Follower decoded resident window | 4 batches per live append stream |
 | Commands memory budget | 24 MiB per node |
 | Applied command storage | 8 MiB normalized payload in a 16 MiB working reservation |
+| Storage working sets held at once | 1, as many as the Commands budget holds with room beside them |
 | Append stream setup / progress idle bound | 5 seconds / 5 seconds |
 | Snapshot section / transport chunk | 8 MiB / 64 KiB |
 | Complete snapshot transfer | 30 seconds |

@@ -379,6 +379,7 @@ Feature: Configuration backup into a public archive
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}} --timeout 3s" from node "{{leader}}" into "stalled.nvxb" reporting JSON
     Then the CLI backup failed with JSON error code "BACKUP_REFUSED"
+    And the CLI backup failure mentions "phase=drain"
     And the CLI backup failure mentions "publishing_emitters"
     And backup archive "stalled.nvxb" does not exist
     When HTTP receiver "api" releases its held responses with "respond 204"

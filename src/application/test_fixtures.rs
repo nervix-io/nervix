@@ -391,6 +391,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             name: named(identifier_raw),
             from: ProcessorInputs::new(Vec::new(), Vec::new()),
             body: nervix_models::EmitterBody::Values,
+            envelope: Box::new(nervix_models::EmitterEnvelope::default()),
             connector: Box::new(EmitterEntity::Syslog(SyslogEmitter::Collector(
                 SyslogCollectorEmitter {
                     mode: nervix_models::SyslogCollectorPublishingMode::NoAck {

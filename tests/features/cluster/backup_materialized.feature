@@ -77,6 +77,10 @@ Feature: Materialized backup and archived lifecycle resumption
       class="bulk"
       """
     When runtime installation on node "node-3" is paused
+    # The relocated generator's first fetch holds a received chunk of the free room while node-3's
+    # restore maintenance asks for its whole working set, as a fetch did when maintenance began a
+    # sweep between two of its charges.
+    And node "node-3" holds its next materialized snapshot fetch on its first chunk until restore maintenance asks for bulk memory
     And this Plexus command request begins executing in the background on the leader node
       """
       RELOCATE GENERATOR produce_0 ONTO NODE node-3 IGNORE PREFERENCES;
@@ -85,6 +89,7 @@ Feature: Materialized backup and archived lifecycle resumption
     When bulk memory on node "node-3" keeps only "2097152" bytes free
     And runtime installation on node "node-3" is released
     Then the background command request succeeds
+    And within "60s" node "node-3" resumes its held materialized snapshot fetch after restore maintenance asked for bulk memory
     Then within "60s" node "node-3" observability metric "nervix_interconnect_bulk_bytes_total" with labels eventually reaches at least 1048576
       """
       class="bulk",direction="received"
@@ -283,6 +288,67 @@ Feature: Materialized backup and archived lifecycle resumption
       """
       relay 'state' materialized state is empty
       """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  @stopped_checkpoint_writes @deloxide_stress_restore @long_running
+  Scenario Outline: A stopped cut taken as soon as STOP returns holds the materialized relay whose last write outlasts the stop grace
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( tenant STRING, value I64, source STRING );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer, source string );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
+      CREATE RELAY state SCHEMA event BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE VHOST edge backup-materialized-stop-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO state INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    When http payload is posted to host "backup-materialized-stop-{{test_id}}.example.com" path "/state"
+      """
+      {"tenant":"alpha","value":1,"source":"alpha-first"}
+      """
+    And http payload is posted to host "backup-materialized-stop-{{test_id}}.example.com" path "/state"
+      """
+      {"tenant":"beta","value":2,"source":"beta-state"}
+      """
+    And http payload is posted to host "backup-materialized-stop-{{test_id}}.example.com" path "/state"
+      """
+      {"tenant":"alpha","value":3,"source":"alpha-state"}
+      """
+    Then within "30s" node "node-1" eventually reports materialized state for relay "state" containing
+      """
+      key={"tenant":"alpha"} payload={"source":"alpha-state","tenant":"alpha","value":3}
+      """
+    And within "30s" node "node-1" eventually reports materialized state for relay "state" containing
+      """
+      key={"tenant":"beta"} payload={"source":"beta-state","tenant":"beta","value":2}
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "running.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given materialized relay "state" takes "15s" to write its state as its domain stops
+    When these Plexus commands are executed on the leader node
+      """
+      STOP;
+      """
+    And the CLI backs up "domain {{domain}}" from node "{{leader}}" into "stopped.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    And backup archives "running.nvxb" and "stopped.nvxb" have identical materialized generations
 
     Examples:
       | cluster_size | replica_count |

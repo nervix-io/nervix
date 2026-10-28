@@ -7,6 +7,7 @@ use std::{
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::*;
+use strum::IntoEnumIterator as _;
 
 use crate::{Arbitrary, Domain, route::RouteShape};
 
@@ -58,10 +59,12 @@ impl Arbitrary<'_> {
                 }
             }
         };
+        let envelope = self.emitter_envelope_of(kind);
         CreateEmitter {
             name: self.name(),
             from: self.processor_inputs(true),
             body,
+            envelope: Box::new(envelope),
             connector: Box::new(connector),
             batch,
             flush_policy: self.flush_policy(),
@@ -70,6 +73,67 @@ impl Arbitrary<'_> {
             construction: self.route_construction(construction_shape),
             materialized_state: self.materialized_state(),
         }
+    }
+
+    /// The envelope an emitter of `kind` writes.
+    ///
+    /// Plexus writes only the clauses and properties the entity declares. The vocabulary holds any
+    /// envelope, which a stored form must carry back, so its domain draws every clause kind and
+    /// properties of any name.
+    pub fn emitter_envelope_of(&mut self, kind: EmitterEntityKind) -> EmitterEnvelope {
+        let declared = kind.capabilities();
+        if self.domain == Domain::Plexus {
+            return self.emitter_envelope(declared.envelope, declared.properties);
+        }
+        let clauses = EnvelopeClauseKind::iter().collect::<Vec<_>>();
+        let mut envelope = self.emitter_envelope(&clauses, &[]);
+        let properties = self.entropy.count(ITEMS);
+        for _ in 0..properties {
+            envelope.properties.push(EnvelopeProperty {
+                name: self.string(),
+                expression: self.expression(),
+            });
+        }
+        envelope
+    }
+
+    /// An envelope that writes some of `clauses` and sets some of `properties`, each at most once,
+    /// as a statement writes them: the clauses in the order their kinds are listed, and the
+    /// properties in the order they are declared.
+    pub fn emitter_envelope(
+        &mut self,
+        clauses: &[EnvelopeClauseKind],
+        properties: &[PropertyDeclaration],
+    ) -> EmitterEnvelope {
+        let mut envelope = EmitterEnvelope::default();
+        for kind in EnvelopeClauseKind::iter() {
+            if !clauses.contains(&kind) || !self.entropy.flag() {
+                continue;
+            }
+            match kind {
+                EnvelopeClauseKind::Persistent => envelope.persistent = true,
+                EnvelopeClauseKind::Mandatory => envelope.mandatory = true,
+                EnvelopeClauseKind::Retain => envelope.retain = true,
+                EnvelopeClauseKind::Timestamp => envelope.timestamp = Some(self.expression()),
+                EnvelopeClauseKind::DeliverAfter => envelope.deliver_after = Some(self.duration()),
+                EnvelopeClauseKind::Delay => envelope.delay = Some(self.duration()),
+                EnvelopeClauseKind::ReplyTo => envelope.reply_to = Some(self.expression()),
+                EnvelopeClauseKind::MessageId => envelope.message_id = Some(self.expression()),
+                EnvelopeClauseKind::DeduplicationId => {
+                    envelope.deduplication_id = Some(self.expression());
+                }
+            }
+        }
+        for property in properties {
+            if !self.entropy.flag() {
+                continue;
+            }
+            envelope.properties.push(EnvelopeProperty {
+                name: property.name.to_string(),
+                expression: self.expression(),
+            });
+        }
+        envelope
     }
 
     fn emitter_body(&mut self, connector: &EmitterEntity) -> EmitterBody {

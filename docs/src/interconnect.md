@@ -66,10 +66,10 @@ one production behavior, which is what every node uses:
   `nervix_primitives::time`, whose timers are Tokio's, so it follows the clock of the runtime it
   runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
   lifetimes, and the drain deadline derived from certificate expiry.
-- **CPU work.** Encoding and decoding run through `nervix-execution`, which submits each admitted
-  CPU job through the boundary's CPU-job mechanism. In the Turmoil build that mechanism runs the
-  job as a task on the simulated scheduler, under the same admission, charge, and cancellation
-  policy.
+- **CPU work.** Encoding and decoding run through `nervix-execution`. A class worker drains its
+  admitted FIFO through the boundary's CPU mechanism without dispatching a new blocking task for
+  each successor. In the Turmoil build the worker yields on the simulated scheduler between
+  bounded jobs, under the same admission, charge and cancellation policy.
 
 The transport's concurrent maps use per-process hash seeds. Where a walk over one of them causes
 effects, the walk runs in the key's semantic order instead of map order: retiring removed or
@@ -1252,8 +1252,10 @@ Consensus separates traffic according to the progress it protects:
 
 The ordered append stream can keep multiple batches in flight while preserving follower order. Its
 consensus-level window bounds a follower to 16 outstanding batches and 16 MiB of unacknowledged log
-data. Heartbeats and elections remain on management capacity, so a full append window does not block
-leadership traffic.
+data. Each batch stops at 256 entries or the 1 MiB byte target, so a newly elected leader can
+learn that a lagging follower rejects its previous-log boundary without first transferring a larger
+speculative entry batch over a slow link. Heartbeats and elections remain on management capacity,
+so a full append window does not block leadership traffic.
 
 The consensus adapter obtains its first append request before opening the duplex transport. This
 lets the caller's retry and cancellation gate pace a setup attempt even when the transport refuses
@@ -2065,6 +2067,13 @@ persisted preparation as cleaned up. Only an
 exact durable discard, activation, or schedule-based reconciliation resolves that preparation.
 
 ## Observability
+
+Backup capture and inventory remain terminal request/reply operations. Their administrative
+handlers log owner-local phase boundaries at `info`, correlated by domain, owner node and capture
+coordination identity. Revision catch-up, cluster-state application, lifecycle checkpoints, storage
+capture, staging and inventory are distinguishable in those logs; no progress frames or additional
+wire state are sent. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
+owns the coordinator's timeout phases and elapsed measurements.
 
 Each node exports interconnect measurements through its local metrics endpoint. The main groups
 cover connection and stream occupancy, pending operations, setup failures and resets, quota

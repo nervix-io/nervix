@@ -627,6 +627,7 @@ mod tests {
             body: nervix_models::EmitterBody::Codec {
                 codec: named("event_codec"),
             },
+            envelope: Box::new(nervix_models::EmitterEnvelope::default()),
             connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
                 ZeroMqPushEmitter {
                     mode: nervix_models::ZeroMqPushPublishingMode::NoAck {

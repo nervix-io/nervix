@@ -19,13 +19,14 @@ use std::{
     ops::{Bound, RangeBounds},
 };
 
+use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable as _, Snapshot as FjallSnapshot};
 use futures_util::{FutureExt as _, Stream, StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass, Reservation, StorageClass};
 use nervix_primitives::sync::{
-    Arc,
+    Arc, OwnedSemaphorePermit, Semaphore, StdArc,
     atomic::{AtomicBool, AtomicU64, Ordering},
     blocking::{Mutex, RwLock},
     watch,
@@ -119,7 +120,93 @@ impl StorageCharge {
             Self::Bulk => MemoryClass::Bulk,
         }
     }
+
+    /// The working memory one operation of this kind reserves.
+    fn working_bytes(self, executor: &Executor) -> io::Result<u64> {
+        let bytes = match self {
+            Self::Management => executor
+                .limits()
+                .management_event_bytes
+                .as_u64()
+                .checked_mul(STORAGE_RESERVATION_MULTIPLIER),
+            Self::Bulk => executor.limits().snapshot_section_working_bytes(),
+            Self::Commands => executor.limits().command_state_storage_working_bytes(),
+        };
+        let Some(bytes) = bytes else {
+            return Err(io::Error::other(StorageFailure::Capacity));
+        };
+        Ok(bytes)
+    }
 }
+
+/// How the store admits the working memory of its operations.
+///
+/// Every operation charged to the Commands class reserves the command state storage working set,
+/// which is most of the class: the default class holds one 16 MiB working set in its 24 MiB. A
+/// working set that asked the class for room it cannot have yet would take a place in the class's
+/// queue, and a place takes every byte the class releases until it is satisfied. The rest of the
+/// class would then wait behind room that only this store's own earlier working set can release: a
+/// source's control call would be refused, and a replication frame or a follower's answer would
+/// wait for storage. Commands working sets therefore take one of the store's turns before they ask
+/// the class, and the store has as many turns as the class holds working sets with room left
+/// beside them. A working set that waits for a turn holds no place in the class's queue.
+struct WorkingSetAdmission {
+    /// Shared with each turn a working set takes, because a log chunk keeps its turn beyond the
+    /// read that took it.
+    commands_turns: StdArc<Semaphore>,
+}
+
+impl WorkingSetAdmission {
+    fn new(executor: &Executor) -> io::Result<Self> {
+        let capacity = executor.memory(MemoryClass::Commands).capacity_bytes;
+        let working_set = StorageCharge::Commands.working_bytes(executor)?;
+        let beside_working_sets = capacity
+            .checked_sub(1)
+            .assured("the executor refuses to build an empty Commands class");
+        // A working set that fills the class, or one that charges nothing, still has one turn.
+        let turns = match beside_working_sets.checked_div(working_set) {
+            Some(0) | None => 1,
+            Some(turns) => turns,
+        };
+        let turns: u32 = turns.try_into().assured(
+            "the turns are at most the Commands capacity, which the executor counts in u32 permits",
+        );
+        Ok(Self {
+            commands_turns: StdArc::new(Semaphore::new(turns.arch_into())),
+        })
+    }
+
+    /// Admit one operation's working memory. A Commands working set takes a turn first and asks
+    /// the class only once it holds one.
+    async fn admit(&self, executor: &Executor, charge: StorageCharge) -> io::Result<WorkingSet> {
+        let bytes = charge.working_bytes(executor)?;
+        let turn = match charge {
+            StorageCharge::Commands => Some(
+                StdArc::clone(&self.commands_turns)
+                    .acquire_owned()
+                    .await
+                    .assured("the store never closes its Commands turns"),
+            ),
+            StorageCharge::Management | StorageCharge::Bulk => None,
+        };
+        let reservation = executor
+            .reserve(charge.memory_class(), bytes)
+            .await
+            .map_err(io::Error::other)?;
+        Ok(WorkingSet { reservation, turn })
+    }
+}
+
+/// One operation's admitted working memory, with the turn it holds when it is a Commands working
+/// set.
+///
+/// The fields drop in declaration order: the bytes return to their class before the turn passes, so
+/// the next working set never waits in the class's queue for bytes this one still holds.
+struct WorkingSet {
+    reservation: Reservation,
+    turn: Option<OwnedSemaphorePermit>,
+}
+
 const KEYSPACE_NAMES: [&str; 4] = [
     KEYSPACE_LOGS,
     KEYSPACE_META,
@@ -528,6 +615,7 @@ impl AppliedRange {
 pub(super) struct StoreState {
     db: Database,
     pub(super) executor: Executor,
+    admission: WorkingSetAdmission,
     pub(super) faults: StorageFault,
     failed: AtomicBool,
     logs: Keyspace,
@@ -690,42 +778,24 @@ impl StoreInner {
         charge: StorageCharge,
         operation: impl FnOnce(&Self, &Reservation) -> io::Result<T> + Send + 'static,
     ) -> io::Result<T> {
-        let reservation = Self::reserve(&self.executor, charge).await?;
+        let WorkingSet { reservation, turn } = self.admit(charge).await?;
         let inner = self.clone();
         self.executor
             .run_storage(
                 StorageClass::Consensus,
                 reservation,
                 move |reservation, cancellation| {
+                    let working_set = WorkingSet { reservation, turn };
                     cancellation.check().map_err(io::Error::other)?;
-                    operation(&inner, &reservation)
+                    operation(&inner, &working_set.reservation)
                 },
             )
             .await
             .map_err(io::Error::other)?
     }
 
-    async fn reserve(executor: &Executor, charge: StorageCharge) -> io::Result<Reservation> {
-        let bytes = match charge {
-            StorageCharge::Management => executor
-                .limits()
-                .management_event_bytes
-                .as_u64()
-                .checked_mul(STORAGE_RESERVATION_MULTIPLIER)
-                .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?,
-            StorageCharge::Bulk => executor
-                .limits()
-                .snapshot_section_working_bytes()
-                .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?,
-            StorageCharge::Commands => executor
-                .limits()
-                .command_state_storage_working_bytes()
-                .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?,
-        };
-        executor
-            .reserve(charge.memory_class(), bytes)
-            .await
-            .map_err(io::Error::other)
+    async fn admit(&self, charge: StorageCharge) -> io::Result<WorkingSet> {
+        self.admission.admit(&self.executor, charge).await
     }
 
     fn commit(&self, operation: &str, batch: DurableBatch<'_>) -> io::Result<()> {
@@ -1213,7 +1283,7 @@ impl StoreInner {
         end: Bound<Vec<u8>>,
         expected_leader: Option<LeaderIdOf<TypeConfig>>,
     ) -> io::Result<LogChunkRead> {
-        let reservation = Self::reserve(&self.executor, StorageCharge::Commands).await?;
+        let WorkingSet { reservation, turn } = self.admit(StorageCharge::Commands).await?;
         let executor = self.executor.clone();
         let inner = self.clone();
         executor
@@ -1221,6 +1291,7 @@ impl StoreInner {
                 StorageClass::Consensus,
                 reservation,
                 move |reservation, cancellation| {
+                    let working_set = WorkingSet { reservation, turn };
                     cancellation.check().map_err(io::Error::other)?;
                     if let Some(expected_leader) = expected_leader {
                         let current_vote = inner.read_vote()?;
@@ -1256,7 +1327,7 @@ impl StoreInner {
                     Ok(LogChunkRead::Entries {
                         chunk: Some(LogEntryChunk {
                             entries: entries.into_iter(),
-                            _reservation: reservation,
+                            _working_set: working_set,
                         }),
                         continuation,
                     })
@@ -1291,13 +1362,16 @@ impl FjallStore {
         executor: Executor,
         fault: StorageFault,
     ) -> io::Result<Self> {
-        let reservation = StoreInner::reserve(&executor, StorageCharge::Commands).await?;
+        let admission = WorkingSetAdmission::new(&executor)?;
+        let WorkingSet { reservation, turn } =
+            admission.admit(&executor, StorageCharge::Commands).await?;
         let store_executor = executor.clone();
         let opened = executor
             .run_storage(
                 StorageClass::Consensus,
                 reservation,
                 move |reservation, _| {
+                    let working_set = WorkingSet { reservation, turn };
                     for name in db.list_keyspace_names() {
                         // Consensus owns this complete database, so every keyspace must be one of
                         // the four that make up its current durable shape.
@@ -1329,7 +1403,7 @@ impl FjallStore {
                         {
                             return Err(io::Error::other(StorageFailure::InvalidState));
                         }
-                        let mut batch = DurableBatch::new(&reservation)?;
+                        let mut batch = DurableBatch::new(&working_set.reservation)?;
                         let metadata = StateMetadata::from(&StateMachineData::default());
                         batch.insert(&sm, KEY_METADATA, &StateMetadataRecord::from(&metadata))?;
                         batch.commit(&db)?;
@@ -1362,6 +1436,7 @@ impl FjallStore {
                                 shared: Arc::new(StoreState {
                                     db,
                                     executor: store_executor,
+                                    admission,
                                     faults: fault,
                                     failed: AtomicBool::new(false),
                                     logs,
@@ -1541,8 +1616,9 @@ pub(super) struct FjallLogReader {
 
 struct LogEntryChunk {
     entries: std::vec::IntoIter<EntryOf<TypeConfig>>,
-    /// The decoded entries remain charged until the stream has handed out this complete chunk.
-    _reservation: Reservation,
+    /// The decoded entries remain charged, and keep the store's Commands turn, until the stream has
+    /// handed out this complete chunk.
+    _working_set: WorkingSet,
 }
 
 /// The read boundary survives exhaustion without retaining the chunk's allocation or charge.
@@ -1575,6 +1651,9 @@ impl LogChunkState {
 
 #[cfg(all(test, feature = "shuttle"))]
 mod chunk_shuttle_tests;
+
+#[cfg(all(test, feature = "shuttle"))]
+mod working_set_shuttle_tests;
 
 enum LogChunkRead {
     Entries {
@@ -1838,25 +1917,26 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
         // Ready entries share one reservation-bounded atomic write, with another only when that
         // limit is full. A queued vote waits for one fsync per batch instead of one per entry.
         let completion = AppendCompletion::new(callback);
-        let reservation =
-            match StoreInner::reserve(&self.inner.executor, StorageCharge::Commands).await {
-                Ok(reservation) => reservation,
-                Err(error) => {
-                    self.inner.failed.store(true, Ordering::Release);
-                    completion.complete(Err(io::Error::other(StorageFailure::Stopped)));
-                    return Err(error);
-                }
-            };
+        let WorkingSet { reservation, turn } = match self.inner.admit(StorageCharge::Commands).await
+        {
+            Ok(working_set) => working_set,
+            Err(error) => {
+                self.inner.failed.store(true, Ordering::Release);
+                completion.complete(Err(io::Error::other(StorageFailure::Stopped)));
+                return Err(error);
+            }
+        };
         let executor = self.inner.executor.clone();
         let inner = self.inner.clone();
         let job_completion = completion.clone();
         let submitted = executor
             .submit_storage(StorageClass::Consensus, reservation, move |reservation| {
-                let result = inner.append_entries(entries, &reservation);
+                let working_set = WorkingSet { reservation, turn };
+                let result = inner.append_entries(entries, &working_set.reservation);
                 if result.is_err() {
                     inner.failed.store(true, Ordering::Release);
                 }
-                drop(reservation);
+                drop(working_set);
                 job_completion.complete(result);
             })
             .await;

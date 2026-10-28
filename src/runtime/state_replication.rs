@@ -91,7 +91,7 @@ use replica_branch_checkpoints::{BranchStep, Held, ReplicaBranchCheckpoints, Ste
 use replica_catch_up::RemoteStateOwner;
 use routing::ReplicatedState;
 pub(crate) use routing::StateReplicationRequest;
-pub(in crate::runtime) use tasks::BranchSnapshotTasks;
+pub(in crate::runtime) use tasks::{CheckpointWriter, StateSnapshotTasks};
 
 impl Runtime {
     /// Persist the branch lifecycle an owner formed, hold it as the lifecycle replicas

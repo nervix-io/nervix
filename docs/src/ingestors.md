@@ -587,7 +587,7 @@ Transport-specific schemes and keys:
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
-- `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file`.
+- `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`. This is primarily useful for SQS-compatible local/test endpoints.
 - `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
@@ -1324,6 +1324,25 @@ host `addr` names. A connection that fails or runs out of that deadline, includi
 not resolve, is a source error that `DESCRIBE INGESTOR` shows as the transient error, and the
 instance tries again on its `RETRY POLICY` cadence without acknowledging anything.
 
+The client's `addr` is an AMQP URI whose scheme is `amqp` or `amqps`, which names a host, and whose
+port, when it names one, is not 0. Lapin would take `localhost` for an address that names no host,
+so `CREATE RABBITMQ CLIENT` refuses such an address before commit, together with any other address
+of that kind and any credentials, virtual host or query option (`heartbeat`, `frame_max`,
+`channel_max`, `connection_timeout` or `auth_mechanism`) that Lapin cannot read. The refusal names
+the key, never the address, which can carry credentials. Every connection reads the address the
+same way.
+
+An `amqps` connection trusts the platform roots and the PEM certificates in `tls_ca_file`, and
+verifies the broker certificate against the host `addr` names, whichever of its addresses was
+dialled. A client names `tls_cert_file` and `tls_key_file` together or not at all. With them, the
+connection presents that PEM certificate chain and its unencrypted PEM private key, PKCS #8,
+PKCS #1 or SEC1, to a broker that asks for a client certificate. A file that cannot be read, or that
+holds no PEM certificate or no private key, fails the connection as a configuration error. A broker
+that requires a client certificate and receives none, or one it does not accept, ends the TLS
+session with an alert: `DESCRIBE INGESTOR` shows that the broker refused the TLS session, naming the
+alert, as the transient error, and the instance tries again on its `RETRY POLICY` cadence. An `amqp`
+address carries no TLS, so the client's TLS keys do not apply to it.
+
 ### Redis Pub/Sub
 
 <!-- connector-matrix:ingest-redis-pubsub:start -->
@@ -1370,7 +1389,8 @@ to its byte bound, then applies its declared `DROP OLDEST` or `DROP NEWEST` over
 `DROP` discards every payload during the hold. Discards count in
 `nervix_ingestor_quiesce_dropped_total`. A `REDIS CLIENT` declares connection-pool bounds even
 when only ingestors reference it; see [Database Client Connection Pools](database-client-pools.md).
-Each subscription owns a separate connection. It resolves the `addr` hostname through the node's
+Each subscription owns a separate connection, which the client's command-pool lifetimes,
+`pool_idle_timeout_ms` and `pool_max_lifetime_ms`, never close. It resolves the `addr` hostname through the node's
 asynchronous DNS resolver on initial subscribe and every resume after a disconnect; it does not
 consume a pooled command connection. For `rediss://`, TLS verifies the original hostname and
 uses the configured CA and optional client identity. DNS and connection failures follow the

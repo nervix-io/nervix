@@ -57,10 +57,22 @@ fn sockets_names_timers_and_cpu_jobs_belong_to_the_simulated_host() {
         assert!(started.elapsed() >= WAIT);
 
         let scheduler = thread::current().id();
-        let job = spawn_cpu(|| thread::current().id())
-            .await
-            .assured("the job returns its thread without panicking");
-        assert_eq!(job, scheduler);
+        let (result, observed) = crate::sync::oneshot::channel();
+        let mut result = Some(result);
+        spawn_cpu(move || {
+            if let Some(result) = result.take() {
+                result
+                    .send(thread::current().id())
+                    .assured("the test awaits the worker");
+            }
+            false
+        })
+        .await
+        .assured("the simulated worker exits after its callback");
+        assert_eq!(
+            observed.await.assured("the worker reports its thread"),
+            scheduler
+        );
         Ok(())
     });
     simulation

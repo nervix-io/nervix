@@ -223,6 +223,7 @@ mod tests {
                 },
             ))),
             batch: None,
+            envelope: Default::default(),
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
             mode: AckMode::Attached,

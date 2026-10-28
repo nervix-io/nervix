@@ -125,6 +125,9 @@ pub struct EntityPresentation {
     mode: String,
     quiesce: Option<String>,
     conflict: Option<String>,
+    /// The envelope section an emitter writes, as one line of canonical Plexus. Absent for an
+    /// ingestor and for an emitter that writes none.
+    envelope: Option<String>,
 }
 
 impl EntityPresentation {
@@ -139,6 +142,7 @@ impl EntityPresentation {
             mode: entity.acknowledgement().to_canonical_plexus(),
             quiesce: Some(ingest_quiesce_to_plexus(entity.quiesce())),
             conflict: None,
+            envelope: None,
         }
     }
 
@@ -262,8 +266,19 @@ impl EntityPresentation {
             format!("options: {options}"),
             format!("mode: {}", self.mode),
             format!("quiesce: {quiesce}"),
-            "envelope: none".to_owned(),
+            format!("envelope: {}", self.envelope.as_deref().unwrap_or("none")),
         ]
+    }
+
+    /// This presentation of an emitter's entity with the envelope section the emitter writes.
+    pub fn with_envelope(
+        mut self,
+        envelope: &crate::EmitterEnvelope,
+    ) -> error_stack::Result<Self, CanonicalPlexusError> {
+        if !envelope.is_empty() {
+            self.envelope = Some(envelope.to_canonical_plexus()?);
+        }
+        Ok(self)
     }
 
     pub(super) fn reference_to_plexus(&self) -> String {
@@ -349,6 +364,7 @@ impl IngestorPresentationModel for ClientProducerIngestor {
             mode: self.mode.to_canonical_plexus(),
             quiesce: Some(ingest_quiesce_to_plexus(&IngestQuiesceMode::Suspend)),
             conflict: None,
+            envelope: None,
         }
     }
 }
@@ -540,6 +556,7 @@ impl EmitterEntity {
             mode: self.publishing().to_canonical_plexus(),
             quiesce: None,
             conflict: None,
+            envelope: None,
         };
         self.present_options(&mut presentation)?;
         Ok(presentation)
