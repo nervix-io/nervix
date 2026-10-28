@@ -1430,8 +1430,7 @@ impl<'a> SealedSource<'a> {
                     .checked_add(super::RESTORE_STATE_WORKING_BYTES)
                     .ok_or_else(truncated)?;
                 let charge = executor
-                    .reserve(MemoryClass::Bulk, working)
-                    .await
+                    .try_reserve(MemoryClass::Bulk, working)
                     .change_context(MaterializedSnapshotError::Admission)?;
                 let mut source = reader
                     .take()

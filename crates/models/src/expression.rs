@@ -1,3 +1,4 @@
+use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -135,6 +136,38 @@ pub struct CaseBranch {
 }
 
 impl Expression {
+    /// A written integer, optionally signed and explicitly cast to an integer type.
+    /// This is a literal projection, not expression evaluation or constant folding.
+    pub(crate) fn integer_literal(&self) -> Option<i128> {
+        match self {
+            Self::Literal(Literal::I64(value)) => Some(i128::from(*value)),
+            Self::Unary {
+                operator: UnaryOperator::Negate,
+                expression,
+            } => {
+                let value = expression.integer_literal()?;
+                Some(
+                    value
+                        .checked_neg()
+                        .assured("a signed I64 literal fits within I128"),
+                )
+            }
+            Self::Cast {
+                expression,
+                target:
+                    ParseAsType::U8
+                    | ParseAsType::I8
+                    | ParseAsType::U16
+                    | ParseAsType::I16
+                    | ParseAsType::U32
+                    | ParseAsType::I32
+                    | ParseAsType::U64
+                    | ParseAsType::I64,
+            } => expression.integer_literal(),
+            _ => None,
+        }
+    }
+
     pub fn visit_fields(&self, visitor: &mut impl FnMut(&FieldReference)) {
         match self {
             Self::Literal(_) => {}

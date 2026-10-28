@@ -1,8 +1,8 @@
-//! Relay delivery and acknowledgement messages through the bounded wire codec.
+//! Typed stream envelopes, relay delivery and acknowledgements through the bounded wire codec.
 //!
 //! Layer: test harness.
 //!
-//! - **Owns.** Generated relay grant requests and replies, admission exchanges, acknowledgement
+//! - **Owns.** Generated stream request envelopes, relay grant requests and replies, admission exchanges, acknowledgement
 //!   resolutions and connection bindings with their prerequisite records and refusals, with every
 //!   branch key, record metadata and registration they carry, and the properties that the bounded rkyv codec keeps each one whole and refuses
 //!   damaged bytes with a typed failure that leaves no charge and no allocation behind.
@@ -56,6 +56,90 @@ const ELEMENTS: usize = 3;
 
 /// The most bytes of one generated relay body.
 const BODY_BYTES: usize = 64;
+
+#[nervix_primitives::test]
+async fn nested_request_bulk_admission_refuses_a_queued_charge_without_waiting() {
+    use futures_util::FutureExt as _;
+
+    let executor = Executor::default();
+    let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+    let held = executor
+        .try_reserve(MemoryClass::Bulk, capacity - 8192)
+        .assured("the fixture leaves room for the request payload");
+    let payload_charge = executor
+        .try_reserve(MemoryClass::Bulk, 4096)
+        .assured("the encoded payload fits");
+    let waiting = executor.reserve(MemoryClass::Bulk, 8192);
+    let mut waiting = std::pin::pin!(waiting);
+    assert!(waiting.as_mut().now_or_never().is_none());
+    let request = crate::request::RequestEnvelope {
+        class: PoolClass::Bulk,
+        request: "test_snapshot".to_owned(),
+        payload: vec![7; 4096],
+    };
+    let result = super::encode_stream_request(&executor, request, payload_charge).now_or_never();
+    assert!(
+        result.is_some(),
+        "an envelope must refuse overlap instead of waiting behind a charge that needs its payload"
+    );
+    let error = result
+        .verified("encoding returned without waiting")
+        .err()
+        .assured("the queued charge leaves no envelope room");
+    assert!(error.contains::<nervix_execution::AdmissionError>());
+    let admitted = waiting
+        .await
+        .assured("releasing the payload lets the waiter finish");
+    drop(admitted);
+    drop(held);
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+}
+
+/// The complete current envelope reaches the receiver through the stream's production encoding
+/// boundary, and retains only the output allocation once encoding completes.
+#[test]
+fn bolero_bulk_request_envelopes_preserve_payload_and_release_charges() {
+    let runtime = property_runtime();
+    bolero::check!()
+        .with_iterations(64)
+        .with_max_len(4096)
+        .for_each(|input| {
+            let executor = Executor::default();
+            let request = crate::request::RequestEnvelope {
+                class: PoolClass::Bulk,
+                request: "snapshot".to_owned(),
+                payload: input.to_vec(),
+            };
+            let payload_bytes = u64::try_from(request.payload.len())
+                .assured("the bounded property input fits the byte budget");
+            let charge = executor
+                .try_reserve(MemoryClass::Bulk, payload_bytes)
+                .assured("the bounded payload fits the untouched class");
+            runtime.block_on(async {
+                let encoded = super::encode_stream_request(&executor, request.clone(), charge)
+                    .await
+                    .assured("the bounded envelope encodes");
+                assert_eq!(
+                    executor.memory(MemoryClass::Bulk).reserved_bytes,
+                    u64::try_from(encoded.len()).assured("the bounded envelope length fits"),
+                    "encoding returns the input charge before the request opens a stream"
+                );
+                let (decoded, charge) = decode_rkyv::<crate::request::RequestEnvelope>(
+                    &executor,
+                    MemoryClass::Bulk,
+                    CpuClass::Bulk,
+                    encoded,
+                )
+                .await
+                .assured("the current envelope decodes")
+                .into_parts();
+                assert_eq!(decoded, request);
+                drop(decoded);
+                drop(charge);
+                assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+            });
+        });
+}
 
 fn property_runtime() -> nervix_primitives::runtime::Runtime {
     nervix_primitives::runtime::Builder::new_current_thread()

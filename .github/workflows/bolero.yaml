@@ -15,6 +15,8 @@ on:
     outputs:
       randomized-result:
         value: ${{ jobs.bolero-gate.outputs.randomized-result }}
+      randomized-required:
+        value: ${{ jobs.bolero-gate.outputs.randomized-required }}
       sanitizer-result:
         value: ${{ jobs.bolero-gate.outputs.sanitizer-result }}
       sanitizer-required:
@@ -46,10 +48,14 @@ env:
   BOLERO_LABELS: ${{ inputs.labels-json || '[]' }}
 
 jobs:
-  # Check excludes this whole call only for its verified prose-only selection without `fuzz`.
-  # Once called (or run directly), every ordinary property remains required, including on reruns.
+  # Check excludes this whole call only for its verified prose-only selection without `bolero-random`
+  # or `fuzz`. A pull request runs this ordinary randomized and corpus job only with `bolero-random`,
+  # which it carries only when its task requires the job: `fuzz` is the preferred Bolero evidence.
+  # Scheduled and manual runs always run it. Once selected, every ordinary property remains
+  # required, including on reruns.
   bolero-random:
     name: bolero-random
+    if: (inputs.event-name || github.event_name) != 'pull_request' || contains(fromJSON(inputs.labels-json || '[]'), 'bolero-random')
     runs-on: blacksmith-8vcpu-ubuntu-2404
     # Run 39649567371 took 47m10s; 90 minutes covers 1.5 times that duration plus publication.
     timeout-minutes: 90
@@ -375,18 +381,24 @@ jobs:
     timeout-minutes: 5
     outputs:
       randomized-result: ${{ steps.selection.outputs.randomized-result }}
+      randomized-required: ${{ steps.selection.outputs.randomized-required }}
       sanitizer-result: ${{ steps.selection.outputs.sanitizer-result }}
       sanitizer-required: ${{ steps.selection.outputs.sanitizer-required }}
     steps:
-      - name: Require ordinary properties and requested fuzzing
+      - name: Require the requested ordinary properties and fuzzing
         id: selection
         env:
           RANDOM_RESULT: ${{ needs.bolero-random.result }}
           FUZZ_RESULT: ${{ needs.bolero-fuzz.result }}
           COMBINED_RESULT: ${{ needs.bolero-fuzz-combined.result }}
+          RANDOM_REQUIRED: ${{ (inputs.event-name || github.event_name) != 'pull_request' || contains(fromJSON(inputs.labels-json || '[]'), 'bolero-random') }}
           FUZZ_REQUIRED: ${{ inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz') }}
         run: |
-          test "$RANDOM_RESULT" = success
+          if [[ "$RANDOM_REQUIRED" == "true" ]]; then
+            test "$RANDOM_RESULT" = success
+          else
+            test "$RANDOM_RESULT" = skipped
+          fi
           if [[ "$FUZZ_REQUIRED" == "true" ]]; then
             test "$FUZZ_RESULT" = success
             test "$COMBINED_RESULT" = success
@@ -401,13 +413,15 @@ jobs:
               "tested_sha": os.environ["BOLERO_TESTED_SHA"],
               "run": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
               "event": os.environ["BOLERO_EVENT_NAME"], "labels": json.loads(os.environ["BOLERO_LABELS"]),
-              "randomized": os.environ["RANDOM_RESULT"], "sanitizer": os.environ["FUZZ_RESULT"],
+              "randomized": os.environ["RANDOM_RESULT"],
+              "randomized_required": os.environ["RANDOM_REQUIRED"] == "true",
+              "sanitizer": os.environ["FUZZ_RESULT"],
               "sanitizer_combined": os.environ["COMBINED_RESULT"],
               "sanitizer_required": os.environ["FUZZ_REQUIRED"] == "true",
           }
           pathlib.Path("selection.json").write_text(json.dumps(record, indent=2) + "\n")
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              for name, value in [("randomized-result", record["randomized"]), ("sanitizer-result", record["sanitizer"]), ("sanitizer-required", os.environ["FUZZ_REQUIRED"])]:
+              for name, value in [("randomized-result", record["randomized"]), ("randomized-required", os.environ["RANDOM_REQUIRED"]), ("sanitizer-result", record["sanitizer"]), ("sanitizer-required", os.environ["FUZZ_REQUIRED"])]:
                   output.write(f"{name}={value}\n")
           PYTHON
 

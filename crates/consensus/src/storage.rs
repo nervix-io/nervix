@@ -150,44 +150,58 @@ impl StorageCharge {
 /// wait for storage. Commands working sets therefore take one of the store's turns before they ask
 /// the class, and the store has as many turns as the class holds working sets with room left
 /// beside them. A working set that waits for a turn holds no place in the class's queue.
+/// Bulk working sets use independent turns for the same reason: snapshot chunks and staging work
+/// must retain the room beside an admitted storage job.
 struct WorkingSetAdmission {
     /// Shared with each turn a working set takes, because a log chunk keeps its turn beyond the
     /// read that took it.
     commands_turns: StdArc<Semaphore>,
+    /// Shared with each admitted Bulk worker, which may outlive its asynchronous caller.
+    bulk_turns: StdArc<Semaphore>,
 }
 
 impl WorkingSetAdmission {
     fn new(executor: &Executor) -> io::Result<Self> {
-        let capacity = executor.memory(MemoryClass::Commands).capacity_bytes;
-        let working_set = StorageCharge::Commands.working_bytes(executor)?;
+        Ok(Self {
+            commands_turns: Self::turns(executor, StorageCharge::Commands)?,
+            bulk_turns: Self::turns(executor, StorageCharge::Bulk)?,
+        })
+    }
+
+    fn turns(executor: &Executor, charge: StorageCharge) -> io::Result<StdArc<Semaphore>> {
+        let capacity = executor.memory(charge.memory_class()).capacity_bytes;
+        let working_set = charge.working_bytes(executor)?;
         let beside_working_sets = capacity
             .checked_sub(1)
-            .assured("the executor refuses to build an empty Commands class");
+            .assured("the executor refuses to build an empty memory class");
         // A working set that fills the class, or one that charges nothing, still has one turn.
         let turns = match beside_working_sets.checked_div(working_set) {
             Some(0) | None => 1,
             Some(turns) => turns,
         };
         let turns: u32 = turns.try_into().assured(
-            "the turns are at most the Commands capacity, which the executor counts in u32 permits",
+            "the turns are at most the class capacity, which the executor counts in u32 permits",
         );
-        Ok(Self {
-            commands_turns: StdArc::new(Semaphore::new(turns.arch_into())),
-        })
+        Ok(StdArc::new(Semaphore::new(turns.arch_into())))
     }
 
-    /// Admit one operation's working memory. A Commands working set takes a turn first and asks
-    /// the class only once it holds one.
+    /// Admit one operation's working memory. Commands and Bulk working sets take independent
+    /// class-specific turns before asking for their memory.
     async fn admit(&self, executor: &Executor, charge: StorageCharge) -> io::Result<WorkingSet> {
         let bytes = charge.working_bytes(executor)?;
-        let turn = match charge {
-            StorageCharge::Commands => Some(
-                StdArc::clone(&self.commands_turns)
+        let turns = match charge {
+            StorageCharge::Commands => Some(&self.commands_turns),
+            StorageCharge::Bulk => Some(&self.bulk_turns),
+            StorageCharge::Management => None,
+        };
+        let turn = match turns {
+            Some(turns) => Some(
+                StdArc::clone(turns)
                     .acquire_owned()
                     .await
-                    .assured("the store never closes its Commands turns"),
+                    .assured("the store never closes its working-set turns"),
             ),
-            StorageCharge::Management | StorageCharge::Bulk => None,
+            None => None,
         };
         let reservation = executor
             .reserve(charge.memory_class(), bytes)
@@ -197,8 +211,7 @@ impl WorkingSetAdmission {
     }
 }
 
-/// One operation's admitted working memory, with the turn it holds when it is a Commands working
-/// set.
+/// One operation's admitted working memory, with its Commands or Bulk turn.
 ///
 /// The fields drop in declaration order: the bytes return to their class before the turn passes, so
 /// the next working set never waits in the class's queue for bytes this one still holds.

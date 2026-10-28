@@ -486,6 +486,7 @@ impl RelayProcessorNode {
                     return;
                 }
                 Ok(MaterializedDependencyResolution::Wait) => {
+                    let parks_first = required_wait.is_none();
                     let pending = match required_wait {
                         Some(required_wait) => PendingMaterializedBatch::parked_again(
                             incoming_relay.clone(),
@@ -495,6 +496,17 @@ impl RelayProcessorNode {
                         None => PendingMaterializedBatch::new(incoming_relay.clone(), batch),
                     };
                     self.pending_materialized.push_back(pending);
+                    if parks_first {
+                        branch
+                            .runtime
+                            .inner
+                            .fault_injection
+                            .record_materialized_wait_if_armed(
+                                &branch.domain,
+                                self.kind,
+                                &self.processor,
+                            );
+                    }
                     return;
                 }
                 Err(error) => {

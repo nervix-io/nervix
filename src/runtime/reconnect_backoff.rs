@@ -20,15 +20,27 @@ pub(in crate::runtime) trait AcknowledgementKeepalive {
     where
         F: std::future::Future,
     {
+        self.keep_alive();
+        self.keep_alive_while_pending(future).await
+    }
+
+    /// Await `future`, reporting these acknowledgements alive each time another
+    /// `REMOTE_ACK_ALIVE_INTERVAL` passes with `future` still pending. Unlike
+    /// [`Self::keep_alive_while`] it reports nothing up front, so work that ends within one
+    /// interval, as a relay delivery ordinarily does, reports nothing at all.
+    async fn keep_alive_while_pending<F>(&self, future: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
         let mut future = std::pin::pin!(future);
         loop {
             nervix_primitives::task::consume_budget().await;
-            self.keep_alive();
             nervix_primitives::select! {
                 biased;
                 result = &mut future => return result,
                 _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {}
             }
+            self.keep_alive();
         }
     }
 }
