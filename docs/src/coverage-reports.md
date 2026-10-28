@@ -60,6 +60,8 @@ the downloaded artifact:
 | `coverage-operator-deployment` | Kubernetes deployment identity, public readiness observations, failure cleanup and image-publication gating |
 | `coverage-kache-ci` | The shared compiler cache's remote publication contract and build-runner diagnostic tooling |
 | `coverage-connector-matrix` | Plexus connector matrix rendering, generated manual regions and declaration drift checks |
+| `coverage-ci-selection` | Exact-source suite and Bolero call selection |
+| `coverage-wasm-bindgen` | The console build's wasm-bindgen CLI selection, installation and verification |
 | `coverage-model-runner` | Native collector supervision, command and artifact accounting |
 | `coverage-typed-ratchet-python` | Architecture source/compiler rule runners and their qualification |
 | `coverage-primitive-boundary` | Primitive provenance and thread-owner validation |
@@ -493,19 +495,19 @@ job's result. It decides which producers the union requires:
 | The Bolero call's selection record | `bolero`, `bolero-selection` | Whenever the run calls Bolero |
 
 Every required producer job must have succeeded, and every other one must have been skipped. The
-Bolero selection record must show that the randomized properties passed and that the sanitizer
-campaigns ran exactly when `fuzz` requested them. Without `fuzz`, the recorded deliberate skip is
-valid and supplies no report. A job that a later attempt of the run did not rerun keeps its earlier
-attempt's verdict and artifacts, so a collection of any attempt up to the current one is the run's.
+Bolero selection record must show that the randomized properties passed exactly when
+`bolero-random` requested them and that the sanitizer campaigns ran exactly when `fuzz` requested
+them. Without the label, the recorded deliberate skip of that mode is valid and supplies no report.
+A job that a later attempt of the run did not rerun keeps its earlier attempt's verdict and
+artifacts, so a collection of any attempt up to the current one is the run's.
 
 The event and tested source decide eligibility together:
 
-| Selection | Ordinary properties | Live sanitizer coverage | Full union |
+| Selection | Randomized properties | Live sanitizer coverage | Full union |
 | --- | --- | --- | --- |
-| Code or test PR without `fuzz` | Required | Deliberately skipped; no fuzz report | Required, with the other label-selected producers |
-| Code or test PR carrying `fuzz` | Required | Required for the complete tested inventory | Required, with the requested fuzz campaign |
-| Verified prose-only PR carrying `fuzz` | Required | Required for the complete tested inventory | Skipped; the campaign keeps its own report and verdict |
-| Verified prose-only PR without `fuzz` | Entire Bolero call excluded | No campaign or report | Skipped; no union evidence |
+| Code or test PR | Required with `bolero-random`; deliberately skipped otherwise | Required for the complete tested inventory with `fuzz`; deliberately skipped otherwise, with no fuzz report | Required, with the label-selected producers |
+| Verified prose-only PR carrying `bolero-random` or `fuzz` | Required with `bolero-random`; deliberately skipped otherwise | Required for the complete tested inventory with `fuzz`; deliberately skipped otherwise | Skipped; each requested run keeps its own report and verdict |
+| Verified prose-only PR carrying neither label | Entire Bolero call excluded | No campaign or report | Skipped; no union evidence |
 | Scheduled or manual Bolero workflow | Required | Deliberately skipped | No Check union is launched by this standalone workflow |
 
 Check runs on PR open, reopen, push and label changes. Each event records its own label snapshot;

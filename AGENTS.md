@@ -1070,9 +1070,12 @@ build and the existing tests, and nothing in it changes behavior.
   `tests/bolero-targets.toml`, with one stable ID, exact package and test identity, required
   features, domain version, source-adjacent corpus, input/case budgets and invariant. Use the same
   production path and complete assertion in ordinary randomized/corpus and coverage-guided
-  libFuzzer runs. Registration in both CI modes is mandatory even while other work is concurrent;
-  CI runs the sanitizer mode only for PRs labeled `fuzz`. Check may exclude the reusable Bolero
-  workflow only for a verified prose-only PR without `fuzz`; a labeled PR runs both modes.
+  libFuzzer runs. Registration in both CI modes is mandatory even while other work is concurrent.
+  CI runs each mode only for a PR carrying its label: the sanitizer mode for `fuzz` and the
+  ordinary randomized/corpus mode for `bolero-random`. `fuzz` is the preferred Bolero evidence; a
+  PR carries `bolero-random` only when its task requires the randomized/corpus run itself, such as
+  a change to that run or a release qualification. Check may exclude the reusable Bolero workflow
+  only for a verified prose-only PR without either label.
   A target addition or change also updates the target register in
   `docs/src/property-testing-and-fuzzing.md` and any owning representation coverage map in the
   same change; the registered domain version, case count and input bound must agree with the
@@ -1312,14 +1315,15 @@ build and the existing tests, and nothing in it changes behavior.
   Sanitizer CI runs the inventory in shards of whole harnesses, and only the combined record of
   every shard of one plan, which `just combine-bolero-fuzz` checks, claims the whole inventory.
   Check calls the reusable Bolero workflow with its tested SHA, event and label snapshot;
-  randomized checks are required and a deliberate sanitizer skip publishes no fuzz coverage.
+  randomized checks are required exactly when `bolero-random` requests them, and a deliberate
+  sanitizer skip publishes no fuzz coverage.
   Keep native fuzz reports and the Python runner report distinct from ordinary coverage and CRAP.
 - Check verifies its exact tested merge before excluding ordinary suites for documentation-only
   changes. `test-selection` records the changed paths and requirements; its selection is not
   property execution evidence. `no-docker` never authorizes a test exclusion. The reusable Bolero
-  call is excluded as a whole only for verified prose changes without `fuzz`; once called, its
-  ordinary properties and requested sanitizer execution remain mandatory even on single-job
-  reruns. [Property Testing And Fuzzing](docs/src/property-testing-and-fuzzing.md#documentation-only-selection)
+  call is excluded as a whole only for verified prose changes without `bolero-random` or `fuzz`;
+  once called, its requested randomized and sanitizer execution remain mandatory even on
+  single-job reruns. [Property Testing And Fuzzing](docs/src/property-testing-and-fuzzing.md#documentation-only-selection)
   owns the allowed locations, evidence and failure semantics; `just test-ci-selection` tests them.
 - Use `just validate` for formatting and validation.
 - Every ordinary coverage consumer reads the one merged, repository-relative `lcov-workspace.info`.
@@ -1543,10 +1547,12 @@ build and the existing tests, and nothing in it changes behavior.
   selection derives the required producers: the ordinary report, the modeled primitive
   conformance and diagnostic-evidence collections, and the producers the `shuttle`, `loom`,
   `turmoil`, `deloxide` and `fuzz` labels enable. A run without `fuzz` requires the Bolero call's
-  recorded deliberate skip and refuses a fuzz report. A missing, stale, foreign, corrupt, failed,
-  incomplete or unselected input fails the union, which then writes no report. The union is line
-  coverage with per-mode attribution and carries no function or branch records; the ordinary
-  report, its patch coverage and its CRAP report never read it. A change to a producer job, the
+  recorded deliberate skip and refuses a fuzz report, and the call's record must show the
+  randomized run's success where `bolero-random` requested it and its deliberate skip elsewhere.
+  A missing, stale, foreign, corrupt, failed, incomplete or unselected input fails the union,
+  which then writes no report. The union is line coverage with per-mode attribution and carries
+  no function or branch records; the ordinary report, its patch coverage and its CRAP report
+  never read it. A change to a producer job, the
   producer it collects or the artifact it uploads keeps the requirement table in
   `scripts/coverage_full.py` current in the same change, which its workflow contract tests hold.
   `just test-coverage-full` exercises the union, and `just coverage-full-runner` collects its Python

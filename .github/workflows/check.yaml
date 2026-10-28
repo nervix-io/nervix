@@ -1517,6 +1517,14 @@ jobs:
       - name: Plexus connector matrix renderer
         run: just coverage-connector-matrix
 
+      # Every pull request whose diff requires the suites tests the source selection and the console
+      # build's tooling here; the Bolero randomized job, which also runs them, needs `bolero-random`.
+      - name: CI test selection
+        run: just coverage-ci-selection
+
+      - name: Web console wasm-bindgen CLI
+        run: just coverage-wasm-bindgen
+
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
@@ -1631,6 +1639,8 @@ jobs:
             target/operator-deployment-coverage/python.lcov
             target/kache-ci/python.lcov
             target/connector-matrix/python.lcov
+            target/ci-selection/python.lcov
+            target/wasm-bindgen-coverage/python.lcov
             target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn
