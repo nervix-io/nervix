@@ -11364,14 +11364,15 @@ impl WasmLifecycleFailureFixture {
 fn ensure_onnx_runtime_loaded() {
     let result = ONNX_RUNTIME_INIT.get_or_init(|| {
         let dylib_path = resolve_onnxruntime_dylib()?;
-        ort::init_from(&dylib_path)
-            .map_err(|error| {
-                format!(
-                    "failed to initialize ONNX Runtime from '{}': {error}",
-                    dylib_path.display()
-                )
-            })?
-            .commit();
+        // Only load the library: the nodes create the process's one ONNX Runtime environment on
+        // first use, and ONNX Runtime refuses a second.
+        let environment_builder = ort::init_from(&dylib_path).map_err(|error| {
+            format!(
+                "failed to load ONNX Runtime from '{}': {error}",
+                dylib_path.display()
+            )
+        })?;
+        drop(environment_builder);
         Ok(())
     });
 
