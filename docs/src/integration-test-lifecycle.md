@@ -1883,6 +1883,22 @@ compaction failed; see [Terminal Teardown](./shutdown.md#terminal-teardown).
 
 ### What Cleanup Releases
 
+The resource-source-discovery fixture uses the existing node-scoped command-pause registry. Once
+reconciliation finds a usable source for an absent local copy, the fixture hides the source view
+and records that it was consumed. It leaves the node, transport and all other scenarios running.
+The public regression waits for that observation and the pending replica, explicitly restores
+source visibility, and verifies upload completion and a lookup from the replicated file. Its
+observation wait is bounded at 120 seconds; its public pending-state probe keeps a 30-second bound.
+The source view changes only in a testing build. Explicit release removes the control, and the
+ordinary scenario cleanup releases and clears it with the other command pauses after failure.
+
+The resource upload-publication fixture retains its selected node's refusal in a watch channel.
+It refuses one publication after the local archive is installed, then holds that upload's reply
+until reconciliation takes the applying upload up. The client therefore cannot supply the archive
+again before the recovery observation. The retained `TakenUp` state permits the scenario's positive
+assertion and is disposed with that world's injector. Active, order and stressed selections include
+both cluster sizes of this existing public recovery outline.
+
 Harness state goes back only after the tasks that used it have ended, so the next scenario never
 finds a port, a fault, or a proxy taken. What a node left stopping still uses stays with its keeper
 until that node has ended.
