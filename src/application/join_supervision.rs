@@ -169,13 +169,13 @@ impl JoinJudge {
                     refusal,
                 )));
             }
-            Some(AdmissionVerdict::Accepted) => {
-                if self.standing == JoinStanding::RecoveredMember && !self.within.is_empty() {
-                    info!("the leader accepted this node's return beside every live voter");
-                    return JoinStep::Ended(JoinOutcome::Admitted);
-                }
+            Some(AdmissionVerdict::Accepted)
+                if self.standing == JoinStanding::RecoveredMember && !self.within.is_empty() =>
+            {
+                info!("the leader accepted this node's return beside every live voter");
+                return JoinStep::Ended(JoinOutcome::Admitted);
             }
-            None => {}
+            Some(AdmissionVerdict::Accepted) | None => {}
         }
         let mut peers = Vec::new();
         if !self.within.contains(&self.through) {
