@@ -379,6 +379,7 @@ Feature: Configuration backup into a public archive
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}} --timeout 3s" from node "{{leader}}" into "stalled.nvxb" reporting JSON
     Then the CLI backup failed with JSON error code "BACKUP_REFUSED"
+    And the CLI backup failure mentions "phase=drain"
     And the CLI backup failure mentions "publishing_emitters"
     And backup archive "stalled.nvxb" does not exist
     When HTTP receiver "api" releases its held responses with "respond 204"
@@ -1038,7 +1039,28 @@ Feature: Configuration backup into a public archive
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     When the session backs up the cluster on node "{{follower}}" without downloading its archive
     And the backup's archive is downloaded from node "{{follower}}"
-    Then the download is redirected to node "{{leader}}"
+    Then the download is sent to node "{{leader}}", which assembled the archive
+
+  @backup_holder_download @deloxide_stress_restore
+  Scenario: A backup recovered after leadership moves streams its archive from the node that assembled it
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_event ( id I64 );
+      """
+    Then the current leader node is saved as placeholder "assembler"
+    And a node other than placeholder "assembler" is saved as placeholder "successor"
+    When a completed cluster backup is recovered with a different local destination
+    And leadership is transferred from node "{{assembler}}" to node "{{successor}}"
+    Then node "{{successor}}" eventually reports a leader other than "{{assembler}}"
+    And node "{{assembler}}" eventually reports a leader other than "{{assembler}}"
+    When the backup's archive is downloaded from node "{{successor}}"
+    Then the download is sent to node "{{assembler}}", which assembled the archive
+    And the CLI recovers that archive to stdout with the same execution reference
+    When the backup's archive is downloaded from node "{{assembler}}"
+    Then the download is refused as "NotRetained"
 
   Scenario Outline: A backup taken while models change holds one coherent revision
     Given a <cluster_size> node nervix cluster is started

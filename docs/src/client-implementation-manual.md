@@ -663,8 +663,9 @@ payload, infinity, and nullable and sensitive branch key fields.
   quiesced cut, its engagement and release times and quiesce counters.
 - **A-2.** A client MUST download one archive per `DownloadBackup` call, sending exactly one
   `BackupDownloadRequest` that names the backup's execution reference. The answer is one
-  `BackupDownloadFailed` or `LeaderRedirect` frame, or a `BackupArchiveStart`, the archive as
-  `BackupArchiveChunk` frames in order, and a `BackupArchiveComplete`. After the start, a
+  `BackupDownloadFailed`, `BackupArchiveHolder` or `LeaderRedirect` frame, or a
+  `BackupArchiveStart`, the archive as `BackupArchiveChunk` frames in order, and a
+  `BackupArchiveComplete`. After the start, a
   `BackupDownloadFailed` may also take the place of the remaining chunks and the completion, when
   the node cannot read the archive it retains. Any other order is a protocol violation.
 - **A-3.** A client MUST check that the start's size and digest equal the summary's, MUST refuse an
@@ -674,6 +675,11 @@ payload, infinity, and nullable and sensitive branch key fields.
   for, and SHOULD write the archive so that only its owner can read it: an archive holds password
   hashes and secrets.
 - **A-5.** A client MUST act on the answer:
+  - `BackupArchiveHolder` means the client downloads again from the node it names, which retains
+    the archive. The client SHOULD do so without moving its session there. When the node names no
+    endpoint the client can use, the client backs off and asks the node it started from again. A
+    download that then fails at the named node starts again at the node the client started from,
+    which names the holder again or answers why it cannot.
   - `LeaderRedirect` means the client downloads again from the leader, or backs off when no leader
     endpoint is named.
   - `BackupDownloadFailed` with `Expired`, `NotOwner`, `NotRetained`, or `InvalidRequest` is final

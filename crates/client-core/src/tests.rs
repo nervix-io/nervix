@@ -36,7 +36,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     AttachDisposition, AttachOutcome, ClientFrame, ClientMessage, ClientRequest,
     CommandDisposition, Diagnostic, DomainInfo, DomainList, DomainsObserved, EncodedFrame,
-    LeaderEndpoints, LeaderRedirect, Leadership, LeadershipObserved, NoticeLevel, OutcomeOrigin,
+    LeaderRedirect, Leadership, LeadershipObserved, NodeEndpoints, NoticeLevel, OutcomeOrigin,
     Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected, RequestRejection, RowSchema,
     ServerFrame, ServerNotice, SessionEndReason, SessionEnding, SessionLimitSettings,
     SessionLimits, SourceSpan, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
@@ -1560,7 +1560,7 @@ async fn client_domain_can_be_updated() {
 
 #[test]
 fn wire_outcomes_convert_into_public_outcomes() {
-    let leader = LeaderEndpoints {
+    let leader = NodeEndpoints {
         node: ClusterNodeName::parse("node-2").assured("the test node name is valid"),
         grpc_uri: Some(Url::parse("http://127.0.0.1:47393").assured("a literal URL")),
         web_console_uri: None,
@@ -1757,7 +1757,7 @@ fn replies_ask_for_the_routing_their_disposition_needs() {
     );
     assert_eq!(
         routing_of(CommandDisposition::NotLeader(LeaderRedirect {
-            leader: Some(LeaderEndpoints {
+            leader: Some(NodeEndpoints {
                 node: node.clone(),
                 grpc_uri: None,
                 web_console_uri: None,
@@ -1768,7 +1768,7 @@ fn replies_ask_for_the_routing_their_disposition_needs() {
     );
     assert_eq!(
         routing_of(CommandDisposition::NotLeader(LeaderRedirect {
-            leader: Some(LeaderEndpoints {
+            leader: Some(NodeEndpoints {
                 node,
                 grpc_uri: Some(uri.clone()),
                 web_console_uri: None,

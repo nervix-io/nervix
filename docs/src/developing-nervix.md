@@ -673,6 +673,15 @@ and keeps their attempts, completion records and diagnostic coverage reports as 
 ordinary report tool also exports selected artifacts, records explicit proofs in reviewed copies and
 qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic implementation
 and the ordinary report command in separate instrumented builds through the native collector.
+For applicable work, record the tested revision and inventory digest, each selection's complete
+workload accounting and artifact path, and the registered workloads that reach the changed owner
+on the task and pull request. A green job from an earlier revision cannot qualify a changed
+owner. For async-only or otherwise untracked changes, name the other checks that cover the changed
+path; for documentation-only work, record why no diagnostic execution applies. Use the toolchain
+files' declared `llvm-tools` for the compiler that produced each coverage profile, retaining the
+configured kache wrapper. Ordinary registered Bolero properties run on every pull request;
+sanitizer CI runs only with `fuzz`, and a skipped campaign supplies no execution evidence. API
+rejections use paired current `compile_fail` and compiling doctests in normal tests and CI.
 [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) has the lane's
 classes, its record, proof requirements, current graph limits and the paths detection does not
 cover, and [Integration Test Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) its bounds.

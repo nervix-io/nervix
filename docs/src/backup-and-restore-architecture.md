@@ -349,15 +349,30 @@ at most 128 GiB of artifacts at once, archives and snapshot transfers alike.
 
 A finished backup records its outcome in its command execution: the archive's size, digest, capture
 time, retention deadline, whether resources are included, its user count and each domain's
-revision, cut, section count and section bytes. The archive itself, the staged sections and the
-manifest are never written to consensus.
+revision, cut, section count and section bytes, and the process incarnation of the node that
+assembled the archive and retains it. The archive itself, the staged sections and the manifest are
+never written to consensus.
 
 The coordinator retains the archive in memory, under the execution reference, until the first
 download that queues its last frame or until the reference's retry validity ends: 15 minutes by
 default, counted from the time the reference was issued. A restart loses every archive a node
-retained. A download is served only to the user who ran the backup. A node that does not hold the
-archive redirects the download to the leader, which answers from the recorded outcome: the archive,
-or why it is not retained. The download streams chunks of at most 256 KiB with four frames queued
+retained. A download is served only to the user who ran the backup, and only by the node the
+recorded outcome names: leadership can move after a backup completes, and the client can recover
+the outcome from any node, so the leader is not necessarily the node that holds the archive.
+
+- A node that the recorded outcome names streams the archive while it retains it, and refuses the
+  download once a download collected it.
+- Any other node that applied the outcome sends the client to the named node, with that node's
+  endpoints, while the named process incarnation is live, and refuses the download once it
+  restarted or left the cluster.
+- A node that has not applied the outcome redirects the download to the leader, which answers from
+  it. An outcome reaches a client only once every live node applied it, so this happens only for a
+  reference no backup recorded or one still applying.
+- An archive a node retains under a reference whose recorded outcome names another node belongs to
+  a run whose outcome was not recorded. It is released when a download asks for it, and never
+  streamed. A run whose outcome the cluster refuses to record releases its archive at once.
+
+The download streams chunks of at most 256 KiB with four frames queued
 ahead of the client, and each frame must reach the client within its request timeout; the
 download as a whole has no deadline, because an archive can take far longer to transfer than a
 command takes to run. [Sessions](./sessions.md#backup-downloads) and the [Client Session
@@ -805,13 +820,14 @@ A retained archive's read failure is reported before its download sends the fixe
 | Boundary | Failure | What remains | Recovery |
 | --- | --- | --- | --- |
 | Backup admission | The statement is batched, queued in a transaction, or sent to a follower | Nothing admitted | Send it alone, to the leader the redirect names. |
-| Cut lease and drain | The lease or the drain does not finish within the cut's budget | A pause is undone and the lease released; a failed drain names what each node still held | Send the backup again, with a longer `TIMEOUT` or after the stalled emitter recovers. |
+| Cut budget | A lease, guard, counters read, drain, configuration capture or owner capture does not finish within the cut's budget | The refusal names its typed active phase, that phase's age, total elapsed cut time and completed phase durations. A pause is undone and the lease released; a failed drain also retains what each node still held | Inspect the phase and owner logs, then send the backup again with an appropriate `TIMEOUT` or after the stalled operation recovers. |
 | Cut reach | A node the schedule assigns the domain's work to is not reported live when a quiesced cut starts, a scheduled state owner is not reported live when any cut captures, or the schedule places an entity whose state the archive captures on no node | Nothing paused when a quiesced cut refused before its pause, otherwise the pause is undone; the lease is released and no archive is assembled | Send the backup again once the node is back, or once failover has moved its placements or a node can host the entity again. |
 | Leader change during a cut | The tenure check fails | The domain is resumed, by the coordinator or by the next leader's reconciliation, and the command stays applying | The next leader re-executes the backup under the same reference; the client retries the reference to receive its archive. |
 | Outcome recording | Leadership moves, or the leader cannot confirm that it still leads, before the backup's outcome is recorded | The command stays applying, and the client receives `OutcomeUnknown` | The leader that resumes the command, or the client's retry of the reference, runs the backup again with new cuts; the client receives that run's outcome and archive. |
 | Owner capture | An owner cannot apply the revision, convert a checkpoint, or stage a section | No archive is assembled. The coordinator's copies and the failing owner's partial files are dropped; other owners' staged sections expire after 600 seconds | Send the backup again; it takes a new cut. |
 | Section transfer or assembly | A fetch fails, or the archive cannot be staged or encoded | No archive is retained | Send the backup again. |
 | Retained archive | The node restarts, the retry validity ends, or a download collects it | The recorded outcome remains; its download is refused | Take a new backup. |
+| Archive download from another node | Leadership moved after the outcome was recorded, or another run lost the race to record it, and the client asks a node that does not hold the archive | The archive stays retained on the node the outcome names. A losing run's archive is never streamed; it is released when a download asks for it, or at once when the cluster refuses its outcome | The download is sent on to the named node while its process is live; once that process restarted or left the cluster, the download is refused: take a new backup. |
 | Restore intake | The stream is abandoned, oversized, truncated or has another digest, or staging cannot hold it | Nothing changed; staging quota returned | Send the archive again from its first byte. |
 | Restore preparation and planning | Verification, preparation memory, parsing, the plan, a branch key or a conversion is refused | Nothing changed | Correct the archive, the target or the options; a refusal for room alone is retried for 30 seconds first. |
 | A step | A consensus refusal, a version that does not install, a model batch the leader refuses, or state that does not convert or install | The recorded steps stay applied; a created domain stays stopped with its gate closed if installation did not complete | Restore the archive again under another name. |
@@ -904,6 +920,20 @@ cause chain. A coordinator's direct checkpoint calls retain the same runtime-sta
 causes as an installation through the interconnect; interrupted guest and native-metadata captures
 retain their cause in the backup failure. These diagnostics name operations and entities without
 including archive contents.
+
+Each domain cut logs its administrative phase entry and completion at `info`, with the domain,
+execution reference, phase duration and total elapsed time. The timeout refusal retains the active
+phase and ordered completed durations, including lease admission, alteration guard, opening
+counters and drain. The controlled boundary after drain is `capture`; configuration capture, owner
+capture and closing counters have distinct phases. Resume and lease release remain cleanup outside
+the cut's deadline and do not receive a new capture budget.
+
+Owner capture logs identify the node and coordination identity and distinguish revision wait,
+cluster-state application, lifecycle checkpoints, storage capture, staging and inventory. The
+capture operation returns a terminal reply, so a coordinator waiting for an owner reports owner
+capture rather than claiming to know that node's current internal phase. Retained owner logs give
+that finer attribution. Phase diagnostics carry no archive contents or branch-key values and do not
+change archive records or node-to-node messages.
 
 The leader logs at `info` when it assembled an archive, when a download collected one and when a
 restore completed, with the execution reference and the domains; skipped state is logged at `warn`
