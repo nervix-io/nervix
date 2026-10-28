@@ -33,6 +33,7 @@ impl EmitterConnectorStarter {
                 SentryEventEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     dns: context.dns()?,
+                    platform: connector.platform.clone(),
                 },
                 context.emitter_host(),
             ),
