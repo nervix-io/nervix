@@ -310,6 +310,7 @@ mod relay_send_attempts;
 mod relay_subscription;
 mod relay_transit;
 mod remote_ack_owner;
+mod remote_ack_registrar;
 mod remote_ack_watch_charge;
 mod remote_dispatch;
 mod reorderer;
@@ -365,7 +366,7 @@ use branch_lru_state::{
 use branch_runtime::{
     BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL, BranchRuntime, BranchRuntimeMetrics,
     IngestorRouteRuntime, MaterializedBatchWaitContext, MaterializedDomainHandles,
-    PendingMaterializedBatch, branch_lru_placement, flush_branch_junction,
+    ParkedMaterializedBatch, PendingMaterializedBatch, branch_lru_placement, flush_branch_junction,
     internal_processor_error_policies, persist_branch_instance_lru_snapshot,
     publish_branch_instance_lru_snapshot,
 };

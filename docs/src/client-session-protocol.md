@@ -504,7 +504,10 @@ Client CONFIG validation uses the ordinary failed-command outcome before configu
 The registry checks declared keys and the composition root runs network-free driver checks for
 standalone mutations and transaction preflight. Refusals name the client and key without rendering
 driver values that may contain credentials. A refused transaction statement leaves the transaction
-available for correction. `SHOW CREATE CLIENT` and structured-choice previews are confidential
+available for correction. `DESCRIBE CLIENT <name>` is an ordinary domain-scoped read on the command
+lane. It returns connector identity and effective CONFIG, marking declared defaults supplied for
+omitted keys; a missing client is a failed command. `SHOW CREATE CLIENT` preserves authored CONFIG.
+Both client inspection commands and structured-choice previews are confidential
 inspection projections: declared secrets, address credentials/query options and undeclared driver
 properties appear as `********`. Complete canonical configuration remains in backup serialization;
 inspection text is not a complete configuration export. See the
@@ -1628,7 +1631,11 @@ it can be sent again. Once the complete body is admitted, installation belongs t
 continues when the uploading connection closes, a new leader resumes it, and `ResourceInstalled`
 arrives only after every live node incarnation has verified and installed the same digest. If
 leadership moves while the upload installs, the reply is a `LeaderRedirect`, and repeating the same
-identity and archive on the new leader recovers the recorded outcome. [Resource Versions And
+identity and archive on the new leader recovers the recorded outcome. A leader that cannot confirm
+it still leads refuses the upload's writes the same way, with a redirect that names no leader. When
+the refused write was the version's publication, the leader still holds the copy it installed and
+its reconciliation publishes that copy, so repeating the upload joins the installation or recovers
+its outcome rather than finding it failed. [Resource Versions And
 Bindings](./resource-versions.md#version-lifecycle) owns what admission, installation, publication,
 and completion mean, and [Command Completion](./command-completion.md#effect-specific-completion)
 owns the completion boundary.

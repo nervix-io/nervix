@@ -13,6 +13,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE RELAY visual_scope_output SCHEMA visual_scope_event UNBRANCHED;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='junction']" is clicked
     And selector ".create-name" is filled with "visual_scope_junction"
@@ -54,6 +55,7 @@ Feature: Web console visual junction and reingestor creation
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     When the web console is opened on node "{{old_leader}}"
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='junction']" is clicked
@@ -97,6 +99,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE RELAY visual_order_state SCHEMA visual_order_event UNBRANCHED WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".prompt-row" contains "{{domain}} tx"
@@ -186,6 +189,7 @@ Feature: Web console visual junction and reingestor creation
         ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='junction']" is clicked
     And selector ".create-name" is filled with "visual_route_junction"
@@ -248,6 +252,7 @@ Feature: Web console visual junction and reingestor creation
         ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='reingestor']" is clicked
     And selector ".create-name" is filled with "visual_partition_stage"
@@ -322,6 +327,7 @@ Feature: Web console visual junction and reingestor creation
         ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='junction']" is clicked
     And selector ".create-name" is filled with "visual_sensitive_junction"

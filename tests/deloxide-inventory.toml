@@ -126,6 +126,7 @@ tags = [
   "@client_io_03_generation",
   "@remote_ack_owners",
   "@backup_wait",
+  "@backup_parked_wait",
   "@restarted_voter_observation",
   "@domain_clock_takeover",
   "@udf_column_builder",
@@ -881,6 +882,16 @@ scenario = "A quiesced backup restores two WASM branches and Kafka domain offset
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "A quiesced cut's drain and its force-flush generations while a junction re-evaluates a message parked on REQUIRED WAIT through slow materialized state reads, then the message's release once its state arrives."
+examples = 2
+feature = "tests/features/cluster/backup.feature"
+id = "scenario.backup-parked-wait-slow-reads"
+invariant = "A message parked on REQUIRED WAIT stays parked while every flush generation re-evaluates it, so a quiesced backup completes within its declared timeout on one and three nodes."
+invocation = "scenarios"
+scenario = "A parked required wait whose state reads are slow does not hold the cut"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Bounded restore generations of large and many guest saves, staging, publication and cluster restart."
 examples = 4
 feature = "tests/features/cluster/backup_generation.feature"
@@ -1347,6 +1358,26 @@ scenario = "A Plexus cluster backup waits across independent domain cut budgets"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Diagnostic cluster lifetimes, leader routing and command recovery around an ordinary CLI subprocess whose backup runs again under its reference after leadership moves while its expired outcome waits to be recorded."
+examples = 1
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-rerun-expiry"
+invariant = "A backup that runs again under its reference holds its second cut again and returns the second-domain quiesce expiry, and both domains resume."
+invocation = "scenarios"
+scenario = "A backup that runs again under its reference returns the second-domain quiesce expiry again"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Diagnostic cluster lifetimes, leader routing and command recovery around an ordinary CLI subprocess whose cluster backup runs again under its reference after leadership moves while its outcome waits to be recorded."
+examples = 1
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-rerun-holds"
+invariant = "A cluster backup that runs again under its reference holds each delayed cut again, and the archive the client receives records both holds."
+invocation = "scenarios"
+scenario = "A cluster backup that runs again under its reference holds each delayed cut again"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "A joining node whose Raft heartbeat a member cannot run beside is refused at its first handshake and stops itself through the shutdown coordinator, while the members keep their leader. The handshake, the join progress watch and the gossip view are untracked."
 examples = 2
 feature = "tests/features/cluster/node_prerequisites.feature"
@@ -1737,6 +1768,16 @@ scenario = "A quiesced backup restores two WASM branches and Kafka domain offset
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
+coverage = "Under scheduling stress: a quiesced cut's drain and its force-flush generations while a junction re-evaluates a message parked on REQUIRED WAIT through slow materialized state reads, then the message's release once its state arrives."
+examples = 2
+feature = "tests/features/cluster/backup.feature"
+id = "stress.backup-parked-wait-slow-reads"
+invariant = "A message parked on REQUIRED WAIT stays parked while every flush generation re-evaluates it, so a quiesced backup completes within its declared timeout on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A parked required wait whose state reads are slow does not hold the cut"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Under scheduling stress: bounded restore generations of large and many guest saves, staging, publication and cluster restart."
 examples = 4
 feature = "tests/features/cluster/backup_generation.feature"
@@ -1984,6 +2025,26 @@ id = "stress.backup-multi-domain-wait"
 invariant = "One- and three-node cluster backups wait across independent domain cut budgets and retain both quiesced cuts."
 invocation = "stress-restore-scenarios"
 scenario = "A Plexus cluster backup waits across independent domain cut budgets"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: diagnostic cluster lifetimes, leader routing and command recovery around an ordinary CLI subprocess whose backup runs again under its reference after leadership moves while its expired outcome waits to be recorded."
+examples = 1
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-rerun-expiry"
+invariant = "A backup that runs again under its reference holds its second cut again and returns the second-domain quiesce expiry, and both domains resume."
+invocation = "stress-restore-scenarios"
+scenario = "A backup that runs again under its reference returns the second-domain quiesce expiry again"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: diagnostic cluster lifetimes, leader routing and command recovery around an ordinary CLI subprocess whose cluster backup runs again under its reference after leadership moves while its outcome waits to be recorded."
+examples = 1
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-rerun-holds"
+invariant = "A cluster backup that runs again under its reference holds each delayed cut again, and the archive the client receives records both holds."
+invocation = "stress-restore-scenarios"
+scenario = "A cluster backup that runs again under its reference holds each delayed cut again"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
@@ -2951,6 +3012,8 @@ workloads = [
   "scenario.wasm-kafka-restore",
   "stress.client-alter-drain",
   "stress.wasm-kafka-restore",
+  "scenario.backup-parked-wait-slow-reads",
+  "stress.backup-parked-wait-slow-reads",
 ]
 
 [[owner]]
@@ -2995,6 +3058,8 @@ workloads = [
   "stress.shutdown-flush-before-freeze",
   "scenario.client-alter-drain",
   "stress.client-alter-drain",
+  "scenario.backup-parked-wait-slow-reads",
+  "stress.backup-parked-wait-slow-reads",
 ]
 
 [[owner]]
@@ -3081,6 +3146,8 @@ workloads = [
   "stress.materialized-bulk-generations",
   "stress.materialized-retention-activation",
   "stress.materialized-restart-retention",
+  "scenario.backup-parked-wait-slow-reads",
+  "stress.backup-parked-wait-slow-reads",
 ]
 
 [[owner]]
@@ -3095,6 +3162,8 @@ workloads = [
   "scenario.client-alter-drain",
   "stress.wasm-kafka-restore",
   "stress.client-alter-drain",
+  "scenario.backup-parked-wait-slow-reads",
+  "stress.backup-parked-wait-slow-reads",
 ]
 
 [[owner]]

@@ -170,7 +170,11 @@ For `ZEROMQ CLIENT`, use a `tcp://host:port` or `ipc://path` address. Set `'bind
 on a socket that listens for peers and `'bind' = 'false'` on a socket that connects; omission
 also selects connect. The Boolean accepts those two values ignoring letter case. `ZEROMQ PULL`
 and `ZEROMQ PUSH` both use `MODE NO ACK`; only the first received frame is ingested, with no
-transport headers or peer metadata. Read the ZeroMQ sections of Ingestors and Emitters for the
+transport headers or peer metadata. Messages with no frames are skipped, while additional frames
+are discarded. A PUSH publish sends one payload frame and has no receiver delivery receipt. For
+TCP hostnames, the ZeroMQ driver uses the system resolver instead of the node resolver. Prefer a
+bound PULL ingestor with connecting PUSH peers when a peer can restart: a connecting PULL socket
+does not detect or recover a lost peer. Read the ZeroMQ sections of Ingestors and Emitters for the
 current connection, retry and deadline limits.
 
 - Every referenced name is declared in the active domain before use.

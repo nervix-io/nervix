@@ -12,21 +12,22 @@ use nervix_models::{
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterTransportIngestorOperation,
     AlterWireSchema, AlterWireSchemaOperation, Backup, BackupCapture, BackupResources, BackupScope,
     ClientIngestorEntity, CordonNode, CreateDomain, CreateResource, CreateStatement, CreateUser,
-    DescribeCluster, DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter,
-    DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement,
-    DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction,
-    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace,
-    DomainTimeRate, DrainNode, DropModel, DropNode, EmitterBatchLegality, EmitterBodyForm,
-    EmitterEntityKind, EmitterReferenceKind, ExistingUserPolicy, FieldName, HttpIngestorEntity,
-    IngestorAlteration, IngestorEntityKind, InspectionFormat, KafkaIngestorEntity, LookupQuery,
-    ModelKind, ModelName, MqttIngestorEntity, NatsIngestorEntity, NodeRef, PlacementPolicy,
-    PrometheusIngestorEntity, PulsarIngestorEntity, RabbitMqIngestorEntity, RebindResource,
-    RebindResourceMembers, RebindResourceSelection, RedisIngestorEntity, RelayBranching, RelayName,
-    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
-    RelocationSelection, ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore,
-    RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate,
-    ShowEmitters, ShowIngestors, ShowPlacements, ShowRelayMaterializedState, ShowTransactions,
-    ShowUdfs, SqsIngestorEntity, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    DescribeClient, DescribeCluster, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
+    DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup,
+    DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
+    DescribeTransaction, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig,
+    DomainPace, DomainTimeRate, DrainNode, DropModel, DropNode, EmitterBatchLegality,
+    EmitterBodyForm, EmitterEntityKind, EmitterReferenceKind, ExistingUserPolicy, FieldName,
+    HttpIngestorEntity, IngestorAlteration, IngestorEntityKind, InspectionFormat,
+    KafkaIngestorEntity, LookupQuery, ModelKind, ModelName, MqttIngestorEntity, NatsIngestorEntity,
+    NodeRef, PlacementPolicy, PrometheusIngestorEntity, PulsarIngestorEntity,
+    RabbitMqIngestorEntity, RebindResource, RebindResourceMembers, RebindResourceSelection,
+    RedisIngestorEntity, RelayBranching, RelayName, Relocation, RelocationMember,
+    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
+    ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore, RestoreLifecycle,
+    RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate, ShowEmitters,
+    ShowIngestors, ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
+    SqsIngestorEntity, StartDomain, Statement, StopDomain, SubscriptionBinding,
     SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
     TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
     WebsocketsIngestorEntity, ZeroMqIngestorEntity,
@@ -135,6 +136,7 @@ pub enum StatementVariant {
     DescribeResource,
     DescribeLookup,
     DescribeEndpoint,
+    DescribeClient,
     DescribeJunction,
     DescribeDeduplicator,
     DescribeReingestor,
@@ -201,6 +203,7 @@ impl StatementVariant {
             Statement::DescribeResource(_) => Self::DescribeResource,
             Statement::DescribeLookup(_) => Self::DescribeLookup,
             Statement::DescribeEndpoint(_) => Self::DescribeEndpoint,
+            Statement::DescribeClient(_) => Self::DescribeClient,
             Statement::DescribeJunction(_) => Self::DescribeJunction,
             Statement::DescribeDeduplicator(_) => Self::DescribeDeduplicator,
             Statement::DescribeReingestor(_) => Self::DescribeReingestor,
@@ -585,6 +588,9 @@ impl Arbitrary<'_> {
             }
             StatementVariant::DescribeEndpoint => {
                 Statement::DescribeEndpoint(DescribeEndpoint { name: self.name() })
+            }
+            StatementVariant::DescribeClient => {
+                Statement::DescribeClient(DescribeClient { name: self.name() })
             }
             StatementVariant::DescribeJunction => {
                 Statement::DescribeJunction(DescribeJunction { name: self.name() })

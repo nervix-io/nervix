@@ -29,6 +29,13 @@ before inspecting mounted files or opening a client. Missing timeout or HTTPS tr
 table locator with an empty or third dot-separated part is an `ExternalNameError` at Plexus Model
 construction; no malformed target reaches the insert SQL.
 
+The declared ClickHouse connection keys reject unusable intervals with `InvalidValue` for the
+offending key: the HTTP pool idle limit takes positive schedulable milliseconds, and TCP keep-alive
+takes representable whole-second intervals expressed in milliseconds. Default values apply only
+to omitted keys. `DESCRIBE CLIENT` projects effective configuration through the existing
+confidential key policy; a missing client and a failed registry read use ordinary failed-command
+outcomes without exposing configuration values.
+
 ZeroMQ endpoint validation keeps the socket driver's endpoint error beneath
 `OfflineClientConfigError` for `addr`. Its socket owners keep the shared Boolean parser's
 `ClientConfigError` beneath their configuration context for `bind`; a malformed value does not

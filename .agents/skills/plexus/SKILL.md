@@ -19,6 +19,9 @@ lowercase HTTP field names, and on an emitter that keeps one value per header na
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, response-header reads, frame metadata and the closed client CONFIG key set.
+For ClickHouse HTTP connection tuning, read the ClickHouse Emitters section and the generated
+client key reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured values;
+`SHOW CREATE CLIENT <name>` preserves authored configuration. Both redact secrets.
 
 For delivery durations and direct-value mappings, follow the Ingestors delivery-mode and Emitters
 direct-value sections. Nervix validates the entity's declared limits and exact mapping types at
@@ -433,6 +436,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `grpc` endpoint may use a DNS hostname: the node's resolver is used when the first export opens
   the lazy connection, and the configured hostname remains the HTTPS certificate name. A DNS
   outage follows the emitter's declared retry policy.
+- For a ZeroMQ PULL/PUSH pair, use `MODE NO ACK` on both sides and the typed `ZEROMQ CLIENT`
+  `addr` and `bind` keys. A PULL ingestor reads frame 0 only and skips messages with no frames;
+  PUSH sends one payload frame without a receiver receipt. TCP hostnames use the ZeroMQ driver's
+  system resolver. Read [Ingestors](../../../docs/src/ingestors.md#zeromq) and
+  [Emitters](../../../docs/src/emitters.md#zeromq) before setting bind direction and deadlines.
 - Client deadline keys mean the same thing everywhere: `timeout_ms` bounds a whole request,
   name resolution, connection and TLS included, `connect_timeout_ms` bounds establishing a
   connection, the protocol handshake included, and `idle_timeout_ms` bounds how long a connection

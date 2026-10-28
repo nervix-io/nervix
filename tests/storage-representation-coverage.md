@@ -121,6 +121,14 @@ Model. The vocabulary owner separately checks namespace JSON/archive equality an
 conversions in `models-iceberg-declarations`; `client-config-schema` covers ordered owned and
 delegated configuration values through JSON/archive equality and public inspection.
 
+## Client Configuration And Inspection
+
+`client-config-schema` includes omitted ClickHouse connection defaults and explicit typed TCP and
+pool intervals. JSON and archive equality preserve the authored entries; the effective-default
+projection preserves those entries and is idempotent, and public inspection remains idempotent.
+`models-archived-models` includes the typed `DESCRIBE CLIENT` statement and its client identity;
+the Plexus statement targets check its canonical text through both composed statement readers.
+
 ## Emitter Envelope Coverage
 
 The vocabulary domain of the emitter Model generator draws envelopes of every clause kind, with

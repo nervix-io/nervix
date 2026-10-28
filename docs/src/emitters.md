@@ -1651,7 +1651,13 @@ ingestor renders it, so it can name the client's `MOUNT`; see
 [Client Config Mounts](resources.md#client-config-mounts).
 
 `CREATE CLIENT` checks `addr` with the socket driver's TCP/IPC endpoint parser, including after
-rendering an address template. This check opens no socket and performs no name lookup.
+rendering an address template. This check opens no socket and performs no name lookup. A TCP
+hostname on a connecting PUSH socket uses the ZeroMQ driver's system resolver, not the node's
+configured resolver; see [Name Resolution](name-resolution.md#residual-resolution).
+
+Each publish sends one payload frame, including when `BATCH` packs several records into one
+encoded message. The PUSH socket offers no transport headers, multipart envelope or delivery
+receipt from a PULL peer.
 
 A client that connects rather than binds connects when the emitter starts. The driver retries a
 refused connection on its own and waits for the peer's ZMTP handshake, so the client's
@@ -2249,11 +2255,25 @@ CREATE CLICKHOUSE CLIENT ch
 ```
 
 `'addr'` and a positive `'timeout_ms'` are required. Optional keys are `'user'`, `'password'`,
-`'database'`, `'tls_ca_file'`, `'tls_cert_file'`, and `'tls_key_file'`; unknown keys are refused.
+`'database'`, `'tls_ca_file'`, `'tls_cert_file'`, `'tls_key_file'`, `'tcp_keepalive_ms'`, and
+`'pool_idle_timeout_ms'`; unknown keys are refused.
 The timeout bounds both sending an insert body and waiting for ClickHouse to finish the insert and
 return its result. An `https` address requires `'tls_ca_file'` pointing to mounted trust material.
 An `http` address refuses all three TLS file keys. A client certificate and key must be supplied
 together.
+
+`tcp_keepalive_ms` sets the TCP idle interval before keep-alive probes begin; its declared default
+is 60000 milliseconds. `pool_idle_timeout_ms` limits how long an unused HTTP connection may be
+reused; its declared default is 2000 milliseconds. The pool idle timeout requires positive,
+schedulable whole milliseconds. TCP keep-alive requires whole seconds from 1 through 32767,
+expressed in milliseconds, matching the socket's precision and supported range. Set the pool idle
+timeout below the server's `keep_alive_timeout`, and set TCP keep-alive below an intervening NAT or
+load balancer's idle limit. These settings apply to HTTP
+and HTTPS. They govern connection reuse and probing; `timeout_ms` bounds each insert.
+
+`DESCRIBE CLIENT ch` reports the configured keys and effective declared defaults, marking an
+omitted default with `(default)` and redacting confidential values. `SHOW CREATE CLIENT ch`
+preserves authored configuration, with secrets redacted.
 
 The client resolves the host in `addr` through the node's asynchronous resolver for each new
 connection and tries the answers in order; a literal IPv4 or IPv6 address is dialled as written.
