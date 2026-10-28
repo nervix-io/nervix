@@ -2,8 +2,9 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The task that keeps one MySQL pool at `POOL SIZE MIN` established connections, and
-//!   the pass that brings the pool back to that minimum.
+//! - **Owns.** The task that keeps one MySQL pool at `POOL SIZE MIN` established connections,
+//!   counting the ones writers hold with the idle ones, and the pass that brings the pool back to
+//!   that minimum one checkout at a time.
 //! - **Depends on.** `error-stack`, and the primitives boundary's timers and tasks. The pool it
 //!   keeps is behind [`KeptPool`].
 //! - **Must not know.** Emitters and their inserts, the host's lease, how a connection is opened,
@@ -56,19 +57,20 @@ pub(super) trait KeptPool: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Self::Checkout, Report<PoolMinimumError>>> + Send;
 }
 
-/// Check the pool's shortfall from `minimum` out of it together, and return the checkouts.
+/// Check connections out of `pool` one at a time until it has established `minimum` connections,
+/// and return the checkouts.
 ///
-/// The checkouts are held until the pass ends, so the pool cannot hand the same connection to the
-/// next one.
+/// The pool hands over a connection it holds idle before it opens one, so the first checkouts take
+/// its idle connections and only the connections it is still missing open. Every checkout is held
+/// until the pass ends, so the pool cannot hand the same connection over twice, and the pool's
+/// established connections are read again before each checkout, so the ones writers took or
+/// returned meanwhile count. A pass holds at most `minimum` checkouts, however that count moves.
 pub(super) async fn restore_minimum<P: KeptPool>(
     pool: &P,
     minimum: usize,
 ) -> Result<Vec<P::Checkout>, Report<PoolMinimumError>> {
-    let Some(shortfall) = minimum.checked_sub(pool.established()) else {
-        return Ok(Vec::new());
-    };
-    let mut held = Vec::with_capacity(shortfall);
-    for _ in 0..shortfall {
+    let mut held = Vec::new();
+    while held.len() < minimum && pool.established() < minimum {
         consume_budget().await;
         match pool.check_out().await {
             Ok(checkout) => held.push(checkout),
@@ -112,3 +114,10 @@ impl PoolMinimum {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod tests;

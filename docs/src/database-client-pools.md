@@ -124,7 +124,7 @@ driver leaves out:
 | Client type | The driver's own minimum | What Nervix adds |
 | --- | --- | --- |
 | `POSTGRES` | Counts every connection the driver holds, idle or checked out. The driver opens it with the pool and replaces a connection it closes at a lifetime or after a failure when the pool would otherwise fall below it. | Nothing. |
-| `MYSQL` | A retention floor only: the driver keeps up to that many idle connections once they are returned, and never opens one to reach it. | A maintenance task reads the pool's established connections once a second and checks the shortfall out of the pool, which opens a connection for each checkout it has no idle one for. |
+| `MYSQL` | A retention floor only: the driver keeps up to that many idle connections once they are returned, and never opens one to reach it. | Once a second a maintenance task checks connections out of the pool one at a time, holding each, until the pool's established connections, the ones emitters hold included, reach `MIN`, and then returns them. The pool hands over its idle connections first and opens one for each checkout it has none idle for, so the task opens exactly the missing ones. |
 | `MONGODB` | Counts every application connection to a server, available, being established or checked out. The driver populates each ready server's pool up to it in the background. | Nothing. |
 | `REDIS` | Counts idle connections only, so every checkout would make the driver open another beside the connection in use, up to `MAX`. Nervix does not use it. | Opening the pool establishes `MIN` command connections. Whenever the pool closes one, Nervix counts the connections still established, the ones publishers hold included, and has the pool open the missing ones. |
 
@@ -134,6 +134,11 @@ emitter opens the pool again on its retry policy. When the pool later closes a c
 lifetime or after a failed `PING`, Nervix brings it back to `MIN` at once. If Redis cannot be
 reached then, each attempt waits up to `connect_timeout_ms` and the next follows as soon as it ends,
 while a publisher that finds no connection idle still opens one for itself.
+
+For MySQL, opening the pool validates one connection, and the maintenance task brings the pool to
+`MIN` a second later. A checkout that fails ends its pass, which returns the connections it held,
+and the next pass tries again a second later, while an emitter that finds no connection idle still
+opens one for itself.
 
 ## Connection lifetimes
 
