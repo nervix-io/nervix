@@ -1937,8 +1937,8 @@ owner merges explicit CA and identity paths into native URL TLS options without 
 options, and refuses explicit files with `tls=false`. Runtime preparation streams the identity
 parts into a private combined PEM on the bounded filesystem executor, preserving typed I/O causes.
 The shared client owns that file through its last clone because the driver may reopen the path
-for later connections; its final drop deletes the file. No identity bytes are persisted as Nervix
-control-plane state.
+for later connections; its final drop deletes the file. The generated path and combined contents
+are not added to stored client configuration. Uploaded resources keep their own storage contract.
 `sentry-prepared-envelopes` checks complete event preservation, defaults, framing and attempt
 bytes; the one- and three-node Sentry scenarios qualify those bytes through a reopened connector
 after a mock endpoint's `503` response. See
