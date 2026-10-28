@@ -1,11 +1,13 @@
-//! The runtime's ownership of branch snapshot tasks, explored under Shuttle.
+//! The runtime's ownership of snapshot tasks and checkpoint writers, explored under Shuttle.
 //!
 //! Layer: test harness.
 //! - **Owns.** The ordering invariants of the snapshot task owner: a runtime that closes it and
 //!   waits returns only after every task started under it has made its last write, whether that
-//!   task's branch told it to stop, was ended without telling it anything, or is still there; and
-//!   a domain's stop returns only after every task of that domain has written, waits for no other
-//!   domain's task, and never loses a task registered while it removes the domain's tracker.
+//!   task's branch told it to stop, was ended without telling it anything, or is still there; a
+//!   domain's stop returns only after every task of that domain has written, waits for no other
+//!   domain's task, and never loses a task registered while it removes the domain's tracker; and a
+//!   placement's checkpoint writer makes its last write once its domain's stop tells it to or its
+//!   placement is dropped, never once a reassignment aborted it.
 //! - **Depends on.** The production task owner and the Shuttle runner of the model harness.
 //! - **Must not know.** What a snapshot holds, the state store, or the executor.
 
@@ -26,7 +28,7 @@ use nervix_primitives::{
     task::JoinHandle,
 };
 
-use super::BranchSnapshotTasks;
+use super::{CheckpointWriter, StateSnapshotTasks};
 
 const MODEL_TASK_JOINS: &str =
     "Shuttle fails the whole execution when a model task panics, so no join observes one";
@@ -47,7 +49,7 @@ fn domain(name: &str) -> DomainName {
 /// stop, whether sent or dropped, or for the runtime's, then makes its last write, which yields
 /// before it completes as a storage job does, and ends.
 fn snapshot_task(
-    tasks: &BranchSnapshotTasks,
+    tasks: &StateSnapshotTasks,
     domain: &DomainName,
     branch_stop: &watch::Sender<bool>,
     written: StdArc<AtomicUsize>,
@@ -74,7 +76,7 @@ fn snapshot_task(
 /// a deadlock.
 fn a_closing_runtime_racing_its_branches() {
     shuttle::future::block_on(async {
-        let tasks = BranchSnapshotTasks::default();
+        let tasks = StateSnapshotTasks::default();
         let domain = domain("default");
         let written = StdArc::new(AtomicUsize::new(0));
         let (stopped_in_time, _) = watch::channel(false);
@@ -121,7 +123,7 @@ fn shuttle_a_closed_snapshot_task_owner_is_waited_for_until_every_task_has_writt
 /// stop had removed the tracker the registration joined.
 fn a_stopping_domain_racing_its_branches() {
     shuttle::future::block_on(async {
-        let tasks = StdArc::new(BranchSnapshotTasks::default());
+        let tasks = StdArc::new(StateSnapshotTasks::default());
         let stopping = domain("stopping");
         let running = domain("running");
         let written = StdArc::new(AtomicUsize::new(0));
@@ -193,4 +195,83 @@ fn a_stopping_domain_racing_its_branches() {
 #[test]
 fn shuttle_a_stopping_domain_waits_for_its_own_snapshot_tasks_and_keeps_late_ones() {
     check_interleavings(a_stopping_domain_racing_its_branches);
+}
+
+/// How many checkpoint writers of the stopping domain the check has write their last state: the
+/// one its stop tells and the one whose placement is dropped.
+const TOLD_OR_DROPPED_WRITERS: usize = 2;
+
+/// The checkpoint writer of one placement of `domain` as the runtime starts it. It waits for its
+/// last write's signal, then makes that write, which yields before it completes as a storage job
+/// does, and ends.
+fn checkpoint_writer(
+    tasks: &StateSnapshotTasks,
+    domain: &DomainName,
+    written: StdArc<AtomicUsize>,
+) -> CheckpointWriter {
+    tasks.spawn_checkpoint_writer(domain, move |last_write| async move {
+        last_write.arrived().await;
+        nervix_primitives::task::yield_now().await;
+        written.fetch_add(1, Ordering::SeqCst);
+    })
+}
+
+/// A domain stops while one of its placements' checkpoint writers is told to write by the stop,
+/// another placement is dropped without its stop, as a failed build drops what it started, a third
+/// is aborted by a reassignment that replaces its runtime, and another domain's writer keeps
+/// running. Whichever comes first, the stop returns only once the told and the dropped writers
+/// have made their last write, and never waits for the other domain's writer, whose stop only
+/// comes when the runtime closes; a stop that waited for it would hang the check, which Shuttle
+/// reports as a deadlock. The aborted writer never writes, even though its guard goes away after
+/// it: its signal reaches nobody. A closing runtime then has the other domain's writer write too.
+fn a_stopping_domain_racing_its_checkpoint_writers() {
+    shuttle::future::block_on(async {
+        let tasks = StdArc::new(StateSnapshotTasks::default());
+        let stopping = domain("stopping");
+        let running = domain("running");
+        let written = StdArc::new(AtomicUsize::new(0));
+        let written_by_aborted = StdArc::new(AtomicUsize::new(0));
+        let written_elsewhere = StdArc::new(AtomicUsize::new(0));
+        let told = checkpoint_writer(&tasks, &stopping, written.clone());
+        let dropped = checkpoint_writer(&tasks, &stopping, written.clone());
+        let aborted = checkpoint_writer(&tasks, &stopping, written_by_aborted.clone());
+        let elsewhere = checkpoint_writer(&tasks, &running, written_elsewhere.clone());
+        let placements = nervix_primitives::task::spawn(async move {
+            drop(dropped);
+            aborted.abort().await;
+        });
+
+        told.write_last();
+        tasks.wait_for_domain(&stopping).await;
+        assert_eq!(
+            written.load(Ordering::SeqCst),
+            TOLD_OR_DROPPED_WRITERS,
+            "a stopping domain finished waiting before its told and dropped writers had written"
+        );
+        assert_eq!(
+            written_by_aborted.load(Ordering::SeqCst),
+            0,
+            "a writer a reassignment aborted made its last write"
+        );
+        assert_eq!(
+            written_elsewhere.load(Ordering::SeqCst),
+            0,
+            "another domain's writer was told to write by this domain's stop"
+        );
+
+        placements.await.assured(MODEL_TASK_JOINS);
+        tasks.close();
+        tasks.wait().await;
+        assert_eq!(
+            written_elsewhere.load(Ordering::SeqCst),
+            1,
+            "a closing runtime finished waiting before a running domain's writer had written"
+        );
+        drop(elsewhere);
+    });
+}
+
+#[test]
+fn shuttle_a_stopping_domain_waits_for_the_checkpoint_writers_it_tells_and_the_ones_dropped() {
+    check_interleavings(a_stopping_domain_racing_its_checkpoint_writers);
 }
