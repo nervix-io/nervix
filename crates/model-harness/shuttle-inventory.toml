@@ -79,9 +79,9 @@ name = "nervix-connector-kafka"
 [[package]]
 checks = [
   "topic::ingestor::driver::shuttle_tests::shuttle_a_cancelled_discard_preserves_acknowledgement_and_batch_order",
-  "topic::ingestor::driver::shuttle_tests::shuttle_an_acknowledgement_never_waits_on_a_driver_that_holds_a_publish_for_room",
+  "topic::ingestor::driver::shuttle_tests::shuttle_an_acknowledgement_stays_writable_during_qos_zero_overflow",
   "topic::ingestor::driver::shuttle_tests::shuttle_an_acknowledgement_returns_once_the_loop_wrote_every_acknowledgement_it_requested",
-  "topic::ingestor::driver::shuttle_tests::shuttle_an_acknowledgement_waits_on_a_driver_whose_held_publish_the_ingestor_made_room_for",
+  "topic::ingestor::driver::shuttle_tests::shuttle_admitted_publishes_keep_order_while_the_first_acknowledgement_is_written",
   "topic::ingestor::driver::shuttle_tests::shuttle_an_acknowledgement_whose_connection_ends_fails_with_the_loss",
   "topic::ingestor::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_publish_the_broker_delivered",
   "topic::ingestor::shuttle_tests::shuttle_a_read_whose_batch_timeout_races_the_cancellation_hands_over_every_publish",

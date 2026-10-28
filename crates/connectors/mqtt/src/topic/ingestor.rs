@@ -39,7 +39,7 @@ use arch_into::ArchInto as _;
 use async_trait::async_trait;
 use driver::MqttConnection;
 use error_stack::{Report, ResultExt as _};
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestorBatch,
     IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
@@ -48,7 +48,8 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
-    ClientConfigEntry, ConnectorKind, MQTT_MAXIMUM_PACKET_BYTES, MqttQos, MqttSession,
+    ClientConfigEntry, ConnectorKind, MQTT_MAXIMUM_PACKET_BYTES, MQTT_SOURCE_READ_AHEAD_HEADROOM,
+    MqttQos, MqttSession,
 };
 use nervix_primitives::time::{Instant, timeout, timeout_at};
 use rumqttc::{
@@ -61,19 +62,6 @@ use thiserror::Error;
 use url::{Host, Url};
 
 use crate::topic::connection::{MqttConnectionError, MqttDialer};
-
-/// How many publishes beyond its acknowledgement window an ingestor connection takes from its broker
-/// before the host reads them.
-///
-/// In an `ACK` mode every connection advertises its window and this many more as its Receive
-/// Maximum, and its read-ahead holds every publish the Receive Maximum admits. Under `NO ACK` the client acknowledges every
-/// publish on receipt, the broker holds back none, and the read-ahead holds this many.
-///
-/// A policy input: enough to keep a connection reading, and so sending its keep-alive, while the
-/// host holds its loop for a moment and the broker sends what it does not hold back, such as a
-/// publish at quality of service 0, and few enough to bound what an ingestor that stops drops with its
-/// connection.
-const HEADROOM: NonZeroU16 = nonzero_ext::nonzero!(64_u16);
 
 /// Admission releases or copies a packet's frame bytes before the client decodes another packet.
 #[cfg_attr(
@@ -257,6 +245,8 @@ pub struct MqttTopicIngestorSettings {
     pub acknowledgement_window: Option<NonZeroU64>,
     /// The node resolver every instance resolves its broker host through when it connects.
     pub dns: DnsResolver,
+    /// Host-owned, pre-resolved counter for QoS 0 publishes that do not fit ACK-mode read-ahead.
+    pub read_ahead_dropped: prometheus::IntCounter,
 }
 
 /// Who acknowledges an ingestor's publishes, and how many of them may wait on their acknowledgements.
@@ -280,7 +270,7 @@ impl IngestorAcknowledgement {
         };
         // MQTT carries the Receive Maximum as a Two Byte Integer, so a wider one is advertised as
         // the widest one the protocol holds: the broker sends no more unacknowledged publishes.
-        let Some(admitted) = window.checked_add(u64::from(HEADROOM.get())) else {
+        let Some(admitted) = window.checked_add(MQTT_SOURCE_READ_AHEAD_HEADROOM) else {
             return Self::Manual {
                 receive_maximum: NonZeroU16::MAX,
             };
@@ -310,12 +300,23 @@ impl IngestorAcknowledgement {
         }
     }
 
-    /// How many publishes a connection reads ahead of the host: every publish the Receive Maximum
-    /// admits, or the headroom when the client acknowledges every publish on receipt.
+    /// Every acknowledged outcome the Receive Maximum admits, plus separate QoS 0 headroom.
+    /// Automatic acknowledgement keeps only the headroom and its existing backpressure.
     fn read_ahead(self) -> NonZeroUsize {
+        let headroom = usize::try_from(MQTT_SOURCE_READ_AHEAD_HEADROOM)
+            .assured("MQTT's read-ahead headroom fits every supported native target");
+        let headroom =
+            NonZeroUsize::new(headroom).assured("MQTT's declared read-ahead headroom is nonzero");
         match self {
-            Self::OnReceipt => NonZeroUsize::from(HEADROOM),
-            Self::Manual { receive_maximum } => NonZeroUsize::from(receive_maximum),
+            Self::OnReceipt => headroom,
+            Self::Manual { receive_maximum } => {
+                let acknowledged = usize::from(receive_maximum.get());
+                let capacity = acknowledged
+                    .checked_add(headroom.get())
+                    .assured("the supported native targets hold MQTT's 65,535 slots plus 64");
+                NonZeroUsize::new(capacity)
+                    .assured("the acknowledged window and its headroom are both nonzero")
+            }
         }
     }
 }
@@ -332,6 +333,7 @@ pub struct MqttTopicIngestorPlan {
     acknowledgement: IngestorAcknowledgement,
     client_id_conflict: Option<MqttClientIdError>,
     dns: DnsResolver,
+    read_ahead_dropped: prometheus::IntCounter,
 }
 
 /// One instance's client and the event loop that carries its session, before a driver owns the
@@ -391,6 +393,7 @@ impl MqttTopicIngestorPlan {
             qos,
             acknowledgement_window,
             dns,
+            read_ahead_dropped,
         } = settings;
         Self {
             instances,
@@ -404,6 +407,7 @@ impl MqttTopicIngestorPlan {
             acknowledgement: IngestorAcknowledgement::of(acknowledgement_window),
             client_id_conflict,
             dns,
+            read_ahead_dropped,
         }
     }
 
@@ -979,6 +983,7 @@ impl IngestorConnector for MqttTopicIngestor {
                 eventloop,
                 self.plan.acknowledgement,
                 keep_alive,
+                self.plan.read_ahead_dropped.clone(),
             ));
         }
         Ok(IngestorResume::Ready)
@@ -1068,11 +1073,10 @@ impl BrokerIngestorConnector for MqttTopicIngestor {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use meticulous::OptionExt as _;
     use nervix_dns::{DnsLookupError, DnsLookupFailure};
     use nonzero_ext::nonzero;
 
-    use super::*;
+    use super::{metrics_fixture::IngestorMetricsFixture, *};
     use crate::topic::test_fixtures::DnsFixture;
 
     fn entry(key: &str, value: &str) -> ClientConfigEntry {
@@ -1136,6 +1140,7 @@ mod tests {
             qos: MqttQos::AtLeastOnce,
             acknowledgement_window: Some(nonzero!(1u64)),
             dns,
+            read_ahead_dropped: IngestorMetricsFixture::new().counter(),
         }
     }
 
@@ -1228,7 +1233,7 @@ mod tests {
     }
 
     #[test]
-    fn the_read_ahead_and_the_request_queue_hold_every_publish_the_receive_maximum_admits() {
+    fn read_ahead_reserves_the_receive_maximum_and_separate_qos_zero_headroom() {
         let on_receipt = IngestorAcknowledgement::OnReceipt;
         assert_eq!(on_receipt.read_ahead().get(), 64);
         assert_eq!(
@@ -1244,7 +1249,7 @@ mod tests {
                 receive_maximum: nonzero!(65u16)
             }
         );
-        assert_eq!(sequential.read_ahead().get(), 65);
+        assert_eq!(sequential.read_ahead().get(), 129);
         assert_eq!(sequential.request_capacity().get(), 65);
 
         let parallel = IngestorAcknowledgement::of(Some(nonzero!(2_000u64)));
@@ -1254,7 +1259,7 @@ mod tests {
                 receive_maximum: nonzero!(2_064u16)
             }
         );
-        assert_eq!(parallel.read_ahead().get(), 2_064);
+        assert_eq!(parallel.read_ahead().get(), 2_128);
         assert_eq!(parallel.request_capacity().get(), 2_064);
 
         let wide = IngestorAcknowledgement::of(Some(nonzero!(70_000u64)));
@@ -1264,7 +1269,7 @@ mod tests {
                 receive_maximum: NonZeroU16::MAX
             }
         );
-        assert_eq!(wide.read_ahead().get(), usize::from(u16::MAX));
+        assert_eq!(wide.read_ahead().get(), 65_599);
         assert_eq!(wide.request_capacity().get(), usize::from(u16::MAX));
     }
 
@@ -1494,6 +1499,7 @@ mod tests {
             qos: MqttQos::AtLeastOnce,
             acknowledgement_window: Some(nonzero!(1u64)),
             dns: fixture.dns.clone(),
+            read_ahead_dropped: IngestorMetricsFixture::new().counter(),
         });
         assert_eq!(
             plan.subscribe_filter,
@@ -1765,3 +1771,7 @@ mod read_tests;
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "ingestor_shuttle_tests.rs"]
 mod shuttle_tests;
+
+#[cfg(test)]
+#[path = "ingestor/metrics_fixture.rs"]
+mod metrics_fixture;

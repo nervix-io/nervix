@@ -29,13 +29,14 @@ use nervix_primitives::{
     time::{Instant, sleep},
 };
 use rumqttc::{
-    ClientError, ConnectionError, Event, Incoming, ManualAck, Outgoing, PubAck, Publish,
+    AckMode, ClientError, ConnectionError, Event, Incoming, ManualAck, Outgoing, PubAck, Publish,
     PublishProperties, QoS,
 };
 
 use super::{AcknowledgementRequests, ConnectionEvents, IngestorPacket, MqttConnection};
 use crate::topic::ingestor::{
     IngestorAcknowledgement, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorPosition,
+    PublishRead as _, metrics_fixture::IngestorMetricsFixture,
 };
 
 /// The event loop of a connection whose broker stopped reading it: it writes nothing and yields
@@ -67,6 +68,7 @@ async fn an_acknowledgement_its_connection_cannot_write_fails_after_one_keep_ali
             receive_maximum: NonZeroU16::MIN,
         },
         Some(keep_alive),
+        IngestorMetricsFixture::new().counter(),
     );
     let mut publish = Publish::new("events", QoS::AtLeastOnce, vec![1], None);
     publish.pkid = 1;
@@ -101,9 +103,7 @@ fn admission_bounds_the_complete_packet_and_retains_only_a_discard_acknowledgeme
         let payload_bytes = maximum - (publish.size() - maximum);
         publish.payload = publish.payload.slice(..payload_bytes);
         assert_eq!(publish.size(), maximum);
-        let manual = IngestorAcknowledgement::Manual {
-            receive_maximum: NonZeroU16::MIN,
-        };
+        let manual = AckMode::Manual;
         let IngestorPacket::Message(admitted) = IngestorPacket::classify(publish.clone(), manual)
         else {
             panic!("a packet at the admission bound is delivered");
@@ -123,7 +123,7 @@ fn admission_bounds_the_complete_packet_and_retains_only_a_discard_acknowledgeme
             pair => panic!("the discard retains the acknowledgement its QoS needs: {pair:?}"),
         }
         assert!(matches!(
-            IngestorPacket::classify(publish, IngestorAcknowledgement::OnReceipt),
+            IngestorPacket::classify(publish, AckMode::Automatic),
             IngestorPacket::Oversized(None)
         ));
     }
@@ -142,7 +142,7 @@ fn an_admitted_publish_owns_its_topic_payload_and_correlation_bytes() {
         ..Publish::new("events", QoS::AtMostOnce, Vec::new(), None)
     };
     let IngestorPacket::Message(admitted) =
-        IngestorPacket::classify(publish.clone(), IngestorAcknowledgement::OnReceipt)
+        IngestorPacket::classify(publish.clone(), AckMode::Automatic)
     else {
         panic!("a small packet is admitted");
     };
@@ -205,6 +205,7 @@ async fn a_cancelled_discard_keeps_its_acknowledgement_progress_and_original_dea
                 receive_maximum: NonZeroU16::MIN,
             },
             Some(keep_alive),
+            IngestorMetricsFixture::new().counter(),
         );
         let cancellation = IngestorReadCancellation::new();
         let request = IngestorBatchRequest {
@@ -281,6 +282,7 @@ async fn a_discard_whose_connection_ends_preserves_the_acknowledgement_failure_c
             receive_maximum: NonZeroU16::MIN,
         },
         None,
+        IngestorMetricsFixture::new().counter(),
     );
     let request = IngestorBatchRequest {
         max_messages: NonZeroUsize::MIN,
@@ -345,6 +347,7 @@ async fn a_discard_deadline_starts_after_the_host_settles_its_ordinary_prefix() 
             receive_maximum: NonZeroU16::new(2).assured("two is nonzero"),
         },
         Some(keep_alive),
+        IngestorMetricsFixture::new().counter(),
     );
     let request = IngestorBatchRequest {
         max_messages: NonZeroUsize::new(3).assured("three is nonzero"),
@@ -369,4 +372,129 @@ async fn a_discard_deadline_starts_after_the_host_settles_its_ordinary_prefix() 
             .await
             .assured("the discard has its own acknowledgement deadline after prefix processing");
     assert!(matches!(size, IngestorBatch::Oversized { payloads } if payloads.get() == 1));
+}
+
+/// Scripted incoming packets and acknowledgement writes share the production driver's event loop.
+/// A ping event is a progress witness after the entire incoming prefix has been classified.
+struct OverflowEventLoop {
+    packets: mpsc::UnboundedReceiver<Event>,
+    requests: mpsc::Receiver<ManualAck>,
+    pinged: mpsc::Sender<()>,
+}
+
+impl ConnectionEvents for OverflowEventLoop {
+    async fn next_event(&mut self) -> Result<Event, ConnectionError> {
+        nervix_primitives::select! {
+            biased;
+            requested = self.requests.recv() => {
+                let acknowledgement = requested.assured("the connection keeps its request sender");
+                let outgoing = match acknowledgement {
+                    ManualAck::PubAck(ack) => Outgoing::PubAck(ack.pkid),
+                    ManualAck::PubRec(rec) => Outgoing::PubRec(rec.pkid),
+                };
+                Ok(Event::Outgoing(outgoing))
+            }
+            packet = self.packets.recv() => {
+                let packet = packet.assured("the check keeps its packet sender");
+                if let Event::Outgoing(Outgoing::PingReq) = packet {
+                    self.pinged.send(()).await.assured("the check waits for its ping witness");
+                }
+                Ok(packet)
+            }
+        }
+    }
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn qos_zero_overflow_keeps_polling_and_preserves_acknowledged_publishes() {
+    let metrics = IngestorMetricsFixture::new();
+    let (packets, incoming) = mpsc::unbounded_channel();
+    let (requests, queued) = mpsc::channel(65);
+    let (pinged, mut pings) = mpsc::channel(1);
+    let events = OverflowEventLoop {
+        packets: incoming,
+        requests: queued,
+        pinged,
+    };
+    let mut connection = MqttConnection::start(
+        RecordingClient(requests),
+        events,
+        IngestorAcknowledgement::Manual {
+            receive_maximum: NonZeroU16::new(65).assured("the sequential window includes headroom"),
+        },
+        Some(Duration::from_secs(10)),
+        metrics.counter(),
+    );
+    let mut first = Publish::new("events", QoS::AtLeastOnce, vec![1], None);
+    first.pkid = 1;
+    packets
+        .send(Event::Incoming(Incoming::Publish(first.clone())))
+        .assured("the driver owns its packet receiver");
+    let first_read = connection
+        .next_publish()
+        .await
+        .assured("the first publish is delivered");
+    assert!(matches!(first_read, super::PublishReadOutcome::Message(publish) if *publish == first));
+
+    for value in 0..128_u8 {
+        packets
+            .send(Event::Incoming(Incoming::Publish(Publish::new(
+                "events",
+                QoS::AtMostOnce,
+                vec![value],
+                None,
+            ))))
+            .assured("the driver keeps polling the incoming flood");
+    }
+    let mut following = Publish::new("events", QoS::AtLeastOnce, vec![200], None);
+    following.pkid = 2;
+    packets
+        .send(Event::Incoming(Incoming::Publish(following.clone())))
+        .assured("the following acknowledged publish fits its broker window");
+    packets
+        .send(Event::Outgoing(Outgoing::PingReq))
+        .assured("the loop emits a ping after reading the flood");
+    nervix_primitives::time::timeout(Duration::from_secs(10), pings.recv())
+        .await
+        .assured("QoS 0 overflow must not stop the connection's keep-alive polling")
+        .assured("the driver sends its progress witness");
+    assert_eq!(
+        metrics.dropped(),
+        64,
+        "every overflow is counted while the host still waits"
+    );
+    connection
+        .acknowledge(&[MqttTopicIngestorPosition { publish: first }])
+        .await
+        .assured("QoS 0 overflow leaves the first acknowledgement writable");
+
+    for value in 0..64_u8 {
+        let next = connection
+            .next_publish()
+            .await
+            .assured("the admitted prefix is retained");
+        let expected = Publish::new("events", QoS::AtMostOnce, vec![value], None);
+        assert!(
+            matches!(next, super::PublishReadOutcome::Message(publish) if *publish == expected)
+        );
+    }
+    let next = connection
+        .next_publish()
+        .await
+        .assured("the following acknowledged publish is retained");
+    assert!(matches!(next, super::PublishReadOutcome::Message(publish) if *publish == following));
+    connection
+        .acknowledge(&[MqttTopicIngestorPosition { publish: following }])
+        .await
+        .assured("the following acknowledgement is written");
+    let resumed = Publish::new("events", QoS::AtMostOnce, vec![201], None);
+    packets
+        .send(Event::Incoming(Incoming::Publish(resumed.clone())))
+        .assured("taking the queued prefix releases its QoS 0 capacity");
+    let next = connection
+        .next_publish()
+        .await
+        .assured("QoS 0 admission resumes after draining");
+    assert!(matches!(next, super::PublishReadOutcome::Message(publish) if *publish == resumed));
+    assert_eq!(metrics.dropped(), 64);
 }
