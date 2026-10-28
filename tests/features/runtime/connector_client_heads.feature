@@ -25,8 +25,8 @@ Feature: Connector names head client definitions
       | 3            | KAFKA        |                       |                                                                                |
       | 1            | PULSAR       |                       | 'addr' = 'pulsar://127.0.0.1:6650'                                             |
       | 3            | PULSAR       |                       | 'addr' = 'pulsar://127.0.0.1:6650'                                             |
-      | 1            | HTTP         |                       | 'endpoint' = 'http://127.0.0.1:19080'                                          |
-      | 3            | HTTP         |                       | 'endpoint' = 'http://127.0.0.1:19080'                                          |
+      | 1            | HTTP         |                       | 'endpoint' = 'http://127.0.0.1:19080', 'timeout_ms' = 5000                     |
+      | 3            | HTTP         |                       | 'endpoint' = 'http://127.0.0.1:19080', 'timeout_ms' = 5000                     |
       | 1            | SENTRY       |                       | 'dsn' = 'http://public@127.0.0.1:8000/1', 'timeout_ms' = 5000                  |
       | 3            | SENTRY       |                       | 'dsn' = 'http://public@127.0.0.1:8000/1', 'timeout_ms' = 5000                  |
       | 1            | OTEL         |                       | 'endpoint' = 'http://127.0.0.1:4317', 'protocol' = 'grpc', 'timeout_ms' = 5000 |
