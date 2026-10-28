@@ -195,7 +195,7 @@ resubmitting an outcome that might already have produced output.
 | Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
 | Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
 | Syslog TLS publication and split-frame writes | One abort-on-drop task on the binary's runtime, owning TCP connection establishment, the TLS handshake and the complete prepared write. Publication closes the connection there; a split-frame write returns its sender for the later remainder | `tests/common/syslog_tls.rs`, using `tests/common/runner_observation.rs` |
-| Command outcome recovery | On the task awaiting the command, including backup setup through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
+| Command outcome recovery | On the task awaiting the command, including a backup or a backup's recovery a step sends through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
 | Publication-relative receipt timing | A runtime task owns the subscription read before publication and retains its receipt timestamp. The assertion bounds completion after the HTTP publishing step returns; scenario teardown cancels an unfinished reader before stopping nodes | `tests/common/runner_observation.rs`, `tests/common/raw_session.rs` and the timed subscription steps in `tests/scenarios.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
@@ -997,7 +997,18 @@ The harness keeps these boundaries explicit.
   step, and so does a command that begins or ends a transaction, opens or deletes a subscription,
   attaches a clock or changes the domain on a session that cannot move. A request a step sends once
   under a scenario-chosen execution reference learns its outcome the same way before the step
-  records its disposition.
+  records its disposition. The backup steps that send a backup through the raw session learn each
+  outcome the same way before they assert what it carries: a cluster backup under a fresh
+  reference, its recovery to another local destination under that reference, and a kept archive's
+  recovery under the reference the CLI reported. A leader whose lease lapsed at admission
+  therefore costs such a step a repetition of the reference, not its assertions. A leadership move
+  a scenario arms holds the next persistent command of the node it moves leadership from, either
+  after the command's reference lookup and before its admission proposal, or after its durable
+  admission. It releases the command once the successor reports itself the leader and the node it
+  moved from reports the successor too, so that node knows it no longer leads when the command
+  goes on. A proposal held that way answers `OutcomeUnknown` with cause `LeadershipLost`, as a
+  lapsed lease's does, and the backup scenario that holds its first backup there requires the step
+  to learn the backup from the successor and recover it to another destination.
   The paced simulation's published graph is loaded through one native client so its
   BEGIN/COMMIT state and command references survive an interrupted finalization. Raw wire probes
   retain the protocol's received dispositions. A restore completion probe explicitly requesting

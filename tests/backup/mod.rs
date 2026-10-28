@@ -5,8 +5,8 @@
 //! - **Owns.** The directory a scenario's archives are written to, the backup a scenario runs
 //!   through its own session, the downloads it shapes itself, archives it alters to probe the
 //!   reader's refusals, and the checks of what an archive holds.
-//! - **Depends on.** The public CLI, the harness's own session and download client, the archive
-//!   format's reader, and the language layer to parse an archive's Plexus.
+//! - **Depends on.** The public CLI, the harness's own session, command recovery and download
+//!   client, the archive format's reader, and the language layer to parse an archive's Plexus.
 //! - **Must not know.** How the server assembles, retains or streams an archive.
 
 use cucumber::{given, then, when};
@@ -836,6 +836,33 @@ async fn given_resource_directory_holding_a_large_file(
         .insert(placeholder, resource_dir.display().to_string());
 }
 
+/// Sends a backup `command` under `reference` on `session`, and returns the outcome the cluster
+/// knows for it.
+///
+/// The node the session reached may not lead, and leadership may move, or the leader fail to
+/// confirm its lease, before the command's outcome is known. The answer then leaves the outcome to
+/// the leader, and the client session protocol has the same command sent again under the same
+/// reference until the leader answers it. The harness's command recovery sends it, within its own
+/// bound, as the native client would, so a step asserts only an outcome the cluster knows. A known
+/// outcome, success or failure, returns as it is.
+async fn backup_command_outcome(
+    world: &ScenarioWorld,
+    session: &mut TestSession,
+    command: &str,
+    reference: &str,
+) -> std::io::Result<nervix_client_wire::CommandOutcome> {
+    let outcome = session
+        .run_command_result_with_reference(command, reference)
+        .await?;
+    if !outcome_awaits_leader(&outcome) {
+        return Ok(outcome);
+    }
+    let routes = world.cluster().leader_routes();
+    let scope = session.scope();
+    let learned = learn_command_outcome(&routes, &scope, command, reference, outcome).await;
+    Ok(learned.outcome)
+}
+
 #[when(expr = "the session backs up the cluster on node {string} without downloading its archive")]
 async fn when_session_backs_up_the_cluster(world: &mut ScenarioWorld, node: String) {
     let node = expand_placeholders(world, &node);
@@ -844,19 +871,15 @@ async fn when_session_backs_up_the_cluster(world: &mut ScenarioWorld, node: Stri
         .open_session(&node, &world.domain)
         .await
         .expect("the scenario's session opens");
-    let query = "BACKUP CLUSTER TO 'unused.nvxb';";
-    let mut outcome = session
-        .run_command_result(query)
-        .await
-        .expect("the backup is answered");
-    if outcome_awaits_leader(&outcome) {
-        let reference = outcome.execution_reference.clone();
-        let scope = session.scope();
-        let routes = world.cluster().leader_routes();
-        let learned =
-            learn_command_outcome(&routes, &scope, query, reference.as_str(), outcome).await;
-        outcome = learned.outcome;
-    }
+    let reference = fresh_execution_reference();
+    let outcome = backup_command_outcome(
+        world,
+        &mut session,
+        "BACKUP CLUSTER TO 'unused.nvxb';",
+        &reference,
+    )
+    .await
+    .expect("the backup is answered");
     let summary = outcome
         .backup
         .as_deref()
