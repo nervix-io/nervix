@@ -909,7 +909,13 @@ pub(in crate::application) fn format_emitter_describe_output(
         format!("emitter: {}", name.as_str()),
         "kind: EMITTER".to_string(),
     ];
-    lines.extend(emitter.connector.entity_presentation()?.describe_lines());
+    lines.extend(
+        emitter
+            .connector
+            .entity_presentation()?
+            .with_envelope(&emitter.envelope)?
+            .describe_lines(),
+    );
     lines.push(match &emitter.batch {
         Some(batch) => format!("batch: {batch}"),
         None => "batch: none".to_owned(),

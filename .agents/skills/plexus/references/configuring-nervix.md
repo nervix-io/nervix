@@ -37,12 +37,13 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
 | Timed generation from materialized state | `Plexus Overview` and `Examples` |
 | Emitter transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
+| Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names, native BSON widths/date precision, conflict filters and client URL configuration | `Emitters` → `MongoDB`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions and client pool options | `Emitters` → `MySQL`, and `Database Client Connection Pools` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
 | Session subscriptions and domain clock attachment | `Sessions` |
-| Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore` |
+| Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore`; cut timeout phases and their elapsed measurements: `Backup And Restore Architecture` → `Observability` |
 | Metrics and runtime inspection | `Metrics And Observability` |
 | Full graph examples | `Examples` |
 | Applications that pace producers and consumers by an attached domain clock, and the `TIMESTAMP AT`/`TIMESTAMP NOW` admission they meet | `Paced Simulation Drivers` and `Domains And Time` |
@@ -215,6 +216,9 @@ current connection, retry and deadline limits.
 - Every emitter declares its transport-supported `MODE` in the documented position and
   supplies the complete retry policy plus the confirmation window and timeout when that mode
   confirms asynchronously. No operational mode variable is inferred.
+- Write an envelope clause or `PROPERTIES` key only where the emitter's entity declares it, after
+  the payload and before the construction, in the documented order; see
+  [Emitters → Envelope clauses](../../../../docs/src/emitters.md#envelope-clauses).
 - For Pulsar receipt deadlines and the final wait after `NO ACK` acceptance, read
   [Emitters → Pulsar](../../../../docs/src/emitters.md#pulsar) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).

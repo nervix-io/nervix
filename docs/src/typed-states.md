@@ -32,6 +32,12 @@ required, validates it there, and passes the resulting typed value to the next l
 the registry, execution plans, runtime, clients, and diagnostics from assigning different meanings
 to the same raw value.
 
+A backup cut's active phase is a typed state. Its completed phase measurements are an ordered
+sequence of typed phases and durations; an empty sequence means the first phase is still active.
+These task-owned measurements are volatile diagnostics and do not enter stored configuration,
+archive records or the interconnect's terminal capture reply. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
+owns their reporting and attribution limits.
+
 This chapter describes the landed typed-state architecture across those boundaries. The
 [Cluster Interconnect](./interconnect.md) chapter owns node-to-node wire forms, membership, relay
 delivery, and transport failures. [Domain Clock](./domain-clock.md) owns clock installation,
@@ -481,6 +487,17 @@ and must be recreated. Complete equality properties exercise the production repr
 their range boundaries; see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md).
 
 ## Atomic States On The Data Plane
+
+The bounded executor's worker has `Selected`, `Executing` and `Idle` states. `Selected` owns its
+next admitted callback and charge; `Executing` means that ownership is with the synchronous
+callback; `Idle` has returned the class's active place. Selection and the idle transition share
+the class queue fence. If a runtime drops a worker before its next callback, its destructor returns
+the active place and closes queued submissions with `PoolClosed`, releasing their charges outside
+the fence. Ordinary completion publishes `Idle` before its result, so destruction cannot return
+that place twice. The separate queued-cancellation guard removes its exact entry only while it
+remains queued; a selected callback instead retains its charge and receives the cancellation
+signal. [Execution Primitives](./execution-primitives.md#executor-admission-and-draining) owns the
+full admission and draining contract.
 
 An ACK root's ownership handoff can be tracking a bounded number of active shares or be complete.
 `REQUIRED WAIT` can leave a tracking root temporarily idle without completing it. Attachments,

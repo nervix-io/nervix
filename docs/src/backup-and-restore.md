@@ -953,8 +953,10 @@ contents. The reasons are:
 - an owner has not applied the cut revision within five seconds, or cannot capture or stage its
   share, naming the domain
 - a quiesced domain cannot take its lease or capture its owners within its timeout, reported as
-  `timed out waiting to capture domain '<domain>'`, or does not pause and drain in time, reported
-  with what each node still held
+  `timed out waiting to capture domain '<domain>'` with the active phase, its age, total elapsed
+  time and completed phase durations; a drain timeout also retains what each node still held.
+  Inspect those phases before changing `TIMEOUT`; owner-local capture stages are retained in the
+  administrative logs described in [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
 - the backup coordinator lost its leader tenure while capturing a domain
 
 A capture that fails or is interrupted assembles no archive. The leader drops the sections it
