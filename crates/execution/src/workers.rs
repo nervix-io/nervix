@@ -196,6 +196,13 @@ impl WorkerPool {
 
     /// Return once the job has been handed to a worker. Until then the submitting future still
     /// owns queued cancellation; afterwards the job runs independently of its submitter.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "adapts the caller's synchronous callback for its admitted worker; callback \
+                      effects belong to the caller and execute outside the FIFO fence"
+        )
+    )]
     pub(crate) async fn submit(
         &self,
         reservation: Reservation,
@@ -388,6 +395,13 @@ where
     T: Send + 'static,
     F: FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
 {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "invokes one caller-owned synchronous callback outside the FIFO fence; the \
+                      worker owns admission, cancellation and completion, not callback effects"
+        )
+    )]
     fn execute(self: Box<Self>, worker: &mut Worker) {
         let Self {
             job,

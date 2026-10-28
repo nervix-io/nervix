@@ -390,6 +390,10 @@ last worker's exit cannot strand an admitted job. No idle worker retains a block
 The queue semaphore still bounds pending work, refuses `RefuseWhenFull` with typed `QueueFull`, and
 hands a freed place to an existing `WaitForPlace` waiter before a later requester.
 
+The storage submission adapter and each job's invocation carry explicit dispatch contracts for
+the caller-owned synchronous callback. Its effects remain the caller's responsibility; the
+executor's bounded contract covers admission and queue transitions outside that callback.
+
 A caller withdrawing while its job remains queued removes that exact entry and immediately returns
 its memory charge and queue place. Once selected by a worker, the job owns its charge until its
 callback exits and observes the caller's cancellation between bounded units. A detached storage
