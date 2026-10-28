@@ -34,6 +34,7 @@ mod domain_clock;
 mod duration_text;
 mod emitter;
 mod emitter_batch;
+mod emitter_envelope;
 mod expression;
 mod http_request;
 mod ingestor_input;
@@ -116,10 +117,10 @@ pub use connector::{
     EmitterEntityBody, EmitterEntityCapabilities, EmitterEntityKind, EmitterEntityMetadata,
     EmitterEntityModel, EmitterModeChange, EmitterPublication, EmitterReference,
     EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, EndpointIngestMode,
-    EnvelopeClauseKind, ExternalName, ExternalNameDeclaration, ExternalNameError, GcsConfigEntry,
-    HeaderLayout, HeaderModel, HeaderNames, HttpConfigEntry, HttpEmitter, HttpEmitterEntity,
-    HttpEndpointIngestor, HttpIngestor, HttpIngestorEntity, HttpRequestEmitter,
-    HttpRequestEmitterMode, HttpRequestIngestMode, HttpRequestIngestor,
+    EnvelopeClauseForm, EnvelopeClauseKind, ExternalName, ExternalNameDeclaration,
+    ExternalNameError, GcsConfigEntry, HeaderLayout, HeaderModel, HeaderNames, HttpConfigEntry,
+    HttpEmitter, HttpEmitterEntity, HttpEndpointIngestor, HttpIngestor, HttpIngestorEntity,
+    HttpRequestEmitter, HttpRequestEmitterMode, HttpRequestIngestMode, HttpRequestIngestor,
     HttpRequestIngestorAlteration, HttpRequestPublishingMode, IcebergCatalog, IcebergEmitter,
     IcebergEmitterEntity, IcebergLocationError, IcebergNamespace, IcebergRestConfigEntry,
     IcebergStorageBackend, IcebergStorageBackendError, IcebergTableEmitter,
@@ -161,26 +162,26 @@ pub use connector::{
     PostgresTablePublishingMode, PostgresValueMapping, PrometheusApiRoot, PrometheusApiRootError,
     PrometheusClientConfigError, PrometheusConfigEntry, PrometheusIngestMode, PrometheusIngestor,
     PrometheusIngestorEntity, PrometheusQueryIngestor, PrometheusQueryIngestorAlteration,
-    PropertyDeclaration, PulsarConfigEntry, PulsarEmitter, PulsarEmitterEntity, PulsarIngestMode,
-    PulsarIngestor, PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName,
-    PulsarSubscriptionOwnership, PulsarTopicEmitter, PulsarTopicEmitterMode, PulsarTopicIngestor,
-    PulsarTopicIngestorAlteration, PulsarTopicName, PulsarTopicPublishingMode, RabbitMqConfigEntry,
-    RabbitMqEmitter, RabbitMqEmitterEntity, RabbitMqIngestMode, RabbitMqIngestor,
-    RabbitMqIngestorEntity, RabbitMqQueueEmitter, RabbitMqQueueEmitterMode, RabbitMqQueueIngestor,
-    RabbitMqQueueIngestorAlteration, RabbitMqQueueName, RabbitMqQueuePublishingMode,
-    RedisChannelName, RedisConfigEntry, RedisEmitter, RedisEmitterEntity, RedisIngestor,
-    RedisIngestorAlteration, RedisIngestorEntity, RedisPubSubEmitter, RedisPubSubEmitterMode,
-    RedisPubSubIngestMode, RedisPubSubIngestor, RedisPubSubPublishingMode, ReplacedHeaderWrite,
-    RuntimeCapability, S3ConfigEntry, SENTRY_DEFAULT_PLATFORM, SENTRY_MAX_EVENT_BYTES,
-    SentryConfigEntry, SentryEmitter, SentryEmitterEntity, SentryEventEmitter,
-    SentryEventEmitterMode, SentryEventPublishingMode, SqsConfigEntry, SqsEmitter,
-    SqsEmitterEntity, SqsFifoGroup, SqsIngestMode, SqsIngestor, SqsIngestorEntity, SqsQueueEmitter,
-    SqsQueueEmitterMode, SqsQueueIngestor, SqsQueueIngestorAlteration, SqsQueueName,
-    SqsQueuePublishingMode, SyslogCollectorEmitter, SyslogCollectorEmitterMode,
-    SyslogCollectorPublishingMode, SyslogConfigEntry, SyslogEmitter, SyslogEmitterEntity,
-    SyslogIngestMode, SyslogIngestor, SyslogIngestorEntity, SyslogListenerIngestor,
-    SyslogListenerIngestorAlteration, WEBSOCKETS_CONTROL_FRAME_BUDGET, WaitBound,
-    WebsocketsClientConfig, WebsocketsClientConfigError, WebsocketsClientKey,
+    PropertyDeclaration, PropertyType, PulsarConfigEntry, PulsarEmitter, PulsarEmitterEntity,
+    PulsarIngestMode, PulsarIngestor, PulsarIngestorEntity, PulsarSubscription,
+    PulsarSubscriptionName, PulsarSubscriptionOwnership, PulsarTopicEmitter,
+    PulsarTopicEmitterMode, PulsarTopicIngestor, PulsarTopicIngestorAlteration, PulsarTopicName,
+    PulsarTopicPublishingMode, RabbitMqConfigEntry, RabbitMqEmitter, RabbitMqEmitterEntity,
+    RabbitMqIngestMode, RabbitMqIngestor, RabbitMqIngestorEntity, RabbitMqQueueEmitter,
+    RabbitMqQueueEmitterMode, RabbitMqQueueIngestor, RabbitMqQueueIngestorAlteration,
+    RabbitMqQueueName, RabbitMqQueuePublishingMode, RedisChannelName, RedisConfigEntry,
+    RedisEmitter, RedisEmitterEntity, RedisIngestor, RedisIngestorAlteration, RedisIngestorEntity,
+    RedisPubSubEmitter, RedisPubSubEmitterMode, RedisPubSubIngestMode, RedisPubSubIngestor,
+    RedisPubSubPublishingMode, ReplacedHeaderWrite, RuntimeCapability, S3ConfigEntry,
+    SENTRY_DEFAULT_PLATFORM, SENTRY_MAX_EVENT_BYTES, SentryConfigEntry, SentryEmitter,
+    SentryEmitterEntity, SentryEventEmitter, SentryEventEmitterMode, SentryEventPublishingMode,
+    SqsConfigEntry, SqsEmitter, SqsEmitterEntity, SqsFifoGroup, SqsIngestMode, SqsIngestor,
+    SqsIngestorEntity, SqsQueueEmitter, SqsQueueEmitterMode, SqsQueueIngestor,
+    SqsQueueIngestorAlteration, SqsQueueName, SqsQueuePublishingMode, SyslogCollectorEmitter,
+    SyslogCollectorEmitterMode, SyslogCollectorPublishingMode, SyslogConfigEntry, SyslogEmitter,
+    SyslogEmitterEntity, SyslogIngestMode, SyslogIngestor, SyslogIngestorEntity,
+    SyslogListenerIngestor, SyslogListenerIngestorAlteration, WEBSOCKETS_CONTROL_FRAME_BUDGET,
+    WaitBound, WebsocketsClientConfig, WebsocketsClientConfigError, WebsocketsClientKey,
     WebsocketsConfigEntry, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
     WebsocketsFrameType, WebsocketsIngestMode, WebsocketsIngestor, WebsocketsIngestorAlteration,
     WebsocketsIngestorEntity, WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders,
@@ -203,6 +204,9 @@ pub use emitter::{
 pub use emitter_batch::{
     BatchMessageLimit, BatchUnavailability, ByteSizeUnit, EmitterBatchLegality,
     EmitterBatchLimitError, EmitterBatchPolicy, PayloadSizeError, PayloadSizeLimit,
+};
+pub use emitter_envelope::{
+    EmitterEnvelope, EnvelopeClause, EnvelopeDeclarationError, EnvelopeProperty,
 };
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,

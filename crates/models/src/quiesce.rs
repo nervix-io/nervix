@@ -1294,6 +1294,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         name: base_name,
         from: base_from,
         body: base_body,
+        envelope: base_envelope,
         connector: base_emitter,
         batch: base_batch,
         flush_policy: base_flush_policy,
@@ -1306,6 +1307,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         name: candidate_name,
         from: candidate_from,
         body: candidate_body,
+        envelope: candidate_envelope,
         connector: candidate_emitter,
         batch: candidate_batch,
         flush_policy: candidate_flush_policy,
@@ -1329,7 +1331,9 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     if base_emitter.client() != candidate_emitter.client() {
         changes.push(ModelChangeAspect::EmitterClient);
     }
-    if !base_emitter.same_definition(candidate_emitter) {
+    // The envelope is written in the destination's section, and SET TO replaces it with the rest
+    // of the destination, so a changed envelope changes what the destination receives.
+    if !base_emitter.same_definition(candidate_emitter) || base_envelope != candidate_envelope {
         changes.push(ModelChangeAspect::EmitterConnector);
     }
     if base_body != candidate_body {
@@ -1482,6 +1486,7 @@ mod tests {
             body: EmitterBody::Codec {
                 codec: named("event_codec"),
             },
+            envelope: Box::new(crate::EmitterEnvelope::default()),
             connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
                 ZeroMqPushEmitter {
                     mode: crate::ZeroMqPushPublishingMode::NoAck {
@@ -1886,6 +1891,17 @@ mod tests {
         assert_single_aspect(
             Model::Emitter(base.clone()),
             Model::Emitter(connector),
+            ModelChangeAspect::EmitterConnector,
+            QuiesceLevel::EntityPause,
+        );
+
+        // The envelope is written in the destination's section, so a changed envelope is a
+        // changed destination.
+        let mut envelope = base.clone();
+        envelope.envelope.persistent = true;
+        assert_single_aspect(
+            Model::Emitter(base.clone()),
+            Model::Emitter(envelope),
             ModelChangeAspect::EmitterConnector,
             QuiesceLevel::EntityPause,
         );
