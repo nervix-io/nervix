@@ -19,6 +19,7 @@ checks = [
   "tests::shuttle_checks::shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot",
   "tests::shuttle_checks::shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit",
   "tests::shuttle_checks::shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity",
+  "tests::shuttle_checks::shuttle_submission_racing_worker_exit_never_strands_an_admitted_job",
 ]
 name = "nervix-execution"
 
@@ -229,6 +230,7 @@ checks = [
   "runtime::state_replication::schedule_installation_tests::shuttle_recovery_never_misses_initial_schedule_installation",
   "runtime::state_replication::tasks::shuttle_tests::shuttle_a_closed_snapshot_task_owner_is_waited_for_until_every_task_has_written",
   "runtime::state_replication::tasks::shuttle_tests::shuttle_a_stopping_domain_waits_for_its_own_snapshot_tasks_and_keeps_late_ones",
+  "runtime::state_replication::tasks::shuttle_tests::shuttle_a_stopping_domain_waits_for_the_checkpoint_writers_it_tells_and_the_ones_dropped",
   "runtime::state_store::durability::shuttle_tests::shuttle_a_failed_synchronization_refuses_every_uncovered_writer",
   "runtime::state_store::durability::shuttle_tests::shuttle_an_abandoned_synchronization_frees_the_barrier",
   "runtime::state_store::durability::shuttle_tests::shuttle_an_abandoned_writers_failed_synchronization_still_refuses_what_it_covered",

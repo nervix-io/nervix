@@ -57,7 +57,7 @@ native targets and none of them is compiled there.
 | `LazyLock` | `sync::blocking` | The standard library's | Unavailable | Real: the standard library's, outside every model |
 | Task spawning, joining, yielding, aborting, tracking, the cooperative budget, and polling a future outside it with `unconstrained` | `task` | Tokio's and Tokio Util's | Modeled: Shuttle's Tokio, with the boundary's abort-on-drop handle; Shuttle keeps no cooperative budget, so `unconstrained` only forwards the poll | Real: Tokio's and Tokio Util's, outside every model |
 | Blocking the runtime worker thread that calls it: the declared owners outside the executor | `task::block_in_place` | Tokio's | Unavailable | Real: Tokio's, outside every model |
-| Running a CPU job the bounded executor admitted | `task::spawn_cpu` | Tokio's blocking pool; under Turmoil, one task of the simulated host's scheduler | Modeled: Shuttle's `spawn_blocking` | Real: Tokio's blocking pool, outside every model |
+| Draining admitted CPU jobs on one worker | `task::spawn_cpu` | Tokio's blocking pool; under Turmoil, a simulated task yielding between callbacks | Modeled: Shuttle's `spawn_blocking` | Real: Tokio's blocking pool, outside every model |
 | Running a job on the blocking pool itself: the executor's storage jobs, and the declared owners outside the executor | `task::spawn_blocking` | Tokio's blocking pool | Modeled: Shuttle's `spawn_blocking` | Real: Tokio's blocking pool, outside every model |
 | Timers and the monotonic clock: sleeps, deadlines, timeouts, intervals and instants | `time` | Tokio's, following the clock of the runtime that polls them: the operating system's, a test's paused clock, or the simulated host's under Turmoil | Shuttle's: a sleep or an interval's tick is one scheduling point that takes no time, and a timeout expires only when a check triggers it; `Instant::now` reads the operating system's clock | Real: Tokio's, outside every model |
 | Controls of a paused clock: `pause`, `advance` and `resume` | `time`, with the `test-util` capability | Tokio's | Shuttle's, which take no time | Real: Tokio's, outside every model |
@@ -102,7 +102,8 @@ Turmoil replaces the network and the clock, not synchronization. A Turmoil build
 primitives on the simulated host whose task uses them: `net` selects Turmoil's sockets, and
 `net::lookup_host`, which only that mode has, answers from the simulated DNS table; the timers and
 instants of `time` follow the host's simulated clock; and `task::spawn_cpu` runs an admitted CPU job
-as one task of the host's scheduler, so its synchronous body is one scheduling step. What the
+through a worker task on the host's scheduler. The worker yields between callbacks, so each
+bounded synchronous job body remains one scheduling step. What the
 simulated hosts run, and what the simulation establishes, belong to
 [Deterministic interconnect simulation](./interconnect-simulation.md).
 
@@ -370,6 +371,47 @@ a file whose owners block in different ways, such as the CLI's, has a permission
 
 The boundary check rejects either item in a file no permission lists it for, and a listed item its
 file no longer names.
+
+## Executor Admission And Draining
+
+Every class holds a bounded FIFO of admitted jobs. A worker takes the next job directly after its
+current callback exits, retaining the same blocking-pool dispatch while a backlog remains. The
+consensus storage class has one worker and executes jobs in admission order. CPU workers use
+`task::spawn_cpu`: its callback runs one job and returns whether another has been selected. In
+ordinary and Shuttle builds the boundary drains those callbacks on one blocking-pool task. Under
+Turmoil it yields on the simulated host between callbacks, preserving one bounded body per
+simulation step. Storage workers drain through `task::spawn_blocking` in every mode.
+
+Submission, exact queued cancellation, selection and the empty-to-idle transition share one
+class-local mutex fence. Each acquisition performs one insert, keyed removal or FIFO selection;
+callbacks, destruction, result delivery and semaphore release happen outside it. A submitter either
+finds an active worker that will observe its job or claims a worker itself, so submission racing the
+last worker's exit cannot strand an admitted job. No idle worker retains a blocking-pool thread.
+The queue semaphore still bounds pending work, refuses `RefuseWhenFull` with typed `QueueFull`, and
+hands a freed place to an existing `WaitForPlace` waiter before a later requester.
+
+The storage submission adapter and each job's invocation carry explicit dispatch contracts for
+the caller-owned synchronous callback. Its effects remain the caller's responsibility; the
+executor's bounded contract covers admission and queue transitions outside that callback.
+
+A caller withdrawing while its job remains queued removes that exact entry and immediately returns
+its memory charge and queue place. Once selected by a worker, the job owns its charge until its
+callback exits and observes the caller's cancellation between bounded units. A detached storage
+submission returns only after its job has been selected. Each callback catches its own panic,
+returns `JobPanicked` to its caller, records its completed service and leaves successors runnable.
+The worker publishes its next selection or its idle transition before delivering the completed
+result. Existing per-class admission, refusal, completion, queue-time and work-time counters retain
+their meanings; work time measures callbacks, excluding dispatch and queue waits.
+
+Worker state distinguishes a selected callback, a callback executing and an idle worker. Runtime
+teardown that drops a worker between callbacks, or before its blocking task starts, returns its
+active place and closes the retained queue with `PoolClosed`. Selected and queued charges are
+released outside the fence; callbacks already running on other workers keep theirs until they
+exit. A subsequently reused class can claim a replacement worker.
+
+The FIFO mutex is tracked by Deloxide. Its owner and public workloads are registered in
+`tests/deloxide-inventory.toml`; Shuttle covers submission racing worker exit as well as cancellation,
+admission ordering and class isolation. No new atomic publication protocol is introduced.
 
 ## Thread Creation Outside The Executor
 

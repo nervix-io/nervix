@@ -361,7 +361,9 @@ readiness, and gate release. A no-op reapplies the current required state before
 
 `START` waits until every listener and assigned source has completed its startup boundary. `STOP`
 waits for remote source and listener teardown, including when it stops the cluster's last running
-domain, and for the last state write of every deduplicator and window branch it ends.
+domain, for the last state write of every deduplicator and window branch it ends, and for the last
+checkpoint of every materialized relay and Kafka domain offset, written once the tasks that change
+it have ended.
 Paced-domain clock authority is part of the same revision. TLS-changing model effects wait for
 every affected listener to install the configuration. Each node installs the TLS VHOSTs of a
 runtime revision before it reports that revision prepared, and the command then confirms the
