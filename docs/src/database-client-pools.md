@@ -69,7 +69,9 @@ metadata work. For Postgres the unit is one bounded insert: the metadata lookup 
 its first insert's connection, and an insert the database refuses for one of its rows writes those
 rows one at a time on the same connection before returning it. MySQL likewise keeps one connection
 for a bounded insert and the isolation of any rows it refuses. For Redis the unit is one publish
-and its response. A flush containing several inserts releases capacity between them so other
+and its response. For MongoDB the driver checks a connection out for each command it sends, the
+collection lookup before a write and each insert or bulk-write command, and returns it when the
+command answers. A flush containing several inserts releases capacity between them so other
 emitters can make progress. An emitter waiting out a flush interval or a retry backoff holds no
 connection at all.
 
@@ -87,6 +89,9 @@ status: WAITING
 detail: waiting for a connection from client 'postgres_main' for 3s
 ```
 
+A MongoDB write waits for a connection inside its driver, which reports no waiting state, so
+`DESCRIBE EMITTER` never shows that wait as `WAITING`.
+
 An acquisition timeout, an inability to connect, or the loss of a connection is an infrastructure
 failure instead, and follows the emitter's existing retry policy and general-error reporting.
 
@@ -95,8 +100,12 @@ authentication and validation, independent of how long an accepted query then ru
 separate pool-wait deadline. A Redis publish checks its connection out within the client's
 `connect_timeout_ms`, 30 seconds by default, the same deadline that bounds opening each new command
 connection: a checkout that runs out of it reports `checking out a Redis command connection did not
-finish within connect_timeout_ms` with the bound. MongoDB retains its native server-selection and
-operation timeouts.
+finish within connect_timeout_ms` with the bound. A MongoDB write has only its driver's deadlines:
+server selection ends after `serverSelectionTimeoutMS`, 30 seconds by default, and opening a
+connection's TCP and TLS session after `connectTimeoutMS`, 10 seconds by default, both set in
+`addr`. The wait for a pooled connection, the connection handshake and each command's answer have
+no deadline. The driver implements neither `waitQueueTimeoutMS` nor `socketTimeoutMS`, so setting
+them in `addr` bounds none of these waits.
 
 ## What each bound counts
 

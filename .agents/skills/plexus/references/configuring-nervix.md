@@ -38,7 +38,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Timed generation from materialized state | `Plexus Overview` and `Examples` |
 | Emitter transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
-| MongoDB collection names, BSON field-name admission, native widths/date precision, conflict filters, client URL configuration and paired TLS identity files | `Emitters` → `MongoDB`, then `Connector Capabilities` |
+| MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions and client pool options | `Emitters` → `MySQL`, and `Database Client Connection Pools` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
@@ -274,7 +274,16 @@ current connection, retry and deadline limits.
   `ON CONFLICT` target, so map such a column to `STRING` when the full unsigned range must reach
   the collection.
   BSON `VALUES` keys cannot contain NUL. Mutual TLS uses paired `tls_cert_file` and `tls_key_file`
-  entries alongside optional `tls_ca_file`; explicit files cannot be combined with `tls=false`.
+  entries alongside optional `tls_ca_file`; any of these files enables TLS without `tls=true`, and
+  explicit files cannot be combined with `tls=false`. A MongoDB client resolves its database from
+  `database` or the `addr` path and is refused with neither; `addr` names its hosts with
+  `mongodb://`, never `mongodb+srv://`.
+- Provision a MongoDB collection before its emitter writes: every write first looks it up, and a
+  missing one fails the write as a transient error retried on `RETRY POLICY`. `ON CONFLICT` names
+  mapped `VALUES` keys as its target, and `DO UPDATE` also needs one mapped field outside it. Both
+  forms upsert by equality with the target values, so back them with a unique index on exactly
+  those fields; `DO UPDATE` keeps the document's unmapped fields. See
+  [Emitters → MongoDB](../../../../docs/src/emitters.md#mongodb).
 - Every optional `COLLECT FOR` policy follows the complete relay input list, has a positive
   duration, and is absent when immediate input execution is intended. Correlator sides are checked
   independently; ingestors never declare input collection. Treat the duration as domain-logical

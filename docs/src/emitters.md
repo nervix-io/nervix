@@ -1125,6 +1125,9 @@ Transport-specific expectations:
   `timeout_ms`; HTTP addresses refuse TLS file keys.
 - `POSTGRES`: use `sslmode=verify-full` in the `addr` URL; Nervix honors `tls_ca_file`, `tls_cert_file`, and `tls_key_file`. `sslmode=disable` is the only other accepted policy.
 - `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file`.
+- `MONGODB`: Nervix honors `tls_ca_file`, and `tls_cert_file` with `tls_key_file` as its client
+  certificate; any of them enables TLS without `tls=true` in `addr`, and an `addr` with `tls=false`
+  refuses them. See [MongoDB](#mongodb).
 - `SYSLOG`: select `'protocol' = 'tls'`. Optional `tls_ca_file` adds a server trust root;
   optional `tls_cert_file` and `tls_key_file` configure client authentication and must appear
   together.
@@ -2559,6 +2562,16 @@ required: each write carries at most `MAX MESSAGES` documents, which measure at 
 bytes, as [Database writes](#database-writes) describes. A document larger than MongoDB's 16 MiB
 document limit is rejected before the write that would carry it.
 
+Nervix never creates a collection: provision it, with any validator and indexes it needs, before
+the emitter writes to it. Whenever the emitter writes rows, on a flush and again on every retry, it
+first looks the collection up by name in the client's database. The lookup needs no privilege
+beyond those that let the client's user write the collection. A missing collection fails the write
+before any document is sent: every row stays unresolved and is written again on the emitter's
+`RETRY POLICY` backoff, and `DESCRIBE EMITTER` shows `MongoDB target collection is not provisioned`
+as the emitter's `transient error` until the collection exists. The lookup and the write are
+separate commands, so a collection dropped between them can be created again by the write, as
+MongoDB creates a missing collection on its first insert.
+
 Every write is unordered, and MongoDB's answer to a write says what became of its documents even
 when the write fails, so no separate isolation pass is needed. A document the server applied is
 delivered. A document the server refuses for good — one the collection's validator refuses
@@ -2650,14 +2663,29 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | connection: name resolution, TCP and TLS: driver default, connectTimeoutMS, 10 s<br>server selection: driver default, 30 s<br>the handshake, a pool wait and a write: unbounded |
+| Network waits | connection: name resolution, TCP and TLS: driver default, connectTimeoutMS, 10 s<br>server selection: driver default, 30 s<br>the handshake, a pool wait, the collection lookup and a write: unbounded |
 | Driver limits | A document above the declared BSON document limit is rejected. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MONGODB COLLECTION capability and mirror reference](connector-capabilities.md#mongodb-collection-emit).
 <!-- connector-matrix:emit-mongodb-collection:end -->
 
-MongoDB conflict policies require a target list because the emitter must build an explicit upsert filter. Target fields must be mapped in `VALUES`. `DO UPDATE` updates every mapped field except the conflict target fields and inserts the full mapped document when no existing document matches. `DO NOTHING` inserts only when no document matches the target.
+A conflict policy names at least one target field as a quoted `VALUES` key, such as
+`ON CONFLICT ('tenant', 'order_id') DO UPDATE`, and every target field must be mapped in `VALUES`.
+`DO UPDATE` must also map at least one field outside its target, because those are the fields it
+updates. `CREATE` and `ALTER` refuse a policy without a target, a target field that `VALUES` does
+not map, and a `DO UPDATE` whose `VALUES` maps only target fields.
+
+Either policy writes every row as an upsert: it updates one document whose target fields equal the
+row's mapped values, or inserts the row's complete mapped document when no document matches.
+Matching follows MongoDB's equality queries, so a null target value also matches a document that
+lacks the field, and a row updates at most one document even when several match. On a match,
+`DO NOTHING` leaves the document as it is, and `DO UPDATE` sets every mapped field outside the
+target and keeps the fields `VALUES` does not map. Neither policy has an update-only or a replacing
+form: a row that matches no document is always inserted, and a matched document is never replaced
+or deleted. The rules need no index, but upserts of the same target that run at the same time, such
+as from two emitters, can each insert a document. Create a unique index on exactly the target fields
+to keep one document per target.
 
 `COLLECTION` preserves its literal text, including case, spaces and Unicode. A collection name
 must be nonempty, contain neither NUL nor `$`, not start with `system.`, and not contain
@@ -2669,8 +2697,9 @@ and collection lengths are UTF-8 byte lengths.
 Emitters using either MongoDB `ON CONFLICT` form require MongoDB 8.0 or newer because those modes
 execute each write as one client bulk write.
 
-MongoDB clients declare their connection-pool bounds and use a MongoDB connection URL and database
-name. See [Database Client Connection Pools](database-client-pools.md) for the accepted counts:
+MongoDB clients declare their connection-pool bounds and a MongoDB connection URL, and resolve the
+database their emitters write into. See [Database Client Connection Pools](database-client-pools.md)
+for the accepted counts and how the driver waits for a connection:
 
 ```plexus
 CREATE MONGODB CLIENT mongodb
@@ -2681,17 +2710,26 @@ CREATE MONGODB CLIENT mongodb
   };
 ```
 
-The client requires an `addr` using `mongodb://`. Its query options are delegated to the MongoDB
-driver and validated at `CREATE` without resolving a hostname or connecting. Pool options in that
-URL are refused with a `POOL SIZE` diagnostic: the clause owns both bounds. `database` is optional
-when the URL supplies a database path; an explicit value overrides that path. Unknown CONFIG keys
-are refused. Public inspection redacts address credentials and query options.
+The client requires an `addr` that is a `mongodb://` URL naming its hosts; a `mongodb+srv://`
+address, which needs a DNS lookup to find them, is refused. The URL's query options are delegated to
+the MongoDB driver and checked by its parser at `CREATE` without resolving a hostname or connecting.
+`minPoolSize` and `maxPoolSize` are refused with a `POOL SIZE` diagnostic, because the clause owns
+both bounds. Every other option keeps the driver's meaning, such as `w` and `wtimeoutMS` for the
+write concern, or `connectTimeoutMS` and `serverSelectionTimeoutMS` for the driver's deadlines.
 
-For TLS connections, include `tls=true`, mount a TLS resource, and set `'tls_ca_file'` to the
-mounted CA path. For mutual TLS, also set `'tls_cert_file'` to the PEM certificate chain and
-`'tls_key_file'` to its PEM private key. Supply both identity keys together. Explicit TLS files
-enable TLS when the URL does not choose a mode; a URL with `tls=false` refuses them. Each explicit
-file replaces only its corresponding URL TLS setting, preserving the driver's other TLS options.
+The database comes from the optional `database` key, or else from the URL's path, such as `nervix`
+in `mongodb://127.0.0.1:27017/nervix`; an explicit `database` overrides the path, and a client with
+neither is refused at `CREATE`. A database name holds 1 to 63 bytes and none of `/`, `\`, `.`, `"`,
+`$`, a space or NUL. Unknown CONFIG keys are refused. Public inspection shows an `addr` that carries
+credentials or query options as `********`.
+
+For a private certificate authority, mount a TLS resource and set `'tls_ca_file'` to the mounted CA
+path. For mutual TLS, also set `'tls_cert_file'` to the PEM certificate chain and `'tls_key_file'`
+to its PEM private key, and supply both identity keys together. Any of these files enables TLS by
+itself, so the URL needs no `tls=true`, while a URL with `tls=false` refuses them at `CREATE`. Each
+file replaces only its counterpart among the URL's TLS options, `tlsCAFile` for the CA and
+`tlsCertificateKeyFile` for the identity, and keeps the driver's other TLS options, such as
+`tlsAllowInvalidCertificates`. Without these keys, the URL's own TLS options apply unchanged.
 
 The MongoDB driver reads a combined certificate/key PEM. Nervix prepares that file privately on
 its filesystem executor and retains it for the shared client's lifetime, including all clones;
