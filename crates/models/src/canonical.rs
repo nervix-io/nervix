@@ -879,6 +879,9 @@ impl Statement {
             Self::DescribeEndpoint(describe) => {
                 Ok(format!("DESCRIBE ENDPOINT {};", describe.name.as_str()))
             }
+            Self::DescribeClient(describe) => {
+                Ok(format!("DESCRIBE CLIENT {};", describe.name.as_str()))
+            }
             Self::DescribeJunction(describe) => {
                 Ok(format!("DESCRIBE JUNCTION {};", describe.name.as_str()))
             }

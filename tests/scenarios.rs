@@ -167,6 +167,7 @@ use crate::common::{
 };
 
 mod backup;
+mod clickhouse_connections;
 mod client_consumers;
 mod client_producers;
 mod common;
@@ -11701,6 +11702,27 @@ async fn given_source_confirmation_delay(
     world
         .fault_injection
         .delay_source_confirmation(ingestor, delay);
+}
+
+/// Every read of the junction's materialized dependencies waits this long first, as a read slow to
+/// reach the node that holds the state would. The wait covers each re-evaluation of a message the
+/// junction parked on `REQUIRED WAIT`.
+#[given(expr = "junction {string} takes {string} to read its materialized state")]
+async fn given_junction_reads_materialized_state_slowly(
+    world: &mut ScenarioWorld,
+    junction: String,
+    delay: String,
+) {
+    let delay = parse_duration_text(&delay).expect("step duration must be a valid duration");
+    let junction = expand_placeholders(world, &junction);
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let junction = nervix_models::ModelName::try_from(junction.as_str())
+        .assured("the scenario junction is an identifier-shaped name");
+    world.fault_injection.delay_materialized_dependency_reads(
+        nervix_models::DomainNodeRef::node_in(domain, nervix_models::ModelKind::Junction, junction),
+        delay,
+    );
 }
 
 #[then(expr = "the last shutdown of node {string} reports its drain-support phase {string}")]

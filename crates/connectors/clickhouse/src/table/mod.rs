@@ -40,7 +40,7 @@ use bytes::Bytes;
 use error_stack::{Report, ResultExt as _};
 use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
-    rt::TokioExecutor as HyperTokioExecutor,
+    rt::{TokioExecutor as HyperTokioExecutor, TokioTimer as HyperTokioTimer},
 };
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_columnar_json::{
@@ -55,18 +55,15 @@ use nervix_connector::{
     client_config_value, optional_client_config_value,
 };
 use nervix_dns::{DnsLookupError, DnsResolver};
-use nervix_models::{ClickHouseTableName, ClientConfigEntry, EmitterBatchPolicy};
+use nervix_models::{
+    ClickHouseTableName, ClientConfigEntry, ClientDeadline, ConnectorKind, EmitterBatchPolicy,
+};
 use nervix_primitives::time::Instant;
 use tracing::{debug, trace};
 
 const CLICKHOUSE: &str = "clickhouse";
 /// What `MAX SIZE` measures on a ClickHouse write, which an oversized row's rejection names.
 const MEASURED_REQUEST: &str = "ClickHouse JSONEachRow body";
-/// The TCP keepalive of every connection, the driver's own default.
-const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
-/// How long an idle pooled connection may be reused, the driver's own default. ClickHouse closes an
-/// idle HTTP connection after three seconds, so the client stops reusing one a second earlier.
-const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What one ClickHouse emitter inserts through, from its typed emitter plan.
 pub struct ClickHouseTableEmitterConfig {
@@ -300,6 +297,12 @@ impl ClickHouseTableEmitter {
         config: &[ClientConfigEntry],
         dns: DnsResolver,
     ) -> EmitterStartResult<(ClickHouseClient, Duration)> {
+        let schema = ConnectorKind::ClickHouse
+            .client()
+            .assured("the ClickHouse connector declares a configured client")
+            .config;
+        let effective = schema.effective_entries(config);
+        let config = effective.as_slice();
         let invalid = || {
             Report::new(EmitterOpenError::InvalidConfiguration {
                 connector: CLICKHOUSE,
@@ -316,10 +319,13 @@ impl ClickHouseTableEmitter {
         let tls_config = RustlsClientConfigProvider::new(config)
             .build()
             .map_err(|error| invalid().attach_printable(error.to_string()))?;
+        let tcp_keepalive = Self::connection_interval(config, "tcp_keepalive_ms")?;
+        let pool_idle_timeout = Self::connection_interval(config, "pool_idle_timeout_ms")?;
         let mut connector = HttpConnector::new_with_resolver(dns);
-        connector.set_keepalive(Some(TCP_KEEPALIVE));
+        connector.set_keepalive(Some(tcp_keepalive));
         let mut pool = HyperClient::builder(HyperTokioExecutor::new());
-        pool.pool_idle_timeout(POOL_IDLE_TIMEOUT);
+        pool.pool_timer(HyperTokioTimer::new());
+        pool.pool_idle_timeout(pool_idle_timeout);
         let client = match tls_config {
             Some(tls_config) => {
                 connector.enforce_http(false);
@@ -343,6 +349,28 @@ impl ClickHouseTableEmitter {
             client = client.with_database(database);
         }
         Ok((client, request_timeout))
+    }
+
+    fn connection_interval(
+        config: &[ClientConfigEntry],
+        name: &'static str,
+    ) -> EmitterStartResult<Duration> {
+        let schema = ConnectorKind::ClickHouse
+            .client()
+            .assured("the ClickHouse connector declares a configured client")
+            .config;
+        let key = schema
+            .key(name)
+            .assured("the builder reads a declared ClickHouse connection interval");
+        let value = optional_client_config_value(config, name)
+            .assured("the effective configuration supplies both defaulted intervals");
+        key.validate(value)
+            .change_context(EmitterOpenError::InvalidConfiguration {
+                connector: CLICKHOUSE,
+            })?;
+        Ok(ClientDeadline::parse(value)
+            .assured("the declared interval validator checked positive schedulable milliseconds")
+            .duration())
     }
 
     /// How each mapped column is written into a `JSONEachRow` line: a null as `null`, an `F32`
