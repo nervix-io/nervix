@@ -1880,13 +1880,15 @@ For a record emitter using the emitter `BATCH` clause, the host selects rows fro
 Arc-backed Arrow carriers released by one flush. It retains each carrier's source relay, exact
 branch key, execution time and original batch and row position. The host prepares members in
 arrival order and seals a payload when the source relay, branch, key, ordered headers, ordering
-group or codec container metadata changes. The codec encodes each candidate under `MAX SIZE`, and
-the host subdivides a candidate that does not fit; Arrow memory accounting still belongs to
-`FLUSH`. The connector sees one encoded record per completed payload and answers for it under the
-record's identity, without learning which rows the payload carries. A candidate whose container
-cannot be produced fails each of its members with one message error, which the container failure's
-typed reason decides; the evaluation failure beneath that reason can quote the payload it
-evaluated and is never rendered.
+group or codec container metadata changes. That order is the host's receive order across its
+independent input queues; intake admission on one source does not order another source's delivery.
+The host never rejoins compatible members across an intervening source. The codec encodes each
+candidate under `MAX SIZE`, and the host subdivides a candidate that does not fit; Arrow memory
+accounting still belongs to `FLUSH`. The connector sees one encoded record per completed payload
+and answers for it under the record's identity, without learning which rows the payload carries.
+A candidate whose container cannot be produced fails each of its members with one message error,
+which the container failure's typed reason decides; the evaluation failure beneath that reason can
+quote the payload it evaluated and is never rendered.
 
 The connector owns the destination's own limit on each record, whether the record carries one row
 or a whole batch payload, because only the connector knows what it writes around the payload.
