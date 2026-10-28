@@ -115,7 +115,7 @@ pub use command_execution::{
     CommandExecutionResult, CommandExecutionState, CommandExecutionStatementDisposition,
     CommandExecutionStatementResult, CommandExecutionTransactionOperation,
     CommandExecutionTransactionRequest, CommandExecutionTransactionStatus,
-    CommandExecutionTransactionTarget, DiagnosticSpan,
+    CommandExecutionTransactionTarget, DiagnosticSpan, RecordedBackupArchive,
 };
 pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
 pub use restore::{

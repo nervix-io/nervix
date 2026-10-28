@@ -64,8 +64,8 @@ pub use crate::{
         MemoryClass, OperationLimits, StorageClass, WorkerCounts,
     },
     memory::{
-        AdmissionError, BudgetedBuffer, BufferLimitExceeded, ChargedBytes, MemoryBudgetSnapshot,
-        Reservation,
+        AdmissionError, BudgetedBuffer, BufferGrowthError, BufferLimitExceeded, ChargedBytes,
+        MemoryBudgetSnapshot, Reservation,
     },
     workers::{ExecutionError, QueueAdmission, WorkerClassSnapshot},
 };

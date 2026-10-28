@@ -1001,13 +1001,17 @@ A delivery is held back rather than failed while relay memory on either end has 
 the moment, because that lack of room ends as the node's other relay work resolves.
 
 A receiver refuses a grant for capacity when its relay budget cannot reserve the body, the largest
-decoded batch and decode scratch, when its application queue has no item left, when the capacity
-it keeps for terminal admission outcomes is taken, or when the delivery's channel still has an
-unadmitted batch. Every other refusal is permanent for the grant that asked: its sender epoch, body
-length or admission registration is wrong, its content conflicts with what its delivery identity
-was first granted with, its sequence is out of order, or its admission registration is already
-active. The refusal crosses the wire as a typed `RelayGrantRefusal`, never as an HTTP status or
-text, and the sender decides from its class alone. A permanent refusal fails the delivery at once.
+decoded batch and decode scratch, when its application queue has no item left, when the capacity it
+keeps for terminal admission outcomes is taken, or when the delivery's channel still has an
+unadmitted batch. The grant request is itself charged to the relay budget while the receiver reads
+and decodes it, and it takes only room the budget has free: a request the budget has no room left to
+read or decode is drained unkept and refused for memory like any other, so a full budget is answered
+at once instead of holding the request, and its admission stream, until room returns. Every other
+refusal is permanent for the grant that asked: its sender epoch, body length or admission
+registration is wrong, its content conflicts with what its delivery identity was first granted with,
+its sequence is out of order, or its admission registration is already active. The refusal crosses
+the wire as a typed `RelayGrantRefusal`, never as an HTTP status or text, and the sender decides
+from its class alone. A permanent refusal fails the delivery at once.
 
 A capacity refusal holds a routed or owner-ingress delivery back. The receiver answered, so the
 refusal does not count toward the five-second stall bound: the sender asks for a grant again after

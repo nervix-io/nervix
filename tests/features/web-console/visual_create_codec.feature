@@ -11,6 +11,7 @@ Feature: Web console visual codec and signaling protocol creation
       CREATE WIRE JSON SCHEMA visual_payload_wire MODE STRICT (message string);
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='codec']" is clicked
@@ -53,6 +54,7 @@ Feature: Web console visual codec and signaling protocol creation
       CREATE DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='signaling-protocol']" is clicked
@@ -96,6 +98,7 @@ Feature: Web console visual codec and signaling protocol creation
       CREATE SCHEMA visual_payload (message STRING);
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='codec']" is clicked
@@ -137,6 +140,7 @@ Feature: Web console visual codec and signaling protocol creation
       UPLOAD RESOURCE visual_proto_bundle VERSION '{{visual_proto}}';
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='codec']" is clicked
@@ -173,6 +177,7 @@ Feature: Web console visual codec and signaling protocol creation
       CREATE SCHEMA visual_payload (message STRING);
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='codec']" is clicked
@@ -201,6 +206,7 @@ Feature: Web console visual codec and signaling protocol creation
       CREATE SCHEMA visual_payload (message STRING);
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -261,6 +267,7 @@ Feature: Web console visual codec and signaling protocol creation
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     When the web console is opened on node "{{old_leader}}"
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='codec']" is clicked
