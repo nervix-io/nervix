@@ -4443,6 +4443,7 @@ mod tests {
                         },
                     },
                     client: named("sentry_main"),
+                    platform: None,
                 })),
                 "sentry_main",
             ),

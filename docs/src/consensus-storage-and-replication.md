@@ -293,12 +293,14 @@ snapshot and then the remaining log. Client proposals and management heartbeats 
 catch-up runs.
 
 A discovered node joins as a learner once the leader has read its published prerequisite record and
-found it compatible with the record of every live voter. The leader leaves any other candidate
-outside the membership and logs why once while the reason holds: at `debug` while the candidate has
-published no record the leader can read, and at `warn` with the voter and the mismatch when it
-cannot run beside a voter. [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes
-what the refused node does. Each membership reconciliation gives a blocking learner catch-up
-attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
+found it compatible with the record of every live voter whose run it accepted. The leader leaves any
+other candidate outside the membership and logs why once while the reason holds: at `debug` while
+the candidate has published no record the leader can read, and at `warn` with the voter and the
+mismatch when it cannot run beside a voter. It refuses the run of a voter that cannot run beside an
+older voter's run the same way, without changing the membership.
+[Prerequisites At Join](node-settings.md#prerequisites-at-join) describes the verdicts the leader
+publishes and what a refused node does. Each membership reconciliation gives a blocking learner
+catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
 learner caught up; the membership change has its own ten-second bound. A timeout leaves the node a
 learner, records `raft membership reconciliation failed`, and the one-second reconciliation loop
 tries again while ordinary replication continues.
@@ -432,9 +434,10 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_count_logs`, `raft_count_meta`,
-`raft_count_state`, and `raft_count_snapshots`. Opening it validates the complete keyspace namespace
-before reading any records. Its state metadata requires the current `RestoredLifecycle` encoding,
+The dedicated database owns exactly four current keyspaces: `raft_platform_logs`, `raft_platform_meta`,
+`raft_platform_state`, and `raft_platform_snapshots`. Opening it validates the complete keyspace namespace
+before reading any records. This namespace identifies the current Model shape, including the
+required serialized Sentry platform field. Its state metadata requires the current `RestoredLifecycle` encoding,
 including the durable restore installation gate. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
 and snapshot installation therefore retain their complete magnitudes. See

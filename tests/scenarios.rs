@@ -107,8 +107,8 @@ use crate::common::{
     cluster::{
         AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster,
         DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
-        InterconnectCredentialFault, JoinAttempt, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME,
-        TestClusterConfig, TestSession, WebsocketExchangeAction,
+        InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
+        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
         assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
         command_connect_options, observe_kafka_through, publish_kafka_record_through,
     },
@@ -1514,6 +1514,44 @@ async fn then_the_stallable_endpoint_accepted_connection_after(
         humantime::format_duration(measured),
         humantime::format_duration(minimum)
     );
+}
+
+/// A client that keeps a fixed number of connections to the endpoint opens no other one. That
+/// connection must never arrive, so the window only strengthens the assertion; one that arrived
+/// earlier fails it at once.
+#[then(expr = "the stallable endpoint {string} accepts no connection beyond {int} within {string}")]
+async fn then_the_stallable_endpoint_accepts_no_connection_beyond(
+    world: &mut ScenarioWorld,
+    name: String,
+    count: usize,
+    window: String,
+) {
+    let window = parse_duration_text(&window)
+        .unwrap_or_else(|error| panic!("the window '{window}' is invalid: {error}"));
+    let proxy = world
+        .stallable_tcp_proxies
+        .get(&name)
+        .unwrap_or_else(|| panic!("no endpoint '{name}' was stood"));
+    let Some(beyond) = count.checked_add(1) else {
+        panic!("the endpoint '{name}' cannot be held to {count} connections");
+    };
+    let arrived = nervix_primitives::time::timeout(window, proxy.accepted_at_least(beyond)).await;
+    if arrived.is_ok() {
+        let first = endpoint_connection_accepted_at(world, &name, 1);
+        let further = endpoint_connection_accepted_at(world, &name, beyond);
+        let Some(after) = further.checked_duration_since(first) else {
+            panic!("the endpoint '{name}' accepted connection {beyond} before connection 1");
+        };
+        panic!(
+            "the endpoint '{name}' accepted connection {beyond} {} after connection 1, expected \
+             no more than {count}",
+            humantime::format_duration(after)
+        );
+    }
+    append_cucumber_log_line(&format!(
+        "endpoint '{name}' accepted no connection beyond {count} within {}",
+        humantime::format_duration(window)
+    ));
 }
 
 #[given("ClickHouse is running")]
@@ -11326,14 +11364,15 @@ impl WasmLifecycleFailureFixture {
 fn ensure_onnx_runtime_loaded() {
     let result = ONNX_RUNTIME_INIT.get_or_init(|| {
         let dylib_path = resolve_onnxruntime_dylib()?;
-        ort::init_from(&dylib_path)
-            .map_err(|error| {
-                format!(
-                    "failed to initialize ONNX Runtime from '{}': {error}",
-                    dylib_path.display()
-                )
-            })?
-            .commit();
+        // Only load the library: the nodes create the process's one ONNX Runtime environment on
+        // first use, and ONNX Runtime refuses a second.
+        let environment_builder = ort::init_from(&dylib_path).map_err(|error| {
+            format!(
+                "failed to load ONNX Runtime from '{}': {error}",
+                dylib_path.display()
+            )
+        })?;
+        drop(environment_builder);
         Ok(())
     });
 
@@ -12036,6 +12075,61 @@ async fn when_node_attempts_to_join(world: &mut ScenarioWorld, node_id: String) 
     let failure = match attempt {
         JoinAttempt::Admitted => None,
         JoinAttempt::Stopped(failure) => Some(failure),
+    };
+    world.node_start_attempt = Some(NodeStartAttempt {
+        node: node_id,
+        failure,
+    });
+}
+
+/// Starts a node whose only bootstrap host is a running member, and records whether the cluster
+/// admitted it as a voter or how it stopped, for a later step to assert.
+#[when(expr = "node {string} attempts to join through node {string}")]
+async fn when_node_attempts_to_join_through(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    member_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let member_id = expand_placeholders(world, &member_id);
+    let attempt = world
+        .cluster_mut()
+        .attempt_join_through(&node_id, &member_id)
+        .await
+        .expect("the joining node was neither admitted nor stopped");
+    let failure = match attempt {
+        JoinAttempt::Admitted => None,
+        JoinAttempt::Stopped(failure) => Some(failure),
+    };
+    world.node_start_attempt = Some(NodeStartAttempt {
+        node: node_id,
+        failure,
+    });
+}
+
+/// Starts a node that joins the running cluster through a running member and requires the
+/// cluster to admit it as a voter.
+#[given(expr = "node {string} has joined the cluster")]
+async fn given_node_has_joined_the_cluster(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let attempt = world
+        .cluster_mut()
+        .attempt_join(&node_id)
+        .await
+        .expect("the joining node was neither admitted nor stopped");
+    if let JoinAttempt::Stopped(failure) = attempt {
+        panic!("node '{node_id}' stopped instead of joining: {failure}");
+    }
+}
+
+/// Starts a stopped member again and records how its return ended, for a later step to assert.
+#[when(expr = "node {string} attempts to rejoin")]
+async fn when_node_attempts_to_rejoin(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let attempt = world.cluster_mut().attempt_rejoin(&node_id).await;
+    let failure = match attempt {
+        RejoinAttempt::KeptRunning => None,
+        RejoinAttempt::Stopped(failure) => Some(failure),
     };
     world.node_start_attempt = Some(NodeStartAttempt {
         node: node_id,

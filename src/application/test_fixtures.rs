@@ -681,7 +681,7 @@ pub(in crate::application) async fn build_test_service_inner(
             console_advertise_url: test_service_url(grpc_addr),
             interconnect_advertise_addr: interconnect_addr.into(),
             bootstrap_host: None,
-            recovery_endpoints: Default::default(),
+            recovered_members: Default::default(),
             interconnect: interconnect.clone(),
             membership: crate::cluster::MembershipSettings::default(),
             prerequisites: interconnect.local_prerequisites(),
