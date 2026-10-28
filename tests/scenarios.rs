@@ -105,7 +105,7 @@ use crate::common::{
         SUBSCRIBED_LINE, corpus_report,
     },
     cluster::{
-        AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster,
+        AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster, CommandHold,
         DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
         InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
         TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
@@ -414,6 +414,8 @@ struct ScenarioWorld {
     last_backup: Option<backup::TestBackup>,
     /// A CLI backup paused at its quiesced cut while the scenario exercises other operations.
     background_backup: Option<AbortOnDropHandle<std::process::Output>>,
+    /// The exact CLI child started by the background-backup step, for cancellation assertions.
+    background_backup_pid: Option<nix::unistd::Pid>,
     /// How the last backup download a scenario shaped itself ended.
     last_backup_download: Option<crate::common::raw_session::TestDownloadEnd>,
     /// The `SHOW CREATE` output of models a scenario saved, by the name it saved them as and then
@@ -4682,6 +4684,7 @@ impl ScenarioWorld {
             None
         };
         let mut process = tokio::process::Command::new(scenario_cli_binary());
+        process.kill_on_drop(true);
         process.args([
             "--server",
             &grpc_uri,
@@ -4800,6 +4803,7 @@ async fn when_cli_suggests_for(world: &mut ScenarioWorld, input: String, node: S
     let output = nervix_primitives::time::timeout(
         Duration::from_secs(60),
         tokio::process::Command::new(scenario_cli_binary())
+            .kill_on_drop(true)
             .args([
                 "--server",
                 &grpc_uri,
@@ -5289,6 +5293,7 @@ async fn when_cli_follows_missing_domain(world: &mut ScenarioWorld, domain: Stri
     let output = nervix_primitives::time::timeout(
         Duration::from_secs(10),
         tokio::process::Command::new(scenario_cli_binary())
+            .kill_on_drop(true)
             .args([
                 "--server",
                 &grpc_uri,
@@ -12376,14 +12381,36 @@ async fn given_leadership_moves_under_next_durable_admission(
 ) {
     let from_node_id = expand_placeholders(world, &from_node_id);
     let to_node_id = expand_placeholders(world, &to_node_id);
-    let moved = world
-        .cluster()
-        .move_leadership_after_next_durable_admission(&from_node_id, &to_node_id);
+    let moved = world.cluster().move_leadership_under_next_command(
+        CommandHold::AfterDurableAdmission,
+        &from_node_id,
+        &to_node_id,
+    );
+    world.leadership_move = Some(moved);
+}
+
+#[given(
+    expr = "leadership moves from node {string} to node {string} before its next admission \
+            proposal"
+)]
+async fn given_leadership_moves_before_next_admission_proposal(
+    world: &mut ScenarioWorld,
+    from_node_id: String,
+    to_node_id: String,
+) {
+    let from_node_id = expand_placeholders(world, &from_node_id);
+    let to_node_id = expand_placeholders(world, &to_node_id);
+    let moved = world.cluster().move_leadership_under_next_command(
+        CommandHold::BeforeAdmissionProposal,
+        &from_node_id,
+        &to_node_id,
+    );
     world.leadership_move = Some(moved);
 }
 
 #[then("the leadership move under the durably admitted command completed")]
-async fn then_leadership_move_under_durable_admission_completed(world: &mut ScenarioWorld) {
+#[then("the leadership move before the admission proposal completed")]
+async fn then_leadership_move_completed(world: &mut ScenarioWorld) {
     let moved = world
         .leadership_move
         .take()
@@ -12393,7 +12420,7 @@ async fn then_leadership_move_under_durable_admission_completed(world: &mut Scen
         .expect("the leadership move ends once its command was released");
     ended
         .expect("the leadership move task runs to its end")
-        .expect("the successor reported itself the leader before the command was released");
+        .expect("both nodes reported the successor as the leader before the command was released");
 }
 
 #[given("the leader node forgets its transaction session bindings")]
@@ -17218,7 +17245,8 @@ async fn run_cli_inspection(
         .arg("--password")
         .arg(TEST_AUTH_PASSWORD)
         .arg("--command")
-        .arg(query);
+        .arg(query)
+        .kill_on_drop(true);
     if let CliConnectionCase::MissingCa = connection {
         command
             .arg("--tls-ca-cert")
@@ -33536,6 +33564,13 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.enter_phase(ScenarioPhase::BodyComplete, &format!("result={body}"));
 
                 world.enter_phase(ScenarioPhase::TeardownStarted, "");
+                if let Some(Err(error)) = world.cancel_background_backup().await
+                    && !error.is_cancelled()
+                {
+                    append_cucumber_log_line(&format!(
+                        "scenario teardown failed: background CLI backup task: {error}"
+                    ));
+                }
                 world.stop_consensus_load();
                 world.fault_injection.release_all_health_responses();
                 world.fault_injection.release_all_domain_clock_progress();

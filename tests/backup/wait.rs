@@ -208,6 +208,10 @@ async fn then_cli_recovery_keeps_identity_and_cuts(world: &mut ScenarioWorld) {
     }
 }
 
+/// Backs up the cluster under a fresh execution reference, then sends the reference again with
+/// another destination, which recovers the recorded backup. Each send learns its outcome from the
+/// leader when its answer leaves it unknown, so a leadership change or a lapsed lease at the
+/// first backup's admission costs the step a repetition of the reference, not its assertions.
 #[when("a completed cluster backup is recovered with a different local destination")]
 async fn when_backup_is_recovered_to_another_destination(world: &mut ScenarioWorld) {
     let leader = current_leader_node(world).await;
@@ -217,21 +221,23 @@ async fn when_backup_is_recovered_to_another_destination(world: &mut ScenarioWor
         .await
         .assured("the backup session opens");
     let reference = crate::common::raw_session::fresh_execution_reference();
-    let initial = session
-        .run_command_result_with_reference(
-            "BACKUP CLUSTER TO 'first.nvxb' WITHOUT STATE;",
-            &reference,
-        )
-        .await
-        .assured("the first backup is answered");
+    let initial = backup_command_outcome(
+        world,
+        &mut session,
+        "BACKUP CLUSTER TO 'first.nvxb' WITHOUT STATE;",
+        &reference,
+    )
+    .await
+    .assured("the first backup is answered");
     assert!(initial.backup.is_some(), "{}", initial.message);
-    let recovered = session
-        .run_command_result_with_reference(
-            "BACKUP CLUSTER TO 'recovered.nvxb' WITHOUT STATE;",
-            &reference,
-        )
-        .await
-        .assured("the recovery is answered");
+    let recovered = backup_command_outcome(
+        world,
+        &mut session,
+        "BACKUP CLUSTER TO 'recovered.nvxb' WITHOUT STATE;",
+        &reference,
+    )
+    .await
+    .assured("the recovery is answered");
     assert_eq!(
         recovered.origin,
         nervix_client_core::OutcomeOrigin::Recovered,

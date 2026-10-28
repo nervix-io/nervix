@@ -106,6 +106,12 @@ bounded receiver and exact reader task; close and suspend join that task before 
 Queued messages precede its terminal read failure. These handles, queued payloads and parsing
 state remain volatile and are never part of a persisted Model.
 
+Running MQTT acknowledgement state distinguishes automatic acknowledgement from manual
+acknowledgement with its bounded QoS 0 capacity. Each queued QoS 0 outcome owns its permit until
+the source takes it; acknowledged packets use their separate reserved capacity. Overflow is an
+ordinary admission outcome that drops and counts one publish, rather than a read failure or a
+missing connection. The queue, permits and host-supplied counter handle remain volatile.
+
 Text is parsed into a semantic Model, registry validation resolves its references and contracts,
 and planning produces an execution plan. Each stage passes forward a value whose type expresses
 what has already been established. Runtime code executes the plan; it does not reinterpret a Model
