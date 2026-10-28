@@ -108,6 +108,7 @@ selections = ["deloxide", "deloxide-order"]
 tags = [
   "@restore_client_inspection",
   "@runtime_installation_retry",
+  "@execution_class_drain",
   "@kafka_start_generation",
   "@kafka_start_generation_restore",
   "@wasm_reset_authority_recovery",
@@ -2633,7 +2634,7 @@ scenario = "A restarted node retries refused installations of its committed runt
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Accepted restore model application reaches a full real filesystem queue before its first-poll observation; after capacity is released every step and the configured client are preserved. Async executor waits and test worker parking are untracked."
+coverage = "Accepted restore model application reaches a full real filesystem queue before its first-poll observation; after capacity is released every step and the configured client are preserved. Queue submission and draining reach the executor class-local tracked FIFO fence; async capacity waits and test worker parking are untracked."
 examples = 2
 feature = "tests/features/cluster/restore_client_inspection.feature"
 id = "scenario.restore-client-inspection"
@@ -2643,7 +2644,7 @@ scenario = "An accepted restore waits for client inspection capacity on <cluster
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Under scheduling stress: Accepted restore model application reaches a full real filesystem queue before its first-poll observation; after capacity is released every step and the configured client are preserved. Async executor waits and test worker parking are untracked."
+coverage = "Under scheduling stress: Accepted restore model application reaches a full real filesystem queue before its first-poll observation; after capacity is released every step and the configured client are preserved. Queue submission and draining reach the executor class-local tracked FIFO fence; async capacity waits and test worker parking are untracked."
 examples = 2
 feature = "tests/features/cluster/restore_client_inspection.feature"
 id = "stress.restore-client-inspection"
@@ -2651,6 +2652,39 @@ invariant = "An accepted restore waits for client-inspection capacity, then appl
 invocation = "stress-restore-scenarios"
 scenario = "An accepted restore waits for client inspection capacity on <cluster_size> nodes"
 selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Class-local executor FIFO admission and drain fences while bulk work is occupied and a sequence of management mutations completes on one and three nodes. Callbacks execute outside the fence; async admission and network waits remain untracked."
+examples = 2
+feature = "tests/features/cluster/bounded_execution.feature"
+id = "scenario.execution-class-drain"
+invariant = "Occupied bulk workers do not prevent management command batches from completing or the cluster from retaining a stable leader."
+invocation = "scenarios"
+scenario = "Occupied bulk execution leaves management work responsive"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: class-local executor FIFO admission and drain fences during bulk saturation and repeated public management mutations."
+examples = 2
+feature = "tests/features/cluster/bounded_execution.feature"
+id = "stress.execution-class-drain"
+invariant = "Occupied bulk workers do not prevent management command batches from completing or the cluster from retaining a stable leader."
+invocation = "stress-scenarios"
+scenario = "Occupied bulk execution leaves management work responsive"
+selections = ["deloxide-stress"]
+
+
+[[owner]]
+gap = "CPU-worker interruption between simulated callbacks belongs to the mutually exclusive Turmoil mode. Native blocking-task teardown before its first callback is not deterministically reached by these public scenarios. Native workloads reach normal FIFO admission, cancellation and draining; the ordinary interrupted-worker regression covers selected and queued destructor cleanup without claiming tracked-lock interleavings."
+path = "crates/execution/src/workers.rs"
+workloads = [
+  "scenario.restore-client-inspection",
+  "stress.restore-client-inspection",
+  "scenario.execution-class-drain",
+  "stress.execution-class-drain",
+  "scenario.materialized-bulk-generations",
+  "stress.materialized-bulk-generations",
+]
 
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
