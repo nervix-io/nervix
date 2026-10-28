@@ -194,9 +194,11 @@ struct FaultInjectionState {
     /// acknowledged through the graph and letting the source confirm the batch's positions on its
     /// transport, as a transport slow to answer an acknowledgement would.
     delayed_source_confirmations: DashMap<DomainNodeRef, Duration, RandomState>,
-    /// Waits, keyed by a deduplicator or window processor, that the snapshot task of each of its
-    /// branches spends after the branch stopped before it writes what the branch published last,
-    /// as storage slow to take a large checkpoint would.
+    /// Waits, keyed by the node whose state is written, that a snapshot task spends before the last
+    /// write it makes as that state stops, as storage slow to take a large checkpoint would: the
+    /// snapshot task of each branch of a deduplicator or window processor once the branch stopped,
+    /// and the checkpoint writer of the state the node's placement keeps, such as a materialized
+    /// relay's records, once its domain's stop told it to write.
     delayed_stopped_state_writes: DashMap<DomainNodeRef, Duration, RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
@@ -1182,14 +1184,15 @@ impl FaultInjection {
             .insert(ingestor, delay);
     }
 
-    /// Makes the snapshot task of every branch of `processor`, a deduplicator or window
-    /// processor, wait `delay` after its branch stops before it writes what the branch published
-    /// last, as storage slow to take a large checkpoint would. A wait longer than a branch's stop
-    /// grace leaves that write running after the branch's task was ended.
-    pub fn delay_stopped_state_writes(&self, processor: DomainNodeRef, delay: Duration) {
-        self.inner
-            .delayed_stopped_state_writes
-            .insert(processor, delay);
+    /// Makes every snapshot task that writes the state of `node` wait `delay` before the last
+    /// write it makes as that state stops, as storage slow to take a large checkpoint would: the
+    /// snapshot task of every branch of a deduplicator or window processor, after its branch
+    /// stopped, and the checkpoint writer of the state `node`'s placement keeps, such as a
+    /// materialized relay's records, on each cluster node that keeps it, after its domain's stop
+    /// told it to write. A wait longer than a stop grace leaves that write running after the task
+    /// that owned the state was ended.
+    pub fn delay_stopped_state_writes(&self, node: DomainNodeRef, delay: Duration) {
+        self.inner.delayed_stopped_state_writes.insert(node, delay);
     }
 
     /// Fails the next resource version `node_id` installs, after the node installed and published
@@ -2248,8 +2251,8 @@ impl FaultInjection {
         kind: ModelKind,
         entity: &ModelName,
     ) -> Option<Duration> {
-        let processor = DomainNodeRef::node_in(domain.clone(), kind, entity.clone());
-        let delay = self.inner.delayed_stopped_state_writes.get(&processor)?;
+        let node = DomainNodeRef::node_in(domain.clone(), kind, entity.clone());
+        let delay = self.inner.delayed_stopped_state_writes.get(&node)?;
         Some(*delay)
     }
 
