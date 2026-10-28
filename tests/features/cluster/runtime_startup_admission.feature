@@ -108,11 +108,12 @@ Feature: Runtime startup admission
       """
       raft.id: node-2
       """
-    When http payload is posted to node "node-2" with host "http-admission-{{test_id}}.example.com" path "/events" and is not routed
+    When endpoint request "uninstalled" is posted on node "node-2" host "http-admission-{{test_id}}.example.com" path "/events"
       """
       {"sequence":2}
       """
-    Then the observed broker does not receive a payload within "2s"
+    Then endpoint request "uninstalled" answers HTTP 503
+    And the observed broker does not receive a payload within "2s"
     When consensus connectivity for node "node-2" is restored
     Then within "20s" node "node-2" eventually reports scheduled "junction" "admission_forwarder" owner different from placeholder "persisted_owner"
     And the last command output contains
