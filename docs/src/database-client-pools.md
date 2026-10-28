@@ -109,8 +109,31 @@ operation timeouts.
 
 A Redis client used only by ingestors still declares both bounds but materializes no command pool
 until a local publisher needs one. Consequently a client with `POOL SIZE MIN 1 MAX 4`, one local
-publisher and two local Pub/Sub ingestors maintains one command connection and may use up to six
-Redis connections in total: four command connections and two dedicated subscription connections.
+publisher and two local Pub/Sub ingestors maintains one command connection, whether its publisher
+is idle or publishing, and may use up to six Redis connections in total: four command connections
+and two dedicated subscription connections.
+
+## How each client type keeps its minimum
+
+Every pool-capable client type keeps `MIN` by the same rule: the connections its local users have
+checked out count toward it together with the idle ones, a pool below it opens the ones it is
+missing, and a pool at or above it opens another only for a borrower that finds no connection
+idle, up to `MAX`. The drivers count their own minimums differently, so Nervix supplies what a
+driver leaves out:
+
+| Client type | The driver's own minimum | What Nervix adds |
+| --- | --- | --- |
+| `POSTGRES` | Counts every connection the driver holds, idle or checked out. The driver opens it with the pool and replaces a connection it closes at a lifetime or after a failure when the pool would otherwise fall below it. | Nothing. |
+| `MYSQL` | A retention floor only: the driver keeps up to that many idle connections once they are returned, and never opens one to reach it. | A maintenance task reads the pool's established connections once a second and checks the shortfall out of the pool, which opens a connection for each checkout it has no idle one for. |
+| `MONGODB` | Counts every application connection to a server, available, being established or checked out. The driver populates each ready server's pool up to it in the background. | Nothing. |
+| `REDIS` | Counts idle connections only, so every checkout would make the driver open another beside the connection in use, up to `MAX`. Nervix does not use it. | Opening the pool establishes `MIN` command connections. Whenever the pool closes one, Nervix counts the connections still established, the ones publishers hold included, and has the pool open the missing ones. |
+
+For Redis, opening the pool establishes each of its `MIN` connections within the client's
+`connect_timeout_ms`. A connection that cannot be opened fails the open with its cause, and the
+emitter opens the pool again on its retry policy. When the pool later closes a connection, at a
+lifetime or after a failed `PING`, Nervix brings it back to `MIN` at once. If Redis cannot be
+reached then, each attempt waits up to `connect_timeout_ms` and the next follows as soon as it ends,
+while a publisher that finds no connection idle still opens one for itself.
 
 ## Connection lifetimes
 

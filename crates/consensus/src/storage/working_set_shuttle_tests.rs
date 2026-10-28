@@ -1,8 +1,8 @@
-//! Scheduling checks of how consensus storage admits its Commands working sets.
+//! Scheduling checks of how consensus storage admits its Commands and Bulk working sets.
 //!
 //! Layer: test harness.
 //! - **Owns.** The invariant that a working set waiting for the store's turn leaves the rest of the
-//!   Commands class to its other work, and that the next working set never waits in the class for
+//!   memory class to its other work, and that the next working set never waits in the class for
 //!   bytes the previous one still holds.
 //! - **Depends on.** The production working-set admission, executor and Shuttle runner.
 //! - **Must not know.** Fjall I/O, peer transport or application lifecycle policy.
@@ -16,7 +16,7 @@
 )]
 
 use meticulous::ResultExt as _;
-use nervix_execution::{Executor, MemoryClass};
+use nervix_execution::Executor;
 use nervix_model_harness::shuttle::check_random_and_pct;
 use nervix_primitives::sync::Arc;
 
@@ -27,7 +27,16 @@ const SOURCE_CONTROL_BYTES: u64 = 176;
 
 #[test]
 fn shuttle_a_working_set_waiting_for_its_turn_leaves_room_for_source_control() {
-    check_random_and_pct(|| {
+    check_working_set_progress(StorageCharge::Commands, SOURCE_CONTROL_BYTES);
+}
+
+#[test]
+fn shuttle_a_bulk_working_set_waiting_for_its_turn_leaves_room_for_snapshot_progress() {
+    check_working_set_progress(StorageCharge::Bulk, 4096);
+}
+
+fn check_working_set_progress(charge: StorageCharge, progress_bytes: u64) {
+    check_random_and_pct(move || {
         nervix_primitives::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -36,28 +45,28 @@ fn shuttle_a_working_set_waiting_for_its_turn_leaves_room_for_source_control() {
                 let executor = Executor::default();
                 let admission = Arc::new(
                     WorkingSetAdmission::new(&executor)
-                        .assured("the default executor holds the command storage working set"),
+                        .assured("the default executor holds the storage working set"),
                 );
                 let held = admission
-                    .admit(&executor, StorageCharge::Commands)
+                    .admit(&executor, charge)
                     .await
-                    .assured("the first working set fits the untouched Commands class");
+                    .assured("the first working set fits the untouched class");
 
                 let waiting_admission = Arc::clone(&admission);
                 let waiting_executor = executor.clone();
                 let waiting = nervix_primitives::task::spawn(async move {
                     waiting_admission
-                        .admit(&waiting_executor, StorageCharge::Commands)
+                        .admit(&waiting_executor, charge)
                         .await
                         .assured("the second working set is admitted once the first releases")
                 });
                 let control_executor = executor.clone();
                 let control = nervix_primitives::task::spawn(async move {
                     control_executor
-                        .try_reserve(MemoryClass::Commands, SOURCE_CONTROL_BYTES)
+                        .try_reserve(charge.memory_class(), progress_bytes)
                         .assured(
-                            "a working set waiting for its turn leaves room for a source control \
-                             call",
+                            "a working set waiting for its turn leaves room for the class's other \
+                             work",
                         )
                 });
                 nervix_primitives::task::yield_now().await;
@@ -73,7 +82,7 @@ fn shuttle_a_working_set_waiting_for_its_turn_leaves_room_for_source_control() {
                     .assured("the control call finishes without waiting");
                 drop(control);
                 drop(next);
-                assert_eq!(executor.snapshot().commands_memory.reserved_bytes, 0);
+                assert_eq!(executor.memory(charge.memory_class()).reserved_bytes, 0);
             });
     });
 }

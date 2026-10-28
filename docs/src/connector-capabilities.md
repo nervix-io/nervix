@@ -530,7 +530,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Reference | SENTRY client |  |
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | No entity-specific options. |  |
+| Options in statement order | `PLATFORM 'python'` (string literal); optional; default other |  |
 | Headers | Not offered: An event is encoded inside its Sentry envelope; arbitrary per-event HTTP header writes are not supported. |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
@@ -539,7 +539,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | The connector holds no buffer between its transport and the host. |  |
-| Network waits | a request: name resolution, connection, TLS and the response headers: `timeout_ms`; unbounded when omitted |  |
+| Network waits | a request: name resolution, connection, TLS and the response headers: `timeout_ms`; required |  |
 | Driver limits | An event above 1,000,000 bytes is rejected. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
@@ -1019,7 +1019,7 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
 | `dsn` | required | URL (http or https) | Nervix; strict | yes | none |
-| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `timeout_ms` | required | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 | `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
 | `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
 | `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
@@ -1039,18 +1039,18 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | --- | --- | --- | --- | --- | --- |
 | `compression` | optional | gzip | Nervix; strict | no | none |
 | `endpoint` | required | URL (http or https) | Nervix; strict | no | none |
-| `headers` | optional | string | Nervix; strict | yes | none |
+| `headers` | optional | comma-separated name=percent-encoded-value pairs | Nervix; strict | yes | none |
 | `protocol` | required | grpc or http/protobuf | Nervix; strict | no | none |
 | `timeout_ms` | required | positive, schedulable whole milliseconds | Nervix; strict | no | none |
-| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
-| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
-| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+| `tls_ca_file` | optional; requires `endpoint` to use `https` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional; requires `endpoint` to use `https` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional; requires `endpoint` to use `https` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
 | Capability | Declaration |
 | --- | --- |
-| Additional declared constraints | comma-separated key=value pairs; split at the first '='; trim surrounding whitespace; lowercase keys; preserve values literally without percent-decoding; empty input means no headers<br>tls_ca_file, tls_cert_file and tls_key_file require an https endpoint for both grpc and http/protobuf; tls_cert_file and tls_key_file must occur together |
+| Additional declared constraints | comma-separated key=value pairs; split at the first '='; trim surrounding whitespace; lowercase keys; percent-decode values once as UTF-8; keep literal plus signs; empty input means no headers<br>tls_ca_file, tls_cert_file and tls_key_file require an https endpoint for both grpc and http/protobuf; tls_cert_file and tls_key_file must occur together |
 
 ### CLICKHOUSE client
 

@@ -1629,7 +1629,7 @@ names, and are accepted with the rules the database gives them: `'EST'`, `'MST'`
 `'Etc/GMT+5'` family, whose sign is the reverse of the offset's. A zone only decides how an instant
 reads as a local date and time: every `DATETIME` a function returns is a UTC instant.
 
-Time zone rules come from the IANA Time Zone Database bundled into Nervix, release `2026c` in this
+Time zone rules come from the IANA Time Zone Database bundled into Nervix, release `2026e` in this
 version. Nervix never reads the time zone database, the time zone, or the locale of the host it runs
 on, so every node of a cluster computes the same local times. A Nervix upgrade can bundle a newer
 release, and a zone whose rules the release changed then reads differently in every computation

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 import unittest
@@ -125,6 +126,51 @@ class DocsWorkflowTests(unittest.TestCase):
         page = Path("docs/src/client-tools-cli.md").read_text()
 
         self.assertIn("(nervix-cli-reference.md)", page)
+
+    def test_book_job_runs_for_a_book_labeled_pull_request_or_a_manual_run(self) -> None:
+        # The book needs no image, so adding `book` builds it in that label's own run, and the
+        # newest build of one ref replaces an older one before it publishes.
+        workflow = Path(".github/workflows/docker-build.yaml").read_text()
+        _, build_book = workflow.split("\n  build-book:", maxsplit=1)
+        job, _ = build_book.split("    steps:\n", maxsplit=1)
+
+        self.assertNotIn("needs:", job)
+        self.assertIn(
+            "    if: >-\n"
+            "      github.event_name != 'schedule' &&\n"
+            "      (github.event_name != 'pull_request' ||\n"
+            "        (github.event.pull_request.head.repo.full_name == github.repository &&\n"
+            "          contains(github.event.pull_request.labels.*.name, 'book') &&\n"
+            "          (github.event.action != 'labeled' || github.event.label.name == 'book')))\n",
+            job,
+        )
+        self.assertIn(
+            "    concurrency:\n"
+            "      group: build-book-${{ github.ref }}\n"
+            "      cancel-in-progress: true\n",
+            job,
+        )
+
+    def test_adding_the_book_label_never_builds_or_cancels_an_image(self) -> None:
+        # A label outside these lists runs Docker Build in a group of its own with no image job.
+        workflow = Path(".github/workflows/docker-build.yaml").read_text()
+        image_labels = re.findall(r"fromJSON\('(\[[^]]*\])'\)", workflow)
+
+        self.assertTrue(image_labels)
+        for labels in image_labels:
+            self.assertNotIn("book", json.loads(labels))
+
+    def test_every_pull_request_runs_the_script_tests_the_book_build_runs_first(self) -> None:
+        justfile = Path("justfile").read_text()
+        check = Path(".github/workflows/check.yaml").read_text()
+        checks = re.split(r"\n  [a-z][a-z-]*:\n", check.split("\n  checks:\n", maxsplit=1)[1], maxsplit=1)[0]
+        job, steps = checks.split("\n    steps:\n", maxsplit=1)
+
+        self.assertRegex(justfile, r'book version="[^"]+": test-docs ')
+        self.assertNotIn("needs:", job)
+        self.assertNotIn("    if:", job)
+        self.assertIn("uses: astral-sh/setup-uv@", steps)
+        self.assertIn("run: just test-docs\n", steps)
 
     def test_book_job_installs_locked_python_dependencies_with_uv(self) -> None:
         workflow = Path(".github/workflows/docker-build.yaml").read_text()

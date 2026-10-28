@@ -264,9 +264,15 @@ impl Arbitrary<'_> {
                 }))
             }
             EmitterEntityKind::Sentry(SentryEmitterEntity::Event) => {
+                let platform = if self.entropy.flag() {
+                    Some(self.string())
+                } else {
+                    None
+                };
                 EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
                     mode: self.sentry_event_publication(),
                     client: self.name(),
+                    platform,
                 }))
             }
             EmitterEntityKind::Syslog(SyslogEmitterEntity::Collector) => {

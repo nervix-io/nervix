@@ -120,6 +120,13 @@ the next one is admitted without waiting in the class.
 The turns hold no more working sets than the budget already held at once, and they do not change
 the order in which the ordered storage worker runs admitted operations.
 
+Bulk storage uses independent turns under the same rule. Each operation reserves twice the
+snapshot section limit plus one bulk chunk: 16 MiB plus 64 KiB with the default limits. The
+32 MiB Bulk class admits one such working set, leaving room for snapshot transport and local
+staging. A second storage operation waits for the Bulk turn without taking the remaining Bulk
+permits. Commands and Bulk turns do not serialize each other. Both return their memory before
+passing the turn; cancellation while waiting retains neither a turn nor a memory queue place.
+
 A crash after a log write and before application does not lose an acknowledged command. If the
 entry was committed, recovery streams it from the log and applies it. If it was not committed, a
 later leader may discard it. In either case, the client had not yet received an applied response.
@@ -293,12 +300,14 @@ snapshot and then the remaining log. Client proposals and management heartbeats 
 catch-up runs.
 
 A discovered node joins as a learner once the leader has read its published prerequisite record and
-found it compatible with the record of every live voter. The leader leaves any other candidate
-outside the membership and logs why once while the reason holds: at `debug` while the candidate has
-published no record the leader can read, and at `warn` with the voter and the mismatch when it
-cannot run beside a voter. [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes
-what the refused node does. Each membership reconciliation gives a blocking learner catch-up
-attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
+found it compatible with the record of every live voter whose run it accepted. The leader leaves any
+other candidate outside the membership and logs why once while the reason holds: at `debug` while
+the candidate has published no record the leader can read, and at `warn` with the voter and the
+mismatch when it cannot run beside a voter. It refuses the run of a voter that cannot run beside an
+older voter's run the same way, without changing the membership.
+[Prerequisites At Join](node-settings.md#prerequisites-at-join) describes the verdicts the leader
+publishes and what a refused node does. Each membership reconciliation gives a blocking learner
+catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
 learner caught up; the membership change has its own ten-second bound. A timeout leaves the node a
 learner, records `raft membership reconciliation failed`, and the one-second reconciliation loop
 tries again while ordinary replication continues.
@@ -432,9 +441,10 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_count_logs`, `raft_count_meta`,
-`raft_count_state`, and `raft_count_snapshots`. Opening it validates the complete keyspace namespace
-before reading any records. Its state metadata requires the current `RestoredLifecycle` encoding,
+The dedicated database owns exactly four current keyspaces: `raft_platform_logs`, `raft_platform_meta`,
+`raft_platform_state`, and `raft_platform_snapshots`. Opening it validates the complete keyspace namespace
+before reading any records. This namespace identifies the current Model shape, including the
+required serialized Sentry platform field. Its state metadata requires the current `RestoredLifecycle` encoding,
 including the durable restore installation gate. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
 and snapshot installation therefore retain their complete magnitudes. See
@@ -554,7 +564,7 @@ does not expose flags for them:
 | Follower decoded resident window | 4 batches per live append stream |
 | Commands memory budget | 24 MiB per node |
 | Applied command storage | 8 MiB normalized payload in a 16 MiB working reservation |
-| Storage working sets held at once | 1, as many as the Commands budget holds with room beside them |
+| Storage working sets held at once | 1 per class, as many as each Commands or Bulk budget holds with room beside them |
 | Append stream setup / progress idle bound | 5 seconds / 5 seconds |
 | Snapshot section / transport chunk | 8 MiB / 64 KiB |
 | Complete snapshot transfer | 30 seconds |

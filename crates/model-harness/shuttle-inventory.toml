@@ -90,6 +90,13 @@ name = "nervix-connector-mqtt"
 
 [[package]]
 checks = [
+  "pubsub::pool_minimum::shuttle_tests::shuttle_a_connection_closing_while_the_keeper_reads_its_pool_is_restored",
+  "pubsub::pool_minimum::shuttle_tests::shuttle_connections_closing_together_are_all_restored",
+]
+name = "nervix-connector-redis"
+
+[[package]]
+checks = [
   "queue::ingestor::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_message_its_receives_took",
   "queue::ingestor::shuttle_tests::shuttle_a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget",
 ]
@@ -267,6 +274,7 @@ checks = [
   "restore::tests::shuttle_restore_reclamation_holds_the_revision_through_queued_installation",
   "storage::chunk_shuttle_tests::shuttle_a_consumed_log_chunk_releases_its_charge_before_the_consumer_parks",
   "storage::working_set_shuttle_tests::shuttle_a_working_set_waiting_for_its_turn_leaves_room_for_source_control",
+  "storage::working_set_shuttle_tests::shuttle_a_bulk_working_set_waiting_for_its_turn_leaves_room_for_snapshot_progress",
 ]
 name = "nervix-consensus"
 
