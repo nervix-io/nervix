@@ -400,7 +400,7 @@ connection delivers it.
 | Node startup | Fails startup when its own endpoint does not resolve, or when the bootstrap endpoint does not resolve and there are no recovered Raft peer endpoints; otherwise logs and skips an unresolved bootstrap or recovered peer endpoint | The operator or process supervisor for a failed start; reachable recovered peers for a restart with an unresolved bootstrap endpoint |
 | A source | Fails its connection or its resume | The ingestor host, on the source's retry policy or, for a source in `MODE NO ACK`, its reconnect cadence |
 | A emitter | Fails its start, its reopening or its publish | The emitter host, on its backoff and retry policy |
-| A Redis command pool | Fails the physical connection the pool was opening | The emitter that borrows from the pool, on its retry policy |
+| A Redis command pool | Fails the physical connection the pool was opening: when the pool opens, its open | The emitter that borrows from the pool, on its retry policy, and, for a connection that restores the pool's `POOL SIZE MIN`, the pool itself as soon as the attempt ends |
 | A native session | Fails the connection attempt as `ClientError::ConnectServer` | The session's bounded reconnect policy until its command wait ends; `BACKUP` uses `backup_wait_timeout` |
 
 A shutdown or quiesce that arrives while a source is resuming cancels the resume, together with

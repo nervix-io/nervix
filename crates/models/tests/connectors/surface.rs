@@ -270,7 +270,7 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
             unlocated(ConnectorKind::ZeroMq, &[])
         }
         EmitterEntityKind::Sentry(SentryEmitterEntity::Event) => {
-            unlocated(ConnectorKind::Sentry, &[])
+            unlocated(ConnectorKind::Sentry, &[("PLATFORM", false)])
         }
         EmitterEntityKind::Syslog(SyslogEmitterEntity::Collector) => {
             unlocated(ConnectorKind::Syslog, &[])

@@ -419,6 +419,7 @@ fn batching_emitters_require_a_codec_container_their_emitter_can_publish() {
         .expect("a protobuf codec with BATCH MESSAGE has a batch container");
 
     *emitter.connector = EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
+        platform: None,
         mode: nervix_models::SentryEventPublishingMode::Ack {
             retry_policy: nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
@@ -1996,6 +1997,7 @@ fn sentry_emitter_rejects_http_client() {
     };
     sentry_emitter.connector = Box::new(EmitterEntity::Sentry(SentryEmitter::Event(
         SentryEventEmitter {
+            platform: None,
             mode: nervix_models::SentryEventPublishingMode::Ack {
                 retry_policy: nervix_models::RetryPolicy {
                     backoff: "250ms".to_string(),

@@ -22,16 +22,18 @@ use super::*;
 struct EnvelopeCase {
     event: Map<String, Value>,
     occurred_at: Timestamp,
+    platform: String,
 }
 
 impl SentryEventEmitter {
-    fn fixture() -> Self {
+    fn fixture(platform: &str) -> Self {
         Self {
             client: HttpClient::new(),
             envelope_url: "http://127.0.0.1:1/api/1/envelope/"
                 .parse()
                 .assured("the fixture supplies a literal HTTP URL"),
             auth: HeaderValue::from_static("Sentry sentry_key=test"),
+            platform: platform.to_owned(),
         }
     }
 }
@@ -74,11 +76,12 @@ impl EnvelopeCase {
         Self {
             event,
             occurred_at: Timestamp::from_unix_nanos(946_684_800_000_000_000),
+            platform: String::from_utf8_lossy(input).into_owned(),
         }
     }
 
     fn assert_attempts(&self) {
-        let mut connector = SentryEventEmitter::fixture();
+        let mut connector = SentryEventEmitter::fixture(&self.platform);
         let codec_bytes = serde_json::to_vec(&self.event)
             .assured("the bounded event holds only serializable JSON values");
         let prepared = connector
@@ -119,7 +122,7 @@ impl EnvelopeCase {
             .or_insert(header["event_id"].clone());
         expected
             .entry("platform".to_string())
-            .or_insert(Value::String("other".into()));
+            .or_insert(Value::String(self.platform.clone()));
         expected
             .entry("timestamp".to_string())
             .or_insert(Value::String(self.occurred_at.as_datetime().to_rfc3339()));
@@ -138,7 +141,7 @@ impl EnvelopeCase {
 
 #[test]
 fn invalid_event_json_is_a_definitive_preparation_refusal_with_its_complete_cause() {
-    let mut connector = SentryEventEmitter::fixture();
+    let mut connector = SentryEventEmitter::fixture(nervix_models::SENTRY_DEFAULT_PLATFORM);
     let occurred_at = Timestamp::from_unix_nanos(946_684_800_000_000_000);
     let payload = b"not json";
     let Err(refusal) = connector.prepare_payload(payload.to_vec(), occurred_at) else {

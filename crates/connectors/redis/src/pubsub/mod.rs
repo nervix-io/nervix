@@ -3,11 +3,12 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The Redis client a configuration declares, the `connect_timeout_ms` that bounds
-//!   opening a connection and checking one out, the node's shared pool of command connections and
+//!   opening a connection and checking one out, the node's shared pool of command connections, the
+//!   `POOL SIZE MIN` connections it keeps established, checked-out ones counted with idle ones, and
 //!   the idle and maximum lifetimes it retires them at, the dedicated subscription connection a
 //!   Pub/Sub ingestor reads a channel through, and publication of each record to a channel.
 //! - **Depends on.** The connector contract, node DNS resolver, vocabulary values, `error-stack`,
-//!   Tokio, `redis` and `bb8`.
+//!   Tokio, `redis`, `bb8` and `futures-util`'s joins.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation. The pool it borrows from is leased by the host, which owns the
 //!   interest that keeps it open and the wait it records while a connection is handed over.
@@ -24,7 +25,14 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod counting_redis;
 mod ingestor;
+mod pool_minimum;
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
@@ -32,7 +40,7 @@ mod ingestor;
 )]
 mod test_fixture;
 
-use std::{io, net::SocketAddr, time::Duration};
+use std::{io, net::SocketAddr, num::NonZeroU32, time::Duration};
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
@@ -54,10 +62,16 @@ use nervix_models::{
     RedisChannelName,
 };
 use nervix_primitives::{sync::Arc, time::Instant};
+use pool_minimum::{
+    ConnectionClosures, EstablishedConnections, KeptPool, PoolMinimum, PoolMinimumError,
+    Restoration,
+};
 use redis::{
     AsyncCommands, AsyncConnectionConfig, Client as RedisClient, ClientTlsConfig,
     ErrorKind as RedisErrorKind, RedisFuture, ServerErrorKind,
-    TlsCertificates as RedisTlsCertificates, io::AsyncDNSResolver,
+    TlsCertificates as RedisTlsCertificates,
+    aio::{ConnectionLike, MultiplexedConnection},
+    io::AsyncDNSResolver,
 };
 use thiserror::Error;
 
@@ -93,19 +107,26 @@ pub struct RedisCommandManager {
     client: RedisClient,
     dns: DnsResolver,
     connect_timeout: ConfiguredDeadline,
+    /// Handed to every connection this manager opens, which signals it when it closes.
+    closures: ConnectionClosures,
 }
 
 impl bb8::ManageConnection for RedisCommandManager {
-    type Connection = redis::aio::MultiplexedConnection;
+    type Connection = RedisCommandConnection;
     type Error = redis::RedisError;
 
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
         let config = AsyncConnectionConfig::new()
             .set_connection_timeout(Some(self.connect_timeout.bound()))
             .set_dns_resolver(RedisDns(self.dns.clone()));
-        self.client
+        let connection = self
+            .client
             .get_multiplexed_async_connection_with_config(&config)
-            .await
+            .await?;
+        Ok(RedisCommandConnection {
+            connection,
+            closures: self.closures.clone(),
+        })
     }
 
     async fn is_valid(&self, connection: &mut Self::Connection) -> Result<(), Self::Error> {
@@ -122,18 +143,144 @@ impl bb8::ManageConnection for RedisCommandManager {
     }
 }
 
+/// One physical command connection of the pool, which tells the keeper of the pool's minimum when
+/// the pool closes it.
+#[derive(Debug)]
+pub struct RedisCommandConnection {
+    connection: MultiplexedConnection,
+    closures: ConnectionClosures,
+}
+
+impl ConnectionLike for RedisCommandConnection {
+    fn req_packed_command<'a>(&'a mut self, cmd: &'a redis::Cmd) -> RedisFuture<'a, redis::Value> {
+        self.connection.req_packed_command(cmd)
+    }
+
+    fn req_packed_commands<'a>(
+        &'a mut self,
+        pipeline: &'a redis::Pipeline,
+        offset: usize,
+        count: usize,
+    ) -> RedisFuture<'a, Vec<redis::Value>> {
+        self.connection.req_packed_commands(pipeline, offset, count)
+    }
+
+    fn get_db(&self) -> i64 {
+        self.connection.get_db()
+    }
+}
+
+impl Drop for RedisCommandConnection {
+    fn drop(&mut self) {
+        self.closures.closed();
+    }
+}
+
 /// The node's shared pool of Redis command connections for one named client.
 ///
 /// Every entry is an independent connection, so the declared maximum bounds sockets rather than
 /// handles, and a checked-out connection carries one publisher's outstanding operation alone.
 /// Checking a connection out waits at most the client's `connect_timeout_ms`, which also bounds
-/// opening each new connection. The pool closes a connection idle for the client's
+/// opening each new connection. The pool keeps the declared minimum of established connections,
+/// counting the ones publishers have checked out with the idle ones, and opens another only for a
+/// publisher that finds none idle. It closes a connection idle for the client's
 /// `pool_idle_timeout_ms` or older than its `pool_max_lifetime_ms`, then opens connections again to
-/// keep the declared minimum.
+/// keep the minimum.
 #[derive(Clone, Debug)]
 pub struct RedisCommandPool {
+    shared: Arc<RedisCommandPoolShared>,
+}
+
+/// What every handle to one command pool shares.
+#[derive(Debug)]
+struct RedisCommandPoolShared {
+    commands: CommandConnections,
+    /// The task keeping `POOL SIZE MIN` established, stopped with the last handle. A pool whose
+    /// minimum is zero keeps nothing.
+    _minimum: Option<PoolMinimum>,
+}
+
+/// The pool's connections, and the deadline that every checkout and every new connection keeps.
+///
+/// The task keeping the pool's minimum holds its own copy, so it never holds the handles that stop
+/// it.
+#[derive(Clone, Debug)]
+struct CommandConnections {
     connections: bb8::Pool<RedisCommandManager>,
     connect_timeout: ConfiguredDeadline,
+}
+
+impl CommandConnections {
+    /// Open `minimum` connections into the pool before anything borrows from it.
+    ///
+    /// Nothing else holds the pool yet, so each one fits its maximum, and a connection that fails
+    /// keeps its driver's typed cause, which the open reports.
+    async fn open_minimum(&self, minimum: NonZeroU32) -> Result<(), Report<RedisClientError>> {
+        let opening = (0..minimum.get()).map(|_| self.connections.dedicated_connection());
+        let opened = futures_util::future::try_join_all(opening).await;
+        let opened = match opened {
+            Ok(opened) => opened,
+            Err(source) => return Err(redis_pool_error(source, self.connect_timeout)),
+        };
+        for connection in opened {
+            self.connections.add(connection).assured(
+                "the minimum fits the maximum, nothing else borrows from the pool yet, and a \
+                 command connection never reports itself broken",
+            );
+        }
+        Ok(())
+    }
+
+    /// Why one checkout did not hand a connection over, beneath the restoration it belonged to.
+    fn restoration_error(
+        &self,
+        error: bb8::RunError<redis::RedisError>,
+        restoration: Restoration,
+    ) -> Report<PoolMinimumError> {
+        let not_restored = PoolMinimumError::NotRestored {
+            minimum: restoration.minimum,
+        };
+        match error {
+            bb8::RunError::User(source) => {
+                redis_pool_error(source, self.connect_timeout).change_context(not_restored)
+            }
+            bb8::RunError::TimedOut => {
+                let elapsed = self
+                    .connect_timeout
+                    .elapsed("checking out a Redis command connection");
+                Report::new(elapsed).change_context(not_restored)
+            }
+        }
+    }
+}
+
+impl KeptPool for CommandConnections {
+    fn established(&self) -> EstablishedConnections {
+        let state = self.connections.state();
+        EstablishedConnections {
+            total: state.connections,
+            idle: state.idle_connections,
+        }
+    }
+
+    async fn restore(&self, restoration: Restoration) -> Result<(), Report<PoolMinimumError>> {
+        let checkouts = (0..restoration.checkouts.get()).map(|_| self.connections.get());
+        // Every checkout is held until all of them finish, so the idle connections are taken once
+        // and the pool opens one for each checkout left without one.
+        let held = futures_util::future::join_all(checkouts).await;
+        let mut failure = None;
+        for checkout in held {
+            if let Err(error) = checkout
+                && failure.is_none()
+            {
+                failure = Some(error);
+            }
+        }
+        match failure {
+            None => Ok(()),
+            Some(error) => Err(self.restoration_error(error, restoration)),
+        }
+    }
 }
 
 /// One command connection borrowed from that pool, returned when it is dropped.
@@ -179,26 +326,38 @@ pub async fn open_redis_command_pool(
     let connect_timeout = ConfiguredDeadline::connect(config)
         .change_context(RedisClientError::InvalidConnectTimeout)?;
     let lifetimes = RedisPoolLifetimes::read(config)?;
+    let closures = ConnectionClosures::default();
     let manager = RedisCommandManager {
         client,
         dns,
         connect_timeout,
+        closures: closures.clone(),
     };
-    let opened = bb8::Pool::builder()
+    // Without the driver's idle minimum, which counts idle connections only and would open another
+    // beside every connection a publisher checks out: the pool's own keeper holds the minimum.
+    let connections = bb8::Pool::builder()
         .max_size(bounds.maximum().get())
-        .min_idle(Some(bounds.minimum()))
         .connection_timeout(connect_timeout.bound())
         .idle_timeout(Some(lifetimes.idle))
         .max_lifetime(Some(lifetimes.maximum))
-        .build(manager)
-        .await;
-    match opened {
-        Ok(connections) => Ok(RedisCommandPool {
-            connections,
-            connect_timeout,
+        .build_unchecked(manager);
+    let commands = CommandConnections {
+        connections,
+        connect_timeout,
+    };
+    let minimum = match NonZeroU32::new(bounds.minimum()) {
+        None => None,
+        Some(minimum) => {
+            commands.open_minimum(minimum).await?;
+            Some(PoolMinimum::keep(commands.clone(), minimum, closures))
+        }
+    };
+    Ok(RedisCommandPool {
+        shared: Arc::new(RedisCommandPoolShared {
+            commands,
+            _minimum: minimum,
         }),
-        Err(source) => Err(redis_pool_error(source, connect_timeout)),
-    }
+    })
 }
 
 /// How long the command pool keeps a connection, as the client's effective configuration declares
@@ -416,7 +575,8 @@ impl RedisPubSubEmitter {
         pool: &'pool RedisCommandPool,
         handle: &RedisPoolHandle,
     ) -> Result<RedisPooledConnection<'pool>, Report<EmitterWriteError>> {
-        let mut borrow = std::pin::pin!(pool.connections.get());
+        let commands = &pool.shared.commands;
+        let mut borrow = std::pin::pin!(commands.connections.get());
         let mut waiting = None;
         let connection = std::future::poll_fn(|context| {
             let result = borrow.as_mut().poll(context);
@@ -426,7 +586,7 @@ impl RedisPubSubEmitter {
             result
         })
         .await
-        .map_err(|error| Self::publish_pool_error(error, pool.connect_timeout));
+        .map_err(|error| Self::publish_pool_error(error, commands.connect_timeout));
         drop(waiting);
         connection
     }
@@ -541,7 +701,10 @@ mod tests {
     use nervix_test_environment::dns_authority::DnsAnswer;
 
     use super::*;
-    use crate::pubsub::test_fixture::Fixture;
+    use crate::pubsub::{
+        counting_redis::{ConnectionCounts, CountingRedis},
+        test_fixture::Fixture,
+    };
 
     /// The deadline a client that leaves `connect_timeout_ms` out connects within.
     fn default_connect_timeout() -> ConfiguredDeadline {
@@ -609,6 +772,7 @@ mod tests {
             client,
             dns: fixture.dns,
             connect_timeout: default_connect_timeout(),
+            closures: ConnectionClosures::default(),
         };
         let source = <RedisCommandManager as bb8::ManageConnection>::connect(&manager)
             .await
@@ -661,6 +825,7 @@ mod tests {
                 client,
                 dns: fixture.dns.clone(),
                 connect_timeout: default_connect_timeout(),
+                closures: ConnectionClosures::default(),
             };
             let error = <RedisCommandManager as bb8::ManageConnection>::connect(&manager)
                 .await
@@ -829,10 +994,14 @@ mod tests {
         let pool = open_unconnected_pool(&fixture, &[])
             .await
             .expect("a pool with no minimum opens without a connection");
-        let config = pool.connections.config();
+        let config = pool.shared.commands.connections.config();
         assert_eq!(config.idle_timeout, Some(Duration::from_secs(10 * 60)));
         assert_eq!(config.max_lifetime, Some(Duration::from_secs(30 * 60)));
         assert_eq!(config.connection_timeout, default_connect_timeout().bound());
+        // The driver's idle minimum would open a connection beside every checkout.
+        assert_eq!(config.min_idle, None);
+        // A minimum of zero has nothing to keep.
+        assert!(pool.shared._minimum.is_none());
     }
 
     #[nervix_primitives::test]
@@ -847,7 +1016,7 @@ mod tests {
         )
         .await
         .expect("a pool with no minimum opens without a connection");
-        let config = pool.connections.config();
+        let config = pool.shared.commands.connections.config();
         assert_eq!(config.idle_timeout, Some(Duration::from_secs(45)));
         assert_eq!(config.max_lifetime, Some(Duration::from_secs(5)));
     }
@@ -880,5 +1049,298 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// How long a check waits for a connection that must never arrive. Lengthening it only
+    /// strengthens the check.
+    const NO_FURTHER_CONNECTION: Duration = Duration::from_millis(500);
+
+    /// How long a check waits for the stand-in's counts. Generous, because the wait ends as soon as
+    /// they reach what the check expects.
+    const COUNTS_REACHED: Duration = Duration::from_secs(30);
+
+    /// The configuration of a client whose only key is the stand-in's address.
+    fn counted_client(redis: &CountingRedis) -> [ClientConfigEntry; 1] {
+        [ClientConfigEntry {
+            key: "addr".to_string(),
+            value: redis.url(),
+        }]
+    }
+
+    #[nervix_primitives::test]
+    async fn a_publisher_checking_connections_out_opens_none_beyond_the_minimum() {
+        let fixture = Fixture::start().await;
+        let redis = CountingRedis::start().await;
+        let pool = open_redis_command_pool(
+            &counted_client(&redis),
+            ClientPoolBounds::new(1, std::num::NonZeroU32::new(4).expect("four is positive"))
+                .expect("a minimum of one fits a maximum of four"),
+            fixture.dns.clone(),
+        )
+        .await
+        .expect("the stand-in accepts the pool's minimum");
+        assert_eq!(redis.counts().accepted, 1);
+        for _ in 0..5 {
+            let mut connection = pool
+                .shared
+                .commands
+                .connections
+                .get()
+                .await
+                .expect("the pool hands its idle connection over");
+            let _subscribers: i64 = connection
+                .publish("events", b"payload".as_slice())
+                .await
+                .expect("the stand-in answers the publish");
+        }
+        let further = nervix_primitives::time::timeout(
+            NO_FURTHER_CONNECTION,
+            redis.reach(
+                COUNTS_REACHED,
+                "a connection beyond the minimum",
+                |counts| counts.accepted > 1,
+            ),
+        )
+        .await;
+        assert!(
+            further.is_err(),
+            "one publisher at a time made the pool open a connection beyond its minimum: {:?}",
+            redis.counts()
+        );
+        assert_eq!(pool.shared.commands.connections.state().connections, 1);
+    }
+
+    /// Open a pool of `bounds` against the stand-in, with `entries` beside its address.
+    async fn open_counted_pool(
+        fixture: &Fixture,
+        redis: &CountingRedis,
+        bounds: ClientPoolBounds,
+        entries: &[(&str, &str)],
+    ) -> RedisCommandPool {
+        let mut config = counted_client(redis).to_vec();
+        for (key, value) in entries {
+            config.push(ClientConfigEntry {
+                key: (*key).to_string(),
+                value: (*value).to_string(),
+            });
+        }
+        open_redis_command_pool(&config, bounds, fixture.dns.clone())
+            .await
+            .expect("the stand-in accepts the pool's minimum")
+    }
+
+    fn bounds(minimum: u32, maximum: u32) -> ClientPoolBounds {
+        let maximum = std::num::NonZeroU32::new(maximum).expect("the test maximum is positive");
+        ClientPoolBounds::new(minimum, maximum).expect("the test minimum fits its maximum")
+    }
+
+    #[nervix_primitives::test]
+    async fn opening_a_pool_establishes_its_minimum() {
+        let fixture = Fixture::start().await;
+        let redis = CountingRedis::start().await;
+        let pool = open_counted_pool(&fixture, &redis, bounds(3, 4), &[]).await;
+        assert!(pool.shared._minimum.is_some());
+        let state = pool.shared.commands.connections.state();
+        assert_eq!((state.connections, state.idle_connections), (3, 3));
+        assert_eq!(
+            redis
+                .reach(COUNTS_REACHED, "three open connections", |counts| counts
+                    .open
+                    == 3)
+                .await,
+            ConnectionCounts {
+                accepted: 3,
+                open: 3
+            }
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_closed_connection_is_replaced_counting_the_ones_checked_out() {
+        let lifetime = Duration::from_millis(250);
+        let fixture = Fixture::start().await;
+        let redis = CountingRedis::start().await;
+        let lifetime_ms = lifetime.as_millis().to_string();
+        let pool = open_counted_pool(
+            &fixture,
+            &redis,
+            bounds(2, 4),
+            &[("pool_max_lifetime_ms", lifetime_ms.as_str())],
+        )
+        .await;
+        let opened_at = Instant::now();
+        let connections = &pool.shared.commands.connections;
+        let held = connections
+            .get()
+            .await
+            .expect("the pool hands its first idle connection over");
+        let returned = connections
+            .get()
+            .await
+            .expect("the pool hands its second idle connection over");
+        // Both were opened before the pool was, so this is when both have outlived the lifetime.
+        nervix_primitives::time::sleep_until(opened_at + lifetime).await;
+        // Returned past its lifetime, this one is closed while the other stays checked out.
+        drop(returned);
+        let counts = redis
+            .reach(
+                COUNTS_REACHED,
+                "one replacement beside the checked-out connection",
+                |counts| counts.accepted == 3 && counts.open == 2,
+            )
+            .await;
+        assert_eq!(
+            counts,
+            ConnectionCounts {
+                accepted: 3,
+                open: 2
+            }
+        );
+        let further = nervix_primitives::time::timeout(
+            NO_FURTHER_CONNECTION,
+            redis.reach(COUNTS_REACHED, "a second replacement", |counts| {
+                counts.accepted > 3
+            }),
+        )
+        .await;
+        assert!(
+            further.is_err(),
+            "the pool replaced its closed connection beside the checked-out one with more than \
+             one: {:?}",
+            redis.counts()
+        );
+        let state = connections.state();
+        assert_eq!((state.connections, state.idle_connections), (2, 1));
+        drop(held);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_minimum_that_cannot_be_opened_fails_the_open_with_the_connection_cause() {
+        let fixture = Fixture::start().await;
+        let name = "missing.nervix.test";
+        fixture.authority.set(
+            name,
+            DnsAnswer::NameNotFound {
+                negative_ttl: Duration::from_secs(1),
+            },
+        );
+        let missing = [ClientConfigEntry {
+            key: "addr".to_string(),
+            value: format!("redis://{name}:6379"),
+        }];
+        let error = open_redis_command_pool(&missing, bounds(1, 4), fixture.dns.clone())
+            .await
+            .expect_err("a missing name cannot open the pool's minimum");
+        assert!(
+            matches!(
+                error.current_context(),
+                RedisClientError::Resolve {
+                    host,
+                    failure: DnsLookupFailure::NameNotFound
+                } if host == name
+            ),
+            "{error:?}"
+        );
+        let refused = [ClientConfigEntry {
+            key: "addr".to_string(),
+            value: "redis://127.0.0.1:1".to_string(),
+        }];
+        let error = open_redis_command_pool(&refused, bounds(1, 4), fixture.dns.clone())
+            .await
+            .expect_err("a refused address cannot open the pool's minimum");
+        assert!(
+            matches!(error.current_context(), RedisClientError::Connect { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn dropping_the_pool_stops_its_keeper_and_closes_its_connections() {
+        let fixture = Fixture::start().await;
+        let redis = CountingRedis::start().await;
+        let pool = open_counted_pool(&fixture, &redis, bounds(2, 4), &[]).await;
+        assert_eq!(
+            redis.counts(),
+            ConnectionCounts {
+                accepted: 2,
+                open: 2
+            }
+        );
+        drop(pool);
+        let counts = redis
+            .reach(
+                COUNTS_REACHED,
+                "every connection closed with the pool",
+                |counts| counts.open == 0,
+            )
+            .await;
+        assert_eq!(counts.accepted, 2);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_restoration_that_cannot_check_out_names_the_minimum_above_its_cause() {
+        let fixture = Fixture::start().await;
+        // Nothing listens on the address, so every connection the pool opens is refused.
+        let pool = open_unconnected_pool(&fixture, &[("connect_timeout_ms", "200")])
+            .await
+            .expect("a pool with no minimum opens without a connection");
+        let commands = &pool.shared.commands;
+        let restoration = Restoration {
+            minimum: std::num::NonZeroU32::MIN,
+            checkouts: std::num::NonZeroU32::MIN,
+        };
+        let error = commands
+            .restore(restoration)
+            .await
+            .expect_err("a pool that cannot open a connection cannot restore its minimum");
+        assert!(
+            matches!(
+                error.current_context(),
+                PoolMinimumError::NotRestored { minimum } if *minimum == restoration.minimum
+            ),
+            "{error:?}"
+        );
+        let elapsed = error
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<DeadlineElapsed>())
+            .expect("the checkout's elapsed deadline stays beneath the restoration");
+        assert_eq!(elapsed.key, DeadlineKey::ConnectTimeout);
+        assert_eq!(elapsed.bound, Duration::from_millis(200));
+
+        let refused = redis::RedisError::from(io::Error::from(io::ErrorKind::ConnectionRefused));
+        let error = commands.restoration_error(bb8::RunError::User(refused), restoration);
+        assert!(matches!(
+            error.current_context(),
+            PoolMinimumError::NotRestored { .. }
+        ));
+        assert!(
+            error.frames().any(|frame| matches!(
+                frame.downcast_ref::<RedisClientError>(),
+                Some(RedisClientError::Connect { .. })
+            )),
+            "{error:?}"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_pooled_connection_carries_pipelines_and_names_its_database() {
+        let fixture = Fixture::start().await;
+        let redis = CountingRedis::start().await;
+        let pool = open_counted_pool(&fixture, &redis, bounds(1, 1), &[]).await;
+        let mut connection = pool
+            .shared
+            .commands
+            .connections
+            .get()
+            .await
+            .expect("the pool hands its connection over");
+        let answers: (String, String) = redis::pipe()
+            .cmd("PING")
+            .cmd("PING")
+            .query_async(&mut *connection)
+            .await
+            .expect("the stand-in answers both commands of the pipeline");
+        assert_eq!(answers, ("PONG".to_string(), "PONG".to_string()));
+        assert_eq!(connection.get_db(), 0);
     }
 }

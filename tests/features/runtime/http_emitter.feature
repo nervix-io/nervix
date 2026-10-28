@@ -204,7 +204,7 @@ Feature: HTTP REQUEST emitter
         'endpoint' = 'https://api.example.com', 'timeout_ms' = 5000
       };
       CREATE SENTRY CLIENT other CONFIG {
-        'dsn' = 'http://public@127.0.0.1:8000/1'
+        'dsn' = 'http://public@127.0.0.1:8000/1', 'timeout_ms' = 5000
       };
       """
     When these Plexus commands fail with "requires a HTTP client"

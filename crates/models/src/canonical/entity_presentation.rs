@@ -32,8 +32,8 @@ use crate::{
     OptionPresence, OtelEmitter, OtelMetric, OtelMetricKind, PostgresConflictAction,
     PostgresEmitter, PrometheusIngestor, PrometheusQueryIngestor, PulsarEmitter, PulsarIngestor,
     PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestor, RabbitMqQueueIngestor, RedisEmitter,
-    RedisIngestor, RedisPubSubIngestor, SqsEmitter, SqsFifoGroup, SqsIngestor, SqsQueueIngestor,
-    SyslogIngestor, SyslogListenerIngestor, WebsocketsConnectionIngestor,
+    RedisIngestor, RedisPubSubIngestor, SentryEmitter, SqsEmitter, SqsFifoGroup, SqsIngestor,
+    SqsQueueIngestor, SyslogIngestor, SyslogListenerIngestor, WebsocketsConnectionIngestor,
     WebsocketsEndpointIngestor, WebsocketsIngestor, ZeroMqIngestor, ZeroMqPullIngestor,
 };
 
@@ -586,7 +586,11 @@ impl EmitterEntity {
         presentation: &mut EntityPresentation,
     ) -> error_stack::Result<(), CanonicalPlexusError> {
         match self {
-            Self::Client(_) | Self::ZeroMq(_) | Self::Sentry(_) | Self::Syslog(_) => {}
+            Self::Client(_) | Self::ZeroMq(_) | Self::Syslog(_) => {}
+            Self::Sentry(SentryEmitter::Event(entity)) => {
+                presentation
+                    .optional_option("PLATFORM", entity.platform.as_deref().map(string_literal));
+            }
             Self::Http(HttpEmitter::Request(entity)) => {
                 presentation.written_option("METHOD", expression_to_plexus(&entity.method)?);
                 presentation.written_option("PATH", expression_to_plexus(&entity.path)?);

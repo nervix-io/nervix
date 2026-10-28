@@ -117,6 +117,11 @@ Local opening uses exactly those namespace levels, independently of the Nervix d
 Its commit-size value has already crossed the same positive whole-byte validation boundary as a
 batch-size value; plan construction reads its byte count without interpreting another string.
 
+A Sentry event plan carries the effective platform as a required string. Planning resolves an
+omitted `PLATFORM` from the entity's declared default once; composition passes that value into
+the connector configuration. Preparation uses it only when the codec omits `platform`. The
+runtime neither reads the Sentry Model nor selects its own default.
+
 Kafka source installation also binds the node-owned executor into the connector plan. Partition
 inspectors used by scheduling and the host's partition watch use that same node executor. The
 connector interprets the effective native client deadline and admits its synchronous driver calls;

@@ -171,9 +171,9 @@ The shared variables are:
   system recovers or an operator repairs its provisioning.
 
 Request/response emitters—SQS, Sentry, OTEL, HTTP, the databases, and Iceberg—do not take
-`ACK TIMEOUT`. Except for Iceberg, their client request timeout bounds the response. SQS and
-Sentry clients expose that bound as the optional `timeout_ms` CONFIG key; OTEL, ClickHouse and
-HTTP emitter clients require it. An Iceberg emitter's object-store client bounds each storage
+`ACK TIMEOUT`. Except for Iceberg, their client request timeout bounds the response. SQS clients
+expose that bound as the optional `timeout_ms` CONFIG key; Sentry, OTEL, ClickHouse and HTTP
+emitter clients require it. An Iceberg emitter's object-store client bounds each storage
 call with its own optional `timeout_ms`, while Nervix sets no deadline on its REST catalog
 requests, as [Iceberg retries](#iceberg-retries) describes. For every emitter, Nervix accounts for
 records individually wherever the transport exposes individual results: delivered records acknowledge
@@ -1833,6 +1833,7 @@ the emitter's `WHERE` drops is never sent, so a failure of its group is never re
 CREATE SENTRY EVENT EMITTER <name>
   FROM <relay>
   TO <client>
+  [PLATFORM 'python']
     MODE <mode>
     ENCODE USING <codec>
   <construction>
@@ -1849,7 +1850,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | SENTRY client |
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | No entity-specific options. |
+| Options in statement order | `PLATFORM 'python'` (string literal); optional; default other |
 | Headers | Not offered: An event is encoded inside its Sentry envelope; arbitrary per-event HTTP header writes are not supported. |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -1858,7 +1859,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | a request: name resolution, connection, TLS and the response headers: `timeout_ms`; unbounded when omitted |
+| Network waits | a request: name resolution, connection, TLS and the response headers: `timeout_ms`; required |
 | Driver limits | An event above 1,000,000 bytes is rejected. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
@@ -1878,6 +1879,7 @@ CREATE SENTRY CLIENT sentry_main
 CREATE SENTRY EVENT EMITTER sentry_errors
   FROM errors
   TO sentry_main
+    PLATFORM 'python'
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING sentry_event_codec
   INHERIT ALL
@@ -1889,7 +1891,11 @@ CREATE SENTRY EVENT EMITTER sentry_errors
 The codec must produce one top-level JSON object per record. Its fields use the Sentry event
 protocol, such as `message`, `level`, `environment`, `release`, `tags`, `extra`, `user`, and
 `exception`. Nervix preserves the complete object and supplies `event_id`, `timestamp`, and
-`platform` when they are omitted. It then creates a Sentry envelope, derives the envelope URL and
+`platform` when they are omitted. The default timestamp is the batch's execution time. The
+optional `PLATFORM '<value>'` clause, before `MODE`, supplies an absent platform; leaving the
+clause out selects `other`. A platform already supplied by the codec is preserved. `DESCRIBE`
+shows the effective platform, while `SHOW CREATE` retains whether the clause was written.
+Nervix then creates a Sentry envelope, derives the envelope URL and
 authentication header from the DSN, and submits the event. An invalid event object is handled as a
 route-local encoding error.
 
@@ -1913,8 +1919,12 @@ framing are outside `MAX SIZE`.
 
 Use a JSON wire codec or a JAQ-native codec with JSON output. Sentry emitters require `ENCODE
 USING`, do not accept `write_header`, and still require explicit leakage for sensitive event
-fields. The optional Sentry client keys `timeout_ms`, `tls_ca_file`, `tls_cert_file`, and
-`tls_key_file` have their usual meanings.
+fields. The strict client configuration requires `dsn` and a positive `timeout_ms`. Nervix
+validates the complete DSN with Sentry's native parser at `CREATE CLIENT`, including rendered
+values, before committing the client or connecting to the service. An invalid DSN names `dsn`
+without exposing its value. Client inspection redacts the DSN. The optional `tls_ca_file`,
+`tls_cert_file`, and `tls_key_file` keys have their usual meanings; a certificate and private key
+must be supplied together. Unknown keys are refused.
 Sentry resolves the DSN endpoint through the node's configured DNS resolver; a `timeout_ms`
 includes that lookup, connection setup, TLS, and the response.
 
