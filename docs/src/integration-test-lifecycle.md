@@ -53,6 +53,16 @@ completion with [Command Completion](./command-completion.md).
 
 ## What Runs Where
 
+The emitter assembly outline observes the emitter's public received-message total before each
+switch between its two source relays. It waits for all three initial A rows before posting B, and
+both B rows before returning to A. An endpoint's `NO ACK` response confirms intake admission;
+independent ready relay queues can still interleave at the emitter. The owner regression queues
+B5/B6 before A4/A7 after receiving A3 and observes B5, A4, B6, A7. The packing regression requires
+separate payloads at each of those source boundaries. The public outline retains all seven rows,
+both named branches, source headers, both count and byte limits, one- and three-node clusters,
+the twenty-second flush and the forty-five-second exact-payload assertion. The receipt waits end
+when their condition holds and do not serialize other scenarios.
+
 The orphaned-transaction expiry scenario holds finished-transaction cleanup for its domain on each
 node before it begins the transaction. Expiry and the leadership transfer proceed normally. The
 successor reaches its cleanup barrier only after it observes the replicated terminal transaction;

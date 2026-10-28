@@ -676,6 +676,11 @@ container shape, such as a one-element array, and a carrier with no eligible row
 Batching adds no timer: `FLUSH` alone decides when records leave, and a partial payload is published
 exactly like a full one.
 
+Arrival order is established at the emitter. Each input queue keeps its own order, and ready
+inputs can interleave. Sequential `MODE NO ACK` HTTP responses from different ingestors do
+not establish a common receive order at the emitter. Compatible rows separated by another source
+stay in separate payloads even when their requests were accepted consecutively.
+
 `MAX SIZE` is the exact length of the payload: escaping, UTF-8, base64, field names, separators,
 length prefixes and the container's own brackets all count, and a batch transformation is measured
 by the bytes of its output. Nervix never estimates the size. It encodes the candidate into a buffer
