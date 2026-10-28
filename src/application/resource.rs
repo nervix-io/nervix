@@ -178,9 +178,8 @@ enum UploadResumption {
 }
 
 impl UploadResumption {
-    /// Resumes from a failed read of this node's installed copy of `id`. A copy that was never
-    /// installed leaves the admitted archive unavailable, a refusal by the node's executor or a
-    /// cancellation decided nothing, and any other failure leaves the copy unusable.
+    /// Resumes from a failed read of this node's installed copy of `id`. A refusal by the node's
+    /// executor or a cancellation decided nothing, and any other failure leaves the copy unusable.
     fn from_unreadable_copy(error: Report<ResourceStoreError>, id: &ResourceId) -> Self {
         if let ResourceStoreError::BulkAdmission
         | ResourceStoreError::JoinBlockingTask
@@ -190,13 +189,10 @@ impl UploadResumption {
                 error.change_context(ResourceUploadError::ReadInstalledCopy { id: id.clone() }),
             );
         }
-        let unavailable = ResourceUploadError::AdmittedArchiveUnavailable { id: id.clone() };
-        if let Some(read) = error.downcast_ref::<std::io::Error>()
-            && read.kind() == std::io::ErrorKind::NotFound
-        {
-            return Self::Failed(Report::new(unavailable));
-        }
-        Self::Failed(error.change_context(unavailable))
+        Self::Failed(
+            error
+                .change_context(ResourceUploadError::AdmittedArchiveUnavailable { id: id.clone() }),
+        )
     }
 
     /// Resumes from a refused publication of this node's installed copy of `id`. A conflict with
@@ -463,35 +459,23 @@ impl SessionServiceImpl {
                 continue;
             }
             let local_manifest = self.inner.resource_store.read_manifest(&resource.id).await;
-            let local_error = match local_manifest {
-                Ok(manifest) if manifest.resource == resource => {
-                    let replica = ResourceNodeStatus {
-                        key: local_key,
-                        state: ResourceNodeState::Ready,
-                        root_checksum: Some(manifest.resource.root_checksum),
-                        last_verified_at: Some(current_timestamp()),
-                        source_node: Some(local_node.clone()),
-                        error: None,
-                    };
-                    if let Err(error) = self.publish_resource_replica(replica).await {
-                        self.broadcast_error(format!("{error:#}"));
-                    }
-                    continue;
+            if let Ok(Some(manifest)) = &local_manifest
+                && manifest.resource == resource
+            {
+                let replica = ResourceNodeStatus {
+                    key: local_key,
+                    state: ResourceNodeState::Ready,
+                    root_checksum: Some(manifest.resource.root_checksum.clone()),
+                    last_verified_at: Some(current_timestamp()),
+                    source_node: Some(local_node.clone()),
+                    error: None,
+                };
+                if let Err(error) = self.publish_resource_replica(replica).await {
+                    self.broadcast_error(format!("{error:#}"));
                 }
-                Ok(manifest) => format!(
-                    "installed manifest for resource '{}@{}' does not match its durable version; \
-                     found root checksum {}",
-                    resource.id.identifier.as_str(),
-                    resource.id.version,
-                    manifest.resource.root_checksum,
-                ),
-                Err(error) => format!(
-                    "failed to read the installed manifest for resource '{}@{}': {error}",
-                    resource.id.identifier.as_str(),
-                    resource.id.version,
-                ),
-            };
-            let Some(source_node) = resource_replicas.and_then(|replicas| {
+                continue;
+            }
+            let source_node = resource_replicas.and_then(|replicas| {
                 replicas.iter().find_map(|(node, replica)| {
                     (node != &local_node
                         && live_nodes.contains(node)
@@ -500,23 +484,55 @@ impl SessionServiceImpl {
                             == Some(resource.root_checksum.as_str()))
                     .then(|| node.clone())
                 })
-            }) else {
-                let failed = ResourceNodeStatus {
+            });
+            #[cfg(feature = "testing")]
+            let source_node = if source_node.is_some()
+                && self
+                    .inner
+                    .runtime
+                    .resource_source_discovery_is_deferred(&local_node_id)
+            {
+                None
+            } else {
+                source_node
+            };
+            let Some(source_node) = source_node else {
+                let local_error = match local_manifest {
+                    Ok(None) => None,
+                    Ok(Some(manifest)) => Some(format!(
+                        "installed manifest for resource '{}@{}' does not match its durable \
+                         version; found root checksum {}",
+                        resource.id.identifier.as_str(),
+                        resource.id.version,
+                        manifest.resource.root_checksum,
+                    )),
+                    Err(error) => Some(format!(
+                        "failed to read the installed manifest for resource '{}@{}': {error:#}",
+                        resource.id.identifier.as_str(),
+                        resource.id.version,
+                    )),
+                };
+                let state = match &local_error {
+                    Some(_) => ResourceNodeState::Failed,
+                    None => ResourceNodeState::Pending,
+                };
+                let local_status = ResourceNodeStatus {
                     key: local_key,
-                    state: ResourceNodeState::Failed,
+                    state,
                     root_checksum: None,
                     last_verified_at: None,
                     source_node: None,
-                    error: Some(local_error),
+                    error: local_error,
                 };
                 let already_reported = match resource_replicas {
                     Some(replicas) => match replicas.get(&local_node) {
-                        Some(replica) => replica == &failed,
+                        Some(replica) => replica == &local_status,
                         None => false,
                     },
                     None => false,
                 };
-                if !already_reported && let Err(error) = self.publish_resource_replica(failed).await
+                if !already_reported
+                    && let Err(error) = self.publish_resource_replica(local_status).await
                 {
                     self.broadcast_error(format!("{error:#}"));
                 }
@@ -647,7 +663,12 @@ impl SessionServiceImpl {
         id: &ResourceId,
     ) -> UploadResumption {
         let manifest = match self.inner.resource_store.read_manifest(id).await {
-            Ok(manifest) => manifest,
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => {
+                return UploadResumption::Failed(Report::new(
+                    ResourceUploadError::AdmittedArchiveUnavailable { id: id.clone() },
+                ));
+            }
             Err(error) => return UploadResumption::from_unreadable_copy(error, id),
         };
         if manifest.resource.id != *id
@@ -1352,9 +1373,9 @@ mod tests {
     use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
     use nervix_models::{
         ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CreateResource,
-        CreateStatement, DomainName, ResourceName, ResourceUpload, ResourceUploadIdentity,
-        ResourceUploads, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus, Timestamp,
-        UserName,
+        CreateStatement, DescribeResource, DomainName, ResourceName, ResourceUpload,
+        ResourceUploadIdentity, ResourceUploads, ResourceVersion, ResourceVersionCounter,
+        ResourceVersionStatus, Timestamp, UserName,
     };
     use nervix_plexus::client_statement::local_path_fragment;
     use sorted_vec::SortedVec;
@@ -1946,6 +1967,48 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn an_interrupted_upload_without_a_local_copy_fails_as_unavailable() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
+        let domain =
+            DomainName::parse("default").assured("the test domain is an identifier-shaped literal");
+        let identifier = "missing_archive";
+        declare_resource(&service, &domain, identifier).await;
+        let key = resource_upload_key(&domain, identifier, "missing-upload");
+        let upload = service
+            .inner
+            .consensus
+            .begin_resource_upload(key.clone(), "unavailable-root".to_string())
+            .await
+            .assured("the test upload is admitted by the single-node leader");
+        let id = ResourceId::new(key.domain.clone(), key.identifier.clone(), upload.version);
+        let execution_guard = recovery_execution(&service, &key).await;
+
+        service
+            .recover_resource_upload(upload, execution_guard)
+            .await;
+
+        let resources = service.inner.consensus.current_resources().await;
+        let retained = resources
+            .upload(&key)
+            .assured("the failed upload remains in durable state");
+        let ResourceUploadState::Failed { reason, .. } = &retained.state else {
+            panic!("an absent installed copy cannot complete the upload: {retained:?}");
+        };
+        assert_eq!(
+            reason,
+            "the admitted archive is unavailable before durable version installation"
+        );
+        assert_eq!(resources.version(&id), None, "nothing is published");
+        assert!(!service.inner.resource_upload_executions.contains_key(&key));
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[nervix_primitives::test]
     async fn an_interrupted_upload_fails_when_the_leaders_copy_holds_another_archive() {
         let TestService {
             service,
@@ -2063,19 +2126,6 @@ mod tests {
              no bulk capacity for this resource version"
         );
 
-        let missing = UploadResumption::from_unreadable_copy(
-            Report::new(std::io::Error::from(std::io::ErrorKind::NotFound))
-                .change_context(ResourceStoreError::ReadFile),
-            &id,
-        );
-        let UploadResumption::Failed(missing) = missing else {
-            panic!("a copy that was never installed leaves the archive unavailable: {missing:?}");
-        };
-        assert_eq!(
-            format!("{missing:#}"),
-            "the admitted archive is unavailable before durable version installation"
-        );
-
         let denied = UploadResumption::from_unreadable_copy(
             Report::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
                 .change_context(ResourceStoreError::ReadFile),
@@ -2126,8 +2176,31 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Copy)]
+    enum LocalManifestFixture {
+        Absent,
+        Malformed,
+        Mismatched,
+    }
+
+    #[rstest::rstest]
+    #[case::absent(LocalManifestFixture::Absent, ResourceNodeState::Pending, None)]
+    #[case::malformed(
+        LocalManifestFixture::Malformed,
+        ResourceNodeState::Failed,
+        Some("EOF while parsing an object")
+    )]
+    #[case::mismatched(
+        LocalManifestFixture::Mismatched,
+        ResourceNodeState::Failed,
+        Some("does not match its durable version")
+    )]
     #[nervix_primitives::test]
-    async fn reconciliation_retains_a_failed_local_replica_when_no_live_source_exists() {
+    async fn reconciliation_tracks_local_installation_while_sources_are_unavailable(
+        #[case] local_manifest: LocalManifestFixture,
+        #[case] expected_state: ResourceNodeState,
+        #[case] expected_cause: Option<&str>,
+    ) {
         let TestService {
             service,
             registry: _registry,
@@ -2177,6 +2250,37 @@ mod tests {
             local_node,
         );
 
+        match local_manifest {
+            LocalManifestFixture::Absent => {}
+            LocalManifestFixture::Malformed => {
+                let manifest_path = service.inner.resource_store.manifest_path(&resource.id);
+                let parent = manifest_path
+                    .parent()
+                    .assured("the store puts every manifest inside a version directory");
+                std::fs::create_dir_all(parent)
+                    .assured("the fixture creates its version directory");
+                std::fs::write(&manifest_path, "{")
+                    .assured("the fixture writes its malformed manifest");
+            }
+            LocalManifestFixture::Mismatched => {
+                let source = path.join("different-content");
+                std::fs::create_dir(&source).assured("the fixture creates its source directory");
+                std::fs::write(source.join("content"), "x")
+                    .assured("the fixture writes its source content");
+                service
+                    .inner
+                    .resource_store
+                    .install_from_directory(
+                        resource.id.clone(),
+                        &source,
+                        resource.created_by_node.clone(),
+                        resource.created_at,
+                    )
+                    .await
+                    .assured("the production installer creates a valid but different local copy");
+            }
+        }
+
         service.reconcile_resources_once().await;
         service.reconcile_resources_once().await;
 
@@ -2186,13 +2290,42 @@ mod tests {
             .binary_search_by(|replica| replica.key.cmp(&local_key))
             .assured("reconciliation publishes the local replica outcome");
         let replica = &resources.replicas[replica_index];
-        assert_eq!(replica.state, ResourceNodeState::Failed);
-        assert!(
-            replica
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("installed manifest"))
-        );
+        assert_eq!(replica.state, expected_state);
+        match expected_cause {
+            Some(cause) => {
+                let reason = replica
+                    .error
+                    .as_deref()
+                    .assured("the unusable manifest has a failure reason");
+                assert!(
+                    reason.contains(cause),
+                    "manifest failure cause missing: {reason}"
+                );
+            }
+            None => assert_eq!(replica.error, None),
+        }
+
+        if matches!(local_manifest, LocalManifestFixture::Malformed) {
+            let description = service
+                .describe_resource(
+                    &domain,
+                    DescribeResource {
+                        identifier: resource.id.identifier.clone(),
+                        version: Some(resource.id.version),
+                    },
+                )
+                .await;
+            assert!(description.succeeded(), "{description:?}");
+            let unavailable_entries = description
+                .message
+                .lines()
+                .find(|line| line.starts_with("  - unavailable error="))
+                .assured("DESCRIBE reports the local manifest entries as unavailable");
+            assert!(
+                unavailable_entries.contains("EOF while parsing an object"),
+                "DESCRIBE lost the manifest decoding cause: {unavailable_entries}"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&path);
     }

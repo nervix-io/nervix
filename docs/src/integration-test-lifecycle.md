@@ -1883,6 +1883,22 @@ compaction failed; see [Terminal Teardown](./shutdown.md#terminal-teardown).
 
 ### What Cleanup Releases
 
+The resource-source-discovery fixture uses the existing node-scoped command-pause registry. Once
+reconciliation finds a usable source for an absent local copy, the fixture hides the source view
+and records that it was consumed. It leaves the node, transport and all other scenarios running.
+The public regression waits for that observation and the pending replica, explicitly restores
+source visibility, and verifies upload completion and a lookup from the replicated file. Its
+observation wait is bounded at 120 seconds; its public pending-state probe keeps a 30-second bound.
+The source view changes only in a testing build. Explicit release removes the control, and the
+ordinary scenario cleanup releases and clears it with the other command pauses after failure.
+
+The resource upload-publication fixture retains its selected node's refusal in a watch channel.
+It refuses one publication after the local archive is installed, then holds that upload's reply
+until reconciliation takes the applying upload up. The client therefore cannot supply the archive
+again before the recovery observation. The retained `TakenUp` state permits the scenario's positive
+assertion and is disposed with that world's injector. Active, order and stressed selections include
+both cluster sizes of this existing public recovery outline.
+
 Harness state goes back only after the tasks that used it have ended, so the next scenario never
 finds a port, a fault, or a proxy taken. What a node left stopping still uses stays with its keeper
 until that node has ended.
@@ -2170,7 +2186,11 @@ it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
 
-The RabbitMQ fixture publishes its management HTTP port beside the AMQP endpoints. A scenario's
+The RabbitMQ fixture publishes its management HTTP port beside the AMQP endpoints. Its AMQP TLS
+listener requires a client certificate the scenario certificate authority issued, so an `amqps`
+client that presents none is refused by the broker. The scenario server certificate also carries
+the client-authentication usage, and the TLS scenarios mount it with its key as their client
+identity. The management listener requests no client certificate. A scenario's
 `RabbitMqQueueProbe` observes its explicitly provisioned queue with the fixture credentials:
 consumer acknowledgement mode and prefetch, unacknowledged deliveries, or total outstanding
 messages. Each observation uses the shared status budget and bounded polling. These are broker

@@ -65,6 +65,7 @@ mod model_publication;
 mod pause;
 mod relay_memory;
 mod relocation_commit;
+mod resource_discovery;
 mod resource_publication;
 #[cfg(test)]
 mod resource_publication_tests;
@@ -443,6 +444,7 @@ enum CommandPausePoint {
     RelocationPublication(DomainName),
     ResponseDelivery(ClusterNodeName),
     ResourceInstallation(ClusterNodeName),
+    ResourceSourceDiscovery(ClusterNodeName),
     RestoreStep {
         node_id: ClusterNodeName,
         step: RestoreStep,
