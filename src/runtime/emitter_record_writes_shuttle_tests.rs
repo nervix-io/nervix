@@ -5,9 +5,9 @@
 //! - **Owns.** The invariants the members of a batch payload are held to while the emitter's answers,
 //!   a retry, a cancelled attempt, terminal shutdown, a sibling emitter and a drain race one
 //!   another: every member resolves once, no source acknowledgement completes before every
-//!   attached emitter confirmed it, a retry writes a retained payload with exactly the bytes it
-//!   was first written with, and a drain never reads the emitter empty while one of its members
-//!   is unresolved.
+//!   attached emitter confirmed it, a retry writes a retained payload with exactly the bytes and
+//!   the envelope it was first written with, and a drain never reads the emitter empty while one of
+//!   its members is unresolved.
 //! - **Depends on.** The emitter's buffer, its buffered batches and their row states, its retained
 //!   batch payloads and the answers applied to them, acknowledgement sets, and the server Shuttle
 //!   runner.
@@ -23,7 +23,9 @@
 // scheduling step as the operation it records. The emitter's own counts are the production owner's
 // state, so they are the selected, modeled atomics.
 use futures_util::FutureExt as _;
-use nervix_connector::{EmitterWriteError, RecordEmitter as _};
+use nervix_connector::{
+    EmitterWriteError, PropertyValue, RecordEmitter as _, RecordEnvelope, RecordProperty,
+};
 use nervix_connector_fake::{FakeEmitter, PublishAnswer, Records};
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_primitives::{
@@ -65,6 +67,19 @@ fn one_batch(acks: Vec<AckSet>) -> EmitterPublishBatch {
     EmitterPublishBatch::from_batch(batch, Timestamp::from_unix_nanos(1))
 }
 
+/// The envelope every modeled payload is prepared with: a flag, a computed value and a property.
+fn modeled_envelope() -> RecordEnvelope {
+    RecordEnvelope {
+        persistent: true,
+        message_id: Some("event-1".to_string()),
+        properties: vec![RecordProperty {
+            name: "priority",
+            value: PropertyValue::U8(5),
+        }],
+        ..RecordEnvelope::default()
+    }
+}
+
 fn payload(rows: &[usize], bytes: &[u8]) -> PreparedPayload<EncodedPayload> {
     let mut members = Vec::with_capacity(rows.len());
     for row in rows {
@@ -78,6 +93,7 @@ fn payload(rows: &[usize], bytes: &[u8]) -> PreparedPayload<EncodedPayload> {
                 key: None,
                 headers: Vec::new(),
                 message_group: None,
+                clauses: Some(Arc::new(modeled_envelope())),
             },
             payload: bytes.to_vec(),
         },
@@ -117,7 +133,7 @@ enum SiblingEnd {
 /// Two source messages fan out to a batching emitter and a sibling emitter. The batching emitter
 /// writes one payload of both, learns nothing, and writes it again, while the sibling resolves its
 /// own shares. Each source acknowledgement completes once: successfully only after both emitters
-/// confirmed it, and the retry writes exactly the bytes of the first attempt.
+/// confirmed it, and the retry writes exactly the bytes and the envelope of the first attempt.
 fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
     shuttle::future::block_on(async move {
         let emitter_confirmed = StdArc::new(AtomicBool::new(false));
@@ -153,6 +169,7 @@ fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
             let mut batches = vec![one_batch(emitter_shares)];
             let mut connector =
                 FakeEmitter::<Records>::new([PublishAnswer::Fail, PublishAnswer::ConfirmAll]);
+            let observations = connector.observations();
             let mut prepared = PreparedPayloads::default();
             prepared
                 .retain(payload(&[0, 1], CONFIRMED_PAYLOAD), &mut batches)
@@ -193,6 +210,11 @@ fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
                 .assured("the confirmation names the one record of the retry");
             assert!(answers.unresolved.is_none());
             assert!(prepared.is_empty());
+            assert_eq!(
+                observations.lock().envelopes(),
+                vec![vec![modeled_envelope()], vec![modeled_envelope()]],
+                "every attempt must hand the connector the envelope the payload was prepared with"
+            );
         });
         let sibling = nervix_primitives::task::spawn(async move {
             nervix_primitives::task::yield_now().await;

@@ -325,6 +325,23 @@ fn every_emitter_pair_declares_its_reference_locator_and_options_and_no_envelope
     }
 }
 
+/// A record emitter carries each record's envelope, and no other emitter contract has one, so only
+/// an entity whose records a codec encodes may declare envelope clauses or properties.
+#[test]
+fn only_an_entity_whose_records_a_codec_encodes_declares_an_envelope() {
+    for kind in EmitterEntityKind::all() {
+        let declared = kind.capabilities();
+        if declared.envelope.is_empty() && declared.properties.is_empty() {
+            continue;
+        }
+        assert_eq!(
+            declared.body,
+            EmitterBodyForm::Codec,
+            "{kind} declares an envelope its records do not carry"
+        );
+    }
+}
+
 #[test]
 fn an_iceberg_emitter_declares_every_object_store_its_backend_names() {
     let declared = EmitterEntityKind::Iceberg(IcebergEmitterEntity::Table).capabilities();
@@ -665,8 +682,8 @@ fn assert_generated_ingestor_states_what_its_entity_declares(bytes: &[u8]) {
 }
 
 /// Checks that a generated emitter names a declared publishing mode, writes a body of the
-/// declared form and batching its declared legality admits, and publishes through a client of a
-/// declared connector.
+/// declared form, batching its declared legality admits and only the envelope clauses and
+/// properties its entity declares, and publishes through a client of a declared connector.
 fn assert_generated_emitter_states_what_its_entity_declares(bytes: &[u8]) {
     let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
     let emitters = EmitterEntityKind::all().collect::<Vec<_>>();
@@ -708,6 +725,9 @@ fn assert_generated_emitter_states_what_its_entity_declares(bytes: &[u8]) {
         | (EmitterBatchLegality::Unavailable { .. }, Some(_)) => false,
     };
     assert!(batching, "{emitter_kind} batches as {:?}", emitter.batch);
+    if let Err(refused) = emitter.envelope.check_declared(emitter_kind) {
+        panic!("{emitter_kind} writes an undeclared envelope: {refused:?}");
+    }
     match emitter.connector.reference() {
         nervix_models::EmitterReference::Client(reference) => {
             assert!(declared.reference.admits_client(reference.connector))
