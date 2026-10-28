@@ -112,14 +112,48 @@ impl<T> EndpointIntakeRoute<T> {
     }
 }
 
+/// What a request finds for its host and path in the node's current route publication.
+pub(crate) enum EndpointResolution<R> {
+    /// The published route, which the request retains for its whole lifetime.
+    Routed(R),
+    /// The node installed its routes, and no domain publishes one for this host and path.
+    Unrouted,
+    /// The node has installed no revision since it started, so an absent route may still be one
+    /// the cluster binds: the request is refused as temporarily unavailable, never as missing.
+    Uninstalled,
+}
+
+#[cfg(test)]
+impl<R> EndpointResolution<R> {
+    /// The published route, or `None` for either kind of absence.
+    pub(crate) fn into_route(self) -> Option<R> {
+        match self {
+            Self::Routed(route) => Some(route),
+            Self::Unrouted | Self::Uninstalled => None,
+        }
+    }
+}
+
+/// Whether the table holds every route of an installed revision, so that a missing route is final.
+#[derive(Clone, Copy, Default)]
+enum RouteTableInstallation {
+    /// No revision was installed since the node started or since the runtime cleared the table.
+    #[default]
+    Awaiting,
+    /// A revision installed every domain's routes; later revisions keep the table current.
+    Installed,
+}
+
 struct EndpointRouteTable<T> {
     hosts: HashMap<String, HashMap<String, Arc<EndpointIntakeRoute<T>>>>,
+    installation: RouteTableInstallation,
 }
 
 impl<T> Default for EndpointRouteTable<T> {
     fn default() -> Self {
         Self {
             hosts: HashMap::new(),
+            installation: RouteTableInstallation::default(),
         }
     }
 }
@@ -128,6 +162,7 @@ impl<T> Clone for EndpointRouteTable<T> {
     fn clone(&self) -> Self {
         Self {
             hosts: self.hosts.clone(),
+            installation: self.installation,
         }
     }
 }
@@ -177,11 +212,34 @@ impl<T> Default for EndpointIntakeRoutes<T> {
 }
 
 impl<T> EndpointIntakeRoutes<T> {
-    pub(super) fn resolve(&self, host: &str, path: &str) -> Option<Arc<EndpointIntakeRoute<T>>> {
-        self.current
-            .load()
-            .route(&normalize_http_host(host), path)
-            .cloned()
+    /// Resolves the host and path against one load of the publication, so the route and whether
+    /// its absence is final come from the same table.
+    pub(super) fn resolve(
+        &self,
+        host: &str,
+        path: &str,
+    ) -> EndpointResolution<Arc<EndpointIntakeRoute<T>>> {
+        let current = self.current.load();
+        if let Some(route) = current.route(&normalize_http_host(host), path) {
+            return EndpointResolution::Routed(route.clone());
+        }
+        match current.installation {
+            RouteTableInstallation::Installed => EndpointResolution::Unrouted,
+            RouteTableInstallation::Awaiting => EndpointResolution::Uninstalled,
+        }
+    }
+
+    /// Records that a revision installed every domain's routes, after which a missing route is
+    /// one that no domain publishes.
+    pub(super) fn mark_installed(&self) {
+        if let RouteTableInstallation::Installed = self.current.load().installation {
+            return;
+        }
+        self.current.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.installation = RouteTableInstallation::Installed;
+            next
+        });
     }
 
     pub(super) fn replace_domain(

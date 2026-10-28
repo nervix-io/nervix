@@ -2049,6 +2049,13 @@ payload on a retained ended route closes with 1013. Open a new connection for a 
 Stopping a domain withdraws only its routes and intakes; other domains on the same host and path
 continue receiving requests. A withdrawn route returns HTTP 404.
 
+A node answers 404 only once it has installed a revision since it started. Before that, it cannot
+tell a route the cluster binds from one no domain declares. This happens, for example, when the
+node restarts while its cluster has no quorum to catch up through. Such a node refuses every
+request without a published route with HTTP 503 and no retry delay, and a WebSocket upgrade the
+same way. A route that is already published is served at once. Stopping the node clears its routes
+and returns it to that state.
+
 Server-side endpoints are hosted under a `VHOST`. A plain VHOST serves HTTP and WS on the HTTP listener. A TLS-enabled VHOST serves HTTPS and WSS on the separate HTTPS listener.
 
 TLS is configured on the VHOST itself:

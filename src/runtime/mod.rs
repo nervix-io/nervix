@@ -448,6 +448,7 @@ pub(crate) use endpoint::{EndpointDispatchOutcome, ResolvedEndpointRoute};
 use endpoint::{EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint};
 use endpoint_acknowledgement::EndpointRequestPolicy;
 pub(crate) use endpoint_acknowledgement::{EndpointRequestOutcome, EndpointRequestReply};
+pub(crate) use endpoint_route_table::EndpointResolution;
 use endpoint_route_table::{EndpointBinding, EndpointIntakeRoute, EndpointIntakeRoutes};
 pub(in crate::runtime) use entity_gate::OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL;
 use entity_gate::{
