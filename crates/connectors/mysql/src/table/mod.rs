@@ -1548,4 +1548,32 @@ mod tests {
             ]
         );
     }
+
+    /// The driver's pool as its minimum's keeper reads and draws on it: a pool that has opened
+    /// nothing counts no connection, and a checkout the server refuses names itself above the
+    /// driver's error.
+    #[nervix_primitives::test]
+    async fn a_refused_driver_checkout_is_reported_as_the_keepers_checkout() {
+        let opts = Opts::from_url("mysql://nervix@127.0.0.1:1/nervix")
+            .expect("the address is a valid MySQL URL");
+        let pool = DriverPool::new(opts);
+        assert_eq!(
+            pool.established(),
+            0,
+            "a pool that has opened nothing has established nothing"
+        );
+
+        let Err(report) = pool.check_out().await else {
+            panic!("a checkout from a port that refuses connections must fail");
+        };
+
+        assert!(
+            matches!(report.current_context(), PoolMinimumError::CheckOut),
+            "the checkout names its own failure: {report:?}"
+        );
+        assert!(
+            report.contains::<mysql_async::Error>(),
+            "the driver's error stays beneath the checkout: {report:?}"
+        );
+    }
 }
