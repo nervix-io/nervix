@@ -1626,13 +1626,19 @@ with `'bind' = 'false'`, or when `bind` is omitted, it connects to a peer bound 
 accepts only `true` or `false`, ignoring letter case; any other value is refused at `CREATE CLIENT`.
 `CREATE CLIENT` also checks `addr` with the socket driver's TCP/IPC endpoint parser before storing
 the configuration. Rendered address templates pass that same check before commit; it opens no
-socket and performs no name lookup.
+socket and performs no name lookup. For a TCP hostname, the ZeroMQ driver's connection uses the
+system resolver, not the node's configured resolver; see [Name Resolution](name-resolution.md#residual-resolution).
 Every value of the client's `CONFIG` can name its pinned `MOUNT`. The ingestor's plan resolves
 those values and keeps the mount for as long as the ingestor runs; see
 [Client Config Mounts](resources.md#client-config-mounts). A node that cannot provide the mount or
 render its values cannot start the ingestor, and `DESCRIBE INGESTOR` shows that failure as its
 transient error, naming the entry or the resource. A refusal during pre-commit validation is
 returned by `CREATE CLIENT` instead.
+
+Each received message contributes only frame 0 as the payload. Additional multipart frames are
+discarded; a message with no frames is skipped. A present but empty first frame is still a payload
+and follows the configured codec and message-error policy. ZeroMQ supplies neither transport
+headers nor peer identity or a position to acknowledge.
 
 The ingestor reads no deadline key: a `ZEROMQ` client's `timeout_ms` and `connect_timeout_ms` bound
 only an emitter's waits. A connecting socket connects when the ingestor starts. The driver retries a

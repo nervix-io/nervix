@@ -42,7 +42,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
 | Session subscriptions and domain clock attachment | `Sessions` |
-| Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore` |
+| Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore`; cut timeout phases and their elapsed measurements: `Backup And Restore Architecture` → `Observability` |
 | Metrics and runtime inspection | `Metrics And Observability` |
 | Full graph examples | `Examples` |
 | Applications that pace producers and consumers by an attached domain clock, and the `TIMESTAMP AT`/`TIMESTAMP NOW` admission they meet | `Paced Simulation Drivers` and `Domains And Time` |
@@ -169,7 +169,11 @@ For `ZEROMQ CLIENT`, use a `tcp://host:port` or `ipc://path` address. Set `'bind
 on a socket that listens for peers and `'bind' = 'false'` on a socket that connects; omission
 also selects connect. The Boolean accepts those two values ignoring letter case. `ZEROMQ PULL`
 and `ZEROMQ PUSH` both use `MODE NO ACK`; only the first received frame is ingested, with no
-transport headers or peer metadata. Read the ZeroMQ sections of Ingestors and Emitters for the
+transport headers or peer metadata. Messages with no frames are skipped, while additional frames
+are discarded. A PUSH publish sends one payload frame and has no receiver delivery receipt. For
+TCP hostnames, the ZeroMQ driver uses the system resolver instead of the node resolver. Prefer a
+bound PULL ingestor with connecting PUSH peers when a peer can restart: a connecting PULL socket
+does not detect or recover a lost peer. Read the ZeroMQ sections of Ingestors and Emitters for the
 current connection, retry and deadline limits.
 
 - Every referenced name is declared in the active domain before use.

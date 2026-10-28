@@ -1072,7 +1072,10 @@ reserved raw representation stays inside the encoding's owner. That state record
 still count against ownership handoff; a message parked on materialized `REQUIRED WAIT` does not
 keep a handoff blocked, and neither does a row a window retains until the window steps past it.
 Both owners hold one park guard per retained message and drop it before they acknowledge, so the
-acknowledgement removes the share the holder owns.
+acknowledgement removes the share the holder owns. A processor keeps a parked message's guard while
+it re-evaluates the message and drops it only when the message leaves its park: a message whose
+dependency is still absent returns to its queue with the same guard, so the re-evaluation publishes
+no progress and makes no share active.
 Remote ACK progress publishes a monotonic sequence with the root's parked handoff state. An
 upstream remote share follows that state, and its root publishes the resulting transition farther
 upstream. A delayed progress event cannot reactivate a newer parked state. Terminal ACK resolution
@@ -1731,6 +1734,13 @@ checks below establish what a caller may do with them.
 
 ## Diagnostic Deadlock Detection
 
+The backup cut diagnostics scenario exercises capture-budget expiry and resumption on one and
+three nodes in the active, order and stressed-restore Deloxide selections. The coordinator's phase
+measurements are task-owned administrative state and add no synchronization. The existing capture
+and cleanup paths retain their tracked-lock coverage; phase timing itself establishes no
+interleaving or memory-ordering guarantee. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
+owns the diagnostic contract.
+
 A diagnostic node selects the `deloxide` mode. The `deloxide-order` feature adds historical order
 instrumentation to that same mode, and the `deloxide-stress` feature adds Deloxide's bounded
 scheduling disturbance to its active-only selection; neither is another execution mode, and the two
@@ -1750,6 +1760,25 @@ Runtime disabling does not recover an ordinary or active-only fast path. The pin
 Reads enter that detector in either diagnostic build. The order build also tracks actual guard
 lifetimes locally, including when runtime checking is disabled, so active self waits remain
 observable. No timing from these builds is ordinary product performance evidence.
+
+**Measured cost.** A same-host comparison on Nervix's Kafka filter-map workload measured the
+diagnostic selections against the ordinary build. These are results for that workload and host,
+not a throughput or latency guarantee for other graphs.
+
+| Selection | Observation against the ordinary build |
+| --- | --- |
+| `ActiveOnly` | Throughput and delivery latency matched ordinary execution; peak memory was 15% higher. |
+| `OrderAnalysis` | Throughput was about 41% of ordinary; its delivery latency followed the resulting backlog. |
+| `OrderInstrumentedActiveOnly` | Throughput was about 58% of ordinary even with runtime order checking disabled. |
+| `StressedActiveOnly` | Throughput was about 39% of ordinary. |
+
+Clean processes produced 124 to 156 bytes of evidence each, with no added logging; Deloxide's
+logging-and-visualization feature is not compiled. The external chaos suite runs well below this
+workload's throughput. Its measured diagnostic-image run and recovery times were within a few
+percent of the release image's, which qualifies the chaos scenarios and their evidence, not the
+diagnostic image's production throughput. An engineer comparing a different workload records the
+ordinary baseline, active-only mode, order mode with checking enabled and disabled, and stress
+mode separately on the same host.
 
 **Scheduling stress.** A `deloxide-stress` build compiles Deloxide's random preemption into its
 tracked locks. A thread that already holds a tracked lock and asks for another sleeps first with a

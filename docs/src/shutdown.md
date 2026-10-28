@@ -437,6 +437,11 @@ resumes the domain. The cut captures retained window rows as window state.
 When a parked message has crossed nodes, remote ACK progress carries its parked state back through
 the source's acknowledgement chain. The drain excludes that chain while the message is parked;
 resuming it reactivates the chain, and only a terminal ACK completes the source attempt.
+Every flush generation and every state poll re-evaluates a parked message against the state
+present, and a message whose dependency is still absent stays parked throughout that read. Its
+chain never reads as active work while it is re-evaluated, on its own node or at the node that
+admitted it, however long the read takes, so the confirming generation's own re-evaluation cannot
+restart the confirmation.
 
 Work keeps moving while the drain looks for it, so "nothing visible" is an exact observation rather
 than a series of separate reads. Each observation reads the domain's outstanding force-flush

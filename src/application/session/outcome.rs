@@ -16,7 +16,7 @@ use std::ops::Range;
 
 use nervix_client_wire::{
     AttachDisposition, AttachOutcome, CommandDisposition as WireCommandDisposition, CommandOutcome,
-    Diagnostic, ExecutionReferenceConflict, LeaderEndpoints, LeaderRedirect as WireLeaderRedirect,
+    Diagnostic, ExecutionReferenceConflict, LeaderRedirect as WireLeaderRedirect, NodeEndpoints,
     OutcomeOrigin, SourceSpan, StatementDisposition, StatementOutcome, UnknownOutcomeCause,
 };
 use nervix_consensus::CommandExecutionRequestConflict;
@@ -25,7 +25,7 @@ use nervix_models::CommandExecutionReference;
 use crate::application::{
     command_result::{
         CommandDiagnostic, CommandDisposition, CommandOrigin, CommandResponse, CommandResult,
-        LeaderLocation, LeaderRedirect, OutcomeUnknownCause,
+        LeaderRedirect, NodeLocation, OutcomeUnknownCause,
     },
     transaction::TransactionAttachment,
 };
@@ -144,14 +144,14 @@ fn reference_conflict(conflict: CommandExecutionRequestConflict) -> ExecutionRef
 }
 
 pub(super) fn leader_redirect(redirect: LeaderRedirect) -> WireLeaderRedirect {
-    let leader = redirect.leader.map(leader_endpoints);
+    let leader = redirect.leader.map(node_endpoints);
     WireLeaderRedirect { leader }
 }
 
-pub(super) fn leader_endpoints(location: LeaderLocation) -> LeaderEndpoints {
+pub(super) fn node_endpoints(location: NodeLocation) -> NodeEndpoints {
     let grpc_uri = location.grpc_url.map(|url| url.to_url());
     let web_console_uri = location.web_console_url.map(|url| url.to_url());
-    LeaderEndpoints {
+    NodeEndpoints {
         node: location.node,
         grpc_uri,
         web_console_uri,

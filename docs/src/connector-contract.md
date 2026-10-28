@@ -445,8 +445,12 @@ A ClickHouse client builds `HttpConnector` over the node resolver in both of its
 address refuses TLS file keys and uses a plain HTTP client. An HTTPS address requires
 `tls_ca_file` and wraps the connector in the AWS-LC rustls configuration, trusting the bundled
 WebPKI roots, the platform's native roots and the configured CA. Client identity entries may
-accompany that trust material. Both forms keep the driver's 60-second TCP keepalive and 2-second
-pool idle timeout. Hyper dials a literal IPv4 or IPv6 host without asking the resolver,
+accompany that trust material. Both forms read `tcp_keepalive_ms` and `pool_idle_timeout_ms` from
+the vocabulary's client schema, whose defaults are 60 seconds and 2 seconds respectively. The
+first controls TCP keep-alive probing; the second controls reuse of an idle HTTP connection.
+The builder supplies Hyper's Tokio pool timer, so idle expiry follows the runtime clock and
+retires expired connections even between inserts. Neither setting extends an insert's request
+deadline. Hyper dials a literal IPv4 or IPv6 host without asking the resolver,
 dials a name's answers under its dual-stack policy, described in [Dialling The
 Answers](./name-resolution.md#dialling-the-answers), and applies the URL's port or its scheme's
 default. The required positive `timeout_ms` bounds the send and the response of an insert, and the
@@ -782,6 +786,14 @@ projection, masking secrets and address credentials/query options as `********`.
 serialization retains values for strongly persisted configuration and backup archives; archives
 remain secret-bearing under [Backup And Restore](backup-and-restore.md). Existing entity `DESCRIBE`
 output references clients by name and does not print their CONFIG.
+
+`DESCRIBE CLIENT <name>` reads the stored client in the selected domain and reports its connector
+and effective CONFIG. The schema represents an optional key with a declared default separately
+from a key with no default. It applies defaults only to omitted keys and never substitutes for an
+invalid explicit value. Client inspection marks those supplied defaults with `(default)` and uses
+the same confidential projection as `SHOW CREATE CLIENT`. Runtime initialization consumes that
+same effective-entry projection. Stored Models, archives and canonical `SHOW CREATE` retain the
+authored entries; default metadata lives only in the current vocabulary declaration.
 
 A mode or a quiesce mode that needs an option choice declares it: an MQTT topic's `ACK` modes and its
 `SUSPEND` require `SESSION PERSISTENT` and `QOS 1`, the session a broker keeps messages for, and the

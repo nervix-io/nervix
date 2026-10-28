@@ -643,7 +643,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | CLICKHOUSE TABLE | No ingest entity is declared. The ClickHouse connector inserts mapped rows into an existing table; it declares no change-data-capture or query ingestor. |
+| Entity | CLICKHOUSE TABLE | No ingest entity is declared. The ClickHouse connector inserts mapped rows into an existing table; its client declares TCP keep-alive and HTTP pool idle-reuse intervals. It declares no change-data-capture or query ingestor. |
 | Reference | CLICKHOUSE client |  |
 | Locator and validation rule | TABLE 'sales.Orders' (clickhouse_table) |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -1066,6 +1066,8 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `addr` | required | URL (http or https) | Nervix; strict | no | none |
 | `database` | optional | string | Nervix; strict | no | none |
 | `password` | optional | string | Nervix; strict | yes | none |
+| `pool_idle_timeout_ms` | optional; default `2000` | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tcp_keepalive_ms` | optional; default `60000` | whole seconds from 1000 through 32767000 milliseconds | Nervix; strict | no | none |
 | `timeout_ms` | required | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 | `tls_ca_file` | required when `addr` uses `https` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
 | `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
