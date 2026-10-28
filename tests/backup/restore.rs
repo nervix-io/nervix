@@ -730,7 +730,8 @@ fn state_sections(path: &Path, directories: &[&str]) -> BTreeMap<String, Vec<u8>
     }
     assert!(
         !entries.is_empty(),
-        "sections under {directories:?} are visible"
+        "backup archive {} holds no section under {directories:?} of its domains' state",
+        path.display()
     );
     entries
 }

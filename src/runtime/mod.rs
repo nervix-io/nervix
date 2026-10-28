@@ -598,7 +598,7 @@ use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteAckStorage, RemoteDispatc
 use reorderer::{ReordererFlushContext, flush_branch_reorderer_output, reorder_key_part};
 use schedule_apply::ScheduleApplication;
 use scheduled_node::{
-    EmitterTaskBuildDeps, EmitterTaskDeps, ExecutionBuildDeps, PlacedNodeState,
+    EmitterTaskBuildDeps, EmitterTaskDeps, ExecutionBuildDeps, PlacedNodeState, PlacementTasks,
     ScheduledNodePlacement, ScheduledNodeTask,
 };
 pub(in crate::runtime) use shared_clients::{SharedClientError, SharedClientLease};
@@ -607,7 +607,7 @@ pub(crate) use snapshot_staging::{
     SnapshotStagingError, StagedArtifact, StagedArtifactReader, StagedSnapshotWriter,
 };
 use state_replication::{
-    ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
+    ActivatedRuntimeStateHandoff, CheckpointWriter, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
     DEFAULT_STATE_SNAPSHOT_INTERVAL, PreparedForcedRuntimeStateRecovery,
     PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot, PublishedBranchState,
     RestorableBranchLifecycle,

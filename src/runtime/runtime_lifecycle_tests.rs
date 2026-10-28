@@ -20,15 +20,16 @@ use fjall::Database;
 use nervix_execution::{CpuClass, Executor, MemoryClass};
 use nervix_models::{
     DomainName, EmitterName, GeneratorName, ModelKind, NodeRef, ParseAsType, ReingestorName,
-    SchemaFingerprint,
+    RelayName, SchemaFingerprint, Timestamp,
 };
 use nervix_primitives::{
     sync::{StdArc, blocking, mpsc, oneshot, watch},
     task::JoinHandle,
-    time::{Instant, timeout},
+    time::{Instant, sleep, timeout},
 };
 
 use super::*;
+use crate::runtime_schema::{RuntimeValue, test_runtime_row};
 
 /// How long a check waits for a task or a worker to reach the state it names.
 const REACHED_WITHIN: Duration = Duration::from_secs(60);
@@ -427,7 +428,7 @@ async fn a_stopping_runtime_waits_for_the_snapshot_of_a_branch_whose_task_is_gon
             runtime.shutdown(left).await
         }
     });
-    let told_to_stop = runtime.inner.branch_snapshot_tasks.stopping();
+    let told_to_stop = runtime.inner.state_snapshot_tasks.stopping();
     timeout(REACHED_WITHIN, told_to_stop.cancelled())
         .await
         .expect("the stopping runtime reaches its snapshot tasks");
@@ -572,4 +573,262 @@ async fn a_stopping_domain_does_not_wait_for_another_domains_snapshot_task() {
         .expect("the snapshot task writes once its branch stops")
         .expect("the snapshot task does not panic");
     assert_eq!(window.persisted_revision(), Some(1));
+}
+
+/// Where a check reads the revision of a materialized relay that the runtime's state store holds.
+#[derive(Clone)]
+struct RelayCheckpoints {
+    runtime: Runtime,
+    placement: RuntimeStatePlacement,
+}
+
+impl RelayCheckpoints {
+    /// The revision of the relay's records the runtime's state store holds.
+    fn persisted_revision(&self) -> Option<u64> {
+        let persisted = self
+            .runtime
+            .inner
+            .state_store
+            .as_ref()
+            .expect("the test runtime has a state store")
+            .latest_snapshot(&self.placement)
+            .expect("the snapshot lookup succeeds");
+        persisted.map(|snapshot| snapshot.lsm)
+    }
+}
+
+/// A runtime that persists its state, with one materialized relay that has applied a record no
+/// checkpoint holds yet.
+struct AppliedRelay {
+    checkpoints: RelayCheckpoints,
+    /// The authoritative assignment of the relay, which its state task holds while it runs.
+    state: MaterializedRelayStateOriginator,
+    persistence: MaterializedRelayStatePersistence,
+    _directory: tempfile::TempDir,
+}
+
+impl AppliedRelay {
+    async fn new() -> Self {
+        let directory = tempfile::tempdir().expect("the test host provides a temporary directory");
+        let database = Database::builder(directory.path())
+            .open()
+            .expect("a new directory opens as a database");
+        let runtime = Runtime::with_persistence(Some(database), Duration::from_secs(3_600))
+            .expect("the runtime opens its state store");
+        let placement = RuntimeStatePlacement {
+            domain: domain("default"),
+            state: RuntimeState::MaterializedRelay {
+                schema: SchemaFingerprint::from_digest([9; 32]),
+            },
+            kind: ModelKind::Relay,
+            identifier: named("latest_orders"),
+            branch_key: None,
+        };
+        let schema = test_schema(&[("status", ParseAsType::String)]);
+        let mut assignment = runtime.replicated_materialized_stream_state(
+            placement.clone(),
+            schema.arrow_schema(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let mut state = assignment
+            .originator
+            .take()
+            .expect("the node that executes the relay holds its authoritative assignment");
+        runtime
+            .apply_materialized_stream_records(&mut state, &None, [status_record("ready", 1)])
+            .await
+            .expect("the relay's assignment stays authoritative");
+        Self {
+            checkpoints: RelayCheckpoints { runtime, placement },
+            state,
+            persistence: assignment.persistence,
+            _directory: directory,
+        }
+    }
+}
+
+/// A record of the relay ingested at `watermark`, so a record with a later one replaces it.
+fn status_record(status: &str, watermark: i64) -> RuntimeRow {
+    test_runtime_row([(
+        "status".to_string(),
+        RuntimeValue::String(status.to_string()),
+    )])
+    .with_ingested_at_watermarks(Timestamp::from_unix_nanos(watermark))
+}
+
+/// How long a check holds a materialized relay's last write: past the stop grace of every task of
+/// its domain, so a stop that ends that write at a grace has finished inside the window.
+const HELD_PAST_THE_STOP_GRACE: Duration = Duration::from_secs(TASK_STOP_GRACE.as_secs() * 2);
+
+/// A materialized relay's checkpoint writer makes its last write once its domain stops, and the
+/// stop waits for that write with no grace, however long it takes: a stopped backup cut reads the
+/// relay's checkpoint as soon as the stop returns. Here the write waits for a bulk worker past the
+/// stop grace of every task, so the domain stays stopping while every worker is held, and the
+/// record the relay applied is on disk the moment its stop returns.
+#[nervix_primitives::test]
+async fn a_stopping_domain_waits_past_the_stop_grace_for_a_materialized_relays_last_checkpoint() {
+    let relay = AppliedRelay::new().await;
+    let checkpoints = relay.checkpoints.clone();
+    let domain = checkpoints.placement.domain.clone();
+    let mut execution = idle_execution(&domain);
+    let writer = checkpoints
+        .runtime
+        .spawn_materialized_stream_snapshot_task(relay.persistence.clone())
+        .expect("a persisting runtime starts the relay's checkpoint writer");
+    execution.placement_tasks.insert(
+        NodeRef::new(ModelKind::Relay, &checkpoints.placement.identifier),
+        PlacementTasks {
+            replication: Vec::new(),
+            checkpoints: vec![writer],
+        },
+    );
+    let holders = hold_every_bulk_worker(checkpoints.runtime.executor()).await;
+
+    let mut stopping = nervix_primitives::task::spawn({
+        let checkpoints = checkpoints.clone();
+        async move {
+            let runtime = checkpoints.runtime.clone();
+            runtime
+                .stop_domain_execution(&domain, execution, runtime.emitter_finish_deadline())
+                .await;
+            checkpoints.persisted_revision()
+        }
+    });
+    assert!(
+        timeout(HELD_PAST_THE_STOP_GRACE, &mut stopping)
+            .await
+            .is_err(),
+        "the domain finished stopping while its relay's last checkpoint had no bulk worker"
+    );
+
+    drop(holders);
+    let persisted_when_stopped = timeout(REACHED_WITHIN, stopping)
+        .await
+        .expect("the domain stops once its relay's last checkpoint is written")
+        .expect("the stopping task does not panic");
+    assert_eq!(
+        persisted_when_stopped,
+        Some(1),
+        "the record the relay applied is on disk when its domain's stop returns"
+    );
+    drop(relay);
+}
+
+/// How long a check holds a materialized relay's state task as it stops: well inside the grace that
+/// task is given, so it applies what it still holds instead of being ended.
+const HELD_STATE_TASK_WINDOW: Duration = Duration::from_millis(500);
+
+/// How often a check looks for a checkpoint while it holds a relay's state task.
+const CHECKPOINT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// A relay state task that applies `record`, what the relay still delivers to it, only once its
+/// domain's stop reaches it and the check opens `applying`; it reports through `told_to_stop` that
+/// the stop reached it.
+fn relay_state_task_applying_as_it_stops(
+    runtime: &Runtime,
+    mut state: MaterializedRelayStateOriginator,
+    record: RuntimeRow,
+    told_to_stop: oneshot::Sender<()>,
+    applying: oneshot::Receiver<()>,
+) -> RelayStateTask {
+    let (shutdown, mut stopped) = watch::channel(false);
+    let runtime = runtime.clone();
+    let task = nervix_primitives::task::spawn(async move {
+        stopped
+            .wait_for(|stopped| *stopped)
+            .await
+            .expect("the domain's stop tells the state task to stop before it drops the sender");
+        told_to_stop
+            .send(())
+            .expect("the check waits until the stop reaches the state task");
+        applying
+            .await
+            .expect("the check lets the state task apply what it holds");
+        runtime
+            .apply_materialized_stream_records(&mut state, &None, [record])
+            .await
+            .expect("the relay's assignment stays authoritative");
+    });
+    RelayStateTask { shutdown, task }
+}
+
+/// A materialized relay's state task goes on applying what the relay delivers while its domain
+/// stops, so the relay's checkpoint writer makes its last write only once that task has ended: the
+/// stopped domain's checkpoint then holds the record the state task applied last, not the state the
+/// relay held when the stop was published. Here the state task holds that record until the check
+/// releases it, and no checkpoint is written while it does.
+#[nervix_primitives::test]
+async fn a_stopping_domain_writes_a_materialized_relays_last_checkpoint_once_its_state_task_has_ended()
+ {
+    let AppliedRelay {
+        checkpoints,
+        state,
+        persistence,
+        _directory,
+    } = AppliedRelay::new().await;
+    let domain = checkpoints.placement.domain.clone();
+    let mut execution = idle_execution(&domain);
+    let (told_to_stop, stop_reached) = oneshot::channel();
+    let (apply, applying) = oneshot::channel();
+    execution.relay_state_tasks.insert(
+        RelayName::from(&checkpoints.placement.identifier),
+        relay_state_task_applying_as_it_stops(
+            &checkpoints.runtime,
+            state,
+            status_record("shipped", 2),
+            told_to_stop,
+            applying,
+        ),
+    );
+    let writer = checkpoints
+        .runtime
+        .spawn_materialized_stream_snapshot_task(persistence)
+        .expect("a persisting runtime starts the relay's checkpoint writer");
+    execution.placement_tasks.insert(
+        NodeRef::new(ModelKind::Relay, &checkpoints.placement.identifier),
+        PlacementTasks {
+            replication: Vec::new(),
+            checkpoints: vec![writer],
+        },
+    );
+
+    let stopping = nervix_primitives::task::spawn({
+        let checkpoints = checkpoints.clone();
+        async move {
+            let runtime = checkpoints.runtime.clone();
+            runtime
+                .stop_domain_execution(&domain, execution, runtime.emitter_finish_deadline())
+                .await;
+            checkpoints.persisted_revision()
+        }
+    });
+    timeout(REACHED_WITHIN, stop_reached)
+        .await
+        .expect("the domain's stop reaches the relay's state task")
+        .expect("the state task reports that the stop reached it");
+    let written_while_applying = timeout(HELD_STATE_TASK_WINDOW, async {
+        while checkpoints.persisted_revision().is_none() {
+            sleep(CHECKPOINT_POLL_INTERVAL).await;
+        }
+    })
+    .await;
+    assert!(
+        written_while_applying.is_err(),
+        "the relay's checkpoint was written while its state task was still applying what it held"
+    );
+
+    apply
+        .send(())
+        .expect("the state task waits for the check to release it");
+    let persisted_when_stopped = timeout(REACHED_WITHIN, stopping)
+        .await
+        .expect("the domain stops once its relay's last checkpoint is written")
+        .expect("the stopping task does not panic");
+    assert_eq!(
+        persisted_when_stopped,
+        Some(2),
+        "the relay's last checkpoint holds the record its state task applied as it stopped"
+    );
 }
