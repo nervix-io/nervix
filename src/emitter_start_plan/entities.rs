@@ -129,6 +129,7 @@ single_client_emitter_plan! {
     /// A Sentry emitter, which sends every record as an event to the project its client names.
     SentryEventEmitterPlan {
         batch: Option<EmitterBatchPolicy>,
+        platform: String,
     }
 }
 

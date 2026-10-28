@@ -104,11 +104,18 @@ fn sentry_checks_the_request_deadline_its_http_transport_reads() {
         .validate(&[dsn.clone(), entry("timeout_ms", "1500")])
         .assured("Sentry accepts a bounded request deadline before transport initialization");
     let refusal = schema
-        .validate(&[dsn, entry("timeout_ms", "0")])
+        .validate(&[dsn.clone(), entry("timeout_ms", "0")])
         .expect_err("a request deadline must be positive");
     assert!(matches!(
         refusal.current_context(),
         ClientConfigSchemaError::InvalidValue { key, .. } if key == "timeout_ms"
+    ));
+    let Err(missing) = schema.validate(&[dsn]) else {
+        panic!("the request deadline is required");
+    };
+    assert!(matches!(
+        missing.current_context(),
+        ClientConfigSchemaError::MissingRequired { key } if *key == "timeout_ms"
     ));
 }
 

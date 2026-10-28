@@ -439,7 +439,7 @@ Feature: Emitter batching configuration
         'endpoint' = 'http://127.0.0.1:9324',
         'region' = 'us-east-1'
       };
-      CREATE SENTRY CLIENT sentry_main CONFIG { 'dsn' = 'http://public@127.0.0.1:8000/1' };
+      CREATE SENTRY CLIENT sentry_main CONFIG { 'dsn' = 'http://public@127.0.0.1:8000/1', 'timeout_ms' = 5000 };
       CREATE MONGODB CLIENT mongodb_main POOL SIZE MIN 1 MAX 2 CONFIG {
         'addr' = 'mongodb://127.0.0.1:27017',
         'database' = 'nervix'

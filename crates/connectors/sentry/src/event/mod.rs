@@ -25,16 +25,17 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
     EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle, EmitterOpenError,
     EmitterRecord, EmitterRecordId, EmitterRetryDelay, EmitterStartResult, EmitterWriteError,
-    HttpClientConfig, PerRecordOutcome, RecordEmitter, client_config_value,
-    physical_time::actual_utc_now,
+    HttpClientConfig, OfflineClientConfigError, PerRecordOutcome, RecordEmitter,
+    client_config_value, physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
-    ClientConfigEntry, MessageErrorCode, MessageErrorOperation, StructuredMessageError, Timestamp,
+    ClientConfigEntry, ConnectorKind, MessageErrorCode, MessageErrorOperation,
+    StructuredMessageError, Timestamp,
 };
 use nervix_primitives::time::Instant;
 use reqwest::{
@@ -49,18 +50,28 @@ const SENTRY_AUTH_HEADER: &str = "x-sentry-auth";
 const SENTRY_ENVELOPE_CONTENT_TYPE: &str = "application/x-sentry-envelope";
 const SENTRY_CLIENT_AGENT: &str = concat!("nervix/", env!("CARGO_PKG_VERSION"));
 const SENTRY_RATE_LIMITS_HEADER: &str = "x-sentry-rate-limits";
-const MAX_SENTRY_EVENT_BYTES: usize = 1_000_000;
 
 /// What one Sentry emitter sends with: the entries naming its project DSN and HTTP client settings.
 pub struct SentryEventEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub dns: DnsResolver,
+    /// The plan's resolved platform, used only when the encoded event omits its own.
+    pub platform: String,
 }
 
 pub struct SentryEventEmitter {
     client: HttpClient,
     envelope_url: url::Url,
     auth: HeaderValue,
+    platform: String,
+}
+
+/// Validate the complete DSN with the event driver's parser without connecting or resolving a host.
+/// The public refusal names the key; the driver's typed cause remains in the internal report.
+pub fn validate_client_configuration(
+    config: &[ClientConfigEntry],
+) -> error_stack::Result<(), OfflineClientConfigError> {
+    SentryEventEmitter::dsn(config).map(|_| ())
 }
 
 /// Why one record's payload is not a Sentry event this emitter can send.
@@ -98,10 +109,10 @@ enum SentryEventError {
 impl SentryEventEmitter {
     pub fn new(config: SentryEventEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
         let dns = config.dns;
+        let platform = config.platform;
         let config = config.config.as_slice();
-        let dsn = Self::config_value(config, "dsn")?
-            .parse::<Dsn>()
-            .map_err(|error| Self::config_error(format!("invalid Sentry dsn: {error}")))?;
+        let dsn = Self::dsn(config)
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: SENTRY })?;
         let client = {
             let mapping_input = HttpClientConfig::new(config, "Sentry", &dns).build();
             match mapping_input {
@@ -125,24 +136,15 @@ impl SentryEventEmitter {
             client,
             envelope_url,
             auth,
+            platform,
         })
     }
 
-    fn config_value(config: &[ClientConfigEntry], key: &str) -> EmitterStartResult<String> {
-        {
-            let mapping_input = client_config_value(config, key, "Sentry");
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    let message = error.current_context().to_string();
-                    error
-                        .change_context(EmitterOpenError::InvalidConfiguration {
-                            connector: SENTRY,
-                        })
-                        .attach_printable(message)
-                }),
-            }
-        }
+    fn dsn(config: &[ClientConfigEntry]) -> error_stack::Result<Dsn, OfflineClientConfigError> {
+        let dsn = client_config_value(config, "dsn", ConnectorKind::Sentry.keyword())
+            .change_context(OfflineClientConfigError::key("dsn"))?;
+        dsn.parse::<Dsn>()
+            .change_context(OfflineClientConfigError::key("dsn"))
     }
 
     fn config_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {
@@ -224,6 +226,7 @@ impl SentryEventEmitter {
     fn encode_envelope(
         payload: &[u8],
         occurred_at: Timestamp,
+        platform: &str,
     ) -> Result<Vec<u8>, Report<SentryEventError>> {
         let mut event =
             serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(payload)
@@ -237,7 +240,7 @@ impl SentryEventEmitter {
             .clone();
         event
             .entry("platform".to_string())
-            .or_insert_with(|| serde_json::Value::String("other".to_string()));
+            .or_insert_with(|| serde_json::Value::String(platform.to_owned()));
         if !event.contains_key("timestamp") {
             event.insert(
                 "timestamp".to_string(),
@@ -247,10 +250,10 @@ impl SentryEventEmitter {
 
         let event = serde_json::to_vec(&event)
             .map_err(|source| Report::new(SentryEventError::SerializeEvent { source }))?;
-        if event.len() > MAX_SENTRY_EVENT_BYTES {
+        if event.len() > nervix_models::SENTRY_MAX_EVENT_BYTES {
             return Err(Report::new(SentryEventError::OversizedEvent {
                 size: event.len(),
-                maximum: MAX_SENTRY_EVENT_BYTES,
+                maximum: nervix_models::SENTRY_MAX_EVENT_BYTES,
             }));
         }
         let envelope_header = serde_json::json!({ "event_id": event_id });
@@ -310,14 +313,16 @@ impl RecordEmitter for SentryEventEmitter {
         payload: Vec<u8>,
         occurred_at: Timestamp,
     ) -> Result<Vec<u8>, StructuredMessageError> {
-        Self::encode_envelope(&payload, occurred_at).map_err(|error| StructuredMessageError {
-            reference: uuid::Uuid::now_v7(),
-            code: MessageErrorCode::External,
-            message: format!("{error:#}"),
-            operation: MessageErrorOperation::Publish,
-            operation_index: None,
-            fields: Default::default(),
-            occurred_at,
+        Self::encode_envelope(&payload, occurred_at, &self.platform).map_err(|error| {
+            StructuredMessageError {
+                reference: uuid::Uuid::now_v7(),
+                code: MessageErrorCode::External,
+                message: format!("{error:#}"),
+                operation: MessageErrorOperation::Publish,
+                operation_index: None,
+                fields: Default::default(),
+                occurred_at,
+            }
         })
     }
 
@@ -383,12 +388,46 @@ mod envelope_properties;
 mod tests {
     use super::*;
 
+    const PLATFORM: &str = nervix_models::SENTRY_DEFAULT_PLATFORM;
+
+    #[test]
+    fn dsn_validation_is_offline_and_preserves_the_typed_key_refusal() {
+        let config = |value: &str| {
+            [ClientConfigEntry {
+                key: "dsn".to_owned(),
+                value: value.to_owned(),
+            }]
+        };
+        for value in [
+            "https://key@sentry.invalid/prefix/42",
+            "https://key@sentry.invalid/project",
+        ] {
+            assert!(validate_client_configuration(&config(value)).is_ok());
+        }
+        for value in [
+            "https://private-key@sentry.invalid/",
+            "https://sentry.invalid/42",
+            "ftp://private-key@sentry.invalid/42",
+        ] {
+            let Err(error) = validate_client_configuration(&config(value)) else {
+                panic!("the event driver must refuse {value}");
+            };
+            assert!(error.contains::<sentry_types::ParseDsnError>());
+            assert!(matches!(
+                error.current_context(),
+                OfflineClientConfigError::InvalidKey { key } if key == "dsn"
+            ));
+            assert_eq!(error.to_string(), "invalid client config key 'dsn'");
+        }
+    }
+
     #[test]
     fn envelope_preserves_event_fields_and_adds_protocol_defaults() {
         let occurred_at = Timestamp::from_unix_nanos(946_684_800_000_000_000);
         let envelope = SentryEventEmitter::encode_envelope(
             br#"{"message":"failed","environment":"test","future":{"nested":true}}"#,
             occurred_at,
+            PLATFORM,
         )
         .expect("event should encode");
         let mut lines = envelope.split(|byte| *byte == b'\n');
@@ -412,6 +451,7 @@ mod tests {
         let envelope = SentryEventEmitter::encode_envelope(
             br#"{"message":"failed","timestamp":"2010-05-06T07:08:09Z"}"#,
             Timestamp::from_unix_nanos(946_684_800_000_000_000),
+            PLATFORM,
         )
         .expect("event should encode");
         let event_bytes = envelope
@@ -429,6 +469,7 @@ mod tests {
         let envelope = SentryEventEmitter::encode_envelope(
             br#"{"message":"failed","extra":{"reading":1.4000000000000001}}"#,
             Timestamp::from_unix_nanos(946_684_800_000_000_000),
+            PLATFORM,
         )
         .expect("event should encode");
         let event_bytes = envelope
@@ -446,13 +487,14 @@ mod tests {
     #[test]
     fn a_payload_that_is_not_an_event_names_its_parser_error_once() {
         let occurred_at = Timestamp::from_unix_nanos(946_684_800_000_000_000);
-        let not_json = SentryEventEmitter::encode_envelope(b"not json", occurred_at)
+        let not_json = SentryEventEmitter::encode_envelope(b"not json", occurred_at, PLATFORM)
             .expect_err("text that is not JSON is not an event");
         let json_cause =
             serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(b"not json")
                 .expect_err("text that is not JSON does not parse");
-        let wrong_level = SentryEventEmitter::encode_envelope(br#"{"level":5}"#, occurred_at)
-            .expect_err("a numeric level is not a Sentry level");
+        let wrong_level =
+            SentryEventEmitter::encode_envelope(br#"{"level":5}"#, occurred_at, PLATFORM)
+                .expect_err("a numeric level is not a Sentry level");
         let event_cause = serde_json::from_value::<Event<'static>>(serde_json::json!({"level": 5}))
             .expect_err("a numeric level does not read as an event");
 
@@ -468,10 +510,14 @@ mod tests {
 
     #[test]
     fn envelope_rejects_an_event_above_sentrys_decompressed_limit() {
-        let payload = format!(r#"{{"message":"{}"}}"#, "x".repeat(1_000_000));
+        let payload = format!(
+            r#"{{"message":"{}"}}"#,
+            "x".repeat(nervix_models::SENTRY_MAX_EVENT_BYTES)
+        );
         let result = SentryEventEmitter::encode_envelope(
             payload.as_bytes(),
             Timestamp::from_unix_nanos(946_684_800_000_000_000),
+            PLATFORM,
         );
         assert!(
             result.is_err(),

@@ -14,6 +14,12 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+Sentry's offline DSN check retains `sentry_types::ParseDsnError` beneath
+`OfflineClientConfigError` for `dsn`, and connector initialization retains that same report
+beneath its open context. Public command refusals render the reviewed key context, never the
+secret DSN. Its required request deadline uses the shared schema's `MissingRequired` or
+`InvalidValue` refusal for `timeout_ms` before initialization.
+
 MongoDB's explicit-seed URL and delegated options are checked by its native parser without
 network I/O. Pool query options produce the typed `PoolSizing` outcome naming `POOL SIZE`;
 other native refusals retain the driver's error beneath the value-free key context. Its resolved

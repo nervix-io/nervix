@@ -1,4 +1,102 @@
 Feature: Sentry emission
+  @sentry_declarations
+  Scenario Outline: Sentry declares its platform and uses it for events without a platform
+    Given HTTP receiver "sentry" is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA declared_event (message STRING);
+      CREATE CODEC declared_codec FROM JSON TO SCHEMA declared_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING '.';
+      CREATE RELAY errors SCHEMA declared_event UNBRANCHED;
+      CREATE VHOST edge sentry-{{test_id}}.example.com;
+      CREATE ENDPOINT error_ingress ON edge PATH '/errors' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR error_source
+        FROM error_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING declared_codec
+        TO errors INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SENTRY CLIENT sentry_main CONFIG {
+        'dsn' = 'http://public@127.0.0.1:{{http_receiver_port.sentry}}/1',
+        'timeout_ms' = 5000
+      };
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SENTRY EVENT EMITTER sentry_errors FROM errors
+        TO sentry_main <option> MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        ENCODE USING declared_codec INHERIT ALL
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      DESCRIBE EMITTER sentry_errors;
+      """
+    Then the last command output contains
+      """
+      PLATFORM <declared>
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW CREATE EMITTER sentry_errors;
+      """
+    Then the last command output contains
+      """
+      TO sentry_main
+      """
+    And the last command output contains
+      """
+      <canonical>
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      START;
+      """
+    And http payload is posted to host "sentry-{{test_id}}.example.com" path "/errors"
+      """
+      {"message":"declared platform"}
+      """
+    Then HTTP receiver "sentry" eventually receives at least 1 requests
+    And Sentry receiver "sentry" recorded 1 distinct event across 1 attempts
+      """
+      {"message":"declared platform","platform":<platform>}
+      """
+
+    Examples:
+      | cluster_size | option            | platform | declared | canonical         |
+      | 1            |                   | "other"  | other    | MODE ACK          |
+      | 3            |                   | "other"  | other    | MODE ACK          |
+      | 1            | PLATFORM 'python' | "python" | 'python' | PLATFORM 'python' |
+      | 3            | PLATFORM 'python' | "python" | 'python' | PLATFORM 'python' |
+
+  @sentry_declarations
+  Scenario Outline: Sentry refuses an invalid client configuration before opening a connection
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands fail with "<diagnostic>"
+      """
+      CREATE SENTRY CLIENT checked CONFIG { <config> };
+      """
+    Then the last command error does not contain
+      """
+      private-sentry-key
+      """
+
+    Examples:
+      | cluster_size | config                                                                                                       | diagnostic                                                |
+      | 1            | 'dsn' = 'https://private-sentry-key@sentry.invalid/', 'timeout_ms' = 5000                                    | invalid client config key 'dsn'                           |
+      | 3            | 'dsn' = 'https://private-sentry-key@sentry.invalid/', 'timeout_ms' = 5000                                    | invalid client config key 'dsn'                           |
+      | 1            | 'dsn' = '{{ "https://private-sentry-key@sentry.invalid/" }}', 'timeout_ms' = 5000                            | invalid client config key 'dsn'                           |
+      | 3            | 'dsn' = '{{ "https://private-sentry-key@sentry.invalid/" }}', 'timeout_ms' = 5000                            | invalid client config key 'dsn'                           |
+      | 1            | 'dsn' = 'https://private-sentry-key@sentry.invalid/1'                                                        | missing required client config key 'timeout_ms'           |
+      | 3            | 'dsn' = 'https://private-sentry-key@sentry.invalid/1'                                                        | missing required client config key 'timeout_ms'           |
+      | 1            | 'dsn' = 'https://private-sentry-key@sentry.invalid/1', 'timeout_ms' = 5000, 'extra' = 'x'                    | unknown client config key 'extra'                         |
+      | 3            | 'dsn' = 'https://private-sentry-key@sentry.invalid/1', 'timeout_ms' = 5000, 'extra' = 'x'                    | unknown client config key 'extra'                         |
+      | 1            | 'dsn' = 'https://private-sentry-key@sentry.invalid/1', 'timeout_ms' = 5000, 'tls_cert_file' = '/missing.pem' | client config key 'tls_cert_file' requires 'tls_key_file' |
+      | 3            | 'dsn' = 'https://private-sentry-key@sentry.invalid/1', 'timeout_ms' = 5000, 'tls_cert_file' = '/missing.pem' | client config key 'tls_cert_file' requires 'tls_key_file' |
+
   @domain_execution_time
   Scenario Outline: Sentry emitter publishes codec JSON as authenticated event envelopes
     Given Sentry is running
