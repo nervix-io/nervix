@@ -54,6 +54,13 @@ pub(in crate::runtime) enum OpenClientError {
     /// One of the client's deadline keys breaks the deadline rule; the cause beneath names it.
     #[error("invalid {transport} client deadline")]
     InvalidDeadline { transport: &'static str },
+    /// One of the client's connection-pool lifetimes breaks its declared value rule; the cause
+    /// beneath says why.
+    #[error("invalid {transport} client {key}")]
+    InvalidPoolLifetime {
+        transport: &'static str,
+        key: &'static str,
+    },
     #[error("failed to connect to {transport}: {reason}")]
     Connect {
         transport: &'static str,
@@ -74,6 +81,10 @@ impl OpenClientError {
                 reason: reason.clone(),
             },
             RedisClientError::InvalidConnectTimeout => Self::InvalidDeadline { transport: "Redis" },
+            RedisClientError::InvalidPoolLifetime { key } => Self::InvalidPoolLifetime {
+                transport: "Redis",
+                key,
+            },
             RedisClientError::Connect { reason } => Self::Connect {
                 transport: "Redis",
                 reason: reason.clone(),
@@ -605,6 +616,30 @@ mod tests {
                 reason,
             } if reason.contains("missing.nervix.test") && reason.contains("the name does not exist")
         ));
+        assert!(
+            error
+                .frames()
+                .any(|frame| frame.downcast_ref::<RedisClientError>().is_some())
+        );
+    }
+
+    #[test]
+    fn an_invalid_redis_pool_lifetime_names_its_key_when_a_shared_client_reports_it() {
+        let error =
+            OpenClientError::from_redis(Report::new(RedisClientError::InvalidPoolLifetime {
+                key: "pool_max_lifetime_ms",
+            }));
+        assert!(matches!(
+            error.current_context(),
+            OpenClientError::InvalidPoolLifetime {
+                transport: "Redis",
+                key: "pool_max_lifetime_ms",
+            }
+        ));
+        assert_eq!(
+            error.current_context().to_string(),
+            "invalid Redis client pool_max_lifetime_ms"
+        );
         assert!(
             error
                 .frames()

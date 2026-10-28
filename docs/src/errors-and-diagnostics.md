@@ -755,6 +755,13 @@ outside the bounded channel's range is `InvalidBufferCapacity`, and an invalid i
 `ClientConfigError::InvalidDeadline` beneath `InvalidIdleTimeout`. These are source configuration
 failures before a subscription opens, not record rejections.
 
+A Redis client's command-pool lifetimes, `pool_idle_timeout_ms` and `pool_max_lifetime_ms`, are
+refused at `CREATE CLIENT` unless they are positive, schedulable whole milliseconds. The pool reads
+them from the client's effective entries and checks them again: an invalid value fails opening the
+pool with `RedisClientError::InvalidPoolLifetime`, naming the key above the schema's
+`ClientConfigSchemaError::InvalidValue`, which the node reports as
+`OpenClientError::InvalidPoolLifetime`. It is a configuration failure, not a record rejection.
+
 Redis subscription protocol and read failures retain their driver causes beneath
 `RedisPubSubIngestorError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
 the shared `DeadlineElapsed` with `idle_timeout_ms` and its configured bound beneath `IdleProbe`

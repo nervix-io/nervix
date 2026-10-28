@@ -509,6 +509,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   node, so size it for the node's whole workload rather than per emitter, and expect one pool per
   node the client is placed on. Read the dedicated `Common` → `Database Client Connection Pools`
   documentation entry before choosing values.
+- A `REDIS` client's command pool takes `pool_idle_timeout_ms` and `pool_max_lifetime_ms`, 10 and
+  30 minutes by default, and never applies them to a Pub/Sub ingestor's subscription connection.
+  Read `Connection lifetimes` in that same pools entry before choosing values; `DESCRIBE CLIENT
+  <name>` shows both, marking an omitted one `(default)`.
 - Give a `POSTGRES` client an absolute `postgres://` or `postgresql://` `addr` URL that selects
   either `sslmode=disable` or `sslmode=verify-full`; no other mode is accepted and there is no
   opportunistic fallback. Mounted `tls_ca_file`, `tls_cert_file`, and `tls_key_file` are the

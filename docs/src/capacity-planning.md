@@ -114,6 +114,10 @@ views leave live relay capacity available for evaluation, encoding and dispatch,
 count in the startup memory total.
 The commands budget also holds the 16 MiB working reservation for one normalized consensus state
 write; half is the keyed payload ceiling and half covers database journal encoding and descriptors.
+Consensus storage operations that need that working set queue at the store rather than in the
+budget, so the rest of it stays with command and replication traffic and with source control calls
+while they wait; see
+[Storage Working Sets](./consensus-storage-and-replication.md#storage-working-sets).
 The credentials budget holds the 19 MiB Argon2id works in for one password, so a node computes one
 hash at a time and a burst of login attempts waits there without touching any other class. A stored
 hash whose parameters need more memory than that never verifies.

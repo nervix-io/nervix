@@ -1389,7 +1389,8 @@ to its byte bound, then applies its declared `DROP OLDEST` or `DROP NEWEST` over
 `DROP` discards every payload during the hold. Discards count in
 `nervix_ingestor_quiesce_dropped_total`. A `REDIS CLIENT` declares connection-pool bounds even
 when only ingestors reference it; see [Database Client Connection Pools](database-client-pools.md).
-Each subscription owns a separate connection. It resolves the `addr` hostname through the node's
+Each subscription owns a separate connection, which the client's command-pool lifetimes,
+`pool_idle_timeout_ms` and `pool_max_lifetime_ms`, never close. It resolves the `addr` hostname through the node's
 asynchronous DNS resolver on initial subscribe and every resume after a disconnect; it does not
 consume a pooled command connection. For `rediss://`, TLS verifies the original hostname and
 uses the configured CA and optional client identity. DNS and connection failures follow the
