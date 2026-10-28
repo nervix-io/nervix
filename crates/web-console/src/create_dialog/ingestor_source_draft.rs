@@ -270,6 +270,9 @@ impl IngestorEntityDraft {
             }
             IngestorEntityKind::Http(HttpIngestorEntity::Request) => HttpRequestIngestor {
                 client: self.client()?,
+                method: "GET".to_owned(),
+                headers: Vec::new(),
+                max_body_size: None,
                 every: self.every()?,
                 mode: HttpRequestIngestMode::NoAck,
                 quiesce,

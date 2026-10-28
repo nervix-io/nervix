@@ -363,9 +363,10 @@ the identity of the connection, whichever address accepted it:
   [Peer Identity And Authentication](./interconnect.md#peer-identity-and-authentication) describes.
 - **HTTP authority.** The `Host` header, the HTTP/2 `:authority`, the WebSocket upgrade's URL, and
   the request path and query stay as configured. A literal IPv6 host is written in brackets there.
-- **Proxies.** Every Reqwest client Nervix builds, for HTTP polling, Prometheus, Sentry, OTEL HTTP
-  and both Iceberg clients, keeps Reqwest's default of honoring the proxy environment variables
-  `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`. When a request goes through a proxy, the
+- **Proxies.** HTTP polling ignores proxy environment variables and uses only the HTTP client's
+  explicit `proxy` URL. The Reqwest clients for Prometheus, Sentry, OTEL HTTP and both Iceberg
+  clients keep Reqwest's default of honoring `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
+  `NO_PROXY`. When a request goes through a proxy, the
   node's resolver resolves only the proxy's host; the proxy resolves the service, an HTTPS request
   tunnels through it with `CONNECT`, and TLS still verifies the configured host. An SQS client
   without a custom CA takes its proxy from the same variables under the same rule, and one with a
@@ -373,10 +374,11 @@ the identity of the connection, whichever address accepted it:
 - **Request signing.** An SQS request is signed with SigV4 for its configured endpoint before its
   host is resolved, so the signature, the `Host` header and the certificate check name the same
   host.
-- **Redirects.** A Reqwest client that follows a redirect resolves the new host through the node's
-  resolver like the first, and a native session that follows a leader redirect resolves the
-  leader's advertised host through the client's resolver. The HTTP request emitter follows no
-  redirect.
+- **Redirects.** HTTP polling follows no redirect unless its client sets `follow_redirects = true`;
+  then each redirected host is resolved through the node's resolver. Other Reqwest clients that
+  follow a redirect use that same resolver, and a native session that follows a leader redirect
+  resolves the leader's advertised host through the client's resolver. The HTTP request emitter
+  follows no redirect.
 
 ## Failure Ownership
 

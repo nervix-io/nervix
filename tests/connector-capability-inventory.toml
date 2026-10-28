@@ -109,6 +109,41 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "METHOD"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+]
+
+[[capability]]
+capability = "HEADERS"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+]
+
+[[capability]]
+capability = "MAX BODY SIZE"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+]
+
+[[capability]]
+capability = "metadata.status"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+]
+
+[[capability]]
+capability = "metadata.polled_at"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "HTTP REQUEST INGESTOR"
 scenarios = [

@@ -410,6 +410,25 @@ impl IngestorPresentationModel for WebsocketsConnectionIngestor {
 impl IngestorPresentationModel for HttpRequestIngestor {
     fn entity_presentation(&self) -> EntityPresentation {
         let mut presentation = EntityPresentation::ingestor(self);
+        presentation.written_option("METHOD", string_literal(&self.method));
+        if !self.headers.is_empty() {
+            let fields: Vec<_> = self
+                .headers
+                .iter()
+                .map(|header| {
+                    format!(
+                        "{} = {}",
+                        string_literal(&header.name),
+                        string_literal(&header.value)
+                    )
+                })
+                .collect();
+            presentation.written_option("HEADERS", format!("{{ {} }}", fields.join(", ")));
+        }
+        presentation.optional_option(
+            "MAX BODY SIZE",
+            self.max_body_size.map(|limit| limit.to_string()),
+        );
         presentation.written_option("EVERY", duration_literal(self.every.as_nanos()));
         presentation
     }

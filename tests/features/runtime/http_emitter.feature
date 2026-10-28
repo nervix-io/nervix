@@ -160,7 +160,7 @@ Feature: HTTP REQUEST emitter
       | 3            |
 
   @http_emitter_configuration @http_emitter_timeout
-  Scenario Outline: HTTP REQUEST emitter requires an explicit usable client timeout before activation
+  Scenario Outline: HTTP client requires an explicit usable timeout at declaration
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -168,14 +168,10 @@ Feature: HTTP REQUEST emitter
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (id STRING);
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
+      """
+    When these Plexus commands fail with "missing required client config key 'timeout_ms'"
+      """
       CREATE HTTP CLIENT api CONFIG {'endpoint' = 'https://api.example.com'};
-      """
-    When these Plexus commands fail with "timeout_ms"
-      """
-      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
-        METHOD 'POST' PATH '/events'
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
-        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 
     Examples:

@@ -13,7 +13,7 @@
 use meticulous::{OptionExt as _, ResultExt as _};
 
 use super::*;
-use crate::{ClientConfigEntry, ConnectorKind};
+use crate::{ClientConfigEntry, ConnectorKind, CreateClientHttp, DeadlineKey};
 
 fn entry(key: &str, value: &str) -> ClientConfigEntry {
     ClientConfigEntry {
@@ -267,7 +267,10 @@ fn a_tls_address_requires_its_declared_trust_file() {
         .client()
         .assured("HTTP declares a client")
         .config
-        .validate(&[entry("endpoint", "https://api.example.com")])
+        .validate(&[
+            entry("endpoint", "https://api.example.com"),
+            entry("timeout_ms", "5000"),
+        ])
         .assured("HTTPS uses its driver's built-in trust roots");
 }
 
@@ -297,6 +300,67 @@ fn a_deadline_uses_the_shared_positive_millisecond_contract() {
             ClientConfigSchemaError::InvalidValue { key, .. } if key == "timeout_ms"
         ));
     }
+}
+
+#[test]
+fn http_declares_one_strict_client_transport_contract() {
+    let client = ConnectorKind::Http
+        .client()
+        .assured("HTTP declares a client");
+    let keys: Vec<_> = client.config.keys().iter().map(|key| key.name).collect();
+    assert_eq!(
+        keys,
+        [
+            "endpoint",
+            "follow_redirects",
+            "proxy",
+            "timeout_ms",
+            "tls_ca_file",
+            "tls_cert_file",
+            "tls_key_file",
+        ]
+    );
+    client
+        .config
+        .validate(&[
+            entry("endpoint", "https://api.example.com"),
+            entry("follow_redirects", "true"),
+            entry("proxy", "http://proxy.example.com:8080"),
+            entry("timeout_ms", "5000"),
+        ])
+        .assured("the declared HTTP transport settings are valid together");
+    for (key, value) in [
+        ("follow_redirects", "yes"),
+        ("proxy", "socks5://proxy.example.com:1080"),
+    ] {
+        let refusal = client
+            .config
+            .validate(&[
+                entry("endpoint", "https://api.example.com"),
+                entry("timeout_ms", "5000"),
+                entry(key, value),
+            ])
+            .expect_err("the transport option has its declared value type");
+        assert!(matches!(
+            refusal.current_context(),
+            ClientConfigSchemaError::InvalidValue { key: found, .. } if found == key
+        ));
+    }
+    let missing = client
+        .config
+        .validate(&[entry("endpoint", "https://api.example.com")])
+        .expect_err("the HTTP timeout is required");
+    assert!(matches!(
+        missing.current_context(),
+        ClientConfigSchemaError::MissingRequired { key: "timeout_ms" }
+    ));
+    let contract = CreateClientHttp::TRANSPORT;
+    assert_eq!(contract.timeout, DeadlineKey::Timeout);
+    assert_eq!(contract.redirect_limit_without_opt_in, 0);
+    assert_eq!(contract.redirect_limit_with_opt_in, 10);
+    assert!(!contract.reads_environment_proxy);
+    assert!(contract.redacts_targets_and_headers);
+    assert!(contract.tls_identity_requires_pair);
 }
 
 #[test]

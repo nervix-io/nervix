@@ -320,7 +320,6 @@ Feature: Web console visual ingestor creation
       CREATE RELAY visual_http_relay SCHEMA visual_http_event UNBRANCHED;
       CREATE HTTP CLIENT visual_http_client CONFIG {
         'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
-        'method' = 'GET',
         'timeout_ms' = 5000
       };
       """
@@ -348,7 +347,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-route .create-ingestor-flush [data-flush='immediate']" is clicked
     And selector ".create-ingestor-route .create-ingestor-message-error [data-error='log']" is clicked
     And selector ".create-ingestor-general-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "CREATE HTTP REQUEST INGESTOR visual_http_source FROM visual_http_client"
+    Then selector ".create-preview" contains "CREATE HTTP REQUEST INGESTOR visual_http_source FROM visual_http_client METHOD 'GET'"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked

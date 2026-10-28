@@ -429,6 +429,7 @@ impl PacedIngestorConnector for FakeIngestor {
             messages: vec![IngestorPollMessage {
                 payload: message.payload,
                 headers,
+                metadata: IngestorPollMetadata::Headers,
             }],
             failures: Vec::new(),
             observed_at: scheduled_at,

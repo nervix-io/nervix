@@ -27,6 +27,8 @@ use crate::{FieldName, ParseAsType, SchemaField};
 pub enum IngestorMetadataScope {
     /// No typed field: transport headers are all a message carries beside its payload.
     Headers,
+    /// The response status and scheduled poll instant of an HTTP request.
+    Http,
     /// Where a Kafka message sits in its topic: `topic`, `partition` and `offset`.
     Kafka,
     /// The peer a syslog message arrived from: `peer_addr`.
@@ -69,6 +71,17 @@ const WEBSOCKETS_FIELDS: &[IngestorMetadataField] = &[IngestorMetadataField {
     ty: ParseAsType::String,
 }];
 
+const HTTP_FIELDS: &[IngestorMetadataField] = &[
+    IngestorMetadataField {
+        name: "status",
+        ty: ParseAsType::U16,
+    },
+    IngestorMetadataField {
+        name: "polled_at",
+        ty: ParseAsType::Datetime,
+    },
+];
+
 impl IngestorMetadataScope {
     /// The one declaration of this namespace's fields, in order. The schema fields a program is
     /// validated against and the Arrow columns a host builds are both read from it, so neither
@@ -76,6 +89,7 @@ impl IngestorMetadataScope {
     pub(crate) const fn declared_fields(self) -> &'static [IngestorMetadataField] {
         match self {
             Self::Headers => &[],
+            Self::Http => HTTP_FIELDS,
             Self::Kafka => KAFKA_FIELDS,
             Self::Syslog => SYSLOG_FIELDS,
             Self::Websockets => WEBSOCKETS_FIELDS,

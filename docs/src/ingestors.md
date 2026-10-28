@@ -623,7 +623,6 @@ CREATE IF NOT EXISTS HTTP CLIENT http_tls
   MOUNT dev_tls VERSION 1
   CONFIG {
     'endpoint' = 'https://127.0.0.1:18443/http/notifications',
-    'method' = 'GET',
     'timeout_ms' = 5000,
     'tls_ca_file' = '{{ dev_tls }}/ca.pem'
   };
@@ -927,6 +926,9 @@ under the same head. `DECODE USING <codec>`, the timestamp, the filter, the rout
 ```plexus,ignore
 CREATE HTTP REQUEST INGESTOR <name>
   FROM <client>
+  (METHOD 'GET')
+  [HEADERS { 'accept' = 'application/json' }]
+  [MAX BODY SIZE 1MiB]
   (EVERY 1s)
   MODE <mode>
   ON QUIESCE <quiesce>
@@ -942,21 +944,31 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | HTTP client |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | `EVERY 1s` (duration); required |
+| Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
-| Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |
+| Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | the response body: unbounded |
-| Network waits | a request: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |
-| Driver limits | Response heads above 100 headers or 417,792 bytes are refused.<br>A request follows at most 10 redirects. |
+| Buffers | the response body: set by MAX BODY SIZE; when exceeded, fails the poll; the next poll reads again |
+| Network waits | a request: name resolution, connection, TLS and the response: `timeout_ms`; required |
+| Driver limits | Response heads above 100 headers or 417,792 bytes are refused.<br>Redirects and proxies require the client's explicit opt-in. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-ingest).
 <!-- connector-matrix:ingest-http-request:end -->
 
+- `METHOD '<token>'` is required on the ingestor. `HEADERS { '<name>' = '<value>', … }` writes
+  literal request fields; each value is visible in `SHOW CREATE`. `MAX BODY SIZE` bounds the
+  response body at its declared size, or 16 MiB where omitted. A response above that bound fails
+  its poll.
+- The HTTP client requires `endpoint` and `timeout_ms`. It also declares optional
+  `follow_redirects` and `proxy` settings, plus TLS trust and client identity files. The polling
+  client ignores proxy environment variables and follows no redirect unless opted in.
+- `metadata.status` is the successful response's `U16` status and `metadata.polled_at` is the
+  scheduled `DATETIME` instant of that poll. `read_header` and `read_headers` read the response's
+  headers; `204 No Content` emits no row.
 - polls a configured HTTP endpoint periodically
 - issues the first request immediately, then follows an anchored domain-clock cadence; slow
   responses coalesce missed occurrences into one request at the newest due instant

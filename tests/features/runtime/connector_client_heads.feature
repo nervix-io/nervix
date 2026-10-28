@@ -80,10 +80,9 @@ Feature: Connector names head client definitions
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://127.0.0.1:19080',
-        'method' = 'GET',
         'timeout_ms' = 5000
       };
-      CREATE HTTP REQUEST INGESTOR polling FROM api EVERY 1s
+      CREATE HTTP REQUEST INGESTOR polling FROM api METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

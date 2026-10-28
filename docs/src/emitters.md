@@ -327,8 +327,8 @@ available. The ordinary route-local `FLUSH` clause is required.
 
 The referenced client must be a `HTTP CLIENT` in the same domain. Its `endpoint` is an
 `http://` or `https://` origin with a host and optional port, and no credentials, non-root path,
-query or fragment. It requires a positive, schedulable `timeout_ms`; the client's polling `method`
-setting does not supply the emitter's `METHOD`. HTTPS retains certificate and hostname verification.
+query or fragment. It requires a positive, schedulable `timeout_ms`; the emitter's `METHOD` is its
+own expression. HTTPS retains certificate and hostname verification.
 The optional `tls_cert_file` and `tls_key_file` settings must be supplied together, and mounted TLS
 files use the client's pinned resource version. Validation does not probe the destination.
 
