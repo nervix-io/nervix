@@ -1863,7 +1863,8 @@ The after hook runs every scenario's cleanup through the phases above.
 ```text
 body complete
      |
-teardown started      release paused health responses, domain-clock progress pauses, and
+teardown started      cancel and join the background CLI backup;
+     |                release paused health responses, domain-clock progress pauses, and
      |                command pauses; stop durable catch-up writers and domain write load
      |                sessions, and clear consensus commit delays
 teardown diagnostics  every node's status at once within 10 s; the scenario's context
@@ -1966,6 +1967,18 @@ Harness state goes back only after the tasks that used it have ended, so the nex
 finds a port, a fault, or a proxy taken. What a node left stopping still uses stays with its keeper
 until that node has ended.
 
+- Every asynchronous CLI command, including one-shot inspection, completion, clock, backup and
+  restore commands, starts with `kill_on_drop(true)`. Cancelling its step or expiring its timeout
+  therefore kills the child rather than leaving its redirects and reconnects running. The
+  background-backup step records its child's process id. Teardown aborts and joins its output
+  task before releasing command pauses or stopping the cluster, so the child is dropped before
+  the cluster's listener ports can return to the pool. The public one- and three-node outline
+  `Cancelling a paused background backup ends its CLI process` holds the cut, cancels that same
+  task and requires its exact process to disappear within a 30-second observation budget. A
+  surviving child fails the assertion and is killed to contain the failed regression. After
+  releasing the cut, the outline recovers that same durable backup by its caller-chosen execution
+  reference and collects its archive before stopping the cluster: ending the client does not
+  cancel the server's admitted backup.
 - CLI output readers, the terminal task of an interactive CLI among them, are aborted and their
   `kill_on_drop` child processes are dropped before node teardown, which also removes the REPL's
   working directory. Background HTTP load, held uploads, server processes and real-process
