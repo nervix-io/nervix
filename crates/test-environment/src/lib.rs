@@ -35,7 +35,7 @@ use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_primitives::sync::StdArc;
 use nervix_recovery::Discarded as _;
-use tempfile::{TempDir, tempdir, tempdir_in};
+use tempfile::{NamedTempFile, TempDir, tempdir, tempdir_in};
 use testcontainers::{
     ContainerAsync, ContainerRequest, CopyTargetOptions, GenericBuildableImage, GenericImage,
     Image, ImageExt, ReuseDirective, TestcontainersError,
@@ -177,6 +177,7 @@ pub const MYSQL_ADDR: &str = "mysql_addr";
 pub const MYSQL_TLS_ADDR: &str = "mysql_tls_addr";
 pub const MONGODB_ADDR: &str = "mongodb_addr";
 pub const MONGODB_TLS_ADDR: &str = "mongodb_tls_addr";
+pub const MONGODB_MTLS_ADDR: &str = "mongodb_mtls_addr";
 pub const MONGODB_REPLICA_SET_ADDR: &str = "mongodb_replica_set_addr";
 pub const PROMETHEUS_ADDR: &str = "prometheus_addr";
 pub const PROMETHEUS_TLS_ADDR: &str = "prometheus_tls_addr";
@@ -201,6 +202,7 @@ pub struct DependencyEndpoints {
     values: BTreeMap<String, String>,
     tls_ca_pem: Option<Vec<u8>>,
     tls_ca_path: Option<PathBuf>,
+    tls_identity_path: Option<PathBuf>,
 }
 
 impl fmt::Debug for DependencyEndpoints {
@@ -236,6 +238,12 @@ impl DependencyEndpoints {
         })
     }
 
+    pub fn tls_identity_path(&self) -> io::Result<&Path> {
+        self.tls_identity_path.as_deref().ok_or_else(|| {
+            io::Error::other("TLS materials are unavailable; start a TLS dependency first")
+        })
+    }
+
     pub fn apply_placeholders(&self, placeholders: &mut BTreeMap<String, String>) {
         placeholders.extend(self.values.clone());
     }
@@ -247,6 +255,7 @@ impl DependencyEndpoints {
     fn set_tls(&mut self, tls: &TlsMaterials) {
         self.tls_ca_pem = Some(tls.ca_pem.clone());
         self.tls_ca_path = Some(tls.ca_path.clone());
+        self.tls_identity_path = Some(tls.identity_path.clone());
     }
 }
 
@@ -836,20 +845,35 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
     }
 
     pub async fn start_mongodb(&mut self) -> io::Result<()> {
-        if !self.mark_starting("mongodb").await? {
+        self.start_mongodb_tls(MongoDbClientAuthentication::Optional)
+            .await
+    }
+
+    /// An authenticated standalone server whose TLS connections require a client certificate.
+    pub async fn start_mongodb_mutual_tls(&mut self) -> io::Result<()> {
+        self.start_mongodb_tls(MongoDbClientAuthentication::Required)
+            .await
+    }
+
+    async fn start_mongodb_tls(
+        &mut self,
+        authentication: MongoDbClientAuthentication,
+    ) -> io::Result<()> {
+        let service = authentication.service();
+        if !self.mark_starting(service).await? {
             return Ok(());
         }
         let tls = self.ensure_tls()?.clone();
-        let command = [
-            "-c",
+        let script = format!(
             "set -euo pipefail; cat /certs/node-key.pem /certs/node.pem > /tmp/server.pem; cp \
              /certs/ca.pem /tmp/ca.pem; chown mongodb:mongodb /tmp/server.pem /tmp/ca.pem; chmod \
              600 /tmp/server.pem; exec docker-entrypoint.sh mongod --bind_ip_all --tlsMode \
-             preferTLS --tlsCertificateKeyFile /tmp/server.pem --tlsCAFile /tmp/ca.pem \
-             --tlsAllowConnectionsWithoutCertificates",
-        ];
+             preferTLS --tlsCertificateKeyFile /tmp/server.pem --tlsCAFile /tmp/ca.pem {}",
+            authentication.server_option()
+        );
+        let command = ["-c", &script];
         let container = self
-            .start_container("mongodb", 27017.tcp(), "MongoDB", || {
+            .start_container(service, 27017.tcp(), "MongoDB", || {
                 GenericImage::new("mongo", "8.2")
                     .with_exposed_port(27017.tcp())
                     .with_entrypoint("bash")
@@ -868,14 +892,24 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             })
             .await?;
         let port = mapped_port(&container, 27017, "MongoDB").await?;
-        self.endpoints.insert(
-            MONGODB_ADDR,
-            format!("mongodb://root:nervix@127.0.0.1:{port}/nervix?authSource=admin"),
-        );
-        self.endpoints.insert(
-            MONGODB_TLS_ADDR,
-            format!("mongodb://root:nervix@127.0.0.1:{port}/nervix?authSource=admin&tls=true"),
-        );
+        match authentication {
+            MongoDbClientAuthentication::Optional => {
+                self.endpoints.insert(
+                    MONGODB_ADDR,
+                    format!("mongodb://root:nervix@127.0.0.1:{port}/nervix?authSource=admin"),
+                );
+                self.endpoints.insert(
+                    MONGODB_TLS_ADDR,
+                    format!(
+                        "mongodb://root:nervix@127.0.0.1:{port}/nervix?authSource=admin&tls=true"
+                    ),
+                );
+            }
+            MongoDbClientAuthentication::Required => self.endpoints.insert(
+                MONGODB_MTLS_ADDR,
+                format!("mongodb://root:nervix@127.0.0.1:{port}/nervix?authSource=admin&tls=true"),
+            ),
+        }
         self.containers.push(RunningContainer::Generic(container));
         Ok(())
     }
@@ -1829,10 +1863,33 @@ impl TlsDirectory {
     }
 }
 
+#[derive(Clone, Copy)]
+enum MongoDbClientAuthentication {
+    Optional,
+    Required,
+}
+
+impl MongoDbClientAuthentication {
+    fn service(self) -> &'static str {
+        match self {
+            Self::Optional => "mongodb",
+            Self::Required => "mongodb-mutual-tls",
+        }
+    }
+
+    fn server_option(self) -> &'static str {
+        match self {
+            Self::Optional => "--tlsAllowConnectionsWithoutCertificates",
+            Self::Required => "",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct TlsMaterials {
     dir: StdArc<TlsDirectory>,
     ca_path: PathBuf,
+    identity_path: PathBuf,
     ca_pem: Vec<u8>,
     node_pem: Vec<u8>,
     node_key_pem: Vec<u8>,
@@ -2004,14 +2061,25 @@ IP.1 = 127.0.0.1
     }
 
     fn load(dir: StdArc<TlsDirectory>) -> io::Result<Self> {
+        use io::Write as _;
+
         let ca_path = dir.path().join("ca.pem");
         let ca_pem = fs::read(&ca_path)?;
         let node_pem = fs::read(dir.path().join("node.pem"))?;
         let node_key_pem = fs::read(dir.path().join("node-key.pem"))?;
+        let identity_path = dir.path().join("client-identity.pem");
+        let mut identity = NamedTempFile::new_in(dir.path())?;
+        identity.write_all(&node_pem)?;
+        identity.write_all(b"\n")?;
+        identity.write_all(&node_key_pem)?;
+        identity
+            .persist(&identity_path)
+            .map_err(|error| error.error)?;
         let kafka_keystore = fs::read(dir.path().join("kafka.keystore.p12"))?;
         Ok(Self {
             dir,
             ca_path,
+            identity_path,
             ca_pem,
             node_pem,
             node_key_pem,

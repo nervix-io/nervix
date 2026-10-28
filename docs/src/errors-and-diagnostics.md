@@ -22,6 +22,16 @@ Client initialization also preserves the driver cause of option installation and
 ping. Public command refusal projection renders the reviewed key/pool context rather than driver
 input.
 
+MongoDB TLS preparation retains `MongoDbTlsError` beneath the client-initialization context
+and preserves filesystem, executor and native driver causes. Its contexts name the operation and
+certificate/key role without copying PEM contents or configured paths into diagnostic text.
+Native client construction uses filesystem-worker admission before the driver reads or parses
+TLS files. Admission/cancellation stays an initialization failure; a native TLS refusal retains
+the driver's typed cause beneath its configuration context.
+Explicit files combined with `tls=false` fail offline under the value-free `addr` key context.
+The registry's `ConnectorDeclarationIssue::MongoDbFieldName` refuses a NUL byte in a mapped BSON
+key at CREATE and ALTER; its debug-formatted key escapes control characters in the diagnostic.
+
 The ClickHouse declaration checks a required positive `timeout_ms` and the address/TLS pairing
 before inspecting mounted files or opening a client. Missing timeout or HTTPS trust is a
 `ClientConfigSchemaError::MissingRequired` or `RequiresKey`; a TLS key with an HTTP address is

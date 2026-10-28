@@ -2208,6 +2208,16 @@ sharing the server keep running. Each scenario provisions its own collection and
 server kind with that collection for later assertions; standalone and TLS collections keep their
 own server kinds.
 
+MongoDB mutual-TLS resource scenarios use a separate `mongodb-mutual-tls` service and endpoint.
+Its TLS connections require a client certificate signed by the fixture CA. Setup and observation
+clients use the fixture's private combined identity, while Nervix receives the certificate and key
+as separate mounted files. A CA-only setup client must fail its ping within a two-second server
+selection budget, while the same endpoint accepts the setup client with its identity. Both
+one- and three-node examples assert a document written through
+that authenticated transport. The ordinary MongoDB endpoint retains its own authentication mode.
+The BSON declaration refusal outline substitutes an actual NUL from a named fixture placeholder;
+Plexus string literals remain verbatim, so the fixture does not invent a language escape.
+
 The write-concern outline connects a named public client to the emitter's reported owner before
 publishing. That client retains the server's error notices independently of the sessions used by
 readiness and `DESCRIBE` probes. After checking all six documents and delaying the observer, the
@@ -2217,7 +2227,7 @@ code `100` (`UnsatisfiableWriteConcern`). The notice proves that the failure occ
 the live status has cleared. The scenario preserves its retry policy, write concern and exact
 document oracle.
 
-Both MongoDB test servers set `GLIBC_TUNABLES=glibc.pthread.rseq=1`, enabling glibc's restartable
+All MongoDB test servers set `GLIBC_TUNABLES=glibc.pthread.rseq=1`, enabling glibc's restartable
 sequence registration. This avoids the MongoDB/TCMalloc crash on affected Linux kernels when the
 image's default disables that registration; the [image maintainers document the setting and kernel
 issue](https://github.com/docker-library/mongo/discussions/748). The fixed container environment is

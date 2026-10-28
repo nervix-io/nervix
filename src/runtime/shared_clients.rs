@@ -438,7 +438,7 @@ impl Runtime {
                     .map_err(started)?,
             ),
             PooledTransport::MongoDb => SharedClientInstance::MongoDb(
-                MongoDbClient::open(config, pool.bounds)
+                MongoDbClient::open(config, pool.bounds, &self.inner.executor)
                     .await
                     .map_err(started)?,
             ),

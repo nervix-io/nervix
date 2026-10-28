@@ -24,6 +24,10 @@ carrying a second database identity. Collection names are validated vocabulary v
 their original UTF-8 spelling; the resolved database, separator and collection cross the complete
 namespace-budget check before the emitter opens. Missing database configuration and a refused
 namespace return typed errors, never an empty database or a substituted collection.
+Its BSON field-name predicate rejects NUL at admission. Its private TLS plan distinguishes native
+driver TLS options from a complete split-file identity awaiting preparation; a partial identity
+is a configuration error. Preparation returns native options together with their private combined
+PEM guard. One shared client owner retains both driver and guard until its last handle ends.
 
 Nervix represents absence and distinct semantic states in its types. A zero, empty string,
 empty collection, maximum integer, or all-zero digest is a value in its own right; it does not
