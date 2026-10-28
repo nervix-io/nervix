@@ -40,6 +40,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions and client pool options | `Emitters` → `MySQL`, and `Database Client Connection Pools` |
+| Sentry platform options, event defaults, batch transformations and strict DSN/timeout configuration | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
 | Session subscriptions and domain clock attachment | `Sessions` |
@@ -356,7 +357,10 @@ current connection, retry and deadline limits.
   tables and `Emitters` → `OTEL` before constructing mappings.
   Follow `Ingestors` → `Delivery Modes` for duration bounds and retry ordering, and `Emitters` →
   `Direct-emitter values` for exact types and literal-only OTEL resources. For example, supply an
-  I32 expression for OTEL `severity_number`; an integer literal is I64. A refused alteration
+  I32 expression for OTEL `severity_number`; an integer literal is I64. OTEL also checks literal
+  field ranges before storing the statement. Read its client header-pair format before supplying
+  credentials: values are percent-decoded once, and TLS file keys require an HTTPS endpoint for
+  either transport. A refused alteration
   preserves the accepted graph.
 - For acknowledged HTTP or WebSocket endpoint intake in Plexus, read `Ingestors` → `HTTP ENDPOINT
   And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,

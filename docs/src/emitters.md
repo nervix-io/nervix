@@ -171,9 +171,9 @@ The shared variables are:
   system recovers or an operator repairs its provisioning.
 
 Request/response emitters—SQS, Sentry, OTEL, HTTP, the databases, and Iceberg—do not take
-`ACK TIMEOUT`. Except for Iceberg, their client request timeout bounds the response. SQS and
-Sentry clients expose that bound as the optional `timeout_ms` CONFIG key; OTEL, ClickHouse and
-HTTP emitter clients require it. An Iceberg emitter's object-store client bounds each storage
+`ACK TIMEOUT`. Except for Iceberg, their client request timeout bounds the response. SQS clients
+expose that bound as the optional `timeout_ms` CONFIG key; Sentry, OTEL, ClickHouse and HTTP
+emitter clients require it. An Iceberg emitter's object-store client bounds each storage
 call with its own optional `timeout_ms`, while Nervix sets no deadline on its REST catalog
 requests, as [Iceberg retries](#iceberg-retries) describes. For every emitter, Nervix accounts for
 records individually wherever the transport exposes individual results: delivered records acknowledge
@@ -675,6 +675,11 @@ snapshot and row membership for errors and acknowledgements. A payload with one 
 container shape, such as a one-element array, and a carrier with no eligible row publishes nothing.
 Batching adds no timer: `FLUSH` alone decides when records leave, and a partial payload is published
 exactly like a full one.
+
+Arrival order is established at the emitter. Each input queue keeps its own order, and ready
+inputs can interleave. Sequential `MODE NO ACK` HTTP responses from different ingestors do
+not establish a common receive order at the emitter. Compatible rows separated by another source
+stay in separate payloads even when their requests were accepted consecutively.
 
 `MAX SIZE` is the exact length of the payload: escaping, UTF-8, base64, field names, separators,
 length prefixes and the container's own brackets all count, and a batch transformation is measured
@@ -1836,6 +1841,7 @@ the emitter's `WHERE` drops is never sent, so a failure of its group is never re
 CREATE SENTRY EVENT EMITTER <name>
   FROM <relay>
   TO <client>
+  [PLATFORM 'python']
     MODE <mode>
     ENCODE USING <codec>
   <construction>
@@ -1852,7 +1858,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | SENTRY client |
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | No entity-specific options. |
+| Options in statement order | `PLATFORM 'python'` (string literal); optional; default other |
 | Headers | Not offered: An event is encoded inside its Sentry envelope; arbitrary per-event HTTP header writes are not supported. |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -1861,7 +1867,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | a request: name resolution, connection, TLS and the response headers: `timeout_ms`; unbounded when omitted |
+| Network waits | a request: name resolution, connection, TLS and the response headers: `timeout_ms`; required |
 | Driver limits | An event above 1,000,000 bytes is rejected. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
@@ -1881,6 +1887,7 @@ CREATE SENTRY CLIENT sentry_main
 CREATE SENTRY EVENT EMITTER sentry_errors
   FROM errors
   TO sentry_main
+    PLATFORM 'python'
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING sentry_event_codec
   INHERIT ALL
@@ -1892,7 +1899,11 @@ CREATE SENTRY EVENT EMITTER sentry_errors
 The codec must produce one top-level JSON object per record. Its fields use the Sentry event
 protocol, such as `message`, `level`, `environment`, `release`, `tags`, `extra`, `user`, and
 `exception`. Nervix preserves the complete object and supplies `event_id`, `timestamp`, and
-`platform` when they are omitted. It then creates a Sentry envelope, derives the envelope URL and
+`platform` when they are omitted. The default timestamp is the batch's execution time. The
+optional `PLATFORM '<value>'` clause, before `MODE`, supplies an absent platform; leaving the
+clause out selects `other`. A platform already supplied by the codec is preserved. `DESCRIBE`
+shows the effective platform, while `SHOW CREATE` retains whether the clause was written.
+Nervix then creates a Sentry envelope, derives the envelope URL and
 authentication header from the DSN, and submits the event. An invalid event object is handled as a
 route-local encoding error.
 
@@ -1916,8 +1927,12 @@ framing are outside `MAX SIZE`.
 
 Use a JSON wire codec or a JAQ-native codec with JSON output. Sentry emitters require `ENCODE
 USING`, do not accept `write_header`, and still require explicit leakage for sensitive event
-fields. The optional Sentry client keys `timeout_ms`, `tls_ca_file`, `tls_cert_file`, and
-`tls_key_file` have their usual meanings.
+fields. The strict client configuration requires `dsn` and a positive `timeout_ms`. Nervix
+validates the complete DSN with Sentry's native parser at `CREATE CLIENT`, including rendered
+values, before committing the client or connecting to the service. An invalid DSN names `dsn`
+without exposing its value. Client inspection redacts the DSN. The optional `tls_ca_file`,
+`tls_cert_file`, and `tls_key_file` keys have their usual meanings; a certificate and private key
+must be supplied together. Unknown keys are refused.
 Sentry resolves the DSN endpoint through the node's configured DNS resolver; a `timeout_ms`
 includes that lookup, connection setup, TLS, and the response.
 
@@ -2071,7 +2086,7 @@ CREATE OTEL CLIENT otel_main
   CONFIG {
     'endpoint' = 'http://127.0.0.1:4317',
     'protocol' = 'grpc',
-    'headers' = 'authorization=Bearer <token>',
+    'headers' = 'authorization=Bearer%20<token>',
     'compression' = 'gzip',
     'timeout_ms' = 5000
   };
@@ -2079,13 +2094,17 @@ CREATE OTEL CLIENT otel_main
 
 `endpoint`, `protocol`, and `timeout_ms` are required. `protocol` is exactly `grpc` or
 `http/protobuf`. `headers` is comma-separated `key=value`: Nervix splits each pair at its first
-`=`, trims surrounding whitespace, lowercases keys, and preserves values literally without
-percent-decoding. Empty input supplies no headers. `compression` accepts only `gzip`, and an
+`=`, trims surrounding whitespace, lowercases keys, and percent-decodes each value once.
+A literal `+` remains `+`; `%2B` also decodes to `+`, and `%252C` decodes to the literal `%2C`.
+Encode a comma inside a value as `%2C` and a space as `%20`. Encoded leading and trailing spaces
+belong to the value. This follows the [OTLP header format](https://opentelemetry.io/docs/specs/otel/protocol/exporter/#specifying-headers-via-environment-variables).
+Empty input supplies no headers. `compression` accepts only `gzip`, and an
 absent compression key sends an uncompressed request. `timeout_ms` is a positive request bound.
 For `http/protobuf`, Nervix appends `/v1/logs`, `/v1/traces`, or `/v1/metrics` to the endpoint path.
 Mount TLS files and use `tls_ca_file`, `tls_cert_file`, and `tls_key_file` in the same client; the
 certificate and key must be supplied together, and TLS files require an `https` endpoint on either
-protocol. Both protocols resolve the endpoint's host through
+protocol. CREATE and ALTER CLIENT check this relationship before inspecting files or opening a
+transport. Both protocols resolve the endpoint's host through
 the node's configured DNS resolver for every new connection, and keep the endpoint's host for the
 HTTP authority and the TLS server name. A `timeout_ms` covers the lookup and connection setup as
 well as the response, and for `grpc` it is also the connection timeout. A failed lookup is an
@@ -2128,7 +2147,10 @@ Normal sensitivity rules apply to every expression, including `ATTRIBUTES`.
 Each signal's generated table above gives its closed `VALUES` keys, exact types, requiredness,
 and record constraints. Those tables also list the unsupported OTLP features and their reasons.
 Timestamps cannot precede the Unix epoch. Key/type and required-mapping checks happen at CREATE
-and ALTER; record-dependent ranges and histogram cardinality are checked while encoding each row.
+and ALTER. Literal severities, identifiers and enum names are also checked against the declared
+value domains before the statement is accepted. For example, `(25 AS I32)` is outside the severity
+range even though it has the required type. Record-dependent ranges and histogram cardinality
+are checked while encoding each row.
 
 Each metric emitter defines exactly one metric stream:
 

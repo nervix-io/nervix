@@ -50,6 +50,7 @@ Feature: OTEL Export requests through unknown outcomes
       CREATE OTEL CLIENT otel_main CONFIG {
         'endpoint' = '{{otlp_receiver.collector}}',
         'protocol' = '<protocol>',
+        'headers' = 'authorization=Bearer%20token%2Cpart%3D1%25%2B+{{test_id}}',
         'compression' = 'gzip',
         'timeout_ms' = 5000
       };
@@ -77,6 +78,7 @@ Feature: OTEL Export requests through unknown outcomes
     # scope and observed timestamps, gzip-compressed the same way. The accepted first request and
     # the refused second request are not sent again.
     Then OTLP receiver "collector" eventually receives at least 4 export requests
+    And every export request at OTLP receiver "collector" has header "authorization" equal to "Bearer token,part=1%++{{test_id}}"
     And OTLP receiver "collector" request 4 repeats request 3
     And OTLP receiver "collector" captured these log export requests
       """
