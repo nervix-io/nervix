@@ -1508,6 +1508,35 @@ held-guard entries and I/O do not acquire a recognized lock. Borrowed DashMap it
 lazily; consuming iteration owns its storage. Authored arguments remain checked through external
 macros, including operation expectation macros.
 
+### Bounded Executor Queue Fence
+
+The bounded executor retains one FIFO per worker class in `crates/execution/src/workers.rs`.
+Submission, cancellation of an exact queued job, next-job selection and the last worker's idle
+transition acquire that class's mutex. This is an execution-admission protocol keyed by one class,
+with the configured pending and worker counts as its bounds. Each acquisition inserts, removes or
+selects one entry. Callback execution, job destruction, memory and semaphore release, and result or
+start notifications run outside the fence. A callback can submit work or read its executor without
+re-entering a held queue lock.
+
+An active worker drains admitted successors directly. Submission and returning the last active
+place share the fence: either a worker sees the new job or the submitter claims a worker, with no
+unobserved interval between deciding the queue is empty and publishing idle. Queued cancellation
+removes the exact monotonic admission identity; after selection it raises the existing cancellation
+signal and leaves the charge with the running job. The queue uses an ordinary ordered map under
+this fence, registered in the concurrent-map ledger as a retained bounded admission protocol;
+there is no recurring graph lookup. Interrupted-worker cleanup takes the queue under the fence
+and destroys its entries after releasing it.
+
+Deloxide tracks the fence in every diagnostic selection, including the registered management
+responsiveness and materialized restore workloads. It does not track async semaphore waits,
+oneshot delivery, simulated scheduling or the cancellation atomic. Existing cancellation Loom
+models retain that publication claim. The execution Shuttle checks retain ordering, exact
+backpressure, immediate queued charge release and running charge ownership, and
+`shuttle_submission_racing_worker_exit_never_strands_an_admitted_job` explores the submit/drain
+boundary through the production pool. The ordinary owner regression drains a backlog while its
+submitter futures remain unpolled, and the panic regression requires a successor to finish after its
+predecessor reports `JobPanicked`.
+
 ### Source contracts
 
 Gate annotations with `cfg_attr(nervix_lint, ...)`. Only the isolated analysis driver registers the
@@ -1741,6 +1770,20 @@ primitives there. The boundary selects mechanisms; the source contracts and prod
 checks below establish what a caller may do with them.
 
 ## Diagnostic Deadlock Detection
+
+The resource-source-discovery workload exercises resource publication, a pending replica and
+installation once source visibility resumes, followed by a lookup of the replicated file. Its
+active, order and stressed records name the consensus-storage and cluster lifecycle owners it
+reaches. The scenario's command-pause map, watch observation and source filter are test-only and
+outside Deloxide's tracked locks; they establish the public interleaving directly. No data-plane
+lock, memory-ordering protocol or production wait-and-notify mechanism changes.
+
+The resource-upload-publication workload reaches the recovery caller on one and three nodes: it
+refuses publication after installation, lets reconciliation read the matching local manifest and
+publish that copy, and observes the original upload complete with one version. Its active, order
+and stressed records reach the same consensus-storage and cluster owners. The scenario's refusal
+map and watch remain outside tracked-lock detection; the public assertions establish that recovery
+took up the refused upload before the client's retry could supply the archive again.
 
 The backup cut diagnostics scenario exercises capture-budget expiry and resumption on one and
 three nodes in the active, order and stressed-restore Deloxide selections. The coordinator's phase
@@ -2184,6 +2227,15 @@ recovery after the transaction's configured age. Their asynchronous barriers, pr
 observations and transport waits remain outside Deloxide; the public outcomes and direct
 state-machine regressions cover the retention decision. No synchronization protocol or memory
 ordering changes at this boundary.
+
+The MongoDB client-identity workloads reach the filesystem executor's tracked class-queue fences
+while preparing a private combined PEM and constructing native TLS on one- and three-node
+clusters. Active, order-analysis and lifecycle-stress selections use the real mutual-TLS server,
+require an identity-equipped client to write, and require its CA-only control to fail. Both
+callbacks run outside the queue fence; driver-internal locks, certificate I/O and network waits
+remain outside Deloxide's observation. All four diagnostic lanes apply to these lifecycle jobs;
+restore stress retains its existing selection. The jobs add no synchronization or memory-ordering
+protocol of their own, so they add no Shuttle or Loom model.
 
 The WASM reset publication workloads reach tracked transaction state and impact recording during
 initial application and recovery on one- and three-node clusters. Ordinary, order-analysis and

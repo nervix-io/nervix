@@ -20,5 +20,6 @@
 pub mod queue;
 pub use queue::*;
 
+mod address;
 mod offline_config;
 pub use offline_config::validate_client_configuration;

@@ -19,6 +19,7 @@ checks = [
   "tests::shuttle_checks::shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot",
   "tests::shuttle_checks::shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit",
   "tests::shuttle_checks::shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity",
+  "tests::shuttle_checks::shuttle_submission_racing_worker_exit_never_strands_an_admitted_job",
 ]
 name = "nervix-execution"
 
