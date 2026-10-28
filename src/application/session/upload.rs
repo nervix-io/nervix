@@ -227,9 +227,17 @@ impl SessionServiceImpl {
         // Installation runs as its own task, so a caller that stops waiting never interrupts a
         // version between its publication and its completion.
         let installation = self.inner.service_tasks.spawn(async move {
-            installer
+            let installation = installer
                 .install_uploaded_resource_archive(key, archive.path(), root_checksum)
-                .await
+                .await;
+            #[cfg(feature = "testing")]
+            installer
+                .inner
+                .runtime
+                .fault_injection()
+                .hold_refused_resource_upload_reply(installer.inner.consensus.local_node_id())
+                .await;
+            installation
         });
         let installation = match installation.await {
             Ok(Some(installation)) => installation,

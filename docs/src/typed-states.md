@@ -2,13 +2,17 @@
 
 *Plexus, the Nervix graph definition language.*
 
-Client configuration declarations distinguish required, optional and address-scheme-dependent keys, Nervix and driver
+Client configuration declarations distinguish required, optional, defaulted and address-scheme-dependent keys, Nervix and driver
 ownership, typed value rules, TLS certificate/identity file roles and delegated property namespaces.
 `All` is an explicit driver namespace, not an empty-prefix sentinel. The vocabulary schema owns
 key presence, duplicates, type checks and TLS pairing; rendered mount values cross that same
 boundary again before storage. Driver-specific validation stays in connector engines called by
 the composition root. Confidential inspection is an explicit projection of complete entries;
 stored configuration and archive serialization do not consume that projection.
+Defaulted keys carry their declared value in their presence variant. The effective-entry projection
+adds it only when the authored key is absent; an invalid explicit value still fails validation.
+`DESCRIBE CLIENT` distinguishes these effective defaults from authored values, with the same
+confidential projection, while canonical configuration preserves omission.
 ClickHouse's rendered CONFIG validation requires a positive request deadline and HTTPS trust or
 refuses TLS file keys on HTTP. The case-preserving `ClickHouseTableName` is constructed only from
 one or two nonempty locator parts; the connector receives that validated name and quotes its parts

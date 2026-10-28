@@ -28,6 +28,7 @@ mod conformance_support;
 pub mod correlator;
 pub mod create_resource;
 pub mod deduplicator;
+pub mod describe_client;
 pub mod describe_cluster;
 pub mod describe_correlator;
 pub mod describe_deduplicator;

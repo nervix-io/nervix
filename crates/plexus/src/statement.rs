@@ -38,6 +38,7 @@ pub fn statement_parser<'src>()
             .map(Statement::DescribeDeduplicator),
         crate::describe_domain::describe_domain_parser().map(Statement::DescribeDomain),
         crate::describe_endpoint::describe_endpoint_parser().map(Statement::DescribeEndpoint),
+        crate::describe_client::describe_client_parser().map(Statement::DescribeClient),
         crate::describe_ingestor::describe_ingestor_parser().map(Statement::DescribeIngestor),
         crate::describe_junction::describe_junction_parser().map(Statement::DescribeJunction),
         crate::describe_lookup::describe_lookup_parser().map(Statement::DescribeLookup),

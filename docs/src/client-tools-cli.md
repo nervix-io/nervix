@@ -72,6 +72,10 @@ nervix-cli --domain quickstart --command "$(cat pipeline.plexus)"
 
 ## The Interactive REPL
 
+Inspect a configured connector client in the current domain with `DESCRIBE CLIENT warehouse;`.
+It reports effective configuration, marks omitted declared defaults with `(default)`, and redacts
+confidential values. `SHOW CREATE CLIENT warehouse;` renders the authored declaration.
+
 ### Prompt And Multi-Line Input
 
 The prompt shows the active domain, and continuation lines are marked with dots:

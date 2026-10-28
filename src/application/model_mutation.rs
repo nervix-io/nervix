@@ -2248,6 +2248,12 @@ impl SessionServiceImpl {
                     .verified("this statement requires a request domain, which was resolved above");
                 self.describe_endpoint(domain, describe).await
             }
+            Statement::DescribeClient(describe) => {
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
+                self.describe_client(domain, describe)
+            }
             Statement::DescribeIngestor(describe) => {
                 let domain = domain
                     .as_ref()

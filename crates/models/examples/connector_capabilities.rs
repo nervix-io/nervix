@@ -448,6 +448,7 @@ fn client_key(key: &ClientConfigKey) -> Value {
     let presence = match key.presence {
         ClientConfigPresence::Required => "required".to_owned(),
         ClientConfigPresence::Optional => "optional".to_owned(),
+        ClientConfigPresence::Defaulted(value) => format!("optional; default `{value}`"),
         ClientConfigPresence::RequiredForScheme { address, scheme } => {
             format!("required when `{address}` uses `{scheme}`")
         }

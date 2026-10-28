@@ -154,6 +154,7 @@ mod cli;
 mod cli_completions;
 mod cli_values;
 mod client_consumers;
+mod client_description;
 mod client_producers;
 mod cluster_description;
 mod cluster_parameters;

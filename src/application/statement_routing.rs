@@ -66,6 +66,7 @@ pub(in crate::application) fn requires_leader(statement: &Statement) -> bool {
             | Statement::DescribeResource(_)
             | Statement::DescribeDomain(_)
             | Statement::DescribeEndpoint(_)
+            | Statement::DescribeClient(_)
             | Statement::DescribeIngestor(_)
             | Statement::DescribeRelay(_)
             | Statement::DescribeLookup(_)
@@ -109,4 +110,58 @@ pub(in crate::application) fn is_persistent_statement(statement: &Statement) -> 
                 | Statement::ResetWasmState(_)
                 | Statement::Backup(_)
         )
+}
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns direct statement admission policy checks")
+)]
+mod tests {
+    //! Layer: test harness.
+    //! - **Owns.** Typed admission contracts for domain and cluster inspection.
+    //! - **Depends on.** The routing decisions and semantic statement constructors.
+    //! - **Must not know.** Sessions, storage or runtime execution.
+
+    use std::time::Duration;
+
+    use meticulous::ResultExt as _;
+    use nervix_models::{
+        AlterCluster, ClientName, ClusterParameterChange, ClusterParameterUpdates, DescribeClient,
+        DescribeCluster,
+    };
+
+    use super::*;
+
+    #[test]
+    fn configured_client_inspection_is_a_domain_read() {
+        let statement = Statement::DescribeClient(DescribeClient {
+            name: ClientName::parse("warehouse").assured("warehouse is a valid client name"),
+        });
+        assert!(requires_request_domain(&statement));
+        assert!(requires_existing_domain(&statement));
+        assert!(!requires_leader(&statement));
+        assert!(!is_persistent_statement(&statement));
+    }
+
+    #[test]
+    fn cluster_inspection_needs_no_domain_or_mutation() {
+        let statement = Statement::DescribeCluster(DescribeCluster);
+        assert!(!requires_request_domain(&statement));
+        assert!(!requires_existing_domain(&statement));
+        assert!(!requires_leader(&statement));
+        assert!(!is_persistent_statement(&statement));
+    }
+
+    #[test]
+    fn parameter_changes_use_durable_cluster_admission() {
+        let parameters = ClusterParameterUpdates::try_from(vec![
+            ClusterParameterChange::NodeUnavailabilityTimeout(Duration::from_secs(15)),
+        ])
+        .assured("a positive timeout is a valid cluster parameter change");
+        let statement = Statement::AlterCluster(AlterCluster { parameters });
+        assert!(!requires_request_domain(&statement));
+        assert!(!requires_existing_domain(&statement));
+        assert!(requires_leader(&statement));
+        assert!(is_persistent_statement(&statement));
+    }
 }
