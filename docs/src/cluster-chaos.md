@@ -2539,6 +2539,8 @@ other methods, which a chaos run never substitutes for:
 
 - `fuzz` runs only the Bolero sanitizer job, and `bolero-random` only the Bolero randomized job;
   see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md)
+- `book` builds and publishes only the book; see
+  [Developing Nervix](./developing-nervix.md#building-the-documentation)
 - `deloxide`, `shuttle`, `loom`, `turmoil` and `client-conformance` run their own lanes
 
 ### The Chaos Workflow

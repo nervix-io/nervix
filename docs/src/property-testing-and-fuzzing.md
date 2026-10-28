@@ -526,11 +526,11 @@ no evidence about this choice.
 
 A verified documentation-only selection excludes the ordinary tests, scenarios, extra tests,
 diagnostic evidence and their coverage aggregation. It excludes the entire reusable Bolero call
-unless the event carries `bolero-random` or `fuzz`. Validation and the conventional PR title check
-remain independent and mandatory. Label-selected mode checks remain selected by their labels;
-`bolero-random` still requires the ordinary properties and `fuzz` the complete sanitizer inventory
-even for documentation. Label addition and removal compute a fresh selection from that event's
-label snapshot.
+unless the event carries `bolero-random` or `fuzz`. Validation, the script tests of the `checks`
+job and the conventional PR title check remain independent and mandatory. Label-selected mode
+checks remain selected by their labels; `bolero-random` still requires the ordinary properties and
+`fuzz` the complete sanitizer inventory even for documentation. Label addition and removal compute
+a fresh selection from that event's label snapshot.
 
 The `ci-test-selection` artifact records run, attempt, job, event and action, the tested merge, the
 event's base, the tested base and the head, every changed path, labels and each ordinary/Bolero

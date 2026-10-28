@@ -194,6 +194,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      # Every script test, the book tooling's and the docs worker's included, for every pull request:
+      # the book build that also runs them runs only for a pull request labeled `book`.
+      - name: Setup uv for the script tests
+        uses: astral-sh/setup-uv@v6
+
+      - name: Script tests
+        run: just test-docs
+
       - name: Publish kache cache
         if: always()
         timeout-minutes: 4

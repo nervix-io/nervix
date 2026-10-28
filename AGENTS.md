@@ -1411,6 +1411,13 @@ build and the existing tests, and nothing in it changes behavior.
 - `docs/book.toml` owns the curated public Plexus chapter allowlist rendered into the versioned
   `llms.txt` agent index. Keep that list focused on user-facing Plexus configuration and exclude
   architecture, repository-development, and local-operation material.
+- `just book` renders the book after `just test-docs`, which runs every script test and the docs
+  worker's tests. CI's `build-book` job builds and publishes the book, its PDF and the Plexus agent
+  index and repoints the `snapshot` alias that docs.nervix.io serves, only for a manual run and for
+  a pull request labeled `book`; the `checks` job runs `just test-docs` for every pull request. A
+  pull request carries `book` only when its task requires the rendered book, such as a change to
+  the book's build, theme, structure, screenshots or generated chapters, or a preview a reviewer
+  needs.
 - After each development cycle, run `just validate` and any focused tests added or changed.
 - Use `just test` for the full suite so repository-required environment is configured.
 - Use `just test-scenarios --input <feature> ...` for targeted cucumber runs so the configured test

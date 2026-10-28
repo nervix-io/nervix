@@ -874,3 +874,15 @@ cargo install mdbook --version <MDBOOK_VERSION> --locked
 ```
 
 Building the PDF also needs `pandoc` and a XeLaTeX installation on `PATH`.
+
+In CI, the Docker Build workflow's `build-book` job runs `just publish-book`: it renders the book,
+its PDF and the Plexus agent index, uploads them under an immutable prefix, repoints the `snapshot`
+alias that docs.nervix.io serves and comments the preview's links on the pull request. It runs for
+a manual run of the workflow and, for a pull request from a branch of this repository, only when
+the pull request carries the `book` label. The book needs no image, so adding the label builds it
+at once, and each later push to the labeled pull request builds it again; a newer build of one pull
+request replaces an older one before it publishes. Label a pull request `book` only when its task
+requires the rendered book, such as a change to the book's build, theme, structure, screenshots or
+generated chapters, or a preview a reviewer needs. Every pull request's `checks` job runs
+`just test-docs`, the script tests and docs worker tests that `just book` runs first, so a pull
+request without the label still checks the book's structure and its tooling.
