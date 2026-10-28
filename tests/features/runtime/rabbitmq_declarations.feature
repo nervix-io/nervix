@@ -1,6 +1,7 @@
 Feature: RabbitMQ queue declarations
-  RabbitMQ queue locators preserve external spelling and follow the AMQP short-string byte limit.
-  These checks inspect stopped graph definitions without connecting to a broker.
+  RabbitMQ queue locators preserve external spelling and follow the AMQP short-string byte limit,
+  and a RabbitMQ client's declared configuration is checked before it is committed. These checks
+  inspect stopped graph definitions without connecting to a broker.
 
   Scenario Outline: RabbitMQ queue ingestion preserves its declared policy and external locator
     Given a <cluster_size> node nervix cluster is started
@@ -142,3 +143,64 @@ Feature: RabbitMQ queue declarations
       | 3            | QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ | is 256 bytes long |
       | 1            | éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé                                                                                                                                 | is 256 bytes long |
       | 3            | éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé                                                                                                                                 | is 256 bytes long |
+
+  Scenario Outline: A RabbitMQ client refuses an address that does not name an AMQP broker before commit
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements fail with "invalid client config key 'addr'"
+      """
+      CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = 'amqp:/%2f' };
+      """
+    And these Plexus statements fail with "invalid client config key 'addr'"
+      """
+      CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = 'amqp://127.0.0.1:0/%2f' };
+      """
+    And these Plexus statements fail with "invalid client config key 'addr'"
+      """
+      CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = 'http://127.0.0.1:5672/%2f' };
+      """
+    And these Plexus statements fail with "invalid client config key 'addr'"
+      """
+      CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = 'amqp://127.0.0.1:5672/%2f?heartbeat=soon' };
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A RabbitMQ client refuses an unpaired client identity and an undeclared key before commit
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements fail with "client config key 'tls_cert_file' requires 'tls_key_file'"
+      """
+      CREATE RABBITMQ CLIENT broker CONFIG {
+        'addr' = 'amqps://127.0.0.1:5671/%2f',
+        'tls_cert_file' = 'client.pem'
+      };
+      """
+    And these Plexus statements fail with "client config key 'tls_key_file' requires 'tls_cert_file'"
+      """
+      CREATE RABBITMQ CLIENT broker CONFIG {
+        'addr' = 'amqps://127.0.0.1:5671/%2f',
+        'tls_key_file' = 'client-key.pem'
+      };
+      """
+    And these Plexus statements fail with "unknown client config key 'tls_verify'"
+      """
+      CREATE RABBITMQ CLIENT broker CONFIG {
+        'addr' = 'amqps://127.0.0.1:5671/%2f',
+        'tls_verify' = 'false'
+      };
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

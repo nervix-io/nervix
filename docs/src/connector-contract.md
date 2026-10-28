@@ -306,12 +306,19 @@ policy and do not create application-level probes or acknowledgements.
 
 Composition also passes the node resolver into every RabbitMQ source plan and emitter configuration.
 The connector reads the client's `addr` as an AMQP URI and takes its host from the URL grammar,
-because Lapin's own grammar substitutes `localhost` for an IPv6 literal host. Every connection resolves that host again through the node resolver: an emitter's start, its
+because Lapin's own grammar substitutes `localhost` for an IPv6 literal host and for an address that
+names no host. One owner reads the address before a client is committed and again for every
+connection: it refuses an address whose scheme is not `amqp` or `amqps`, that names no host or that
+names port 0, leaves the credentials, virtual host and query options to Lapin's grammar, and never
+repeats the address in a refusal. Every connection resolves that host again through the node resolver: an emitter's start, its
 reopening after a failed publish, and each source instance's resume. A literal IPv4 or IPv6 address
 is its own answer. The connector tries the answers in resolution order, each within an equal share
 of what remains of the client's `connect_timeout_ms`, 30 seconds by default, and for `amqps`
 completes the TLS handshake within what is left. The handshake verifies the broker certificate against the host `addr` names, whichever of its
-addresses was dialled, trusting the platform roots and the client's `tls_ca_file`. The connector
+addresses was dialled, trusting the platform roots and the client's `tls_ca_file`, and presents the
+client certificate chain and private key of `tls_cert_file` and `tls_key_file` when the client names
+them. The connector reads those files for every connection before it dials, and refuses a file that
+holds no PEM certificate or private key there rather than in the handshake. The connector
 then hands the established transport to Lapin through `Connection::connector`. Lapin's own
 reconnection stays off, so it asks that hook for a transport exactly once and runs the AMQP
 handshake over it, within what remains of the same budget. The source then opens its channel, sets
@@ -331,11 +338,15 @@ stays on AWS-LC.
 A failed connection is a `RabbitMqConnectError`. A lookup failure keeps its `DnsLookupFailure`, and
 unreachable addresses, a failed or overdue TLS handshake, and a failed or overdue AMQP handshake are
 their own variants, as are a Lapin runtime that could not be created and a socket the node could not
-hold a second handle on. A channel step that fails or runs out of the budget is reported beneath the
-source's or emitter's own context for that step, with the elapsed deadline as its typed cause. A source
-reports the failure as a resume failure and retries on its declared `RETRY POLICY`. A emitter reports
-an invalid address, CA file or deadline key as a configuration failure and every other connection
-failure as an initialization failure, and the emitter host reopens it on its backoff. Neither path
+hold a second handle on. A broker that ends the TLS session with an alert, such as one that requires
+a client certificate and receives none, is `TlsRefused`, naming the host and the alert. Under TLS
+1.3 that alert can arrive after the client's side of the handshake completed, on the first read of
+the AMQP handshake, and it is classified the same way there. A channel step that fails or runs out
+of the budget is reported beneath the source's or emitter's own context for that step, with the
+elapsed deadline as its typed cause. A source reports the failure as a resume failure and retries on
+its declared `RETRY POLICY`. A emitter reports an invalid address, CA file, client certificate,
+private key or deadline key as a configuration failure and every other connection failure as an
+initialization failure, and the emitter host reopens it on its backoff. Neither path
 acknowledges undelivered data: a source that cannot connect holds no delivery, and an emitter that
 cannot connect confirms nothing, so the input stays unacknowledged until a later connection
 delivers it.
