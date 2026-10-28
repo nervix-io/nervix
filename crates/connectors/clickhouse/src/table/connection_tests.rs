@@ -11,7 +11,10 @@ use std::{
 };
 
 use nervix_dns::{DnsConfiguration, DnsLookupFailure, NameServers};
-use nervix_primitives::{net::TcpListener, task::JoinHandle};
+use nervix_primitives::{
+    net::{TcpListener, TcpStream},
+    task::JoinHandle,
+};
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -127,6 +130,153 @@ async fn insert(client: &ClickHouseClient) -> error_stack::Result<(), ClickHouse
         GENEROUS_TIMEOUT,
     )
     .await
+}
+
+/// Completes an actual chunked insert, including any byte already read by the reuse probe.
+async fn answer_insert(stream: &mut TcpStream, prefix: &[u8]) {
+    let mut request = prefix.to_vec();
+    let mut buffer = [0_u8; 4096];
+    while !request.ends_with(LAST_CHUNK) {
+        nervix_primitives::task::consume_budget().await;
+        let read = stream
+            .read(&mut buffer)
+            .await
+            .assured("the loopback peer sends an insert");
+        assert_ne!(
+            read, 0,
+            "the insert body must finish before the connection ends"
+        );
+        request.extend_from_slice(&buffer[..read]);
+    }
+    stream
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+        .await
+        .assured("the loopback peer waits for its insert result");
+}
+
+#[nervix_primitives::test]
+async fn configured_pool_idle_timeout_controls_connection_reuse() {
+    struct Case {
+        configured: Option<&'static str>,
+        idle_seconds: u64,
+        expect_new: bool,
+    }
+    let fixture = Fixture::start().await;
+    for Case {
+        configured,
+        idle_seconds,
+        expect_new,
+    } in [
+        Case {
+            configured: Some("100"),
+            idle_seconds: 1,
+            expect_new: true,
+        },
+        Case {
+            configured: Some("10000"),
+            idle_seconds: 3,
+            expect_new: false,
+        },
+        Case {
+            configured: None,
+            idle_seconds: 3,
+            expect_new: true,
+        },
+    ] {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .assured("a loopback TCP port is available");
+        let addr = listener
+            .local_addr()
+            .assured("a bound listener has an address");
+        let mut config = vec![
+            ClientConfigEntry {
+                key: "addr".into(),
+                value: format!("http://{addr}"),
+            },
+            ClientConfigEntry {
+                key: "timeout_ms".into(),
+                value: "30000".into(),
+            },
+        ];
+        if let Some(value) = configured {
+            config.push(ClientConfigEntry {
+                key: "pool_idle_timeout_ms".into(),
+                value: value.into(),
+            });
+        }
+        let (client, _) = ClickHouseTableEmitter::client_from_config(&config, fixture.dns())
+            .assured("the connection configuration is valid");
+        let server = nervix_primitives::task::spawn(async move {
+            let (mut first, _) = listener.accept().await.assured("the first insert connects");
+            answer_insert(&mut first, &[]).await;
+            let mut prefix = [0_u8; 1];
+            nervix_primitives::select! {
+                accepted = listener.accept() => {
+                    let (mut second, _) = accepted.assured("the second insert opens a connection");
+                    answer_insert(&mut second, &[]).await;
+                    true
+                }
+                read = first.read(&mut prefix) => {
+                    let read = read.assured("the first connection can be observed");
+                    if read == 0 {
+                        let (mut second, _) = listener.accept().await
+                            .assured("the second insert connects after idle retirement");
+                        answer_insert(&mut second, &[]).await;
+                        true
+                    } else {
+                        answer_insert(&mut first, &prefix[..read]).await;
+                        false
+                    }
+                }
+            }
+        });
+        insert(&client).await.assured("the first insert succeeds");
+        // Move only the elapsed-time choice under a paused clock. Network I/O stays on the real
+        // reactor, and neither insert races an automatically advanced request timeout.
+        nervix_primitives::time::pause();
+        nervix_primitives::time::advance(Duration::from_secs(idle_seconds)).await;
+        nervix_primitives::time::resume();
+        insert(&client).await.assured("the second insert succeeds");
+        let used_new = server.await.assured("the connection probe completes");
+        assert_eq!(
+            used_new, expect_new,
+            "pool_idle_timeout_ms={configured:?}, idle={idle_seconds}s"
+        );
+    }
+}
+
+#[nervix_primitives::test]
+async fn connection_intervals_preserve_typed_validation_failures() {
+    let fixture = Fixture::start().await;
+    for (key, value) in [("tcp_keepalive_ms", "1001"), ("pool_idle_timeout_ms", "0")] {
+        let config = [
+            ClientConfigEntry {
+                key: "addr".into(),
+                value: "http://127.0.0.1:8123".into(),
+            },
+            ClientConfigEntry {
+                key: "timeout_ms".into(),
+                value: "5000".into(),
+            },
+            ClientConfigEntry {
+                key: key.into(),
+                value: value.into(),
+            },
+        ];
+        let report = match ClickHouseTableEmitter::client_from_config(&config, fixture.dns()) {
+            Ok(_) => panic!("an unrepresentable connection interval must fail before dialing"),
+            Err(report) => report,
+        };
+        assert!(matches!(
+            report.current_context(),
+            EmitterOpenError::InvalidConfiguration { .. }
+        ));
+        assert!(matches!(
+            report.downcast_ref::<nervix_models::ClientConfigSchemaError>(),
+            Some(nervix_models::ClientConfigSchemaError::InvalidValue { key: invalid, .. }) if invalid == key
+        ));
+    }
 }
 
 #[nervix_primitives::test]

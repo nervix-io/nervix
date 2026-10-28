@@ -167,6 +167,7 @@ use crate::common::{
 };
 
 mod backup;
+mod clickhouse_connections;
 mod client_consumers;
 mod client_producers;
 mod common;
@@ -11701,6 +11702,27 @@ async fn given_source_confirmation_delay(
     world
         .fault_injection
         .delay_source_confirmation(ingestor, delay);
+}
+
+/// Every read of the junction's materialized dependencies waits this long first, as a read slow to
+/// reach the node that holds the state would. The wait covers each re-evaluation of a message the
+/// junction parked on `REQUIRED WAIT`.
+#[given(expr = "junction {string} takes {string} to read its materialized state")]
+async fn given_junction_reads_materialized_state_slowly(
+    world: &mut ScenarioWorld,
+    junction: String,
+    delay: String,
+) {
+    let delay = parse_duration_text(&delay).expect("step duration must be a valid duration");
+    let junction = expand_placeholders(world, &junction);
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let junction = nervix_models::ModelName::try_from(junction.as_str())
+        .assured("the scenario junction is an identifier-shaped name");
+    world.fault_injection.delay_materialized_dependency_reads(
+        nervix_models::DomainNodeRef::node_in(domain, nervix_models::ModelKind::Junction, junction),
+        delay,
+    );
 }
 
 #[then(expr = "the last shutdown of node {string} reports its drain-support phase {string}")]
@@ -28696,7 +28718,30 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
 ) {
     let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let expected_fragments = expected_payload_fragments(world, step);
-    await_subscription_payloads(world, duration, &expected_fragments).await;
+    await_subscription_payloads(world, duration, &expected_fragments, None).await;
+}
+
+/// Delays collection of the sample's result while its reader must keep the original deadline.
+/// Only this scenario awaits the injected delay; every other scenario can continue running.
+#[then(
+    expr = "within {string} the relay subscription receives payloads with its caller delayed by \
+            {string}"
+)]
+async fn then_subscription_payloads_survive_a_delayed_caller(
+    world: &mut ScenarioWorld,
+    duration: String,
+    caller_delay: String,
+    #[step] step: &Step,
+) {
+    let duration = parse_duration_text(&duration).assured("the receive budget is a valid duration");
+    let caller_delay =
+        parse_duration_text(&caller_delay).assured("the injected caller delay is a valid duration");
+    assert!(
+        caller_delay > duration,
+        "the controlled caller delay must outlast the receive budget"
+    );
+    let expected_fragments = expected_payload_fragments(world, step);
+    await_subscription_payloads(world, duration, &expected_fragments, Some(caller_delay)).await;
 }
 
 /// Measures an input collector's hold instead of asserting silence while its window runs. Each
@@ -28722,7 +28767,8 @@ async fn then_within_duration_the_relay_subscription_receives_payloads_after_col
         .expect("a collection-delay assertion must follow an http post");
     let expected_fragments = expected_payload_fragments(world, step);
 
-    let first_read_at = await_subscription_payloads(world, duration, &expected_fragments).await;
+    let first_read_at =
+        await_subscription_payloads(world, duration, &expected_fragments, None).await;
 
     let first_read_after = first_read_at.duration_since(first_posted_at);
     append_cucumber_log_line(&format!(
@@ -28751,70 +28797,49 @@ fn expected_payload_fragments(world: &ScenarioWorld, step: &Step) -> Vec<String>
     expected_fragments
 }
 
+impl common::subscription_payloads::PayloadSubscription for TestSession {
+    async fn next_payload(&mut self, budget: Duration) -> std::io::Result<Option<String>> {
+        let event = self.try_next_subscription(budget).await?;
+        Ok(event.map(|event| event.payload))
+    }
+}
+
 /// Reads the active session's subscription until every expected fragment has arrived as often as
 /// it is listed, failing once `duration` has passed, and returns when the first payload was read.
 async fn await_subscription_payloads(
     world: &mut ScenarioWorld,
     duration: Duration,
     expected_fragments: &[String],
+    caller_delay: Option<Duration>,
 ) -> Instant {
     let session = world
         .active_session
-        .as_mut()
-        .expect("an active session with subscription must exist");
-    let deadline = Instant::now() + duration;
-    let mut remaining = expected_fragments
-        .iter()
-        .fold(BTreeMap::new(), |mut counts, fragment| {
-            *counts.entry(fragment.clone()).or_insert(0usize) += 1;
-            counts
-        });
-    let mut observed = Vec::with_capacity(expected_fragments.len());
-    let mut first_read_at = None;
-
-    while !remaining.is_empty() {
-        let now = Instant::now();
-        assert!(
-            now < deadline,
-            "timed out waiting for subscription payloads. expected remaining {:?}, observed {:?}",
-            remaining,
-            observed
-        );
-        let wait = deadline.saturating_duration_since(now);
-        let event = session
-            .try_next_subscription(wait)
-            .await
-            .expect("failed while waiting for subscription payloads")
-            .unwrap_or_else(|| {
-                panic!(
-                    "timed out waiting for subscription payloads. expected remaining {:?}, \
-                     observed {:?}",
-                    remaining, observed
-                )
-            });
-        let read_at = Instant::now();
-        if first_read_at.is_none() {
-            first_read_at = Some(read_at);
-        }
-        let payload = event.payload;
-        observed.push(payload.clone());
-        world.last_subscription_payload = Some(payload.clone());
-
-        if let Some(fragment) = remaining
-            .keys()
-            .find(|fragment| payload.contains(fragment.as_str()))
-            .cloned()
-        {
-            let count = remaining
-                .get_mut(&fragment)
-                .expect("matched fragment must be present in remaining set");
-            *count -= 1;
-            if *count == 0 {
-                remaining.remove(&fragment);
-            }
-        }
+        .take()
+        .assured("the scenario opened its subscription before receiving payloads");
+    let began_at = Instant::now();
+    let observation = common::subscription_payloads::SubscriptionPayloads::new(expected_fragments);
+    let observation = observation.observe(session, duration);
+    if let Some(caller_delay) = caller_delay {
+        nervix_primitives::time::sleep(caller_delay).await;
     }
-    first_read_at.expect("at least one expected fragment makes the loop read a payload")
+    let observed = observation.await;
+    world.active_session = Some(observed.subscription);
+    for receipt in &observed.receipts {
+        append_cucumber_log_line(&format!(
+            "subscription sample receipt after {:?}, budget {duration:?}: {}",
+            receipt.received_at.duration_since(began_at),
+            receipt.payload
+        ));
+    }
+    let first = observed
+        .receipts
+        .first()
+        .verified("a complete nonempty sample received at least one payload");
+    world.last_subscription_payload = observed
+        .receipts
+        .last()
+        .map(|receipt| receipt.payload.clone());
+    first.received_at
 }
 
 #[then(

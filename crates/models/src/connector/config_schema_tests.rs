@@ -22,6 +22,70 @@ fn entry(key: &str, value: &str) -> ClientConfigEntry {
     }
 }
 
+#[test]
+fn defaulted_keys_preserve_authored_configuration_and_explicit_values() {
+    let schema = ConnectorKind::ClickHouse
+        .client()
+        .assured("ClickHouse declares a configured client")
+        .config;
+    let authored = vec![
+        entry("addr", "http://localhost:8123"),
+        entry("timeout_ms", "5000"),
+    ];
+    let effective = schema.effective_entries(&authored);
+    assert_eq!(
+        effective,
+        [
+            authored[0].clone(),
+            authored[1].clone(),
+            entry("pool_idle_timeout_ms", "2000"),
+            entry("tcp_keepalive_ms", "60000"),
+        ]
+    );
+    assert_eq!(schema.effective_entries(&effective), effective);
+    assert_eq!(authored.len(), 2);
+    schema
+        .validate_rendered(&effective)
+        .assured("declared defaults are valid");
+
+    for value in ["1", "2000", "10000"] {
+        let mut explicit = authored.clone();
+        explicit.push(entry("pool_idle_timeout_ms", value));
+        let projected = schema.effective_entries(&explicit);
+        assert_eq!(&projected[..explicit.len()], explicit);
+        assert_eq!(projected.last(), Some(&entry("tcp_keepalive_ms", "60000")));
+    }
+    let mut invalid = authored;
+    invalid.push(entry("pool_idle_timeout_ms", "0"));
+    assert!(
+        schema
+            .validate_rendered(&schema.effective_entries(&invalid))
+            .is_err()
+    );
+}
+
+#[test]
+fn tcp_keepalive_values_fit_the_socket_option_without_truncation() {
+    let key = ClientConfigKey::optional(
+        "tcp_keepalive_ms",
+        ClientConfigValue::TcpKeepaliveMilliseconds,
+    );
+    for value in ["1000", "60000", "32767000"] {
+        key.validate(value)
+            .assured("whole seconds fit Linux TCP_KEEPIDLE");
+    }
+    for value in [
+        "0", "1", "999", "1001", "32768000", "-1000", "1000.0", "invalid",
+    ] {
+        let report = key
+            .validate(value)
+            .expect_err("the socket option cannot represent this interval");
+        assert!(
+            matches!(report.current_context(), ClientConfigSchemaError::InvalidValue { key, .. } if key == "tcp_keepalive_ms")
+        );
+    }
+}
+
 fn mqtt() -> ClientConfigSchema {
     ConnectorKind::Mqtt
         .client()
@@ -301,6 +365,11 @@ fn bolero_schema_checked_client_entries_round_trip() {
             let schema = schemas[index];
             let mut entries = Vec::new();
             for key in schema.keys() {
+                if matches!(key.presence, ClientConfigPresence::Defaulted(_))
+                    && arbitrary.entropy().flag()
+                {
+                    continue;
+                }
                 let value = match key.value {
                     ClientConfigValue::String => arbitrary.string(),
                     ClientConfigValue::Boolean => arbitrary.entropy().flag().to_string(),
@@ -314,6 +383,11 @@ fn bolero_schema_checked_client_entries_round_trip() {
                         .to_string(),
                     ClientConfigValue::Milliseconds => {
                         arbitrary.entropy().boundary_biased(1..=60_000).to_string()
+                    }
+                    ClientConfigValue::TcpKeepaliveMilliseconds => {
+                        Duration::from_secs(arbitrary.entropy().boundary_biased(1..=32_767))
+                            .as_millis()
+                            .to_string()
                     }
                     ClientConfigValue::Url(schemes) => {
                         let index = arbitrary.entropy().index(
@@ -365,6 +439,14 @@ fn bolero_schema_checked_client_entries_round_trip() {
                 .validate_rendered(&decoded)
                 .assured("round trips preserve the schema's accepted value");
             let inspected = schema.inspection_entries(&decoded);
+            assert_eq!(schema.inspection_entries(&inspected), inspected);
+            let effective = schema.effective_entries(&decoded);
+            assert_eq!(&effective[..decoded.len()], decoded);
+            assert_eq!(schema.effective_entries(&effective), effective);
+            schema
+                .validate_rendered(&effective)
+                .assured("default projection retains schema acceptance");
+            let inspected = schema.inspection_entries(&effective);
             assert_eq!(schema.inspection_entries(&inspected), inspected);
         });
 }

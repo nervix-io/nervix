@@ -45,6 +45,7 @@ pub(crate) mod server_process_cluster;
 pub(crate) mod sqs_answer_hold;
 pub(crate) mod stallable_tcp_proxy;
 pub(crate) mod status_request;
+pub(crate) mod subscription_payloads;
 pub(crate) mod suite_watchdog;
 pub(crate) mod syslog_tls;
 pub(crate) mod tcp_forwarder;
