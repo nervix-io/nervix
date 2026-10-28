@@ -123,6 +123,14 @@ impl IcebergColumnError {
             .change_context(EmitterWriteError::Commit { connector: ICEBERG })
             .attach_printable(description)
     }
+
+    /// A current table schema that cannot lay out a batch when publication measures its file.
+    pub(crate) fn publish_failure(refusal: Report<Self>) -> Report<EmitterWriteError> {
+        let description = refusal.current_context().to_string();
+        refusal
+            .change_context(EmitterWriteError::Publish { connector: ICEBERG })
+            .attach_printable(description)
+    }
 }
 
 impl IcebergTableEmitter {

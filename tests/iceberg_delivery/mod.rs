@@ -18,6 +18,7 @@
 use std::time::Duration;
 
 use cucumber::{gherkin::Step, given, then, when};
+use futures_util::TryStreamExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::time::{Instant, timeout};
 
@@ -233,6 +234,79 @@ async fn table_row_count(world: &ScenarioWorld, table: &str) -> Result<u64, Stri
     total
         .parse::<u64>()
         .map_err(|error| format!("Iceberg table {table} counts its rows as '{total}': {error}"))
+}
+
+/// Reads the current snapshot's data-file manifest through the catalog. The scan exposes each
+/// file's recorded row count and exact Parquet byte length without loading its rows.
+async fn table_data_files(world: &ScenarioWorld, table: &str) -> Result<Vec<(u64, u64)>, String> {
+    let loaded = rustfs_iceberg_table(world.dependencies.endpoints(), &world.domain, table).await?;
+    let scan = loaded
+        .scan()
+        .build()
+        .map_err(|error| format!("failed to plan Iceberg table {table}: {error}"))?;
+    let files = scan
+        .plan_files()
+        .await
+        .map_err(|error| format!("failed to read Iceberg manifest of {table}: {error}"))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|error| format!("failed to list Iceberg data files of {table}: {error}"))?;
+    files
+        .into_iter()
+        .map(|file| {
+            file.record_count
+                .map(|rows| (rows, file.file_size_in_bytes))
+                .ok_or_else(|| {
+                    format!("Iceberg data file {} has no row count", file.data_file_path)
+                })
+        })
+        .collect()
+}
+
+#[then(
+    expr = "within {string} the Iceberg table {string} has {int} data files holding {int} rows, \
+            each with at most {int} rows and {int} bytes"
+)]
+async fn then_iceberg_data_files_obey_batch_bounds(
+    world: &mut ScenarioWorld,
+    bound: String,
+    table: String,
+    file_count: usize,
+    row_count: u64,
+    max_rows: u64,
+    max_bytes: u64,
+) {
+    let bound = parse_duration_text(&bound).assured("the scenario declares a valid bound");
+    let table = expand_placeholders(world, &table);
+    let deadline = Instant::now() + bound;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let observed = table_data_files(world, &table).await;
+        if let Ok(files) = &observed {
+            let rows: u64 = files.iter().map(|(rows, _)| rows).sum();
+            if rows == row_count {
+                assert_eq!(
+                    files.len(),
+                    file_count,
+                    "Iceberg table {table} has {rows} rows in files {files:?}"
+                );
+                assert!(
+                    files
+                        .iter()
+                        .all(|(rows, bytes)| *rows <= max_rows && *bytes <= max_bytes),
+                    "Iceberg table {table} has a file beyond {max_rows} rows or {max_bytes} \
+                     bytes: {files:?}"
+                );
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Iceberg table {table} did not hold {row_count} rows within {bound:?}: last observed \
+             {observed:?}"
+        );
+        nervix_primitives::time::sleep(POLL_INTERVAL).await;
+    }
 }
 
 /// How many rows the table holds while a commit it would hold is still to come: a gate hold or a

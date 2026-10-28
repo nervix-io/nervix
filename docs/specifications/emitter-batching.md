@@ -503,6 +503,12 @@ Iceberg is the one emitter with two byte bounds, and they measure different thin
 `BATCH ... MAX SIZE` bounds one written data file, while `COMMIT EACH ... MAX SIZE` bounds the
 Arrow payload bytes staged before a commit becomes due. A declaration that sets the first above the
 second is valid and simply means every commit publishes one data file.
+For a declared `BATCH`, Iceberg measures the full Parquet file, including its footer, before
+staging each accepted segment. It writes one file per segment and checks the file's physical bytes
+and row count before appending its manifest entry. A single row that cannot fit is a per-row
+`validation` error of the `encode` operation through `ON MESSAGE ERROR`. Without the clause, the
+writer uses a 512 MiB rollover target, which `DESCRIBE EMITTER` shows as
+`data file target: 512MiB`; the commit-size counter remains the sum of staged Arrow IPC bytes.
 
 ### Success and partial-failure boundary
 

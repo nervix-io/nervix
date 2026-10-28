@@ -79,6 +79,7 @@ fn fixture_emitter(
             interval: Duration::from_secs(60),
             max_size: 1 << 20,
         },
+        batch_policy: None,
         staging_dir: tempfile::tempdir().assured("the staging directory is created"),
         executor: Executor::default(),
         staged_sequence: 0,

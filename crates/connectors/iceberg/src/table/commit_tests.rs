@@ -231,6 +231,7 @@ async fn fixture_emitter(catalog: StdArc<dyn Catalog>, executor: Executor) -> Ic
             interval: Duration::from_secs(60),
             max_size: 1 << 20,
         },
+        batch_policy: None,
         staging_dir: tempfile::tempdir().assured("the staging directory is created"),
         executor,
         staged_sequence: 0,
