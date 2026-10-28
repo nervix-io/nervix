@@ -33540,6 +33540,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.fault_injection.release_all_health_responses();
                 world.fault_injection.release_all_domain_clock_progress();
                 world.fault_injection.release_all_command_pauses();
+                let backup_gates_released = world.fault_injection.release_all_backup_cut_pauses();
                 world.fault_injection.release_all_wasm_checkpoint_pauses();
                 for node in std::mem::take(&mut world.occupied_bulk_nodes) {
                     world.fault_injection.release_execution(&node);
@@ -33598,9 +33599,13 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.active_session_has_subscription = false;
                 world.last_server_error = None;
                 world.release_mysql_table_locks().await;
+                let cleanup_deadline = PhaseDeadline::after(CLUSTER_TEARDOWN_BUDGET);
+                if backup_gates_released > 0 {
+                    world.finish_background_backups(cleanup_deadline).await;
+                }
                 let cluster_cleanup = match world.cluster.take() {
                     Some(mut cluster) => {
-                        let teardown = cluster.shutdown_for_teardown().await;
+                        let teardown = cluster.shutdown_for_teardown(cleanup_deadline).await;
                         for panicked in teardown.panics() {
                             append_cucumber_log_line(&format!(
                                 "scenario teardown failed: {panicked}"

@@ -1807,6 +1807,15 @@ and cleanup paths retain their tracked-lock coverage; phase timing itself establ
 interleaving or memory-ordering guarantee. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
 owns the diagnostic contract.
 
+The test-only backup cut registry releases its watch-held lease and capture gates before clearing
+the map during scenario cleanup. Existing borrowers observe release; later cuts encounter no
+gate. Gate-owner tests with a paused clock cover waiting cuts, timed holds and later arrivals.
+The supervised failed-body Cucumber fixture reaches both public boundaries on one and three nodes
+and requires every node to stop while every body retains its failure. These watch channels and
+concurrent-map accesses are outside Deloxide's tracked locks. This harness cleanup adds no
+data-plane synchronization or memory-ordering claim; [Integration Test Lifecycle](./integration-test-lifecycle.md#what-cleanup-releases)
+owns its supervision verdict.
+
 A diagnostic node selects the `deloxide` mode. The `deloxide-order` feature adds historical order
 instrumentation to that same mode, and the `deloxide-stress` feature adds Deloxide's bounded
 scheduling disturbance to its active-only selection; neither is another execution mode, and the two
