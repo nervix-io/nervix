@@ -2628,14 +2628,21 @@ allowing the retirement reservations that live Kafka consumers retain.
 The semaphore waits are asynchronous and outside Deloxide's tracked-lock detection; the diagnostic
 restore workloads exercise the surrounding storage and restore lifecycle.
 
-Consensus storage admits each Commands working set through one of the store's turns before it asks
-the Commands class, and a working set returns its bytes before its turn passes. Its Shuttle check
-holds one working set while a second admission waits for its turn and a source control call races
-both, then ends the held working set: the control call finds room at every interleaving, the second
-working set is admitted, and the class ends with nothing reserved. The real-storage owner tests
+Consensus storage admits each Commands or Bulk working set through independent class-specific
+turns before asking its memory class, and a working set returns its bytes before its turn passes.
+Each Shuttle check holds one working set while a second admission waits for its turn and a progress
+charge races both, then ends the held working set: the progress charge finds room at every
+interleaving, the second working set is admitted, and the class ends with nothing reserved. The
+Commands check charges a source control call; the Bulk check charges snapshot progress. The real-storage owner tests
 hold a chunk with an unread entry while a log read and a storage job wait behind it, and require
 the control call's room while they wait. Like the chunk check, this is a control-plane admission
 check without a memory-ordering claim, and its waits are outside Deloxide's detection.
+Ordinary owner tests additionally poll request-envelope, staging and captured-reader admission
+under held and queued Bulk charges: each additional allocation refuses without waiting and
+releases its input. The public stopped-materialized-capture scenario exercises refusal, memory
+release, a fresh successful backup and complete branch-local generator recovery on one and three
+nodes. Its diagnostic workloads reach the surrounding storage lifecycle; Deloxide does not
+observe the asynchronous admission waits themselves.
 
 The checks below hold the scheduler-visible parts of each protocol to their invariants. Test
 names are given relative to their owning module; the `shuttle` feature selects the modeled build.

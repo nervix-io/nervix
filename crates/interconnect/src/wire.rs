@@ -19,7 +19,8 @@ use std::num::NonZeroUsize;
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use nervix_execution::{
-    AdmissionError, BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
+    AdmissionError, BudgetedBuffer, Cancellation, ChargedBytes, CpuClass, Executor, MemoryClass,
+    Reservation,
 };
 use nervix_models::{
     ClusterNodeName, NodePrerequisites, PrerequisiteMismatch, WireContractFingerprint,
@@ -202,6 +203,35 @@ impl RelayMetadata {
     }
 }
 
+/// The encoding job owns the input and its optional charge together. Declaration order returns
+/// the charge after the input is dropped, including when a queued job is cancelled.
+struct RkyvEncoding<T> {
+    value: T,
+    _input_charge: Option<Reservation>,
+}
+
+impl<T> RkyvEncoding<T>
+where
+    T: for<'a> Serialize<HighSerializer<IoWriter<BudgetedBuffer>, ArenaHandle<'a>, RkyvError>>,
+{
+    fn encode(
+        self,
+        charge: Reservation,
+        limit: u64,
+        cancellation: &Cancellation,
+    ) -> Result<BudgetedBuffer, Report<TransportError>> {
+        cancellation.check().map_err(|error| {
+            TransportError::with_cause(Report::new(error), TransportError::Encode)
+        })?;
+        let writer = IoWriter::new(BudgetedBuffer::with_limit(charge, limit));
+        let writer =
+            rkyv::api::high::to_bytes_in::<_, RkyvError>(&self.value, writer).map_err(|error| {
+                TransportError::with_cause(Report::new(error), TransportError::Encode)
+            })?;
+        Ok(writer.into_inner())
+    }
+}
+
 async fn encode_rkyv_buffer<T>(
     executor: &Executor,
     class: MemoryClass,
@@ -218,20 +248,43 @@ where
         .reserve(class, INITIAL_MESSAGE_CHARGE.min(limit))
         .await
         .map_err(|error| TransportError::with_cause(error, TransportError::Encode))?;
+    let encoding = RkyvEncoding {
+        value,
+        _input_charge: None,
+    };
     executor
         .run_cpu(cpu, reservation, move |charge, cancellation| {
-            cancellation.check().map_err(|error| {
-                TransportError::with_cause(Report::new(error), TransportError::Encode)
-            })?;
-            let writer = IoWriter::new(BudgetedBuffer::with_limit(charge, limit));
-            let writer =
-                rkyv::api::high::to_bytes_in::<_, RkyvError>(&value, writer).map_err(|error| {
-                    TransportError::with_cause(Report::new(error), TransportError::Encode)
-                })?;
-            Ok(writer.into_inner())
+            encoding.encode(charge, limit, cancellation)
         })
         .await
         .map_err(|error| TransportError::with_cause(error, TransportError::Encode))?
+}
+
+/// Encode an envelope while its nested payload remains charged. Refuse overlapping admission
+/// instead of queueing behind a charge that needs the retained payload to be released.
+pub(crate) async fn encode_stream_request(
+    executor: &Executor,
+    envelope: crate::request::RequestEnvelope,
+    payload_charge: Reservation,
+) -> Result<ChargedBytes, Report<TransportError>> {
+    let encoding = RkyvEncoding {
+        value: envelope,
+        _input_charge: Some(payload_charge),
+    };
+    let class = encoding.value.class;
+    let limit = class.control_body_limit(executor);
+    let reservation = executor
+        .try_reserve(class.memory_class(), INITIAL_MESSAGE_CHARGE.min(limit))
+        .map_err(|error| TransportError::with_cause(error, TransportError::Encode))?;
+    let buffer = executor
+        .run_cpu(
+            class.cpu_class(),
+            reservation,
+            move |charge, cancellation| encoding.encode(charge, limit, cancellation),
+        )
+        .await
+        .map_err(|error| TransportError::with_cause(error, TransportError::Encode))??;
+    Ok(ChargedBytes::from_buffer(buffer))
 }
 
 /// Serialize one typed value directly into a budgeted writer on the owning CPU class.

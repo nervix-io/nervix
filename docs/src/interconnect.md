@@ -643,6 +643,13 @@ follower whose receive window is full can still produce the answer that releases
 validates the relationships among operation limits and these budgets, including the paired work
 that must fit for independent operations to keep making progress.
 
+A typed stream request admits its envelope without queueing while its nested payload remains
+charged; bounded writer growth also refuses immediately when the class has no room. The encoding
+job owns that payload and charge through cancellation, and returns the payload charge once the
+envelope is encoded, before waiting for a connection lease or response headers. Insufficient room
+for both allocations is a typed encoding admission failure, which releases both allocations
+rather than waiting while retaining the input. The request is not sent after such a refusal.
+
 Stream slots are isolated per connection, and therefore per peer. Admission quotas, memory budgets,
 and CPU wait queues are isolated per class and shared by every peer of the node. A slow or stalled
 peer therefore holds at most the stream slots of its own connections. Once it holds the 32 shared
@@ -1385,6 +1392,11 @@ Materialized metadata and Arrow decoders refuse additional bulk scratch without 
 their encoded input holds a charge in that pool. Refusal releases the local input and preserves
 its typed admission cause; a generator retries a complete read on its next occurrence. No stream
 or request permit survives for that retry.
+Staging file creation, writes and finalization also refuse additional Bulk admission without
+queueing. A received chunk is released on a refused write, so a charge already waiting for those
+bytes can finish. Captured
+checkpoint readers apply the same rule while retaining their working set or a decoded identity
+group. These refusals preserve the underlying admission cause and publish no partial snapshot.
 
 The coordinator streams native lifecycle and Kafka metadata into quota-owned files before
 installation. It retains the verified description's separate `restore_metadata` preparation

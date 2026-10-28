@@ -944,6 +944,10 @@ contents. The reasons are:
 - a resource version's bytes are not installed on the leader, or do not match their catalog entry
 - the archive could not be staged on this node, because it is larger than one archive may be or
   staging failed, or a record does not encode
+- a materialized checkpoint's next read, request envelope, staging operation or group conversion
+  cannot fit beside the Bulk memory it retains; the additional allocation refuses immediately
+  and releases its retained memory. Release the contention and start a new backup; extending
+  `TIMEOUT` does not make the overlapping allocations fit
 - a captured branch lifecycle or Kafka offset checkpoint does not decode, its record exceeds the
   64 MiB record limit, or its lifecycle keys or serializer scratch cannot be admitted to
   `restore_metadata` now, naming the entity; the checkpoint's own conversion charge waits for room
