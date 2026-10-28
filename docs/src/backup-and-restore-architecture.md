@@ -717,10 +717,13 @@ its 2 MiB only from room the bulk class has free when it begins, and otherwise i
 reclaims and measures nothing, publishes no series, and the next sweep tries again. It never waits
 in the class's queue. A place there takes every byte the class releases until it is satisfied, so
 it would hold every other bulk charge on the node behind it, including the next charge of an
-operation that holds part of the room it waits for. Such an operation can never release what it
-holds, and the sweep never gets its room: a materialized snapshot fetch that holds its encoded
-request while it charges the request's envelope, or a received chunk while it charges the write
-that stages it, would stall for as long as the rest of the class stays occupied. Under sustained
+operation that holds part of the room it waits for. Additional admission for a materialized
+snapshot's request envelope, staging operations, stored section reads and captured-group
+conversion therefore refuses without queueing while its input or reader remains charged.
+Refusal releases the operation's retained memory and preserves its typed admission cause;
+incomplete capture publishes no inventory, and a later backup can capture afresh once room
+returns. Consensus Bulk storage independently admits working sets through store-local turns,
+so a second storage working set leaves the rest of the class available for progress. Under sustained
 bulk contention, reclamation therefore waits for room instead of delaying the node's bulk work. A
 bulk class smaller than the working set refuses every sweep at once instead, counting the refusal
 and logging it as a warning, because no free room could ever admit one.

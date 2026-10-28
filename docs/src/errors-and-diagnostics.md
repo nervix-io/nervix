@@ -593,6 +593,13 @@ a decoding failure. A caller keeps the storage report beneath its own context:
 `OwnershipHandoffError::Persistence` for a handoff, and the domain build's `ExecutionBuildError`
 step, which names the node and the state kind, for a state assignment.
 
+Bulk overlap refusals retain `AdmissionError` beneath `MaterializedSnapshotError::Admission`
+for captured checkpoint reads and group metadata, and beneath `SnapshotStagingError::Admission`
+for staged file operations. These are capacity failures, not malformed snapshots. A stopped
+materialized backup keeps the report beneath its capture context and refuses the backup without
+publishing an inventory. Its incomplete staged sections are released; a new backup after capacity
+returns reads the complete checkpoint afresh.
+
 Native Kafka stream conversion retains the rkyv validation failure beneath `DecodeState` and the
 placement-qualified `StateReplicationError::Capture`. A cancelled conversion keeps `Cancelled` at
 that same boundary without publishing the candidate table. Installation refused after an assignment

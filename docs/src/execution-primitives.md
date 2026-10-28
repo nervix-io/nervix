@@ -147,6 +147,13 @@ request therefore refuses immediately when no room is available, releasing the i
 read can progress. Metadata and Arrow sections follow the same rule; framing reads release their
 charges before reading the next frame.
 
+Stream request envelopes, snapshot staging writes and captured checkpoint conversion admit
+additional allocations without queueing while their input remains charged.
+They refuse the additional allocation with its typed admission cause and release their retained
+work on failure. Consensus storage takes separate Commands and Bulk turns before charging a
+working set, and returns the bytes before the turn, so storage waiters do not reserve the room
+the class's other operations need to complete.
+
 The runtime attributes build the selected runtime through a crate path fixed to the boundary: Tokio's
 attribute builds whatever runtime its crate path names, and an attribute that named `tokio` at the
 call site would construct whichever crate a package happened to call `tokio`. Shuttle's own test
