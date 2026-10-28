@@ -886,30 +886,47 @@ through a fresh client under the original reference. The recovery orchestration 
 runner, so delayed step polling cannot restart the wait bound or leave the second cut held. The
 archive must retain both quiesced cuts and the measured first hold.
 
-The paced branch-buffering outline keeps its one-second logical input flush and collection, rate
-20, and 800 ms physical receive budget. Its bounded payload sample owns the raw session on a
-runtime task and records every receipt instant, while Cucumber only awaits the completed sample.
-Checking the deadline between rows on the runner task could fail after the first tenant rows even
-when both second rows were already queued within the budget. A paused-clock regression supplies
-those rows at 100 ms and delays the caller past 800 ms; another requires a missing second row to
-expire at exactly 800 ms despite a duplicate first row. A transport disconnect instead fails
-immediately with its cause. The public outline checks each concrete tenant key and both exact
-payloads while deliberately delaying collection of the result for one second, beyond the
-unchanged receive budget. That delay yields to the runtime and other scenarios; it does not block
-the shared runner. A scripted one-second physical cadence still expires the same 800 ms sample.
-Every returned row must also have a receipt instant strictly before the original deadline: a
-paused-clock reader that resumes at or beyond either the 500 ms or 800 ms bound must fail even
-when its final row is ready. Offloading removes runner polling gaps; it neither extends the budget
-nor proves that runtime workers cannot be delayed.
+The paced branch-buffering outline runs its domain at rate 1200 with one-minute logical input
+flush and collection, a six-second period and skew, and a five-hour branch TTL. Each of these is
+sixty times the physical time it takes, so the flush and the collection each still close 50 ms
+after they open, while a physical clock would hold each for a minute. The receive budget is five
+seconds: twelve times shorter than the wrong clock's first window, and many times longer than
+relay delivery takes on a loaded runner. With one-second windows at rate 20, the budget had to
+stay below a one-second physical cadence, and its 800 ms then measured relay delivery as much as
+the clock. A relay owner fans out one batch at a time, across every branch of the relay, and waits
+for each remote receiver to admit the batch before it takes the next one. On three nodes the
+placement puts other nodes between a row's ingestor, both relay owners, the reingestor and the
+session, so each owner fan-out and each delivery to a remote owner waits for an admission between
+nodes; on one node every hop is local. In a loaded parallel run the first rows of the two tenants
+arrived 269 ms apart and both second rows missed the 800 ms deadline. A relay owner that spends
+that long on each batch produces exactly that pattern. A companion outline makes every relay owner
+wait 250 ms before each batch: at the 800 ms budget that wait failed the same way on one and three
+nodes, while the outline requires every row within the five-second budget.
+
+Each outline's bounded payload sample owns the raw session on a runtime task and records every
+receipt instant, while Cucumber only awaits the completed sample. Checking the deadline between
+rows on the runner task could fail after the first tenant rows even when both second rows were
+already queued within the budget. A paused-clock regression supplies those rows at 100 ms and
+delays the caller past five seconds; another requires a missing second row to expire at exactly
+five seconds despite a duplicate first row. A transport disconnect instead fails immediately with
+its cause. The public outlines check each concrete tenant key and both exact payloads while
+deliberately delaying collection of the result for six seconds, beyond the unchanged receive
+budget. That delay yields to the runtime and other scenarios; it does not block the shared runner.
+A scripted one-minute physical cadence still expires the same five-second sample. Every returned
+row must also have a receipt instant strictly before the original deadline: a paused-clock reader
+that resumes at or beyond either the 500 ms or five-second bound must fail even when its final row
+is ready. Offloading removes runner polling gaps; it neither extends the budget nor proves that
+runtime workers cannot be delayed.
 
 The slow historical-domain Immediate-flush outline keeps its 500 ms receipt budget, physical
 batching minimum, both exact tenant keys and payloads, and one- and three-node topology. It
 delays only collection of the observation result for one second. The reader must start and
 capture its deadline before the caller first polls the result. Its paused-clock control
 supplies both rows at 100 ms and requires receipt signals inside the original 500 ms window
-before the caller resumes after one second. A missing or late row still fails; the existing
-one-second cadence control covers both the 500 ms and 800 ms budgets. The public receive bound
-qualifies the physical clock choice without changing domain time or the batching minimum.
+before the caller resumes after one second. A missing or late row still fails, and the
+wrong-clock control expires this 500 ms budget with a one-second cadence, as it expires the paced
+outlines' five-second budget with a one-minute cadence. The public receive bound qualifies the
+physical clock choice without changing domain time or the batching minimum.
 
 The duration window outline establishes its observation boundary through a public subscription:
 it first waits for a probe branch's window to emit, then submits all four interleaved tenant rows

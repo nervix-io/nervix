@@ -769,10 +769,14 @@ owners:
   scenarios cover the CLI restoring a clock after a transport loss and a reconnected console
   restoring its attachment.
 - The paced branch-buffering outline checks both tenant keys and both sequence values under
-  one-second logical flush and collection at rate 20, retaining its 800 ms physical receive
-  budget. Its subscription reader runs independently of the scenario runner. Controlled harness
-  regressions distinguish timely rows learned about after a runner delay from a genuinely missing
-  row whose original receive budget expires; they do not change the runtime's clock contract.
+  one-minute logical flush and collection at rate 1200. Each window still closes 50 ms after it
+  opens, while a physical clock would hold it for a minute, so the five-second physical receive
+  budget rejects the wrong clock by a factor of twelve and leaves nearly all of itself to relay
+  delivery between three nodes. A companion outline makes every relay owner wait 250 ms before
+  each batch it fans out and keeps the same budget. Each outline's subscription reader runs
+  independently of the scenario runner. Controlled harness regressions distinguish timely rows
+  learned about after a runner delay from a genuinely missing row whose original receive budget
+  expires; they do not change the runtime's clock contract.
 - The slow historical-domain Immediate outline keeps both tenant keys and exact payloads on one
   and three nodes at `TIME RATE 0.0001`. Its 100-microsecond physical batching minimum would take
   one physical second if scaled as logical time, so the receive budget stays 500 milliseconds.
