@@ -226,7 +226,7 @@ impl HttpRequestIngestor {
 )]
 mod tests {
     use reqwest::header::{HeaderName, HeaderValue};
-    use tokio::io::AsyncWriteExt as _;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
     use super::*;
 
@@ -306,6 +306,23 @@ mod tests {
         let address = listener.local_addr().expect("listener address");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("request connection");
+            let mut request = tokio::io::BufReader::new(&mut stream);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                assert!(
+                    request
+                        .read_until(b'\n', &mut line)
+                        .await
+                        .expect("request line")
+                        > 0,
+                    "request ends with an HTTP head"
+                );
+                if line == b"\r\n" {
+                    break;
+                }
+            }
+            drop(request);
             stream.write_all(wire).await.expect("response bytes");
         });
         let response = reqwest::Client::builder()
