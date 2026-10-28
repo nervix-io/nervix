@@ -2228,6 +2228,15 @@ observations and transport waits remain outside Deloxide; the public outcomes an
 state-machine regressions cover the retention decision. No synchronization protocol or memory
 ordering changes at this boundary.
 
+The MongoDB client-identity workloads reach the filesystem executor's tracked class-queue fences
+while preparing a private combined PEM and constructing native TLS on one- and three-node
+clusters. Active, order-analysis and lifecycle-stress selections use the real mutual-TLS server,
+require an identity-equipped client to write, and require its CA-only control to fail. Both
+callbacks run outside the queue fence; driver-internal locks, certificate I/O and network waits
+remain outside Deloxide's observation. All four diagnostic lanes apply to these lifecycle jobs;
+restore stress retains its existing selection. The jobs add no synchronization or memory-ordering
+protocol of their own, so they add no Shuttle or Loom model.
+
 The WASM reset publication workloads reach tracked transaction state and impact recording during
 initial application and recovery on one- and three-node clusters. Ordinary, order-analysis and
 stressed selections distinguish typed loss of publication leadership from a retained genuine
