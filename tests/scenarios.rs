@@ -382,6 +382,8 @@ struct ScenarioWorld {
     /// the registry sees the work in flight rather than the last work that finished.
     active_scenario: Option<ActiveScenarioRegistration>,
     cluster: Option<Cluster>,
+    /// Bulk-worker holds that cleanup releases even when a step fails before explicit release.
+    occupied_bulk_nodes: BTreeSet<nervix_models::ClusterNodeName>,
     active_session: Option<TestSession>,
     /// A bounded next-row reader installed before the publication whose delay it measures.
     subscription_arrival: Option<ArrivalObservation<SubscriptionReceipt>>,
@@ -18396,6 +18398,7 @@ async fn when_these_plexus_commands_are_executed_on_node(
 async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     let node_name = crate::common::cluster::node_name(&node_id);
+    world.occupied_bulk_nodes.insert(node_name.clone());
     let fault_injection = world.fault_injection.clone();
     nervix_primitives::time::timeout(
         Duration::from_secs(30),
@@ -18405,6 +18408,15 @@ async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: Str
     .unwrap_or_else(|error| {
         panic!("bulk execution on '{node_id}' never filled its workers: {error}")
     });
+}
+
+/// Hold every node's bulk class so a management client's leader redirect stays under the fault.
+#[when("bulk execution on every node is occupied")]
+async fn when_bulk_execution_is_occupied_on_every_node(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        nervix_primitives::task::consume_budget().await;
+        when_bulk_execution_is_occupied(world, node_id).await;
+    }
 }
 
 /// Fill every bulk worker on every node, and give them all back once `duration` has passed. The
@@ -19110,9 +19122,9 @@ async fn then_the_unacknowledged_source_ingestor_eventually_counts_refused_paylo
 #[when(expr = "bulk execution on node {string} is released")]
 async fn when_bulk_execution_is_released(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
-    world
-        .fault_injection
-        .release_execution(&crate::common::cluster::node_name(&node_id));
+    let node_name = crate::common::cluster::node_name(&node_id);
+    world.fault_injection.release_execution(&node_name);
+    world.occupied_bulk_nodes.remove(&node_name);
 }
 
 /// Run Plexus on a node and require it to finish inside a bound, which is how a scenario states that
@@ -33382,6 +33394,10 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.fault_injection.release_all_domain_clock_progress();
                 world.fault_injection.release_all_command_pauses();
                 world.fault_injection.release_all_wasm_checkpoint_pauses();
+                for node in std::mem::take(&mut world.occupied_bulk_nodes) {
+                    world.fault_injection.release_execution(&node);
+                    append_cucumber_log_line(&format!("bulk execution cleanup: node={node}"));
+                }
 
                 if let Some(broker) = &world.kafka_mock_broker {
                     broker

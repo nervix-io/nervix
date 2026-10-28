@@ -413,6 +413,16 @@ The FIFO mutex is tracked by Deloxide. Its owner and public workloads are regist
 `tests/deloxide-inventory.toml`; Shuttle covers submission racing worker exit as well as cancellation,
 admission ordering and class isolation. No new atomic publication protocol is introduced.
 
+The public bulk-isolation scenario occupies every node's bulk workers while six sequential
+management mutations and a subsequent domain listing complete, on one- and three-node clusters.
+A production client connects before occupation; its initial follower route and any leader redirect
+remain inside the fully occupied cluster. The mutations share one ten-second budget and the listing
+has another. The harness drives and timestamps replies independently of its cooperative scenario
+runner, checking the sixth mutation's acknowledgement explicitly. Holds remain through readiness
+and stable-leader observations, then cleanup releases them before diagnostics and node stop, even
+after a failed assertion. These harness bounds provide public class-isolation evidence; product
+request deadlines keep their existing owners.
+
 ## Thread Creation Outside The Executor
 
 Starting a thread can bypass the executor's admission, memory charges and cancellation just as

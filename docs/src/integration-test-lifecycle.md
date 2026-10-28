@@ -1108,6 +1108,17 @@ The harness keeps these boundaries explicit.
   same load the corrected probe passed every copy in three runs, completing 23 to 157
   milliseconds after dispatch, and sampling in one of them showed each restarted node's archive
   fetch in flight before and after its probe.
+- **Bulk execution isolation.** The one- and three-node scenario connects a named production
+  client before holding every node's bulk workers. This keeps the complete command path under the
+  fault even after a follower redirects the client to the leader. Six sequential domain creations
+  share one ten-second budget; a domain listing has its own ten-second budget. The shared timed
+  client observer drives and timestamps every reply independently of the Cucumber runner, before
+  diagnostic logging, and the scenario checks the sixth creation's acknowledgement explicitly.
+  Initial connection and authentication precede the fault. The hold remains through the readiness
+  and stable-leader observations. Scenario cleanup releases every recorded bulk hold before
+  diagnostics and node stop, including when occupation or an assertion fails; explicit release
+  removes that node from the retained set. These are harness bounds for class-isolation evidence,
+  not additional product deadlines.
 - **Cleanup.** Scenario cleanup runs after the scenario's assertions, so it spends the harness
   cleanup budget rather than waiting for a product shutdown deadline. A scenario whose subject is
   shutdown, drain, or deadline expiry stops its nodes itself, inside its body, under the product
