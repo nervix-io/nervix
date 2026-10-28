@@ -3150,6 +3150,35 @@ verify-chaos-clock *args:
 test-chaos-stateful-verifiers:
     exec bash scripts/chaos/tests/stateful-self-test.sh
 
+# Run the endpoint route and WebSocket verifier controls without the other external harness checks.
+test-chaos-endpoint-verifiers:
+    exec bash scripts/chaos/tests/endpoint-self-test.sh
+
+# Retain shell coverage of the endpoint route and WebSocket verifier controls.
+coverage-chaos-endpoint-verifiers:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/verify-endpoint-evidence.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/endpoint-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-endpoint-verifier-coverage") }} scripts/chaos/tests/endpoint-self-test.sh
+
+# Run the materialized, generator, window, rotation, expiry, missing-topic and force-flush verifier
+# controls without the other external harness checks.
+test-chaos-lifetimes-verifiers:
+    exec bash scripts/chaos/tests/lifetimes-self-test.sh
+
+# Retain shell coverage of the lifetimes verifier controls.
+coverage-chaos-lifetimes-verifiers:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/verify-lifetimes-evidence.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/lifetimes-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-lifetimes-verifier-coverage") }} scripts/chaos/tests/lifetimes-self-test.sh
+
 # Retain shell coverage of the state, clock and window verifier controls.
 coverage-chaos-stateful-verifiers:
     #!/usr/bin/env bash

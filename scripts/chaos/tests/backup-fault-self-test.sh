@@ -39,7 +39,7 @@ expect_setup_rejection 'backup-fault needs three nodes' 'backup-fault requires -
     "${chaos_dir}/run-baseline.sh" --scenario backup-fault --image fixture --fault owner-crash --nodes 1
 expect_setup_rejection 'restore-fresh-cluster needs three nodes' 'restore-fresh-cluster requires --nodes 3' \
     "${chaos_dir}/run-baseline.sh" --scenario restore-fresh-cluster --image fixture --nodes 1
-expect_setup_rejection 'backup-cycles takes no fault' '--fault applies only to stateful, domain-time, backup-fault and restore-fault' \
+expect_setup_rejection 'backup-cycles takes no fault' '--fault applies only to stateful, endpoints, lifetimes, domain-time, backup-fault and restore-fault' \
     "${chaos_dir}/run-baseline.sh" --scenario backup-cycles --image fixture --fault owner-crash
 
 # The verdict reads the run's globals; this fixture run has its own directory.

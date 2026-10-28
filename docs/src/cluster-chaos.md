@@ -83,8 +83,9 @@ Bolero obligation, and none of those discharges a suite.
 | `scripts/chaos/*-scenario.sh` | Each scenario's faults, observations and verdicts |
 | `node-faults.sh`, `network-faults.sh`, `link-degradation.sh`, `link-ping-helper.sh`, `link-rate-helper.sh` | The fault primitives: process faults through Pumba and Docker, and one netem effect on a container's egress toward chosen addresses; partition plans, rules, effect matrices, preflight and healing; link degradation and its ICMP and transfer probes |
 | `mixed-plan.sh`, `mixed-plan.jq` | Seeded plan generation, plan validation and default coverage |
-| `verify-*.sh` | The external verifiers: ledgers, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed and diagnostic evidence |
+| `verify-*.sh` | The external verifiers: ledgers, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes and diagnostic evidence |
 | `continuous-load.sh`, `observe-nodes.sh`, `observe-clock.sh` | The paced producer, the listener observer and the domain-clock observer, each running inside a container |
+| `endpoint-client.py` | The [endpoints](#endpoints) scenario's HTTP and WebSocket client, which runs inside the pinned Python image and writes its ledger of attempts to its log |
 | `docker-event-recording.sh` | The run's live Docker event recording and its marker windows |
 | `output-boundary.sh`, `consumer-group.sh`, `startup-status.sh`, `image-package-check.sh`, `image-identity.sh`, `tool-images.sh`, `select-subnet.sh`, `require-jq.sh` | Kafka end-offset observations and the output boundary, the source consumer group's members and the nodes that run them, startup status publication, the image-package check, image identity rules, the tool image pins, network selection and the jq requirement |
 | `verifier-self-check.sh` | The verifier self-check's bound, the identity of the chaos scripts and the judgement of the record a suite hands its runs |
@@ -153,6 +154,8 @@ digest:
 | Apache Kafka | 3.9.1 | Multi-architecture index digest | The broker, and topic and consumer-group administration |
 | kcat | 1.7.1 | Its single linux/amd64 manifest, the only one published | The continuous loads, the baseline producer and the topic readers |
 | Alpine | 3.22.6 | Multi-architecture index digest | Listener, readiness and metrics probes, the listener observer, link probes and Docker event markers |
+| Python | 3.13.18 on Alpine 3.24 | Multi-architecture index digest | The [endpoints](#endpoints) scenario's HTTP and WebSocket client, which uses only the standard library |
+| PostgreSQL | 17.11 on Alpine 3.24 | Multi-architecture index digest | The [lifetimes](#lifetimes) scenario's database for its pooled table emitters, with its data on a tmpfs |
 | Pumba | 1.2.1 | Multi-architecture index digest | Every process and network fault |
 | Pumba nettools | The helper published with Pumba 1.2.1 | Multi-architecture index digest | `tc` and `iptables` inside a node's network namespace |
 
@@ -262,7 +265,9 @@ half of the range. The manifest records the subnet, the dynamic range and the no
 | `broker-admin` | Kafka | Disposable topic and consumer-group administration |
 | `kcat` | kcat | Disposable producers and topic readers |
 | `probe` | Alpine | Disposable listener, readiness and metrics probes |
-| `load`, `state-load`, `paced-load` | kcat | The continuous loads |
+| `load`, `state-load`, `paced-load`, `life-load` | kcat | The continuous loads |
+| `endpoint-load`, `endpoint-websocket` | Python | The [endpoints](#endpoints) scenario's HTTP and WebSocket clients |
+| `postgres` | PostgreSQL | The [lifetimes](#lifetimes) scenario's database, with its data on a tmpfs |
 | `observer` | Alpine | The independent listener observer |
 | `clock-observer` | Nervix | One domain-clock observer per node |
 
@@ -293,7 +298,7 @@ inspection where a verdict depends on them:
 | Raft heartbeat, and the election window derived from it | 250 ms, so 1.5 to 3 seconds | 1.5 seconds, so 9 to 18 seconds, for `pause-resume`, `--fault owner-pause` and `--fault voter-pause` |
 | Node unavailability timeout | 10 seconds | 15 seconds for the same pause deployments |
 | Raft snapshot entry threshold, covered log entries retained | 10,000; 1,000 | 64; 16 for `stale-follower` |
-| State snapshot interval, replica count | 30 seconds; 0 | 1 second, and on three nodes one replica, for `stateful`; one replica for `restore-fault` and `restore-volume` |
+| State snapshot interval, replica count | 30 seconds; 0 | 1 second, and on three nodes one replica, for `stateful` and `lifetimes`; one replica for `restore-fault` and `restore-volume` |
 | Command retry validity | 15 minutes | 3 minutes for `restore-fault --fault reclamation-owner-crash` |
 
 ### Interconnect TLS
@@ -338,17 +343,17 @@ take.
 | Option | Applies to | Range and default |
 | --- | --- | --- |
 | `--image IMAGE` | Every scenario | Required |
-| `--nodes 1\|3` | Every scenario. Only `baseline`, `backup`, `backup-cycles`, `rolling-restart`, `leader-crash`, `cluster-restart`, `stateful` and `domain-time` accept `--nodes 1` | Default 3 |
+| `--nodes 1\|3` | Every scenario. Only `baseline`, `backup`, `backup-cycles`, `rolling-restart`, `leader-crash`, `cluster-restart`, `stateful`, `endpoints`, `lifetimes` and `domain-time` accept `--nodes 1` | Default 3 |
 | `--records N` | Every scenario | 1 to 1,000; mixed instability 1 to 20,000. Defaults are in the [catalog](#scenario-catalog) |
 | `--timeout SECONDS` | Every scenario | 120 to 3,600; mixed instability from its duration plus 600 through 21,600. Defaults are in the catalog |
 | `--artifacts DIR` | Every scenario | Default `target/chaos` |
 | `--run-id ID` | Every scenario | 1 to 96 letters, digits, dots, underscores or hyphens, starting with a letter or digit. Generated when omitted. A run ID whose directory already exists is refused |
 | `--verifier-self-check RECORD` | Every scenario | The record of the verifier self-check a suite executed, which the run adopts instead of executing `tests/self-test.sh`. A record that did not pass on this worker, during this boot, for exactly the run's chaos scripts is refused as a setup error before the run creates anything. A suite passes it to every run; a standalone run omits it |
 | `--keep` | Every scenario | Keeps the run's resources after diagnostics and prints their cleanup command |
-| `--outage-seconds N` | The crash scenarios, `cluster-restart`, `stateful`, `domain-time`, `backup-fault` and the crash faults of `restore-fault` | 5 to 120. Default 8; in `stateful`, 45 for `owner-pause` and `owner-partition`; 30 for `voter-pause` and `voter-partition`. The `owner-partition` fault of `backup-fault` holds a fixed 35-second isolation. In `restore-fault --fault reclamation-owner-crash` the killed owner stays down at least until the other target reclaims its staging |
+| `--outage-seconds N` | The crash scenarios, `cluster-restart`, `stateful`, `endpoints`, `lifetimes`, `domain-time`, `backup-fault` and the crash faults of `restore-fault` | 5 to 120. Default 8; in `stateful`, 45 for `owner-pause` and `owner-partition`; in `endpoints` and `lifetimes`, 45 for `owner-partition`; 30 for `voter-pause` and `voter-partition`. The `owner-partition` fault of `backup-fault` holds a fixed 35-second isolation. In `restore-fault --fault reclamation-owner-crash` the killed owner stays down at least until the other target reclaims its staging |
 | `--case CASE`, `--partition-seconds N` | `partition-recovery` | `all`, `follower`, `asymmetric`, `leader` or `quorum-loss`, default `all`; 20 to 600, default 45 |
 | `--isolation-seconds N` | `former-owner-restart` | 20 to 600, default 45 |
-| `--fault FAULT` | `stateful`, `domain-time`, `backup-fault`, `restore-fault` | See those scenarios. One node supports `none` and `cluster-restart`. Default `none`; `backup-fault` requires `owner-crash`, `leader-crash`, `owner-partition` or `rolling-restart`, and `restore-fault` requires `leader-crash`, `leader-partition`, `owner-crash` or `reclamation-owner-crash` |
+| `--fault FAULT` | `stateful`, `endpoints`, `lifetimes`, `domain-time`, `backup-fault`, `restore-fault` | See those scenarios. One node supports `none` and `cluster-restart`. Default `none`; `backup-fault` requires `owner-crash`, `leader-crash`, `owner-partition` or `rolling-restart`, and `restore-fault` requires `leader-crash`, `leader-partition`, `owner-crash` or `reclamation-owner-crash` |
 | `--profile NAME` | `degraded-links` | `all`, `delay`, `jitter`, `random-loss`, `burst-loss`, `rate-limit` or `combined`, default `all` |
 | `--load-interval-ms N` | `degraded-links` | 100 to 5,000, default 750 |
 | `--baseline-seconds N`, `--degrade-seconds N`, `--drain-seconds N` | `degraded-links` | 10 to 120, default 15; 10 to 120, default 20; 10 to 180, default 90 |
@@ -374,6 +379,8 @@ The focused checks run parts of the runner on their own:
 | `just test-chaos-restore` | The option rules of `restore-fault` and `restore-volume`; the padded guest generator's bounds and layout; the node sampler's records, the staging verdicts read from them, including a pair of samples across a restart; and the [restore verdict](#restore-faults) against synthetic reports: a completed restore, one without every step applied, an incomplete one with and without its one failed step, a refusal before and after its target exists, an uncertain failure and an end without a JSON report |
 | `just test-chaos-backup-state` | The [deduplicator and window verdict](#backup-cycles) over an exact set of outputs and one with replayed copies. It also checks the outputs that a restore which lost deduplicator keys, lost or doubled a window's retained rows, changed a record or dropped an output would produce, and malformed and missing inputs |
 | `just test-chaos-stateful-verifiers` | The state, clock and window verdicts |
+| `just test-chaos-lifetimes-verifiers` | The option rules of `lifetimes`, and its [verdicts](#lifetimes) against synthetic ledgers: records enriched with their branch's profile, with an ignored lower or equal timestamp's version, or before a replacement applied; a lost parked record; repeats with and without a fault, before and past the milestone; generated rows of a state never held or going back; malformed and lost windows; a rotation that evicted nothing; an expiring branch that never expired or kept its first profile; a lost late record; and buffered records that were not held or waited for their flush interval |
+| `just test-chaos-endpoint-verifiers` | The option rules of `endpoints`, and its [route and WebSocket verdicts](#endpoints) against synthetic ledgers: accepted records that reach both domains, or a withdrawn domain's route; a lost, repeated, altered or unsent record; a record never accepted or abandoned; a client that stopped early; a bound route that answered 404; a retained connection that was refused with 1013, closed otherwise or not probed; a delivered probe; and a lost, repeated or altered frame |
 | `just verify-chaos-clock ARGS` | The clock verifier over retained observer transcripts |
 | `just coverage-chaos-*` | The same controls under kcov, keeping their shell coverage under `target/chaos-*-coverage/` |
 | `just coverage-chaos-baseline IMAGE [NODES] [TIMEOUT] [RUN_ID]` | The complete baseline controller under kcov against a prebuilt image; use a fresh run ID for each collection |
@@ -820,6 +827,8 @@ trap ran exits on its own, 15 minutes after the run's bound.
 | `former-owner-restart` | 3 | A former owner restarted behind peer-side isolation | 1 s | 1,000, 1,800 s |
 | `cluster-restart` | 1 or 3 | SIGKILL of every node | 1 s | 1,000, 1,800 s |
 | `stateful` | 1 or 3; one node only with no fault or a cluster restart | None, or a crash, pause or partition of the state owner, or a cluster restart | 1 s, and `state-load` at 1 s | 1,000, 2,700 s |
+| `endpoints` | 1 or 3; one node only with no fault or a cluster restart | None, or a crash or partition of the endpoint owner, or a cluster restart | 1 s, and HTTP endpoint intake at 250 ms | 1,000, 1,800 s |
+| `lifetimes` | 1 or 3; one node only with no fault or a cluster restart | None, or a crash or partition of the state owner, or a cluster restart | 1 s, and `life-load` at 500 ms | 1,000, 2,700 s |
 | `domain-time` | 1 or 3; one node only with no fault or a cluster restart | None, or each voter in turn crashed, paused, isolated or stopped, or a cluster restart | 1 s, and `paced-load` at 250 ms | 1,000, 2,700 s |
 | `mixed-instability` | 3 | A seeded or explicit plan of the families above, alone and combined | 1 s | Twice the planned timeline plus 15 minutes of records, at most 20,000; the duration plus the larger of the duration and 20 minutes, at most 6 hours |
 
@@ -1731,6 +1740,209 @@ keeps each processor's verdict. A failing verdict is a product finding, and the 
 baseline ledger before it exits nonzero. `results/stateful-progress.json` records the deployment,
 boundaries, milestone, timings and every verdict.
 
+### Endpoints
+
+```bash
+just chaos run endpoints --image nervix:debian
+just chaos run endpoints --image nervix:debian --nodes 1
+just chaos run endpoints --image nervix:debian --fault owner-crash
+just chaos run endpoints --image nervix:debian --fault owner-partition
+just chaos run endpoints --image nervix:debian --fault cluster-restart
+just chaos run endpoints --image nervix:debian --nodes 1 --fault cluster-restart
+```
+
+**The graphs.** The baseline path keeps its own traffic and exact ledger in its domain. Two more
+domains, `chaos_edge_primary` and `chaos_edge_peer`, each install `fixtures/endpoints.plexus`. Each
+declares the VHOST `chaos-edge.example` and the HTTP endpoint `/events` on it, so the two domains
+share one host and path. In each domain, an `HTTP ENDPOINT` ingestor in `MODE ACK MAX 64 ACK TIMEOUT
+10s` feeds a relay and an attached Kafka emitter, each with its own output topic. The primary also
+installs `fixtures/endpoints-websocket.plexus`: a `WEBSOCKETS ENDPOINT` ingestor in `MODE NO ACK` on
+`/stream`, with its own relay, emitter and topic. Endpoint ingestors serve on every node. On three
+nodes, one acknowledged `RELOCATE` in each domain moves the relays and emitters onto the observed
+follower that the faults target.
+
+**The client.** `endpoint-client.py` runs in the pinned Python image and sends its records through
+every node's HTTP listener in turn, one record due every 250 ms. It finishes every attempt of a
+record before it sends the next one. An attempt without HTTP 200 is attempted again through the
+next node, since the sender owns retry. Every attempt is one line of its ledger, with its node, its
+status, its retry delay and its outcome object, or the error that ended it. The runner holds and
+releases the client at record numbers, and a record's sequence is its number, so each phase
+boundary is a record.
+
+**The phases.**
+
+1. **Shared route.** Records 1 to 40 reach both domains.
+2. **Withdrawn route.** The run stops the peer domain, and records 41 to 80 reach the primary
+   alone. The route stays published for the primary while the peer's binding is withdrawn.
+3. **Shared again.** The run starts the peer domain again, and records 81 to 120 reach both.
+4. **WebSocket.** While the HTTP client holds, a second client opens a WebSocket through a node
+   other than the endpoint owner and sends 20 frames. The run then stops and starts the primary
+   domain, which replaces the source. The retained connection then sends one more frame, and
+   the endpoint must close it with code 1013. The client then opens a new connection and sends
+   20 more frames.
+5. **The fault.** The HTTP client sends records 121 to 160, then the rest of its 400 records while
+   the fault strikes. `--fault` selects the fault:
+   - `none` holds no fault
+   - `owner-crash` kills the endpoint owner, requires the endpoint work to leave it while it is
+     down, holds the outage for `--outage-seconds` (default 8), and starts the same container
+   - `owner-partition` isolates the endpoint owner with verified peer-side rules for at least
+     `--outage-seconds` (default 45), and requires the endpoint work to leave it
+   - `cluster-restart` kills every node and starts each from its own volume
+
+   During the fault, a request through the faulted node, or one whose graph acknowledgement
+   cannot complete, ends without HTTP 200. The client attempts it again through the next node
+   until a node accepts it.
+
+**The verdicts.** `verify-endpoint-evidence.sh` judges each domain's HTTP output against the
+client's ledger, and the WebSocket output against the WebSocket client's ledger. `START` and `STOP`
+complete only once every node's listener has its route or has withdrawn it, so a record
+belongs to exactly one phase.
+
+- **Delivery.** Every record answered with HTTP 200 while a domain's route was bound reaches that
+  domain's output, with its exact content.
+- **Withdrawal.** No record of the peer's withdrawal reaches the peer.
+- **Duplicates.** A record may reach a domain more than once, or without a 200, only when one of
+  its attempts ended without an answer, or with an answer that does not refuse admission. A 404,
+  a 400 or a `not_admitted` outcome refuses admission.
+- **Completion.** Every record is eventually answered with HTTP 200, none is abandoned at the
+  client's four-minute deadline, the client reaches the end of its input, and no bound route
+  answers 404.
+- **WebSocket.**
+  - Both connections are accepted.
+  - Every frame of the retained and the new connection reaches its output exactly once, with its
+    exact content.
+  - The frame sent after the replacement is refused with code 1013 and never delivered.
+
+`endpoints/verdict-*.json` keeps each verdict. A failing verdict is a product finding, and the run
+continues to the baseline ledger before it exits nonzero. `results/endpoints-progress.json` records
+the placement, phases, fault, outputs and every verdict.
+
+### Lifetimes
+
+```bash
+just chaos run lifetimes --image nervix:debian
+just chaos run lifetimes --image nervix:debian --nodes 1
+just chaos run lifetimes --image nervix:debian --fault owner-crash
+just chaos run lifetimes --image nervix:debian --fault owner-partition
+just chaos run lifetimes --image nervix:debian --fault cluster-restart
+just chaos run lifetimes --image nervix:debian --nodes 1 --fault cluster-restart
+```
+
+**The graph.** `fixtures/lifetimes.plexus` runs in the baseline domain beside the baseline path,
+which keeps its own traffic and exact ledger. A separate kcat container produces records to
+`chaos_life_input`, one every 500 ms. Four branches, red, blue, gold and green, interleave strictly,
+and every record carries its index within its branch. Three branch declarations govern lifetimes:
+one with a ten-minute TTL and a ceiling of 16 instances, which a branched window that computes
+sketches requires and four branches never reach, one that expires after 20 seconds without
+activity, and one bounded to two instances with `EVICT LRU`. The life ingestor's relay feeds four
+paths, each with its own attached Kafka emitter and output topic:
+
+- **The junction `chaos_life_enrich`.** It reads the branch's row of the materialized relay
+  `chaos_life_profiles` with `REQUIRED WAIT`. A profile ingestor fills that relay from
+  `chaos_life_profile_input` with `TIMESTAMP AT updated_at`, so the run chooses each row's
+  timestamp, and `LAST BY TIMESTAMP` keeps a branch's row only for a strictly newer one.
+- **The generator `chaos_life_generator`.** It emits each branch's materialized row every second.
+- **The detached window `chaos_life_window`.** It aggregates each branch's records in tumbling
+  six-second windows: their count, bounds and sum, an `APPROX_COUNT_DISTINCT` of the index modulo 3,
+  and an `APPROX_QUANTILE` median. A window that computes sketches takes duration bounds.
+- **The reingestor `chaos_life_rotate`.** It moves every record onto the LRU-bounded branches, which
+  four branches keep evicting.
+
+Four pipelines have their own sources, which the run produces to directly:
+
+- **The expiring path.** A junction with `REQUIRED WAIT` reads the expiring relay's green row.
+- **The late path.** Its emitter writes to `chaos_life_late_output`, which the run creates only
+  after the emitter has reported its absence.
+- **The buffered path.** Its route flushes every 300 seconds.
+- **The pooled path.** Two attached Postgres table emitters write every record to their own table
+  in the `postgres` container, with `ON CONFLICT ('event_id') DO NOTHING`. Both borrow from the
+  client `chaos_life_pg`, whose pool holds one connection on each node. The run creates both tables
+  before the graph starts.
+
+On three nodes, one acknowledged `RELOCATE` moves every processor, relay and emitter of the
+materialized, generated, window, rotating, expiring and pooled paths onto the observed follower that
+the faults target, and their ingestors onto another node. The deployment uses a one-second state
+snapshot interval and, on three nodes, one state replica.
+
+**The phases.** The run holds the life load after a record count, waits until the source has
+acknowledged every record before it, and only then moves the hold, so each record's expected
+profile is exact.
+
+1. **Loaded profiles.** Red, gold and green publish version 1 at second 10 of the run's base minute,
+   and `SHOW RELAY chaos_life_profiles MATERIALIZED STATE` must show them and no blue row.
+2. **Parked records.** Blue has no profile, so blue's first six records park on `REQUIRED WAIT`.
+   The load holds after 24 records. The source's committed offset stays below blue's first record.
+   Blue then publishes version 1, and the source acknowledges through record 24.
+3. **Timestamps.** Red publishes four more versions, and the run requires the relay's state after
+   each one:
+
+   | Red version | Second of the base minute | Red holds | Records produced after it |
+   | ---: | ---: | ---: | --- |
+   | 2 | 20 | 2 | 25 to 40 |
+   | 3 | 15, lower | 2 | 41 to 56 |
+   | 4 | 20, equal | 2 | 57 to 72 |
+   | 5 | 30 | 5 | 73 onward |
+
+   The run waits until the profile source has acknowledged each publication before it requires the
+   state.
+4. **A missing topic.** Five records reach the late path. Its emitter must report `status: ERROR`
+   in `DESCRIBE EMITTER` while its topic is missing. The run then creates the topic, and the source
+   must acknowledge every record and the emitter return to `status: OK`.
+5. **A force flush.** Six records reach the buffered path. Once the nodes' metrics count them
+   received, the output must still be empty. `ALTER KAFKA TOPIC INGESTOR chaos_life_flush_ingestor
+   SET GENERAL ERROR IGNORE` then holds the ingestor and force-flushes its buffer, and the records
+   must arrive within 60 seconds. A second alteration finds the pipeline idle.
+6. **A full pool.** Four pooled records reach both tables. The run then locks both tables in one
+   transaction and produces eight more. One emitter's insert must wait for its table lock while it
+   holds the pool's one connection, and the other emitter must report `status: WAITING` with
+   `waiting for a connection from client 'chaos_life_pg'` in `DESCRIBE EMITTER`. Meanwhile
+   `pg_stat_activity` must show at most one connection of the client from each node. The locks
+   hold through the fault.
+7. **Expiry.** The expiring relay's green row publishes version 1, and eight green records carry it.
+   The row must then disappear from `SHOW RELAY chaos_life_expiring_profiles MATERIALIZED STATE`
+   within 150 seconds. Every entity that holds the branch releases it at its own scan, so the run
+   then waits up to 150 more seconds for `nervix_branch_evictions_total`, summed over the nodes, to
+   count a TTL eviction of that branch.
+
+**The fault.** The load runs on while the fault strikes. `--fault` selects it:
+
+- `none` holds no fault
+- `owner-crash` kills the state owner, requires the work to leave it, holds the outage for
+  `--outage-seconds` (default 8), and starts the same container
+- `owner-partition` isolates the state owner with verified peer-side rules for at least
+  `--outage-seconds` (default 45)
+- `cluster-restart` kills every node and starts each from its own volume
+
+After the fault, the materialized relay must hold red version 5 and version 1 of every other branch.
+A pooled emitter must report its wait for the full pool again, now from the work's current owner,
+so the fault ended the waits it interrupted without losing the records they held.
+
+**Recreation.** The expired green row must still be absent, so neither restored nor replicated
+state brought it back. Eight more green records then park until green publishes version 2, and they
+must carry it. The run then ends the table locks, and both pooled emitters must write all twelve
+records to their tables and return to `status: OK`. The run continues for 80 more life records,
+then drains every path.
+
+**The verdicts.** `verify-lifetimes-evidence.sh` judges each path against the accepted-input ledger
+of its source. Records past the milestone of record 88 may be replayed identically after a fault,
+because a fault can interrupt an acknowledgement after its record was written. Every other
+deviation is a violation.
+
+| Path | Requires |
+| --- | --- |
+| `enrich` | Every record exactly once, with its own fields and its branch's profile. Blue's parked records carry version 1. Red carries version 1 through record 24, version 2 through record 72 and version 5 after it, never version 3 or 4 |
+| `generator` | Only profiles their branch held, versions that never go back, and at least three rows of every branch |
+| `window` | A contiguous run of one branch's records, with exact count, bounds and sum. The distinct count is between 1 and the smaller of 3 and the count, and the median lies within the window's bounds. The closed windows aggregate every record exactly once, without a gap. After a fault, a window that holds a record between the milestone and the recovery is exempt, with every record it holds |
+| `rotation` | Every record exactly once through the LRU-bounded relay, which evicted at least one branch |
+| `expiring` | Every record exactly once, version 1 before the expiry and version 2 after the recreation, and a TTL eviction of the branch |
+| `late` | Every late record exactly once after the emitter recovered |
+| `flush` | Every buffered record exactly once, held until the alteration and force-flushed long before its flush interval |
+| `pool` | Every pooled record exactly once in each table. An emitter reported its wait for the full pool, and after a fault reported it again. No node held more than one connection of the client while the emitter waited |
+
+`lifetimes/verdict-*.json` keeps each verdict. A failing verdict is a product finding, and the run
+continues to the baseline ledger before it exits nonzero. `results/lifetimes-progress.json` records
+the placement, boundaries, fault, outputs and every verdict.
+
 ### Domain Time
 
 ```bash
@@ -2345,15 +2557,18 @@ Each entry is one `just chaos run` command with its arguments, a budget in minut
 which is the unit one CI job runs. An entry may also carry a note. The suite's `ci_reserve_minutes`
 is 21.
 
-The `smoke` suite is one shard:
+The `smoke` suite runs in three shards:
 
-| Entry | Command | Budget (min) |
-| --- | --- | ---: |
-| `baseline-3` | `baseline --nodes 3` | 4 |
-| `leader-crash-3` | `leader-crash --nodes 3` | 7 |
-| `partition-follower` | `partition-recovery --case follower` | 9 |
+| Shard | Entry | Command | Budget (min) |
+| ---: | --- | --- | ---: |
+| 1 | `baseline-3` | `baseline --nodes 3` | 4 |
+| 1 | `leader-crash-3` | `leader-crash --nodes 3` | 7 |
+| 1 | `partition-follower` | `partition-recovery --case follower` | 9 |
+| 2 | `endpoints-1` | `endpoints --nodes 1` | 10 |
+| 2 | `endpoints-3-owner-crash` | `endpoints --nodes 3 --fault owner-crash` | 12 |
+| 3 | `lifetimes-3-owner-crash` | `lifetimes --nodes 3 --fault owner-crash` | 25 |
 
-The `soak` suite runs every delivered scenario, topology, case, profile and fault, in eleven shards:
+The `soak` suite runs every delivered scenario, topology, case, profile and fault, in fourteen shards:
 
 | Shard | Entries, with budgets in minutes |
 | ---: | --- |
@@ -2368,6 +2583,9 @@ The `soak` suite runs every delivered scenario, topology, case, profile and faul
 | 9 | `stateful-3-owner-pause` 20; `stateful-3-owner-partition` 25; `stateful-3-cluster-restart` 22; `domain-time-3-voter-partition` 25 |
 | 10 | `backup-cycles-1` 10; `backup-cycles-3` 12; `restore-into-fresh-cluster` 12; `backup-under-owner-crash` 14; `restore-under-leader-crash` 12; `restore-under-owner-crash` 11; `restore-staging-volume` 11 |
 | 11 | `backup-under-leader-crash` 14; `backup-under-partition` 15; `rolling-restart-during-backup-stream` 20; `restore-under-leader-partition` 20; `restore-reclamation-under-owner-crash` 19 |
+| 12 | `endpoints-1` 10; `endpoints-1-cluster-restart` 12; `endpoints-3` 10; `endpoints-3-owner-crash`, `endpoints-3-owner-partition`, `endpoints-3-cluster-restart` 12 each |
+| 13 | `lifetimes-1` 20; `lifetimes-1-cluster-restart` 22; `lifetimes-3` 22 |
+| 14 | `lifetimes-3-owner-crash`, `lifetimes-3-owner-partition`, `lifetimes-3-cluster-restart` 25 each |
 
 A few soak entries need explanation:
 
@@ -2497,8 +2715,8 @@ cleanup works in this order:
   and the steps after the suite: cleanup, which has its own 8-minute bound holding its five-minute
   wait, plus the summary and the uploads.
 
-The smoke shard therefore runs 20 minutes of entries in a 45-minute step and a 66-minute job. The
-soak's eleven shards hold 926 minutes of entries.
+The smoke shards therefore run 20, 22 and 25 minutes of entries in steps of 45, 47 and 50 minutes
+and jobs of 66, 68 and 71 minutes. The soak's fourteen shards hold 1,133 minutes of entries.
 
 `just chaos suite report [--expect-shards N] SUITE_JSON...` renders one summary of several shards.
 It fails unless each shard passed and `N` of them are present.
@@ -2734,6 +2952,7 @@ from the fixed source tree onto the same official image, and then requalified on
 | [Cluster Chaos 10](https://app.clickup.com/t/86bc85w01) | The smoke and soak suites in CI, against both images |
 | [Backup 07](https://app.clickup.com/t/86bc8dbxv) | Backup cycles with exact deduplicator and window verdicts; quiesced backups under an owner crash, a leader crash, an owner partition and a rolling restart of the download; a restore into a fresh three-node cluster; and soak shards 10 and 11, which run them |
 | [Backup: Qualify restores through a leader crash, a partitioned coordinator, an owner restart and concurrent staging volume](https://app.clickup.com/t/86bckvq84) | Restores held in staging through a leader crash, an isolation of the coordinating leader from its peers and the client, a state owner's crash, and a state owner's crash while a failed restore awaits reclamation; the measured staging volume of three concurrent restores; and their entries in soak shards 10 and 11 |
+| [Typed Ratchet 10](https://app.clickup.com/t/86bc9etg7) | The [endpoints](#endpoints) and [lifetimes](#lifetimes) scenarios, which run the workloads that Typed Ratchet 04, 09, 11 and 12 handed to external qualification, and their smoke shards 2 and 3 and soak shards 12 to 14 |
 
 **Product defects.** The suite found these product defects. Each was fixed through its own task
 and requalified with the scenario that found it:
