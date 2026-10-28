@@ -235,6 +235,7 @@ mod emitter_record_writes;
 mod emitter_retry;
 mod emitter_supervision;
 mod emitter_task;
+mod emitter_task_programs;
 mod emitter_values;
 mod endpoint;
 mod endpoint_acknowledgement;
@@ -439,6 +440,7 @@ use emitter_task::{
     EmitterConnectorContext, EmitterRuntimeError, EmitterRuntimeResult, emitter_error_message,
     emitter_init_error, emitter_publish_error_is_retryable, emitter_report,
 };
+use emitter_task_programs::EmitterTaskPrograms;
 use emitter_values::{
     MappedRequestEmitter, MappedRowEmitter, MappedValuesProjection, MappedValuesProjectionInit,
 };

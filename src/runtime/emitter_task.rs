@@ -799,103 +799,14 @@ impl EmitterTask {
             current_branching: &input_branching,
             udfs: udfs.as_ref(),
         };
-        let filter_map = compile_emitter_filter_map_program(
-            &emitter.name,
-            emitter.route.as_ref(),
-            RuntimeVmSchemaPair {
-                input: input_schema.arrow_schema(),
-                input_sensitivity: input_schema.vm_sensitivity(),
-                output: output_compiled_schema.arrow_schema(),
-                output_sensitivity: output_compiled_schema.vm_sensitivity(),
-            },
-            compile_context,
-        )
-        .change_context(EmitterStartError::Route)?;
-        let http_requests = match &plan.connector {
-            EmitterConnectorPlan::Http(HttpEmitterPlan::Request(connector)) => {
-                let output = codec.as_ref().map(|codec| RuntimeVmSchema {
-                    schema: codec.schema().arrow_schema(),
-                    sensitivity: codec.schema().vm_sensitivity(),
-                });
-                let compiled = CompiledHttpRequestFields::compile(
-                    &emitter.name,
-                    connector,
-                    emitter
-                        .http_request
-                        .as_ref()
-                        .verified("the decision gives every HTTP emitter its request program"),
-                    HttpRequestSchemas {
-                        input: RuntimeVmSchema {
-                            schema: input_schema.arrow_schema(),
-                            sensitivity: input_schema.vm_sensitivity(),
-                        },
-                        output,
-                    },
-                    compile_context,
-                )
-                .change_context(EmitterStartError::HttpRequests)?;
-                Some(compiled)
-            }
-            _ => None,
-        };
-        let ordering_group = match emitter.ordering_group.as_ref() {
-            None => None,
-            Some(declared) => Some(
-                CompiledOrderingGroup::compile(
-                    declared,
-                    &emitter.name,
-                    RuntimeVmSchema {
-                        schema: input_schema.arrow_schema(),
-                        sensitivity: input_schema.vm_sensitivity(),
-                    },
-                    RuntimeVmCompileContext {
-                        available_materialized_streams: &materialized_stream_specs,
-                        available_lookups: &lookups,
-                        current_branching: &input_branching,
-                        udfs: udfs.as_ref(),
-                    },
-                )
-                .change_context(EmitterStartError::OrderingGroup)?,
-            ),
-        };
-        let envelope = CompiledEnvelope::for_emitter(
-            &emitter.name,
-            emitter.envelope.as_ref(),
+        let programs = EmitterTaskPrograms::compile(
+            &emitter,
+            &plan,
+            codec.as_ref(),
             &input_schema,
             &output_compiled_schema,
             compile_context,
-        )
-        .change_context(EmitterStartError::Envelope)?;
-        let mut source_filters = HashMap::default();
-        for input in &emitter.inputs {
-            let Some(source_filter) = input.from_where.as_ref() else {
-                continue;
-            };
-            let program = bind_scoped_filter_program(
-                &ModelName::from(&emitter.name),
-                source_filter.program(),
-                RuntimeVmSchema {
-                    schema: input_schema.arrow_schema(),
-                    sensitivity: input_schema.vm_sensitivity(),
-                },
-                MessageErrorOperation::SourceWhere,
-                RuntimeVmCompileContext {
-                    available_materialized_streams: &materialized_stream_specs,
-                    available_lookups: &lookups,
-                    current_branching: &input_branching,
-                    udfs: udfs.as_ref(),
-                },
-                RuntimeFilterScope::Source {
-                    namespace: "input",
-                    allow_header_reads: false,
-                    allow_metadata: false,
-                },
-            )
-            .change_context_lazy(|| EmitterStartError::SourceFilter {
-                relay: input.relay.clone(),
-            })?;
-            source_filters.insert(input.relay.clone(), program);
-        }
+        )?;
         let task_domain = domain.clone();
         let task_emitter = emitter.name.clone();
         let task_metric_relay = if emitter.inputs.len() == 1 {
@@ -1095,11 +1006,11 @@ impl EmitterTask {
                 node: &task_emitter_node,
                 output_metrics: &task_output_metrics,
                 error_policies: &task_error_policies,
-                source_filters: &source_filters,
-                filter_map: filter_map.as_ref(),
-                ordering_group: ordering_group.as_ref(),
-                envelope: envelope.as_ref(),
-                http_requests: http_requests.as_ref(),
+                source_filters: &programs.source_filters,
+                filter_map: programs.filter_map.as_ref(),
+                ordering_group: programs.ordering_group.as_ref(),
+                envelope: programs.envelope.as_ref(),
+                http_requests: programs.http_requests.as_ref(),
                 materialized_state: &task_materialized_state,
             };
             let mut task_loop = EmitterTaskLoop {

@@ -496,3 +496,134 @@ async fn evaluated_envelopes_stay_with_the_publish_batch_they_were_evaluated_ove
         "the batch keeps its acknowledgements"
     );
 }
+
+#[nervix_primitives::test]
+async fn every_property_type_carries_a_value_of_its_own_type() {
+    let input = test_schema(&[
+        ("f_u8", ParseAsType::U8),
+        ("f_i8", ParseAsType::I8),
+        ("f_u16", ParseAsType::U16),
+        ("f_i16", ParseAsType::I16),
+        ("f_u32", ParseAsType::U32),
+        ("f_i32", ParseAsType::I32),
+        ("f_u64", ParseAsType::U64),
+        ("f_i64", ParseAsType::I64),
+        ("f_bool", ParseAsType::Bool),
+        ("f_text", ParseAsType::String),
+        ("f_at", ParseAsType::Datetime),
+    ]);
+    // Each property reads the input field of its own type, and the bytes property the UTF-8 bytes
+    // of the text, since no input field holds bytes.
+    let declared = [
+        ("p_u8", PropertyType::U8, "input.f_u8"),
+        ("p_i8", PropertyType::I8, "input.f_i8"),
+        ("p_u16", PropertyType::U16, "input.f_u16"),
+        ("p_i16", PropertyType::I16, "input.f_i16"),
+        ("p_u32", PropertyType::U32, "input.f_u32"),
+        ("p_i32", PropertyType::I32, "input.f_i32"),
+        ("p_u64", PropertyType::U64, "input.f_u64"),
+        ("p_i64", PropertyType::I64, "input.f_i64"),
+        ("p_bool", PropertyType::Bool, "input.f_bool"),
+        ("p_text", PropertyType::String, "input.f_text"),
+        ("p_at", PropertyType::Datetime, "input.f_at"),
+        (
+            "p_bytes",
+            PropertyType::Bytes,
+            "bytes_from_utf8(input.f_text)",
+        ),
+    ];
+    let values = declared
+        .iter()
+        .map(|(name, ty, text)| {
+            value(
+                EnvelopeTarget::Property(PropertyDeclaration { name, ty: *ty }),
+                ParseAsType::from(*ty),
+                text,
+            )
+        })
+        .collect();
+    let envelope = compile(RecordEnvelope::default(), values, &input, None);
+    // Each value lies outside the range of every narrower or differently signed type, so a
+    // property read through another type's accessor cannot produce it.
+    let mut published = batch(
+        input,
+        vec![vec![
+            ("f_u8", RuntimeValue::U8(200)),
+            ("f_i8", RuntimeValue::I8(-100)),
+            ("f_u16", RuntimeValue::U16(60_000)),
+            ("f_i16", RuntimeValue::I16(-30_000)),
+            ("f_u32", RuntimeValue::U32(4_000_000_000)),
+            ("f_i32", RuntimeValue::I32(-2_000_000_000)),
+            ("f_u64", RuntimeValue::U64(u64::MAX)),
+            ("f_i64", RuntimeValue::I64(i64::MIN)),
+            ("f_bool", RuntimeValue::Bool(true)),
+            ("f_text", RuntimeValue::String("text".to_string())),
+            ("f_at", datetime("2026-10-27T10:00:00Z")),
+        ]],
+    );
+
+    let envelopes = evaluate(&envelope, &mut published, EnvelopeInput::Published).await;
+
+    let property = |name: &'static str, value: PropertyValue| RecordProperty { name, value };
+    let expected = RecordEnvelope {
+        properties: vec![
+            property("p_u8", PropertyValue::U8(200)),
+            property("p_i8", PropertyValue::I8(-100)),
+            property("p_u16", PropertyValue::U16(60_000)),
+            property("p_i16", PropertyValue::I16(-30_000)),
+            property("p_u32", PropertyValue::U32(4_000_000_000)),
+            property("p_i32", PropertyValue::I32(-2_000_000_000)),
+            property("p_u64", PropertyValue::U64(u64::MAX)),
+            property("p_i64", PropertyValue::I64(i64::MIN)),
+            property("p_bool", PropertyValue::Bool(true)),
+            property("p_text", PropertyValue::String("text".to_string())),
+            property(
+                "p_at",
+                PropertyValue::Datetime(nanos("2026-10-27T10:00:00Z")),
+            ),
+            property("p_bytes", PropertyValue::Bytes(b"text".to_vec())),
+        ],
+        ..RecordEnvelope::default()
+    };
+    assert_eq!(rows(&envelopes, 1), vec![Ok(&expected)]);
+}
+
+#[test]
+fn an_emitter_compiles_an_envelope_only_where_it_writes_one() {
+    let input = test_schema(&[("id", ParseAsType::String)]);
+    let output = test_schema(&[("key", ParseAsType::String)]);
+    let fixture = CompileFixture::new();
+
+    let plain =
+        CompiledEnvelope::for_emitter(&named("plain"), None, &input, &output, fixture.context())
+            .expect("an emitter that writes no envelope compiles");
+    // The value reads the output the route constructs, so it compiles only where the emitter
+    // hands the output schema to the program.
+    let plan = EmitterEnvelopePlan::computing(
+        RecordEnvelope::default(),
+        vec![value(
+            EnvelopeTarget::Clause(EnvelopeClauseKind::MessageId),
+            ParseAsType::String,
+            "output.key",
+        )],
+        true,
+    )
+    .expect("the envelope program lowers");
+    let enveloped = CompiledEnvelope::for_emitter(
+        &named("enveloped"),
+        Some(&plan),
+        &input,
+        &output,
+        fixture.context(),
+    )
+    .expect("a value that reads the constructed output compiles against the output schema");
+
+    assert!(
+        plain.is_none(),
+        "an emitter that writes no envelope compiles none"
+    );
+    assert!(
+        enveloped.is_some(),
+        "an emitter that writes an envelope compiles it"
+    );
+}
