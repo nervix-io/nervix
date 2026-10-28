@@ -9,17 +9,26 @@ node. Its listener takes the existing advertised endpoint and forwards opaque by
 interconnect listener on the restarted node. The advertised endpoint stays fixed so retained peer
 routes also reach the pacer. Its port remains reserved for the test run, as for other retired test
 endpoints. The host, TLS identity, resolver policy and product deadlines stay fixed. Each accepted
-connection uses a 1024-byte inbound buffer, delays each chunk
-by its configured byte rate before forwarding, and forwards responses promptly. A scenario-owned
-task set retains and reaps connections. Cancellation or fixture drop closes the listener and aborts
-all its connections; the fixture cannot survive its node specification.
+connection uses a 1024-byte inbound buffer. The first chunk waits for its byte-rate interval;
+later chunks follow one monotonic byte schedule, so a late timer wake is not charged again on the
+next chunk. After a source has been idle, one available chunk can go promptly and the schedule
+resumes at its configured rate. Responses go promptly. A scenario-owned task set retains and reaps
+connections. Cancellation or fixture drop closes the listener and aborts all its connections; the
+fixture cannot survive its node specification.
 
-The scenario starts the follower without the harness's catch-up retries, records append
-stream opening baselines before that start, and waits for the applied Plexus domain backlog within
-its explicit assertion bound. The opening count is a diagnostic observation because normal initial
-catch-up probes can also open streams. An atomic maximum of bytes forwarded on one connection proves
-that the paced path carried more than one production progress interval. This observation does not inspect TLS or frame bytes
-and establishes no ordering the product relies on.
+The rate-limited case transfers leadership to node-2 while the stopped follower has only its
+initial log, making the new leader recover an unconfirmed previous-log boundary. The scenario
+starts the follower without the harness's catch-up retries, records append-stream
+opening and setup-attempt baselines before that start, and waits for the applied domain backlog
+within its explicit assertion bound. Every five seconds it records applied domains, both stream
+counters for each source, bytes forwarded by the pacer, and each node's applied revision and log,
+snapshot and purged indexes. On failure it also records a concise status for initialization,
+leader and voter membership. The opening count is a diagnostic observation of data streams;
+initial empty probes use the management path. An atomic maximum of bytes forwarded on one
+connection proves that the paced path carried more than one production progress interval. The
+pacer also counts accepted, connected, failed, cancelled and completed connections, and total
+bytes. These observations do not inspect TLS or frame bytes or establish ordering the product
+relies on.
 
 A focused startup scenario occupies the observability port to force the first launch to fail
 before runtime initialization.

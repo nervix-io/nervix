@@ -209,8 +209,10 @@ once after setup succeeds. Subsequent empty commit updates stay on that ordered 
 data batches. Setup retains its five-second deadline; waiting for the caller's next request belongs
 to the caller's lifecycle, rather than to connection setup.
 
-One replication batch targets 1 MiB and stops at 1,024 entries. Commands remain whole, so the first
-command may take a batch past the target; the encoded replication operation is bounded at 2 MiB.
+One replication batch targets 1 MiB and stops at 256 entries. The entry cap also bounds how many
+speculative entries cross a slow link before a new leader learns that its previous-log boundary
+conflicts with a lagging follower. Commands remain whole, so the first command may take a batch
+past the target; the encoded replication operation is bounded at 2 MiB.
 Submissions and answers stay in log order. A conflict, higher vote, partial acceptance, stream
 failure, or liveness failure ends that stream generation after its first result. Raft resumes from
 the last progress the follower confirmed.
@@ -291,12 +293,14 @@ snapshot and then the remaining log. Client proposals and management heartbeats 
 catch-up runs.
 
 A discovered node joins as a learner once the leader has read its published prerequisite record and
-found it compatible with the record of every live voter. The leader leaves any other candidate
-outside the membership and logs why once while the reason holds: at `debug` while the candidate has
-published no record the leader can read, and at `warn` with the voter and the mismatch when it
-cannot run beside a voter. [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes
-what the refused node does. Each membership reconciliation gives a blocking learner catch-up
-attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
+found it compatible with the record of every live voter whose run it accepted. The leader leaves any
+other candidate outside the membership and logs why once while the reason holds: at `debug` while
+the candidate has published no record the leader can read, and at `warn` with the voter and the
+mismatch when it cannot run beside a voter. It refuses the run of a voter that cannot run beside an
+older voter's run the same way, without changing the membership.
+[Prerequisites At Join](node-settings.md#prerequisites-at-join) describes the verdicts the leader
+publishes and what a refused node does. Each membership reconciliation gives a blocking learner
+catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
 learner caught up; the membership change has its own ten-second bound. A timeout leaves the node a
 learner, records `raft membership reconciliation failed`, and the one-second reconciliation loop
 tries again while ordinary replication continues.
@@ -315,7 +319,7 @@ learner or voter role and recorded address.
 ## Bounded Log Reading
 
 Committed-range application, startup replay, and leader-bounded replication streams read the log in
-successive admitted chunks. A chunk targets 1 MiB or 1,024 entries, whichever is reached first, and
+successive admitted chunks. A chunk targets 1 MiB or 256 entries, whichever is reached first, and
 one oversized first entry travels alone. The reader releases the ordered storage worker between
 chunks and retains the chunk's working set, its memory charge and the store's Commands turn, until
 its entries have been handed to the consumer. Handing out the final entry releases the exhausted
@@ -509,10 +513,13 @@ ordinary stream-stop decision. That diagnostic changes neither retry admission n
 | `nervix_interconnect_requests_total{operation="snapshot"}` and `nervix_interconnect_request_seconds_total{operation="snapshot"}` | On the sending node, the snapshot transfer requests a lagging follower answered or failed: the transfer's start, its 64 KiB chunks, and its finish. A transfer moves as these bounded requests in the Bulk pool rather than as a streamed body, so `nervix_interconnect_bulk_bytes_total` does not count it. |
 | `nervix_consensus_snapshot_pinned_generations`, `nervix_consensus_snapshot_pinned_readers`, `nervix_consensus_snapshot_unreferenced_generations` | Generations retained for outgoing transfers and generations awaiting durable deletion. |
 
-Normal membership changes appear at `info`. Append generation endings and invalid or foreign batches
-appear at `debug`; a stalled generation reports that the stream neither answered nor accepted bytes
-for five seconds. Snapshot requests caused by the byte threshold appear at `info`, and byte-retention
-purge requests appear at `debug`.
+Normal membership changes appear at `info`. The first batch of a data stream logs its previous-log
+boundary, first and last entry, and entry count at `debug`. A generation also logs whether a
+follower conflict or a transport or liveness failure ended it. Compare those boundaries with the
+follower's applied log and the public catch-up samples to distinguish repeated conflict search
+from a stream that stalled. Invalid or foreign batches appear at `debug`; a stalled generation
+reports that the stream neither answered nor accepted bytes for five seconds. Snapshot requests
+caused by the byte threshold appear at `info`, and byte-retention purge requests appear at `debug`.
 
 ## Tuning
 
@@ -543,7 +550,7 @@ does not expose flags for them:
 
 | Limit | Current value |
 | --- | --- |
-| Replication batch target | 1 MiB or 1,024 entries; whole commands are never split |
+| Replication batch target | 1 MiB or 256 entries; whole commands are never split |
 | Encoded replication operation | 2 MiB |
 | Leader window per follower | 16 batches and a 16 MiB target byte budget |
 | Follower decoded resident window | 4 batches per live append stream |

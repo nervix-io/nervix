@@ -1074,12 +1074,14 @@ impl Transport {
     }
 
     /// Authenticate an endpoint whose node identity is not known yet, then add its pool target.
-    /// Bootstrap discovery uses the identity in the peer certificate as the result.
+    /// Bootstrap discovery uses the identity in the peer certificate as the result, and judges a
+    /// certificate of another cluster by what `expectation` says the endpoint serves.
     pub async fn bootstrap_target(
         &self,
         target: PeerTarget,
+        expectation: BootstrapExpectation,
     ) -> Result<ClusterNodeName, Report<TransportError>> {
-        self.inner.bootstrap_target(target).await
+        self.inner.bootstrap_target(target, expectation).await
     }
 
     /// Add one discovered peer at its advertised endpoint. Every pool connection still verifies
@@ -1227,6 +1229,54 @@ pub enum TransportError {
         peer: ClusterNodeName,
         mismatch: PrerequisiteMismatch,
     },
+    /// The endpoint the stored membership recorded for `member` now serves a node of another
+    /// cluster that is not `member`, so it no longer leads to the member; the report beneath names
+    /// the node that answered. It refuses no one.
+    #[error("the endpoint {endpoint} recorded for node '{member}' leads to another cluster")]
+    StaleRoute {
+        endpoint: NodeEndpoint,
+        member: ClusterNodeName,
+    },
+}
+
+/// What a node expects to find at an endpoint it bootstraps through, before a certificate names
+/// the node that answers there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootstrapExpectation {
+    /// A bootstrap host an operator named: any member of this cluster may answer there, and one of
+    /// another cluster is a cluster-identity refusal.
+    AnyMember,
+    /// The endpoint the stored membership recorded for this member, which may have moved since.
+    /// A node of another cluster that answers there under another name is a stale route.
+    RecordedMember(ClusterNodeName),
+}
+
+impl BootstrapExpectation {
+    /// `error`, the failure of a handshake with `endpoint`, as this expectation reads it: a
+    /// cluster-identity refusal from a node other than the recorded member is a stale route.
+    pub(crate) fn judge_handshake_failure(
+        &self,
+        endpoint: NodeEndpoint,
+        error: Report<TransportError>,
+    ) -> Report<TransportError> {
+        let Self::RecordedMember(member) = self else {
+            return error;
+        };
+        let TransportError::IncompatiblePeer {
+            peer,
+            mismatch: PrerequisiteMismatch::ClusterIdentity { .. },
+        } = error.current_context()
+        else {
+            return error;
+        };
+        if peer == member {
+            return error;
+        }
+        error.change_context(TransportError::StaleRoute {
+            endpoint,
+            member: member.clone(),
+        })
+    }
 }
 
 /// How far this node has come in joining the cluster through the connections it dials.
