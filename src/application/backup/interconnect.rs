@@ -33,7 +33,11 @@ use nervix_primitives::{
     time::Instant,
 };
 
-use super::{CaptureSectionKey, CapturedSectionStage, restore_storage::RestoredStateSource};
+use super::{
+    CaptureSectionKey, CapturedSectionStage,
+    cut_progress::{CaptureContext, CutPhase, CutProgress},
+    restore_storage::RestoredStateSource,
+};
 use crate::{
     application::session_service::SessionServiceImpl,
     runtime::{
@@ -271,9 +275,11 @@ impl SessionServiceImpl {
         quiesced: bool,
         status: DomainStatus,
         primaries: ahash::HashSet<NodeRef>,
+        progress: &mut CutProgress,
     ) -> Result<CapturedDomainState, Report<RemoteOperationFailure>> {
         let runtime = self.inner.runtime.clone();
         if quiesced {
+            progress.enter(CutPhase::LifecycleCheckpoints);
             runtime
                 .checkpoint_backup_branch_lifecycles(domain)
                 .await
@@ -281,6 +287,7 @@ impl SessionServiceImpl {
                     failure_context(domain, "backup state section operation failed")
                 })?;
         }
+        progress.enter(CutPhase::StorageCapture);
         let domain_owned = domain.clone();
         let executor = runtime.executor().clone();
         let reservation = executor
@@ -313,6 +320,15 @@ impl SessionServiceImpl {
         peer: &nervix_models::ClusterNodeName,
         request: CaptureDomainStateRequest,
     ) -> Result<(), RemoteOperationFailure> {
+        let mut progress = CutProgress::at(
+            request.domain.clone(),
+            CaptureContext::Owner {
+                node: self.inner.consensus.local_node_id().clone(),
+                coordination: request.coordination.clone(),
+            },
+            CutPhase::RevisionWait,
+            Instant::now(),
+        );
         let result: Result<_, Report<RemoteOperationFailure>> = async {
             if self.inner.consensus.current_leader().await.as_ref() != Some(peer) {
                 return Err(failed(
@@ -326,6 +342,7 @@ impl SessionServiceImpl {
                 self.inner.consensus.subscribe_applied(),
             )
             .await?;
+            progress.enter(CutPhase::ClusterStateApply);
             self.apply_current_cluster_state()
                 .await
                 .change_context_lazy(|| {
@@ -337,6 +354,7 @@ impl SessionServiceImpl {
                     "capture coordinator is not the current leader",
                 ));
             }
+            progress.enter(CutPhase::ConfigurationCapture);
             let Some(capture) = self.inner.consensus.configuration_capture().await else {
                 return Err(failed(&request.domain, "configuration is unavailable"));
             };
@@ -354,8 +372,15 @@ impl SessionServiceImpl {
                     .extend(schedule.primary_entities_on(self.inner.consensus.local_node_id()));
             }
             let state = self
-                .capture_local_state(&request.domain, request.quiesced, status, primaries)
+                .capture_local_state(
+                    &request.domain,
+                    request.quiesced,
+                    status,
+                    primaries,
+                    &mut progress,
+                )
                 .await?;
+            progress.enter(CutPhase::Staging);
             let mut staged = self
                 .stage_guest_state_sections(
                     state.guest_saves,
@@ -418,6 +443,10 @@ impl SessionServiceImpl {
             Ok(())
         }
         .await;
+        match &result {
+            Ok(()) => progress.log_completed(),
+            Err(_) => progress.log_failed(),
+        }
         result.map_err(project_failure)
     }
 
@@ -460,6 +489,15 @@ impl SessionServiceImpl {
         peer: &nervix_models::ClusterNodeName,
         request: CaptureInventoryRequest,
     ) -> Result<Vec<CapturedSectionInventory>, RemoteOperationFailure> {
+        let progress = CutProgress::at(
+            request.domain.clone(),
+            CaptureContext::Owner {
+                node: self.inner.consensus.local_node_id().clone(),
+                coordination: request.coordination.clone(),
+            },
+            CutPhase::OwnerInventory,
+            Instant::now(),
+        );
         let result: Result<_, Report<RemoteOperationFailure>> = async {
             if self.inner.consensus.current_leader().await.as_ref() != Some(peer) {
                 return Err(failed(
@@ -487,6 +525,10 @@ impl SessionServiceImpl {
             Ok(sections)
         }
         .await;
+        match &result {
+            Ok(_) => progress.log_completed(),
+            Err(_) => progress.log_failed(),
+        }
         result.map_err(project_failure)
     }
 
