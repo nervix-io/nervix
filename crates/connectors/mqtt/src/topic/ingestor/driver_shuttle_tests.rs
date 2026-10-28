@@ -41,7 +41,7 @@ use rumqttc::{
 use super::{AcknowledgementRequests, ConnectionEvents, MqttConnection};
 use crate::topic::ingestor::{
     IngestorAcknowledgement, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorPosition,
-    PublishRead as _, PublishReadOutcome,
+    PublishRead as _, PublishReadOutcome, metrics_fixture::IngestorMetricsFixture,
 };
 
 const CHECK_TASK_JOINS: &str =
@@ -150,6 +150,7 @@ fn connection(
             receive_maximum: read_ahead,
         },
         None,
+        IngestorMetricsFixture::new().counter(),
     );
     (connection, deliveries, record)
 }
@@ -239,62 +240,107 @@ fn an_acknowledgement_returns_once_the_loop_wrote_every_acknowledgement_it_reque
     });
 }
 
-/// An ingestor acknowledges a publish while the broker floods publishes that ask for no
-/// acknowledgement into a read-ahead of one.
-fn an_acknowledgement_never_waits_on_a_driver_that_holds_a_publish_for_room() {
-    shuttle::future::block_on(async {
-        let (mut connection, deliveries, mut record) = connection(1);
-        let mut publishes = vec![publish(1, QoS::AtLeastOnce)];
-        for id in 2..=4 {
-            publishes.push(publish(id, QoS::AtMostOnce));
+/// A broker observation that the driver reached the following QoS 1 publish, after classifying
+/// the complete QoS 0 flood. It cannot unblock a driver waiting for read-ahead room.
+struct OverflowObservedEventLoop {
+    events: FakeEventLoop,
+    following: mpsc::Sender<()>,
+}
+
+impl ConnectionEvents for OverflowObservedEventLoop {
+    async fn next_event(&mut self) -> Result<Event, ConnectionError> {
+        let event = self.events.next_event().await?;
+        if let Event::Incoming(Incoming::Publish(publish)) = &event
+            && publish.pkid == 200
+        {
+            self.following
+                .send(())
+                .await
+                .assured("the check waits for its delivery witness");
         }
-        let broker = deliver(deliveries, publishes);
-        let first = connection
+        Ok(event)
+    }
+}
+
+/// QoS 0 overflow cannot stop polling or occupy the capacity the following QoS 1 publish needs.
+fn an_acknowledgement_stays_writable_during_qos_zero_overflow() {
+    shuttle::future::block_on(async {
+        let metrics = IngestorMetricsFixture::new();
+        let (requests, requested) = mpsc::unbounded_channel();
+        let (deliveries, delivered) = mpsc::unbounded_channel();
+        let (written_to, mut record) = mpsc::unbounded_channel();
+        let (following, mut reached) = mpsc::channel(1);
+        let events = OverflowObservedEventLoop {
+            events: FakeEventLoop {
+                requests: requested,
+                deliveries: delivered,
+                written: written_to,
+            },
+            following,
+        };
+        let mut connection = MqttConnection::start(
+            FakeClient { requests },
+            events,
+            IngestorAcknowledgement::Manual {
+                receive_maximum: NonZeroU16::new(65)
+                    .assured("the sequential window includes headroom"),
+            },
+            None,
+            metrics.counter(),
+        );
+        let first = publish(1, QoS::AtLeastOnce);
+        deliveries
+            .send(first.clone())
+            .assured("the driver keeps its receiver");
+        let read = connection
             .next_publish()
             .await
-            .assured("a connection the broker keeps open fails no read");
-        let PublishReadOutcome::Message(first) = first else {
-            panic!("the ordinary fixture yields an admitted publish");
-        };
-        let first = *first;
+            .assured("the first publish arrives");
+        assert!(matches!(read, PublishReadOutcome::Message(read) if *read == first));
 
-        let acknowledged = connection
-            .acknowledge(&[MqttTopicIngestorPosition { publish: first }])
-            .await;
-
-        match acknowledged {
-            Ok(()) => assert_eq!(
-                written(&mut record),
-                [1],
-                "an acknowledgement that returned was written"
-            ),
-            Err(error) => {
-                assert!(
-                    matches!(
-                        error.current_context(),
-                        MqttTopicIngestorError::ReadAheadFull { publishes } if publishes.get() == 1
-                    ),
-                    "an acknowledgement fails only because the driver holds a publish for room: \
-                     {error:?}"
-                );
-                assert!(
-                    written(&mut record).is_empty(),
-                    "an acknowledgement that failed was not written"
-                );
-            }
+        let mut flood = Vec::new();
+        for id in 2..=67 {
+            flood.push(publish(id, QoS::AtMostOnce));
         }
-        // The broker's deliveries never wait, so its task returns while the connection still
-        // reads them; the ingestor then drops the connection, as it does after a failure.
-        let deliveries = broker.await.assured(CHECK_TASK_JOINS);
-        drop(connection);
-        drop(deliveries);
+        let following = publish(200, QoS::AtLeastOnce);
+        flood.push(following.clone());
+        let broker = deliver(deliveries, flood);
+        reached
+            .recv()
+            .await
+            .assured("the driver keeps polling after QoS 0 overflow");
+        connection
+            .acknowledge(&[MqttTopicIngestorPosition { publish: first }])
+            .await
+            .assured("the first QoS 1 acknowledgement stays writable");
+        assert_eq!(written(&mut record), [1]);
+
+        for id in 2..=65 {
+            let read = connection
+                .next_publish()
+                .await
+                .assured("the admitted prefix is retained");
+            let expected = publish(id, QoS::AtMostOnce);
+            assert!(matches!(read, PublishReadOutcome::Message(read) if *read == expected));
+        }
+        let read = connection
+            .next_publish()
+            .await
+            .assured("QoS 0 cannot take the following QoS 1 slot");
+        assert!(matches!(read, PublishReadOutcome::Message(read) if *read == following));
+        connection
+            .acknowledge(&[MqttTopicIngestorPosition { publish: following }])
+            .await
+            .assured("the following QoS 1 acknowledgement is written");
+        assert_eq!(written(&mut record), [200]);
+        assert_eq!(metrics.dropped(), 2);
+        drop(broker.await.assured(CHECK_TASK_JOINS));
     });
 }
 
-/// An ingestor reads two publishes from a read-ahead of one, making room for every publish the driver
-/// held, while the broker floods publishes that ask for no acknowledgement, and then acknowledges the
-/// first.
-fn an_acknowledgement_waits_on_a_driver_whose_held_publish_the_ingestor_made_room_for() {
+/// Reading and acknowledging an admitted prefix preserves the order and full contents of the
+/// remaining QoS 0 publishes.
+fn admitted_publishes_keep_order_while_the_first_acknowledgement_is_written() {
     shuttle::future::block_on(async {
         let (mut connection, deliveries, mut record) = connection(1);
         let mut publishes = vec![publish(1, QoS::AtLeastOnce)];
@@ -543,20 +589,17 @@ fn shuttle_an_acknowledgement_returns_once_the_loop_wrote_every_acknowledgement_
     );
 }
 
-/// An acknowledgement that meets a driver holding a publish for room in a full read-ahead fails at
-/// once instead of waiting for writes only the ingestor's next read could let happen.
+/// An acknowledgement remains writable after the driver drops a QoS 0 flood, and the following
+/// QoS 1 publish retains its reserved read-ahead capacity.
 #[test]
-fn shuttle_an_acknowledgement_never_waits_on_a_driver_that_holds_a_publish_for_room() {
-    check_interleavings(an_acknowledgement_never_waits_on_a_driver_that_holds_a_publish_for_room);
+fn shuttle_an_acknowledgement_stays_writable_during_qos_zero_overflow() {
+    check_interleavings(an_acknowledgement_stays_writable_during_qos_zero_overflow);
 }
 
-/// An acknowledgement that meets a driver still publishing that it waits for room the ingestor has
-/// already made waits for the writes instead of failing.
+/// Admitted publishes retain packet order while the first acknowledgement is written.
 #[test]
-fn shuttle_an_acknowledgement_waits_on_a_driver_whose_held_publish_the_ingestor_made_room_for() {
-    check_interleavings(
-        an_acknowledgement_waits_on_a_driver_whose_held_publish_the_ingestor_made_room_for,
-    );
+fn shuttle_admitted_publishes_keep_order_while_the_first_acknowledgement_is_written() {
+    check_interleavings(admitted_publishes_keep_order_while_the_first_acknowledgement_is_written);
 }
 
 /// An acknowledgement whose connection ends before the loop wrote it fails with the lost

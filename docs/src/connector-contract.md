@@ -1301,12 +1301,24 @@ Receive Maximum, 65,535. The broker then sends no further publish at QoS 1 while
 their acknowledgements, so a batch holds at most that many, and an `ACK PARALLEL MAX` above 65,535
 gathers at most 65,535 of them before its `BATCH TIMEOUT` ends it. The extra capacity lets the
 connection keep reading while the host holds a batch. The broker holds back no publish at QoS 0,
-which a subscription at QoS 1 receives from a publisher
-that sends at QoS 0, and under `NO ACK`, where the client acknowledges every publish on receipt,
-it holds back none. The read-ahead holds as many publishes as the Receive Maximum admits, or 64
-under `NO ACK`. Once it is full, the task holds the next publish and polls nothing until the
-source reads one, so the connection's flow control holds the broker back, and the client sends no
-keep-alive until the host reads again.
+which a subscription at QoS 1 receives from a publisher that sends at QoS 0. In an `ACK` mode the
+read-ahead reserves the full Receive Maximum for QoS 1/2 packet outcomes and admits up to 64 QoS 0
+outcomes alongside them, in the same packet-ordered queue. Each queued QoS 0 outcome owns one
+capacity permit until the source takes it. Excess QoS 0 publishes are dropped and counted, so
+they cannot stop event-loop polling, consume a QoS 1/2 slot, delay a `PUBACK`, or stop keep-alive
+pings. An oversized QoS 0 publish that cannot enter read-ahead is counted as overflow rather than
+as an oversized outcome; no payload is counted twice.
+
+The host resolves `nervix_ingestor_read_ahead_dropped_payloads_total` once per ingestor and physical
+node and passes its counter handle to the connector. The driver increments it at each overflow,
+including while the host waits for downstream acknowledgement. Prometheus exposes the count with
+`domain`, `ingestor` and `physical_node_id` labels; a reconnect does not reset it. It is separate
+from codec rejections, oversized payloads, quiesce drops and transport redeliveries.
+
+Under `NO ACK`, the client acknowledges every publish on receipt and the broker holds back none.
+Its read-ahead holds 64 outcomes. Once it is full, the task holds the next outcome and polls
+nothing until the source reads one, so the connection's flow control holds the broker back and
+the client sends no keep-alive until the host reads again.
 
 Acknowledging a batch requests a `PUBACK` for each of its publishes at QoS 1 and returns once the
 event loop has written all of them to the connection and flushed them. The broker answers none, so
@@ -1314,7 +1326,9 @@ that is everything the source can confirm. A batch never asks for more acknowled
 client's request queue holds, so no request waits for room. The acknowledgement never waits on a
 task that stopped polling. While the task holds a publish for room in a full read-ahead, only the
 host's next read, which follows the acknowledgement, could let it write, so the acknowledgement
-fails with `MqttTopicIngestorError::ReadAheadFull`. When the connection ended first, it fails with the
+fails with `MqttTopicIngestorError::ReadAheadFull`. In an ACK mode, QoS 0 cannot cause this state:
+the broker would have to exceed the advertised Receive Maximum for acknowledged publishes.
+When the connection ended first, it fails with the
 lost connection beneath `MqttTopicIngestorError::Acknowledge`. A connection whose broker stopped reading
 it holds the writes, and the client's flush has no deadline of its own, so the acknowledgement
 waits at most one keep-alive interval, 60 seconds unless the broker's `CONNACK` announced its own,
