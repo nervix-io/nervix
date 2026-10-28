@@ -537,7 +537,19 @@ impl fmt::Display for DurationText {
 
 /// The first prerequisite two nodes disagree on, with both values, seen from the node that judged
 /// the pairing: `local` is that node's own value and `peer` the other node's.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Error, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Error,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 #[cfg_attr(
     nervix_lint,
     nervix::error_boundary(
