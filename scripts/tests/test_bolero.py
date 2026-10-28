@@ -234,6 +234,7 @@ class InventoryTests(unittest.TestCase):
             "models-identities",
             "models-identity-validation",
             "models-prerequisite-records",
+            "models-admission-verdicts",
             "models-archived-models",
             "models-archived-counts",
             "consensus-archived-counts",

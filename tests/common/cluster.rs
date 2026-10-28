@@ -45,8 +45,8 @@ use nervix_consensus::{RaftRetentionSettings, RaftTimings};
 use nervix_dns::{DnsConfiguration, DnsResolver};
 use nervix_execution::Executor;
 use nervix_interconnect::{
-    ControlEnvelope, Envelope, PeerResolver, PeerTarget, RuntimeErrorEvent, TlsConfigBundle,
-    Transport, TransportClock, TransportIdentity, TransportOptions,
+    BootstrapExpectation, ControlEnvelope, Envelope, PeerResolver, PeerTarget, RuntimeErrorEvent,
+    TlsConfigBundle, Transport, TransportClock, TransportIdentity, TransportOptions,
 };
 use nervix_models::{ClusterNodeName, NodeEndpoint, TrustRootFingerprint};
 use nervix_plexus::client_statement::{ClientStatement, parse_client_statement_sources};
@@ -780,6 +780,15 @@ pub(crate) enum JoinAttempt {
     Stopped(String),
 }
 
+/// How a stopped member's return to a running cluster ended.
+#[derive(Debug)]
+pub(crate) enum RejoinAttempt {
+    /// The node was still running when its startup budget ended.
+    KeptRunning,
+    /// The node stopped; the text is how its start or its task ended.
+    Stopped(String),
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TestClusterConfig {
     pub replica_count: usize,
@@ -1274,6 +1283,62 @@ impl Cluster {
         if !self.nodes.contains_key(node_id) {
             self.register_new_node(node_id)?;
         }
+        self.wait_for_join_decision(node_id).await
+    }
+
+    /// Starts `node_id` as a new node whose only bootstrap host is the running member `through`,
+    /// and waits for the cluster's decision as [`Self::attempt_join`] does.
+    pub(crate) async fn attempt_join_through(
+        &mut self,
+        node_id: &str,
+        through: &str,
+    ) -> io::Result<JoinAttempt> {
+        let Some(member) = self.nodes.get(through) else {
+            return Err(io::Error::other(format!("unknown node '{through}'")));
+        };
+        if !member.task.is_running() {
+            return Err(io::Error::other(format!(
+                "node '{through}' must be running to bootstrap another node"
+            )));
+        }
+        let bootstrap_host = member.spec.interconnect_endpoint();
+        self.register_new_node_through(node_id, bootstrap_host)?;
+        self.wait_for_join_decision(node_id).await
+    }
+
+    /// Starts `node_id`, a stopped member that the stored membership already counts among the
+    /// voters, and waits until its task ends or its whole startup budget has passed. Such a node
+    /// is a voter from its first moment, so only a stop tells a refused return apart from one the
+    /// cluster accepted.
+    pub(crate) async fn attempt_rejoin(&mut self, node_id: &str) -> RejoinAttempt {
+        if let Err(error) = self
+            .start_node_without_waiting_for_raft_catch_up(node_id)
+            .await
+        {
+            return RejoinAttempt::Stopped(format!("{error:#}"));
+        }
+        // The cluster judges the returning node once its gossip reaches the leader, and a refused
+        // node stops through its whole shutdown, so the decision gets a node's startup budget.
+        let deadline = PhaseDeadline::after(NODE_STARTUP_BUDGET);
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let handle = self
+                .nodes
+                .get_mut(node_id)
+                .verified("the node was registered before it was started");
+            if let NodeTaskState::Terminal(outcome) = handle.task.inspect().await {
+                return RejoinAttempt::Stopped(outcome.to_string());
+            }
+            if deadline.has_passed() {
+                return RejoinAttempt::KeptRunning;
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Starts a registered node and waits until it is a voter of the membership it reports or its
+    /// task has ended.
+    async fn wait_for_join_decision(&mut self, node_id: &str) -> io::Result<JoinAttempt> {
         if let Err(error) = self
             .start_node_without_waiting_for_raft_catch_up(node_id)
             .await
@@ -1310,18 +1375,28 @@ impl Cluster {
     /// Adds `node_id` to the nodes the harness owns, joining through a running member, with what
     /// a scenario named for it before it existed.
     fn register_new_node(&mut self, node_id: &str) -> io::Result<()> {
-        if self.nodes.contains_key(node_id) {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("node '{node_id}' already exists"),
-            ));
-        }
         let bootstrap_host = self
             .nodes
             .values()
             .find(|node| node.task.is_running())
             .map(|node| node.spec.interconnect_endpoint())
             .ok_or_else(|| io::Error::other("a running bootstrap node is required"))?;
+        self.register_new_node_through(node_id, bootstrap_host)
+    }
+
+    /// Adds `node_id` to the nodes the harness owns, with `bootstrap_host` as the one member it
+    /// dials first and what a scenario named for it before it existed.
+    fn register_new_node_through(
+        &mut self,
+        node_id: &str,
+        bootstrap_host: String,
+    ) -> io::Result<()> {
+        if self.nodes.contains_key(node_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("node '{node_id}' already exists"),
+            ));
+        }
         let mut config = self
             .nodes
             .values()
@@ -1670,7 +1745,10 @@ impl Cluster {
                 .await
                 .map_err(io::Error::other)
         } else {
-            match transport.bootstrap_target(peer_target).await {
+            // The probe dials a bootstrap host of a cluster the probing credentials claim.
+            let bootstrap =
+                transport.bootstrap_target(peer_target, BootstrapExpectation::AnyMember);
+            match bootstrap.await {
                 Ok(peer_node_id) => transport
                     .send(
                         &peer_node_id,

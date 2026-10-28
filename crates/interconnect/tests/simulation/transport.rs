@@ -21,8 +21,8 @@ use arrow_schema::{DataType, Field, Schema};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass};
 use nervix_interconnect::{
-    ConnectionFailureReason, ControlEnvelope, Envelope, InterconnectRequest, JoinTerms,
-    PeerResolver, PeerTarget, PoolClass, ReceivedEnvelope, RelayDelivery, RelayPayload,
+    BootstrapExpectation, ConnectionFailureReason, ControlEnvelope, Envelope, InterconnectRequest,
+    JoinTerms, PeerResolver, PeerTarget, PoolClass, ReceivedEnvelope, RelayDelivery, RelayPayload,
     RelayPayloadKind, RemoteOperationFailure, RemoteOperationSubject, RequestError,
     RequestSubquota, RuntimeState, StateCheckpointAvailable, StatePlacementEnvelope,
     StateReplicationAck, StateSnapshotEnvelope, StateSyncRequest, StateSyncResponse,
@@ -119,10 +119,15 @@ impl Authority {
     }
 
     fn issue(&self, name: &str) -> Credentials {
-        let mut params = CertificateParams::new(vec![name.to_string()])
+        self.issue_for(CLUSTER, name, name)
+    }
+
+    /// Credentials for node `node` of `cluster` serving the simulated host `host`.
+    fn issue_for(&self, cluster: &str, node: &str, host: &str) -> Credentials {
+        let mut params = CertificateParams::new(vec![host.to_string()])
             .assured("fixture DNS names are valid SANs");
         params.subject_alt_names.push(SanType::URI(
-            format!("nervix://cluster/{CLUSTER}/node/{name}")
+            format!("nervix://cluster/{cluster}/node/{node}")
                 .try_into()
                 .assured("fixture identity URI is valid"),
         ));
@@ -791,7 +796,9 @@ fn exchange_with_multiple_peers(run: ScenarioRun) -> Result<(), SimulationError>
                         .next()
                         .assured("simulated DNS returned an address");
                     let invalid = PeerTarget::new(target.addr, "incorrect-host");
-                    let error = match client.bootstrap_target(invalid).await {
+                    let bootstrap =
+                        client.bootstrap_target(invalid, BootstrapExpectation::AnyMember);
+                    let error = match bootstrap.await {
                         Ok(_) => panic!("the certificate must reject an unrelated DNS identity"),
                         Err(error) => error,
                     };

@@ -150,7 +150,8 @@ hello's record against its own before it binds the connection, and answers with 
 with a refusal that names the first prerequisite they disagree on, in the order of the table above,
 and both values. The dialing node judges an accepted answer's record the same way. Neither side
 reads consensus, so the check holds for a node that has never reached the cluster. A certificate
-that names another cluster is refused as a cluster-identity mismatch before any hello is read.
+that names another cluster is refused as a cluster-identity mismatch before any hello is read,
+unless it answers at an endpoint recorded for a member it does not name, as described below.
 
 A refusal affects only the node that is joining. A node that starts with peers to reach, a
 bootstrap host or the other members its stored membership names, joins through the first
@@ -158,13 +159,38 @@ connection it dials that completes; when a connection it dials is refused before
 completed, it stops instead. A node leaves that joining state once, and a connection another node
 dials never moves it, so an incompatible newcomer never stops a node that has joined. A node that
 bootstraps a cluster alone joins nothing.
-Until a joining node is a member of the membership it has applied, it also stops as soon as a live
-member of that membership publishes a record it cannot run beside. A live node outside it, such as
-another joining node or one that was itself refused and has not left gossip yet, never stops it. A
-node that has never been a member knows no membership before it is admitted, so the handshakes of
-the connections it dials are what refuse it. The leader admits a node gossip discovered only when
-the node's record is compatible with the record of every live voter, and leaves a node that has
+
+An endpoint the stored membership recorded for a member can outlive the member: its address may
+now serve a node of another cluster that trusts the same authority. A certificate there that names
+another cluster and a node other than the recorded member is a stale route, not a refusal: the dial
+fails as `TransportError::StaleRoute`, naming the endpoint and the member, refuses no one and leaves
+the node joining, and the node joins through another recorded member or its bootstrap host. A
+certificate that names the recorded member in another cluster is a cluster-identity refusal, and so
+is a certificate of another cluster at a bootstrap host.
+
+The member a joining node happens to reach first does not decide whether the cluster can run
+beside it: timing compatibility is not transitive, so a node can run beside the member it joined
+through and not beside another voter. The leader decides, on every membership reconciliation. It
+judges the runs of the live voters that published a record it reads in the order the runs started:
+a run is accepted when it can run beside every run accepted before it, and refused naming the first
+of those, in name order, that it cannot. The run that started last is the one that changed,
+so a member that returns with a record an older voter cannot run beside is refused, and the voters
+that kept running are not. Refusing a voter's run changes no membership. The leader judges a live
+node outside the membership against the accepted voters' records: it admits one that can run beside
+every one of them, refuses one that cannot, naming the first such voter, and leaves one that has
 published no record it can read outside the membership.
+
+The leader publishes its verdicts in its gossip state under the key `admission_verdicts`, with the
+Raft term it leads. A node that finds another node leading withdraws the verdicts it published, and
+a reader that sees the verdicts of two leaders follows the newer term. A joining node reads the
+verdict on its own run, its name and incarnation, and stops on a refusal, which names the voter and
+the prerequisite with both values seen from the joining node. A member its stored membership names
+returns without changing the voters or the quorum, so its join ends once the leader has accepted
+its run and a peer's clock has answered within tolerance. Any other node's join ends once the
+membership it has applied admits it, because from then on the cluster may count it among its
+voters. Until then it also stops as soon as a live member of that membership publishes a record it
+cannot run beside. A live node outside that membership, such as another joining node or one that
+was itself refused and has not left gossip yet, never stops it.
 
 Once its first connection completes, a joining node asks the peer it joined through for its
 physical clock, then every other live peer it has completed a handshake with. It asks each peer
@@ -173,10 +199,8 @@ between the probe's departure and its answer's arrival, so one probe proves skew
 reading falls outside that window, and the skew it proves is the distance to the nearer end. A peer
 whose clock reads before the Unix epoch answers so, and is behind by more than all the time since
 it. A node whose proven skew to one of those peers exceeds its `--clock-skew-tolerance` stops, but
-only while it is still joining. A member its stored membership names returns without changing the
-voters or the quorum, so its join ends at the first answer. Any other node's join ends once the
-membership it has applied admits it, because from then on the cluster may count it among its
-voters: a skew that an answer proves after that is logged at `warn`, and the node stays.
+only while it is still joining: a skew that an answer proves once the membership has admitted a
+newcomer is logged at `warn`, and the node stays.
 
 A refused node logs `this node was refused at join and stops` at `error`, requests its own stop,
 runs the ordinary shutdown phases, and exits with status `1`. Its report, beneath
@@ -196,9 +220,11 @@ ends hold the same anchors. A node that has joined does not stop for it.
 
 `DESCRIBE CLUSTER` lists every live node's published record and marks each timing that differs
 from the leader's, and `nervix_cluster_timing_drift_nodes` counts the nodes whose timings differ.
-Both sides of a refused connection log the refusal at `warn`. The leader logs a node it leaves
-outside the membership once while the refusal holds: at `warn` when the node cannot run beside a
-voter, at `debug` while it has published no record the leader can read. An outbound pool
+Both sides of a refused connection log the refusal at `warn`. The leader logs a run it refuses once
+while the refusal holds, at `warn` with `refused a node's run that cannot run beside a voter`, and
+a node it leaves outside the membership at `debug` while that node has published no record the
+leader can read. A returning member whose run the leader accepted logs
+`the leader accepted this node's return beside every live voter` at `info`. An outbound pool
 connection that ends in a refusal is counted in `nervix_interconnect_connection_failures_total`
 with reason `prerequisite`. [Cluster Interconnect](interconnect.md#the-join-contract) owns the
 handshake and its wire forms.
@@ -481,9 +507,16 @@ property that requires it to read back unchanged. A second, `cluster-peer-clock-
 the clock probe and every answer to it to read back unchanged through the archive. Public scenarios
 on one-node and three-node clusters refuse a joining node whose cluster identity or trust root
 differs, or whose Raft heartbeat is outside the bound, and require the refusal to name the
-prerequisite and both values; admit a node whose heartbeat differs within the bound and show its
-drift through `DESCRIBE CLUSTER`; and refuse to start a node whose memory limit cannot hold its
-budgets.
+prerequisite and both values; refuse a node that joins through a member it can run beside but not
+beside another voter, naming that voter; admit a node whose heartbeat differs within the bound and
+show its drift through `DESCRIBE CLUSTER`; and refuse to start a node whose memory limit cannot hold
+its budgets. A three-node scenario refuses a returning member that can run beside the voters it
+recorded but not beside one admitted while it was away, naming that voter: admitting a voter while
+a member is away needs a quorum without it, which fewer voters do not give. Unit tests cover the
+leader's judgment of voter runs and candidates, a joining node's handling of its verdict, and the
+verdicts' gossip text, whose registered `models-admission-verdicts` Bolero property requires it to
+read back unchanged. Interconnect unit tests and the `stale recorded endpoint` case of the
+[deterministic interconnect simulation](interconnect-simulation.md) cover the stale route.
 
 Resource-volume checks use the chosen seed before the first commit, and the live publication for
 a joining or returning node. Local default resource limits do not refuse a node before it can

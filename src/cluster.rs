@@ -43,9 +43,11 @@ use error_stack::Report;
 use futures_util::future::join_all;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{GossipNode, GossipState};
+use nervix_dns::DnsLookupError;
 use nervix_interconnect::{
-    ApplicationRevisionResponse, InterconnectRequest, PeerTarget, PoolClass, RequestContext,
-    RequestError, RequestSubquota, Transport as InterconnectTransport, TransportError,
+    ApplicationRevisionResponse, BootstrapExpectation, InterconnectRequest, PeerTarget, PoolClass,
+    RequestContext, RequestError, RequestSubquota, Transport as InterconnectTransport,
+    TransportError,
 };
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, NodeEndpoint, NodePrerequisites,
@@ -787,7 +789,9 @@ pub struct ClusterSettings {
     pub console_advertise_url: NodeServiceUrl,
     pub interconnect_advertise_addr: NodeEndpoint,
     pub bootstrap_host: Option<String>,
-    pub recovery_endpoints: BTreeSet<NodeEndpoint>,
+    /// The interconnect endpoint the stored membership recorded for each other member, which a
+    /// returning node dials before it has heard from anyone.
+    pub recovered_members: BTreeMap<ClusterNodeName, NodeEndpoint>,
     pub interconnect: InterconnectTransport,
     pub membership: MembershipSettings,
     pub prerequisites: NodePrerequisites,
@@ -870,8 +874,25 @@ struct GossipDatagram {
 
 #[derive(Clone)]
 struct GossipRoute {
-    node_id: Option<ClusterNodeName>,
+    peer: GossipRoutePeer,
     target: PeerTarget,
+}
+
+/// Who answers at a gossip route's endpoint.
+#[derive(Clone)]
+enum GossipRoutePeer {
+    /// The node this node authenticated there.
+    Authenticated(ClusterNodeName),
+    /// No node authenticated yet: the first exchange authenticates whoever answers, judged by what
+    /// the endpoint is expected to serve.
+    Expected(BootstrapExpectation),
+}
+
+/// One endpoint the stored membership recorded for a member, with what resolving it gave.
+struct RecoveredRoute {
+    member: ClusterNodeName,
+    endpoint: NodeEndpoint,
+    resolved: Result<Vec<PeerTarget>, Report<DnsLookupError>>,
 }
 
 /// Chitchat requires a standard error; keep the interconnect report inside that boundary.
@@ -887,20 +908,14 @@ impl InterconnectGossipTransport {
     fn build(
         interconnect: InterconnectTransport,
         advertise_addr: SocketAddr,
-        seed_targets: Vec<(SocketAddr, PeerTarget)>,
+        seed_routes: BTreeMap<SocketAddr, GossipRoute>,
         local_node_id: ClusterNodeName,
         fault_injection: crate::ConfiguredFaultInjection,
     ) -> io::Result<Self> {
         let (incoming_tx, incoming_rx) = mpsc::channel(GOSSIP_QUEUE_CAPACITY);
         let routes = DashMap::new();
-        for (addr, target) in seed_targets {
-            routes.insert(
-                addr,
-                GossipRoute {
-                    node_id: None,
-                    target,
-                },
-            );
+        for (addr, route) in seed_routes {
+            routes.insert(addr, route);
         }
         let transport = Self {
             inner: StdArc::new(InterconnectGossipTransportInner {
@@ -961,7 +976,7 @@ impl InterconnectGossipTransport {
         self.inner.routes.insert(
             request.from,
             GossipRoute {
-                node_id: Some(context.peer_node_id().clone()),
+                peer: GossipRoutePeer::Authenticated(context.peer_node_id().clone()),
                 target,
             },
         );
@@ -1000,7 +1015,7 @@ impl InterconnectGossipTransport {
                 self.inner.routes.insert(
                     id.gossip_advertise_addr,
                     GossipRoute {
-                        node_id: Some(node_id),
+                        peer: GossipRoutePeer::Authenticated(node_id),
                         target,
                     },
                 );
@@ -1078,12 +1093,12 @@ impl InterconnectGossipTransport {
         let route = match self.inner.routes.get(&to) {
             Some(route) => route.clone(),
             None => GossipRoute {
-                node_id: None,
+                peer: GossipRoutePeer::Expected(BootstrapExpectation::AnyMember),
                 target: PeerTarget::new(to, to.ip().to_string()),
             },
         };
-        let node_id = match route.node_id {
-            Some(node_id) => {
+        let node_id = match route.peer {
+            GossipRoutePeer::Authenticated(node_id) => {
                 // The application-health topology can retire a peer after Chitchat declares it
                 // dead. Chitchat still probes that peer, including on a bootstrap node with no
                 // configured seeds, so restore the authenticated route before trying the probe.
@@ -1093,17 +1108,17 @@ impl InterconnectGossipTransport {
                     .map_err(|error| anyhow::Error::new(GossipExchangeFailure::Transport(error)))?;
                 node_id
             }
-            None => {
+            GossipRoutePeer::Expected(expectation) => {
                 let node_id = self
                     .inner
                     .interconnect
-                    .bootstrap_target(route.target.clone())
+                    .bootstrap_target(route.target.clone(), expectation)
                     .await
                     .map_err(|error| anyhow::Error::new(GossipExchangeFailure::Transport(error)))?;
                 self.inner.routes.insert(
                     to,
                     GossipRoute {
-                        node_id: Some(node_id.clone()),
+                        peer: GossipRoutePeer::Authenticated(node_id.clone()),
                         target: route.target,
                     },
                 );
@@ -1256,24 +1271,48 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         .next()
         .assured("a successful resolution holds at least one target")
         .addr;
-    let mut seed_targets = BTreeMap::new();
+    let mut seed_routes = BTreeMap::new();
     let mut seed_nodes = BTreeSet::new();
-    let has_recovered_peers = !settings.recovery_endpoints.is_empty();
-    let recovered = join_all(settings.recovery_endpoints.into_iter().map(|endpoint| {
-        let interconnect = &settings.interconnect;
-        async move { (endpoint.clone(), interconnect.resolve(&endpoint).await) }
-    }))
+    let has_recovered_peers = !settings.recovered_members.is_empty();
+    let recovered = join_all(
+        settings
+            .recovered_members
+            .into_iter()
+            .map(|(member, endpoint)| {
+                let interconnect = &settings.interconnect;
+                async move {
+                    let resolved = interconnect.resolve(&endpoint).await;
+                    RecoveredRoute {
+                        member,
+                        endpoint,
+                        resolved,
+                    }
+                }
+            }),
+    )
     .await;
-    for (endpoint, result) in recovered {
-        match result {
+    for route in recovered {
+        match route.resolved {
             Ok(targets) => {
                 for target in targets {
                     seed_nodes.insert(target.addr.to_string());
-                    seed_targets.insert(target.addr, target);
+                    seed_routes.insert(
+                        target.addr,
+                        GossipRoute {
+                            peer: GossipRoutePeer::Expected(BootstrapExpectation::RecordedMember(
+                                route.member.clone(),
+                            )),
+                            target,
+                        },
+                    );
                 }
             }
             Err(error) => {
-                warn!(%endpoint, %error, "could not resolve a recovered Raft peer for gossip");
+                warn!(
+                    endpoint = %route.endpoint,
+                    error = %format!("{error:#}"),
+                    "could not resolve a recovered Raft peer for gossip"
+                );
             }
         }
     }
@@ -1283,9 +1322,17 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         match settings.interconnect.resolve(&seed).await {
             Ok(targets) => {
+                // A bootstrap host the operator named is expected to serve any member, even where
+                // it resolves to an endpoint the stored membership recorded for one.
                 for target in targets {
                     seed_nodes.insert(target.addr.to_string());
-                    seed_targets.insert(target.addr, target);
+                    seed_routes.insert(
+                        target.addr,
+                        GossipRoute {
+                            peer: GossipRoutePeer::Expected(BootstrapExpectation::AnyMember),
+                            target,
+                        },
+                    );
                 }
             }
             Err(error) if has_recovered_peers => {
@@ -1297,7 +1344,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
     let transport = InterconnectGossipTransport::build(
         settings.interconnect.clone(),
         gossip_advertise_addr,
-        seed_targets.into_iter().collect(),
+        seed_routes,
         node_id.clone(),
         settings.fault_injection,
     )?;

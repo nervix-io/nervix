@@ -44,12 +44,13 @@ use futures_util::StreamExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, ClusterParameterRecord,
-    ClusterParameterValues, ClusterSchedule, CoordinationIdentity, DomainClockAuthority,
-    DomainClockState, DomainName, DomainSchedule, DomainStartPoint, DomainState, DomainStatus,
-    NodeEndpoint, NodePrerequisites, NodeServiceUrl, PrerequisiteMismatch, ResourceId,
-    ResourceName, ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion,
-    ResourceVersionStatus, Statement, TransactionImpactReport, UserName,
+    AdmissionVerdict, AdmissionVerdicts, ClusterNodeIdentity, ClusterNodeIncarnation,
+    ClusterNodeName, ClusterParameterRecord, ClusterParameterValues, ClusterSchedule,
+    CoordinationIdentity, DomainClockAuthority, DomainClockState, DomainName, DomainSchedule,
+    DomainStartPoint, DomainState, DomainStatus, NodeEndpoint, NodePrerequisites, NodeServiceUrl,
+    PrerequisiteMismatch, ResourceId, ResourceName, ResourceNodeStatus, ResourceUpload,
+    ResourceUploadKey, ResourceVersion, ResourceVersionStatus, Statement, TransactionImpactReport,
+    UserName,
 };
 use nervix_primitives::{
     sync::{
@@ -1143,22 +1144,26 @@ impl MembershipSnapshot {
         admission_fences: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
     ) -> MembershipPlan {
         let candidates = gossip.latest_admission_candidates();
-        let mut voter_records = BTreeMap::new();
-        for (node_id, node) in &candidates {
-            if !self.voters.contains(node_id) {
-                continue;
-            }
-            if let Some(record) = &node.prerequisites {
-                voter_records.insert(node_id.clone(), record.clone());
-            }
-        }
+        let VoterJudgment {
+            accepted,
+            mut verdicts,
+            mut refusals,
+        } = self.judge_voter_runs(&candidates);
         let mut mutations = Vec::new();
-        let mut refusals = Vec::new();
         let mut desired_voters = self.voters.clone();
         for node in candidates.into_values() {
             if !self.voters.contains(&node.node_id)
-                && let Some(reason) = AdmissionRefusalReason::of(&node, &voter_records)
+                && let Some(reason) = AdmissionRefusalReason::of(&node, &accepted)
             {
+                if let AdmissionRefusalReason::Incompatible { voter, mismatch } = &reason {
+                    verdicts.insert(
+                        node.identity(),
+                        AdmissionVerdict::Refused {
+                            voter: voter.clone(),
+                            mismatch: mismatch.clone(),
+                        },
+                    );
+                }
                 refusals.push(AdmissionRefusal {
                     candidate: node.identity(),
                     reason,
@@ -1203,15 +1208,94 @@ impl MembershipSnapshot {
         MembershipPlan {
             mutations,
             refusals,
+            verdicts,
+        }
+    }
+
+    /// Judges the runs of the live voters that published a record this build reads, in the order
+    /// the runs started. A run is accepted when it can run beside every run accepted before it, and
+    /// refused naming the first of those, in name order, that it cannot. The run that started
+    /// last is the one that changed, so a member that returns with a record an older voter cannot
+    /// run beside is refused, and the voters that kept running are not. Refusing a voter's run
+    /// changes no membership: the node stops itself once it reads its verdict while it is still
+    /// joining.
+    fn judge_voter_runs(
+        &self,
+        candidates: &BTreeMap<ClusterNodeName, GossipNode>,
+    ) -> VoterJudgment {
+        let mut oldest_first = BTreeMap::new();
+        for node in candidates.values() {
+            if self.voters.contains(&node.node_id) {
+                oldest_first.insert(RunStart::of(node), node);
+            }
+        }
+        let mut judgment = VoterJudgment::default();
+        for node in oldest_first.into_values() {
+            let Some(record) = &node.prerequisites else {
+                continue;
+            };
+            match IncompatibleVoter::first(record, &judgment.accepted) {
+                Some(IncompatibleVoter { voter, mismatch }) => {
+                    judgment.verdicts.insert(
+                        node.identity(),
+                        AdmissionVerdict::Refused {
+                            voter: voter.clone(),
+                            mismatch: mismatch.clone(),
+                        },
+                    );
+                    judgment.refusals.push(AdmissionRefusal {
+                        candidate: node.identity(),
+                        reason: AdmissionRefusalReason::Incompatible { voter, mismatch },
+                    });
+                }
+                None => {
+                    judgment
+                        .accepted
+                        .insert(node.node_id.clone(), record.clone());
+                    judgment
+                        .verdicts
+                        .insert(node.identity(), AdmissionVerdict::Accepted);
+                }
+            }
+        }
+        judgment
+    }
+}
+
+/// The order in which the leader judges the runs of the live voters: the run that started first
+/// comes first, and runs that started at the same instant come in name order.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RunStart {
+    incarnation: ClusterNodeIncarnation,
+    node_id: ClusterNodeName,
+}
+
+impl RunStart {
+    fn of(node: &GossipNode) -> Self {
+        Self {
+            incarnation: node.incarnation,
+            node_id: node.node_id.clone(),
         }
     }
 }
 
-/// The membership changes one reconciliation makes, and the candidates it leaves outside.
+/// The leader's judgment of the runs of the live voters.
+#[derive(Debug, Default)]
+struct VoterJudgment {
+    /// The records of the voters whose runs it accepted, by name: a candidate is judged against
+    /// these.
+    accepted: BTreeMap<ClusterNodeName, NodePrerequisites>,
+    verdicts: BTreeMap<ClusterNodeIdentity, AdmissionVerdict>,
+    refusals: Vec<AdmissionRefusal>,
+}
+
+/// The membership changes one reconciliation makes, the candidates it leaves outside, and its
+/// verdict on every live run it judged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MembershipPlan {
     mutations: Vec<MembershipMutation>,
     refusals: Vec<AdmissionRefusal>,
+    verdicts: BTreeMap<ClusterNodeIdentity, AdmissionVerdict>,
 }
 
 /// A gossip-discovered node the leader leaves outside the membership.
@@ -1243,9 +1327,29 @@ impl AdmissionRefusalReason {
         let Some(record) = &candidate.prerequisites else {
             return Some(Self::Unpublished);
         };
+        let IncompatibleVoter { voter, mismatch } =
+            IncompatibleVoter::first(record, voter_records)?;
+        Some(Self::Incompatible { voter, mismatch })
+    }
+}
+
+/// A live voter whose record cannot run beside a node's, with the mismatch seen from the voter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IncompatibleVoter {
+    voter: ClusterNodeName,
+    mismatch: PrerequisiteMismatch,
+}
+
+impl IncompatibleVoter {
+    /// The first of the voters whose records are `voter_records`, in name order, that cannot run
+    /// beside a node holding `record`, if any.
+    fn first(
+        record: &NodePrerequisites,
+        voter_records: &BTreeMap<ClusterNodeName, NodePrerequisites>,
+    ) -> Option<Self> {
         for (voter, voter_record) in voter_records {
             if let Err(mismatch) = voter_record.verify_peer(record) {
-                return Some(Self::Incompatible {
+                return Some(Self {
                     voter: voter.clone(),
                     mismatch,
                 });
@@ -1278,7 +1382,7 @@ impl ReportedAdmissionRefusals {
                         %voter,
                         prerequisite = %mismatch.prerequisite(),
                         refusal = %mismatch,
-                        "refused to admit a node that cannot run beside a voter"
+                        "refused a node's run that cannot run beside a voter"
                     ),
                 }
             }
@@ -1991,6 +2095,9 @@ struct ConsensusState {
     raft_retention: RaftRetentionPolicy,
     /// Serializes membership changes, and holds the admission refusals the leader has reported.
     membership_mutation: AsyncMutex<ReportedAdmissionRefusals>,
+    /// The verdicts on live runs this node holds while it leads, replaced by every membership
+    /// reconciliation and withdrawn once a reconciliation finds another node leading.
+    admission_verdicts: watch::Sender<Option<AdmissionVerdicts>>,
     incoming_snapshots: Mutex<BTreeMap<ClusterNodeName, IncomingSnapshotTransfer>>,
     events: ConsensusEvents,
     metrics_task: Mutex<Option<JoinHandle<()>>>,
@@ -2344,6 +2451,7 @@ impl Consensus {
                 connectivity,
                 raft_retention: retention,
                 membership_mutation: AsyncMutex::new(ReportedAdmissionRefusals::default()),
+                admission_verdicts: watch::channel(None).0,
                 incoming_snapshots: Mutex::new(BTreeMap::new()),
                 events,
                 metrics_task: Mutex::new(Some(metrics_task)),
@@ -4004,23 +4112,37 @@ impl Administrator {
         Ok(true)
     }
 
+    /// Brings the membership in line with what gossip shows while this node leads, and judges
+    /// every live run against the live voters. The verdicts are held for
+    /// [`Self::admission_verdicts`] before any membership change is attempted, so a change that
+    /// fails does not withhold them, and a reconciliation that finds another node leading
+    /// withdraws them.
     pub async fn reconcile_nodes(
         &self,
         gossip: impl Future<Output = GossipState>,
     ) -> error_stack::Result<(), ConsensusError> {
         let mut reported_refusals = self.inner.membership_mutation.lock().await;
         let gossip = gossip.await;
-        let leader = self.inner.raft.current_leader().await;
-        if leader.as_ref() != Some(&self.inner.local_node_id) {
+        // One observation gives both the leadership and the term the verdicts are published under.
+        let metrics = self.inner.raft.metrics().borrow_watched().clone();
+        if metrics.current_leader.as_ref() != Some(&self.inner.local_node_id) {
+            self.inner.admission_verdicts.send_replace(None);
             return Ok(());
         }
 
         let before = self.effective_membership();
         let state = self.inner.store.inner.state();
         let admission_fences = (&state.node_admission_fences).into();
-        let plan = before.automatic_mutations(&gossip, &admission_fences);
-        reported_refusals.report(&plan.refusals);
-        for mutation in plan.mutations {
+        let MembershipPlan {
+            mutations,
+            refusals,
+            verdicts,
+        } = before.automatic_mutations(&gossip, &admission_fences);
+        reported_refusals.report(&refusals);
+        self.inner
+            .admission_verdicts
+            .send_replace(Some(AdmissionVerdicts::new(metrics.current_term, verdicts)));
+        for mutation in mutations {
             nervix_primitives::task::consume_budget().await;
             match mutation {
                 MembershipMutation::UpdateAddress { node_id, endpoint } => {
@@ -4100,6 +4222,12 @@ impl Administrator {
                 .report(format!("raft membership updated: {:?}", after.voters));
         }
         Ok(())
+    }
+
+    /// The verdicts on live runs this node holds while it leads, as its last membership
+    /// reconciliation judged them, or `None` while it does not lead.
+    pub fn admission_verdicts(&self) -> Option<AdmissionVerdicts> {
+        self.inner.admission_verdicts.borrow().clone()
     }
 
     pub async fn drop_node(
@@ -6740,14 +6868,14 @@ mod tests {
     use fjall::Database;
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        ClusterNodeIdentity, ClusterNodeIncarnation, ConsensusFloors, DomainClockAuthority,
-        DomainClockState, DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint,
-        DomainState, DomainStatus, DomainTimeRate, NodeEndpoint, NodePrerequisites,
-        PrerequisiteMismatch, PrerequisiteTimings, RaftLogDurability, ResourceId, ResourceName,
-        ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceUploadIdentity,
-        ResourceUploadKey, ResourceUploadState, ResourceVersion, ResourceVersionCounter,
-        ResourceVersionStatus, Statement, Timestamp, TimingPrerequisite, TransactionPosition,
-        TrustRootFingerprint, WireContractFingerprint,
+        AdmissionVerdict, ClusterNodeIdentity, ClusterNodeIncarnation, ConsensusFloors,
+        DomainClockAuthority, DomainClockState, DomainConfig, DomainName, DomainPace,
+        DomainSchedule, DomainStartPoint, DomainState, DomainStatus, DomainTimeRate, NodeEndpoint,
+        NodePrerequisites, PrerequisiteMismatch, PrerequisiteTimings, RaftLogDurability,
+        ResourceId, ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
+        ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState, ResourceVersion,
+        ResourceVersionCounter, ResourceVersionStatus, Statement, Timestamp, TimingPrerequisite,
+        TransactionPosition, TrustRootFingerprint, WireContractFingerprint,
     };
     use nervix_primitives::sync::{Arc, atomic::AtomicU64};
     use openraft::{
@@ -7459,6 +7587,8 @@ mod tests {
                 reason: AdmissionRefusalReason::Unpublished,
             }]
         );
+        // Waiting for a record is no verdict: the node is neither accepted nor refused.
+        assert!(plan.verdicts.is_empty());
     }
 
     #[test]
@@ -7486,20 +7616,34 @@ mod tests {
 
         let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
 
+        let mismatch = PrerequisiteMismatch::Timing {
+            prerequisite: TimingPrerequisite::RaftHeartbeatInterval,
+            local: Duration::from_millis(250),
+            peer: Duration::from_secs(1),
+        };
         assert!(plan.mutations.is_empty());
         assert_eq!(
             plan.refusals,
             vec![AdmissionRefusal {
                 candidate: node_identity("node-2", 2),
                 reason: AdmissionRefusalReason::Incompatible {
-                    voter: first,
-                    mismatch: PrerequisiteMismatch::Timing {
-                        prerequisite: TimingPrerequisite::RaftHeartbeatInterval,
-                        local: Duration::from_millis(250),
-                        peer: Duration::from_secs(1),
-                    },
+                    voter: first.clone(),
+                    mismatch: mismatch.clone(),
                 },
             }]
+        );
+        assert_eq!(
+            plan.verdicts,
+            BTreeMap::from([
+                (node_identity("node-1", 1), AdmissionVerdict::Accepted),
+                (
+                    node_identity("node-2", 2),
+                    AdmissionVerdict::Refused {
+                        voter: first,
+                        mismatch,
+                    },
+                ),
+            ])
         );
     }
 
@@ -7542,39 +7686,192 @@ mod tests {
                 },
             ]
         );
+        // The membership admits the candidate; only the voter's run carries a verdict.
+        assert_eq!(
+            plan.verdicts,
+            BTreeMap::from([(node_identity("node-1", 1), AdmissionVerdict::Accepted)])
+        );
+    }
+
+    /// A live voter running with the heartbeat `heartbeat`, started as run `incarnation`.
+    fn live_voter(name: &str, incarnation: u64, heartbeat: Duration) -> GossipNode {
+        GossipNode {
+            interconnect_endpoint: Some(node_endpoint(&format!("{name}.test:7443"))),
+            prerequisites: Some(test_prerequisites(heartbeat)),
+            ..undiscovered_node(name, incarnation)
+        }
+    }
+
+    /// The membership whose voters are `names`, each at its test endpoint.
+    fn voters(names: &[&str]) -> MembershipSnapshot {
+        let mut voters = BTreeSet::new();
+        let mut nodes = BTreeMap::new();
+        for name in names {
+            let node_id = ClusterNodeName::parse(name).assured("the test node name is valid");
+            voters.insert(node_id.clone());
+            nodes.insert(node_id, format!("{name}.test:7443"));
+        }
+        MembershipSnapshot { voters, nodes }
+    }
+
+    fn heartbeat_mismatch(voter: Duration, run: Duration) -> PrerequisiteMismatch {
+        PrerequisiteMismatch::Timing {
+            prerequisite: TimingPrerequisite::RaftHeartbeatInterval,
+            local: voter,
+            peer: run,
+        }
     }
 
     #[test]
-    fn a_voter_whose_record_another_voter_cannot_run_beside_is_never_refused() {
+    fn a_voter_whose_run_cannot_run_beside_an_older_voters_is_refused_and_keeps_its_seat() {
         let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
-        let second = ClusterNodeName::parse("node-2").assured("the test node name is valid");
         let gossip = GossipState {
             live_nodes: vec![
-                GossipNode {
-                    interconnect_endpoint: Some(node_endpoint("node-1.test:7443")),
-                    ..undiscovered_node("node-1", 1)
-                },
-                GossipNode {
-                    interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
-                    prerequisites: Some(test_prerequisites(Duration::from_secs(1))),
-                    ..undiscovered_node("node-2", 2)
-                },
+                live_voter("node-1", 1, Duration::from_millis(250)),
+                live_voter("node-2", 2, Duration::from_secs(1)),
             ],
             dead_node_ids: BTreeSet::new(),
             dead_node_identities: BTreeSet::new(),
         };
-        let membership = MembershipSnapshot {
-            voters: BTreeSet::from([first.clone(), second.clone()]),
-            nodes: BTreeMap::from([
-                (first, "node-1.test:7443".to_string()),
-                (second, "node-2.test:7443".to_string()),
-            ]),
+
+        let plan = voters(&["node-1", "node-2"]).automatic_mutations(&gossip, &BTreeMap::new());
+
+        let mismatch = heartbeat_mismatch(Duration::from_millis(250), Duration::from_secs(1));
+        assert!(plan.mutations.is_empty());
+        assert_eq!(
+            plan.refusals,
+            vec![AdmissionRefusal {
+                candidate: node_identity("node-2", 2),
+                reason: AdmissionRefusalReason::Incompatible {
+                    voter: first.clone(),
+                    mismatch: mismatch.clone(),
+                },
+            }]
+        );
+        assert_eq!(
+            plan.verdicts,
+            BTreeMap::from([
+                (node_identity("node-1", 1), AdmissionVerdict::Accepted),
+                (
+                    node_identity("node-2", 2),
+                    AdmissionVerdict::Refused {
+                        voter: first,
+                        mismatch,
+                    },
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn the_run_that_started_last_is_refused_whatever_the_names() {
+        let second = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 9, Duration::from_secs(1)),
+                live_voter("node-2", 3, Duration::from_millis(250)),
+                live_voter("node-3", 4, Duration::from_millis(250)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
 
-        let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
+        let plan =
+            voters(&["node-1", "node-2", "node-3"]).automatic_mutations(&gossip, &BTreeMap::new());
 
-        assert!(plan.refusals.is_empty());
+        assert_eq!(
+            plan.verdicts,
+            BTreeMap::from([
+                (
+                    node_identity("node-1", 9),
+                    AdmissionVerdict::Refused {
+                        voter: second,
+                        mismatch: heartbeat_mismatch(
+                            Duration::from_millis(250),
+                            Duration::from_secs(1)
+                        ),
+                    },
+                ),
+                (node_identity("node-2", 3), AdmissionVerdict::Accepted),
+                (node_identity("node-3", 4), AdmissionVerdict::Accepted),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_candidate_compatible_with_the_voter_it_reached_but_not_another_is_refused_naming_it() {
+        // 250ms is within the bound of 190ms but not of 100ms: compatibility is not transitive.
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(100)),
+                live_voter("node-2", 2, Duration::from_millis(190)),
+                live_voter("node-3", 3, Duration::from_millis(250)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+
+        let plan = voters(&["node-1", "node-2"]).automatic_mutations(&gossip, &BTreeMap::new());
+
+        let mismatch = heartbeat_mismatch(Duration::from_millis(100), Duration::from_millis(250));
         assert!(plan.mutations.is_empty());
+        assert_eq!(
+            plan.verdicts,
+            BTreeMap::from([
+                (node_identity("node-1", 1), AdmissionVerdict::Accepted),
+                (node_identity("node-2", 2), AdmissionVerdict::Accepted),
+                (
+                    node_identity("node-3", 3),
+                    AdmissionVerdict::Refused {
+                        voter: first,
+                        mismatch,
+                    },
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_candidate_is_judged_beside_the_voters_whose_runs_were_accepted() {
+        // The returning node-2 is refused beside node-1, so it does not keep out a candidate that
+        // can run beside node-1.
+        let joining = ClusterNodeName::parse("node-3").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(250)),
+                live_voter("node-2", 5, Duration::from_secs(1)),
+                live_voter("node-3", 6, Duration::from_millis(400)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+
+        let plan = voters(&["node-1", "node-2"]).automatic_mutations(&gossip, &BTreeMap::new());
+
+        assert_eq!(
+            plan.mutations,
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    endpoint: node_endpoint("node-3.test:7443"),
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([
+                        ClusterNodeName::parse("node-1").assured("the test node name is valid"),
+                        ClusterNodeName::parse("node-2").assured("the test node name is valid"),
+                        joining,
+                    ]),
+                },
+            ]
+        );
+        assert_eq!(
+            plan.verdicts.get(&node_identity("node-2", 5)),
+            Some(&AdmissionVerdict::Refused {
+                voter: ClusterNodeName::parse("node-1").assured("the test node name is valid"),
+                mismatch: heartbeat_mismatch(Duration::from_millis(250), Duration::from_secs(1)),
+            })
+        );
     }
 
     #[test]

@@ -58,10 +58,14 @@ async fn gossip_reconnects_a_known_route_after_its_outbound_target_is_retired() 
     let interconnect = crate::application::test_fixtures::test_interconnect("test", &node).await;
     let address = interconnect.local_addr();
     let peer = PeerTarget::new(address, address.ip().to_string());
+    let seed = GossipRoute {
+        peer: GossipRoutePeer::Expected(BootstrapExpectation::AnyMember),
+        target: peer,
+    };
     let gossip = InterconnectGossipTransport::build(
         interconnect.clone(),
         address,
-        vec![(address, peer)],
+        BTreeMap::from([(address, seed)]),
         node.clone(),
         crate::ConfiguredFaultInjection::default(),
     )

@@ -83,6 +83,7 @@ tests = [
   "transport::network_disruption_respects_deadlines_and_repairs_authenticated_service",
   "transport::prerequisites::a_joiner_beyond_the_heartbeat_bound_is_refused_once_a_partition_heals",
   "transport::parameters::a_live_parameter_publication_gates_catch_up_across_a_partition",
+  "transport::prerequisites::a_recorded_endpoint_another_cluster_now_serves_is_a_stale_route",
   "transport::prerequisites::a_rolling_heartbeat_change_joins_within_the_bound_and_is_refused_beyond_it",
   "transport::production_transport_exchanges_typed_arrow_batch_and_state_frames_over_simulated_tcp",
   "transport::relay::relay_reconciliation_and_cancellation_survive_lost_replies",
