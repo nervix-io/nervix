@@ -144,7 +144,9 @@ impl CliTerminal {
                 .kill_on_drop(true);
             command.spawn()?
         };
-        let master = AsyncFd::new(terminal.master)?;
+        // SAFETY: the `AsyncFd` takes ownership of the master side's `OwnedFd`, which keeps its
+        // descriptor open and referring to this terminal until the `AsyncFd` drops it.
+        let master = unsafe { AsyncFd::register(terminal.master) }?;
         let (keys, typed) = mpsc::channel(PENDING_KEY_SEQUENCES);
         let display = StdArc::new(Mutex::new(TerminalDisplay::default()));
         let player = nervix_primitives::task::spawn(play_terminal(master, typed, display.clone()));

@@ -10,7 +10,9 @@
     nervix::layer(vocabulary, reason = "owns OTEL field declarations")
 )]
 
-use crate::{MappedValueField, MappedValueType, MappedValueTypes};
+use crate::{
+    Expression, Literal, MappedValueField, MappedValueType, MappedValueTypes, ParseAsType,
+};
 
 /// Whether a mapping must occur in the statement. Required fields also refuse NULL records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -51,6 +53,53 @@ pub enum OtelValueRule {
 }
 
 impl OtelValueRule {
+    /// Record-dependent expressions retain their row-time checks. Written literals can be
+    /// refused before the graph is installed, using the same domain as the record encoder.
+    pub fn admits_literal(self, expression: &Expression) -> bool {
+        if let Expression::Cast {
+            expression,
+            target: ParseAsType::String,
+        } = expression
+        {
+            return self.admits_literal(expression);
+        }
+        if self == Self::SeverityNumber
+            && let Some(value) = expression.integer_literal()
+        {
+            return self.admits_integer(value);
+        }
+        if let Expression::Literal(Literal::String(value)) = expression {
+            return self.admits_string(value);
+        }
+        true
+    }
+
+    pub fn admits_integer(self, value: i128) -> bool {
+        match self {
+            Self::SeverityNumber => (0..=24).contains(&value),
+            _ => true,
+        }
+    }
+
+    pub fn admits_string(self, value: &str) -> bool {
+        match self {
+            Self::TraceId => Self::admits_hex_id(value, 16),
+            Self::SpanId => Self::admits_hex_id(value, 8),
+            Self::SpanKind => matches!(
+                value,
+                "SERVER" | "CLIENT" | "INTERNAL" | "PRODUCER" | "CONSUMER"
+            ),
+            Self::StatusCode => matches!(value, "OK" | "ERROR" | "UNSET"),
+            _ => true,
+        }
+    }
+
+    fn admits_hex_id(value: &str, byte_len: usize) -> bool {
+        value.len() == byte_len * 2
+            && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && value.bytes().any(|byte| byte != b'0')
+    }
+
     pub const fn value_type(self) -> MappedValueType {
         match self {
             Self::String | Self::TraceId | Self::SpanId | Self::SpanKind | Self::StatusCode => {
@@ -199,9 +248,9 @@ pub const OTEL_UNSUPPORTED_FEATURES: &[OtelUnsupportedFeature] = &[
 
 /// Exact current decoding, shared by the public declaration and the manual.
 pub const OTEL_HEADERS_FORMAT: &str = "comma-separated key=value pairs; split at the first '='; \
-                                       trim surrounding whitespace; lowercase keys; preserve \
-                                       values literally without percent-decoding; empty input \
-                                       means no headers";
+                                       trim surrounding whitespace; lowercase keys; \
+                                       percent-decode values once as UTF-8; keep literal plus \
+                                       signs; empty input means no headers";
 
 /// Pairing declared independently of the selected OTLP transport.
 pub const OTEL_TLS_ENDPOINT_RULE: &str = "tls_ca_file, tls_cert_file and tls_key_file require an \

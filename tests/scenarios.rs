@@ -107,8 +107,8 @@ use crate::common::{
     cluster::{
         AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster,
         DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
-        InterconnectCredentialFault, JoinAttempt, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME,
-        TestClusterConfig, TestSession, WebsocketExchangeAction,
+        InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
+        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
         assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
         command_connect_options, observe_kafka_through, publish_kafka_record_through,
     },
@@ -383,6 +383,8 @@ struct ScenarioWorld {
     /// the registry sees the work in flight rather than the last work that finished.
     active_scenario: Option<ActiveScenarioRegistration>,
     cluster: Option<Cluster>,
+    /// Bulk-worker holds that cleanup releases even when a step fails before explicit release.
+    occupied_bulk_nodes: BTreeSet<nervix_models::ClusterNodeName>,
     active_session: Option<TestSession>,
     /// A bounded next-row reader installed before the publication whose delay it measures.
     subscription_arrival: Option<ArrivalObservation<SubscriptionReceipt>>,
@@ -1517,6 +1519,44 @@ async fn then_the_stallable_endpoint_accepted_connection_after(
     );
 }
 
+/// A client that keeps a fixed number of connections to the endpoint opens no other one. That
+/// connection must never arrive, so the window only strengthens the assertion; one that arrived
+/// earlier fails it at once.
+#[then(expr = "the stallable endpoint {string} accepts no connection beyond {int} within {string}")]
+async fn then_the_stallable_endpoint_accepts_no_connection_beyond(
+    world: &mut ScenarioWorld,
+    name: String,
+    count: usize,
+    window: String,
+) {
+    let window = parse_duration_text(&window)
+        .unwrap_or_else(|error| panic!("the window '{window}' is invalid: {error}"));
+    let proxy = world
+        .stallable_tcp_proxies
+        .get(&name)
+        .unwrap_or_else(|| panic!("no endpoint '{name}' was stood"));
+    let Some(beyond) = count.checked_add(1) else {
+        panic!("the endpoint '{name}' cannot be held to {count} connections");
+    };
+    let arrived = nervix_primitives::time::timeout(window, proxy.accepted_at_least(beyond)).await;
+    if arrived.is_ok() {
+        let first = endpoint_connection_accepted_at(world, &name, 1);
+        let further = endpoint_connection_accepted_at(world, &name, beyond);
+        let Some(after) = further.checked_duration_since(first) else {
+            panic!("the endpoint '{name}' accepted connection {beyond} before connection 1");
+        };
+        panic!(
+            "the endpoint '{name}' accepted connection {beyond} {} after connection 1, expected \
+             no more than {count}",
+            humantime::format_duration(after)
+        );
+    }
+    append_cucumber_log_line(&format!(
+        "endpoint '{name}' accepted no connection beyond {count} within {}",
+        humantime::format_duration(window)
+    ));
+}
+
 #[given("ClickHouse is running")]
 async fn given_clickhouse_is_running(world: &mut ScenarioWorld) {
     initialize_scenario_identity(world);
@@ -2353,6 +2393,13 @@ enum CapturedExport {
 }
 
 impl CapturedExport {
+    fn header_values(&self, name: &str) -> Vec<&[u8]> {
+        match self {
+            Self::Http(request) => request.header_values(name),
+            Self::Grpc(call) => call.header_values(name),
+        }
+    }
+
     /// The path the request was sent to: an OTLP/HTTP path such as `/v1/logs`, or an OTLP/gRPC
     /// method.
     fn path(&self) -> &str {
@@ -2552,6 +2599,30 @@ async fn then_otlp_receiver_eventually_receives_requests(
                 panic!("OTLP receiver '{name}': {error}");
             }
         }
+    }
+}
+
+#[then(
+    expr = "every export request at OTLP receiver {string} has header {string} equal to {string}"
+)]
+fn then_otlp_receiver_exports_have_header(
+    world: &mut ScenarioWorld,
+    receiver: String,
+    header: String,
+    expected: String,
+) {
+    let expected = expand_placeholders(world, &expected);
+    let exports = captured_exports(world, &receiver);
+    assert!(
+        !exports.is_empty(),
+        "the OTLP receiver must have captured an export"
+    );
+    for export in exports {
+        assert_eq!(
+            export.header_values(&header),
+            [expected.as_bytes()],
+            "OTLP receiver '{receiver}' captured a different '{header}' header"
+        );
     }
 }
 
@@ -11327,14 +11398,15 @@ impl WasmLifecycleFailureFixture {
 fn ensure_onnx_runtime_loaded() {
     let result = ONNX_RUNTIME_INIT.get_or_init(|| {
         let dylib_path = resolve_onnxruntime_dylib()?;
-        ort::init_from(&dylib_path)
-            .map_err(|error| {
-                format!(
-                    "failed to initialize ONNX Runtime from '{}': {error}",
-                    dylib_path.display()
-                )
-            })?
-            .commit();
+        // Only load the library: the nodes create the process's one ONNX Runtime environment on
+        // first use, and ONNX Runtime refuses a second.
+        let environment_builder = ort::init_from(&dylib_path).map_err(|error| {
+            format!(
+                "failed to load ONNX Runtime from '{}': {error}",
+                dylib_path.display()
+            )
+        })?;
+        drop(environment_builder);
         Ok(())
     });
 
@@ -11947,6 +12019,28 @@ async fn given_junction_reads_materialized_state_slowly(
     );
 }
 
+/// The junction's first read of a message's dependency is slowed too, so a payload that reached
+/// the junction's input may still be read rather than parked. This waits until the junction, whose
+/// reads the scenario slowed, has parked a message on `REQUIRED WAIT`.
+#[then(expr = "junction {string} has parked a message on its materialized state")]
+async fn then_junction_parked_a_message(world: &mut ScenarioWorld, junction: String) {
+    let junction = expand_placeholders(world, &junction);
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let junction = nervix_models::ModelName::try_from(junction.as_str())
+        .assured("the scenario junction is an identifier-shaped name");
+    let processor =
+        nervix_models::DomainNodeRef::node_in(domain, nervix_models::ModelKind::Junction, junction);
+    // A loaded runner delays the slowed read and the delivery before it; the wait ends as soon as
+    // the junction parks the message.
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world.fault_injection.wait_for_materialized_wait(&processor),
+    )
+    .await
+    .expect("the junction parks the message on its materialized state");
+}
+
 #[then(expr = "the last shutdown of node {string} reports its drain-support phase {string}")]
 async fn then_last_shutdown_reports_drain_support_phase(
     world: &mut ScenarioWorld,
@@ -12037,6 +12131,61 @@ async fn when_node_attempts_to_join(world: &mut ScenarioWorld, node_id: String) 
     let failure = match attempt {
         JoinAttempt::Admitted => None,
         JoinAttempt::Stopped(failure) => Some(failure),
+    };
+    world.node_start_attempt = Some(NodeStartAttempt {
+        node: node_id,
+        failure,
+    });
+}
+
+/// Starts a node whose only bootstrap host is a running member, and records whether the cluster
+/// admitted it as a voter or how it stopped, for a later step to assert.
+#[when(expr = "node {string} attempts to join through node {string}")]
+async fn when_node_attempts_to_join_through(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    member_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let member_id = expand_placeholders(world, &member_id);
+    let attempt = world
+        .cluster_mut()
+        .attempt_join_through(&node_id, &member_id)
+        .await
+        .expect("the joining node was neither admitted nor stopped");
+    let failure = match attempt {
+        JoinAttempt::Admitted => None,
+        JoinAttempt::Stopped(failure) => Some(failure),
+    };
+    world.node_start_attempt = Some(NodeStartAttempt {
+        node: node_id,
+        failure,
+    });
+}
+
+/// Starts a node that joins the running cluster through a running member and requires the
+/// cluster to admit it as a voter.
+#[given(expr = "node {string} has joined the cluster")]
+async fn given_node_has_joined_the_cluster(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let attempt = world
+        .cluster_mut()
+        .attempt_join(&node_id)
+        .await
+        .expect("the joining node was neither admitted nor stopped");
+    if let JoinAttempt::Stopped(failure) = attempt {
+        panic!("node '{node_id}' stopped instead of joining: {failure}");
+    }
+}
+
+/// Starts a stopped member again and records how its return ended, for a later step to assert.
+#[when(expr = "node {string} attempts to rejoin")]
+async fn when_node_attempts_to_rejoin(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let attempt = world.cluster_mut().attempt_rejoin(&node_id).await;
+    let failure = match attempt {
+        RejoinAttempt::KeptRunning => None,
+        RejoinAttempt::Stopped(failure) => Some(failure),
     };
     world.node_start_attempt = Some(NodeStartAttempt {
         node: node_id,
@@ -18419,6 +18568,7 @@ async fn when_these_plexus_commands_are_executed_on_node(
 async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     let node_name = crate::common::cluster::node_name(&node_id);
+    world.occupied_bulk_nodes.insert(node_name.clone());
     let fault_injection = world.fault_injection.clone();
     nervix_primitives::time::timeout(
         Duration::from_secs(30),
@@ -18428,6 +18578,15 @@ async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: Str
     .unwrap_or_else(|error| {
         panic!("bulk execution on '{node_id}' never filled its workers: {error}")
     });
+}
+
+/// Hold every node's bulk class so a management client's leader redirect stays under the fault.
+#[when("bulk execution on every node is occupied")]
+async fn when_bulk_execution_is_occupied_on_every_node(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        nervix_primitives::task::consume_budget().await;
+        when_bulk_execution_is_occupied(world, node_id).await;
+    }
 }
 
 /// Fill every bulk worker on every node, and give them all back once `duration` has passed. The
@@ -19133,9 +19292,9 @@ async fn then_the_unacknowledged_source_ingestor_eventually_counts_refused_paylo
 #[when(expr = "bulk execution on node {string} is released")]
 async fn when_bulk_execution_is_released(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
-    world
-        .fault_injection
-        .release_execution(&crate::common::cluster::node_name(&node_id));
+    let node_name = crate::common::cluster::node_name(&node_id);
+    world.fault_injection.release_execution(&node_name);
+    world.occupied_bulk_nodes.remove(&node_name);
 }
 
 /// Run Plexus on a node and require it to finish inside a bound, which is how a scenario states that
@@ -33405,6 +33564,10 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.fault_injection.release_all_domain_clock_progress();
                 world.fault_injection.release_all_command_pauses();
                 world.fault_injection.release_all_wasm_checkpoint_pauses();
+                for node in std::mem::take(&mut world.occupied_bulk_nodes) {
+                    world.fault_injection.release_execution(&node);
+                    append_cucumber_log_line(&format!("bulk execution cleanup: node={node}"));
+                }
 
                 if let Some(broker) = &world.kafka_mock_broker {
                     broker

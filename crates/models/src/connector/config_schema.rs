@@ -46,6 +46,10 @@ pub enum ClientConfigPresence {
         address: &'static str,
         scheme: &'static str,
     },
+    OptionalForScheme {
+        address: &'static str,
+        scheme: &'static str,
+    },
 }
 
 /// A file's role, including the two halves of a TLS client identity.
@@ -61,6 +65,7 @@ pub enum ClientConfigFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientConfigValue {
     String,
+    PercentEncodedHeaders,
     Boolean,
     UnsignedInteger,
     PositiveInteger,
@@ -76,6 +81,7 @@ impl ClientConfigValue {
     pub const fn label(self) -> &'static str {
         match self {
             Self::String => "string",
+            Self::PercentEncodedHeaders => "comma-separated name=percent-encoded-value pairs",
             Self::Boolean => "boolean",
             Self::UnsignedInteger => "unsigned integer",
             Self::PositiveInteger => "positive integer",
@@ -97,6 +103,9 @@ impl ClientConfigValue {
         };
         match self {
             Self::String => {}
+            Self::PercentEncodedHeaders => {
+                crate::PercentEncodedHeaders::parse(value).change_context(invalid())?;
+            }
             Self::Boolean => {
                 if !value.eq_ignore_ascii_case("true") && !value.eq_ignore_ascii_case("false") {
                     return Err(Report::new(invalid()));
@@ -247,6 +256,14 @@ impl ClientConfigKey {
         }
     }
 
+    /// Permit this key only when the named address uses the declared scheme.
+    pub const fn only_for_scheme(self, address: &'static str, scheme: &'static str) -> Self {
+        Self {
+            presence: ClientConfigPresence::OptionalForScheme { address, scheme },
+            ..self
+        }
+    }
+
     pub const fn driver(self) -> Self {
         Self {
             owner: ClientConfigOwner::Driver,
@@ -301,6 +318,12 @@ pub enum ClientConfigSchemaError {
     RequiresKey {
         key: &'static str,
         required: &'static str,
+    },
+    #[error("client config key '{key}' requires '{address}' to use {scheme}")]
+    RequiresScheme {
+        key: &'static str,
+        address: &'static str,
+        scheme: &'static str,
     },
     #[error("client config key '{key}' is reserved for Nervix")]
     Reserved { key: String },
@@ -451,10 +474,16 @@ impl ClientConfigSchema {
         stage: ConfigValueStage,
     ) -> Result<(), Report<ClientConfigSchemaError>> {
         for key in self.keys {
-            let ClientConfigPresence::RequiredForScheme { address, scheme } = key.presence else {
-                continue;
+            let (address, scheme) = match key.presence {
+                ClientConfigPresence::RequiredForScheme { address, scheme }
+                | ClientConfigPresence::OptionalForScheme { address, scheme } => (address, scheme),
+                _ => continue,
             };
-            if values.contains_key(key.name) {
+            let present = values.contains_key(key.name);
+            if matches!(key.presence, ClientConfigPresence::RequiredForScheme { .. }) && present
+                || matches!(key.presence, ClientConfigPresence::OptionalForScheme { .. })
+                    && !present
+            {
                 continue;
             }
             let Some(value) = values.get(address) else {
@@ -469,11 +498,21 @@ impl ClientConfigSchema {
                     expected: "URL",
                 }
             })?;
-            if parsed.scheme() == scheme {
-                return Err(Report::new(ClientConfigSchemaError::RequiresKey {
-                    key: address,
-                    required: key.name,
-                }));
+            match key.presence {
+                ClientConfigPresence::RequiredForScheme { .. } if parsed.scheme() == scheme => {
+                    return Err(Report::new(ClientConfigSchemaError::RequiresKey {
+                        key: address,
+                        required: key.name,
+                    }));
+                }
+                ClientConfigPresence::OptionalForScheme { .. } if parsed.scheme() != scheme => {
+                    return Err(Report::new(ClientConfigSchemaError::RequiresScheme {
+                        key: key.name,
+                        address,
+                        scheme,
+                    }));
+                }
+                _ => {}
             }
         }
         Ok(())

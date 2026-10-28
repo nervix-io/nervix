@@ -55,8 +55,8 @@ use nervix_models::{
     NatsSubjectEmitter, OtelEmitter, OtelMappings, OtelMetricsEmitter, PostgresEmitter,
     PostgresTableEmitter, PulsarEmitter, PulsarTopicEmitter, RabbitMqEmitter, RabbitMqQueueEmitter,
     RedisEmitter, RedisPubSubEmitter, RetryPolicy, RouteConstruction, SchemaName, SentryEmitter,
-    SentryEventEmitter, SqsEmitter, SqsQueueEmitter, SyslogCollectorEmitter, SyslogEmitter,
-    ZeroMqEmitter, ZeroMqPushEmitter, parse_duration_text,
+    SqsEmitter, SqsQueueEmitter, SyslogCollectorEmitter, SyslogEmitter, ZeroMqEmitter,
+    ZeroMqPushEmitter, parse_duration_text,
 };
 use nervix_vm::{
     SemanticScopePolicy, lower_route_construction,
@@ -1077,21 +1077,18 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 queue: queue.clone(),
                 mode: decide_sqs_publishing_mode(mode),
             })),
-            (
-                EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
-                    client: expected,
-                    ..
-                })),
-                Model::ClientSentry(client),
-            ) => EmitterConnectorPlan::Sentry(SentryEmitterPlan::Event(SentryEventEmitterPlan {
-                batch: emitter.batch,
-                client: EmitterClientSpec::declared(
-                    expected,
-                    &client.name,
-                    client.mount.as_ref(),
-                    &client.config,
-                )?,
-            })),
+            (EmitterEntity::Sentry(SentryEmitter::Event(event)), Model::ClientSentry(client)) => {
+                EmitterConnectorPlan::Sentry(SentryEmitterPlan::Event(SentryEventEmitterPlan {
+                    batch: emitter.batch,
+                    platform: event.platform().to_owned(),
+                    client: EmitterClientSpec::declared(
+                        &event.client,
+                        &client.name,
+                        client.mount.as_ref(),
+                        &client.config,
+                    )?,
+                }))
+            }
             (EmitterEntity::Otel(otel), Model::ClientOtel(client)) => {
                 let OtelMappings {
                     values,
@@ -1549,7 +1546,7 @@ mod tests {
         CreateClientPostgres, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
         CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
         CreateClientZeroMq, EmitterBatchLegality, ErrorPolicies, FlushPolicy, OtelLogsEmitter,
-        ProcessorInputs, RouteConstruction,
+        ProcessorInputs, RouteConstruction, SentryEventEmitter,
     };
     use nonzero_ext::nonzero;
     use rstest::rstest;
@@ -1951,6 +1948,7 @@ mod tests {
                             },
                         },
                         client: client(),
+                        platform: Some("python".to_owned()),
                     })),
                     client: Model::ClientSentry(CreateClientSentry {
                         name: client(),
@@ -2333,6 +2331,33 @@ mod tests {
                 "{}",
                 kind.label()
             );
+        }
+    }
+
+    #[test]
+    fn sentry_plan_resolves_the_platform_before_runtime_composition() {
+        for (authored, expected) in [(None, "other"), (Some("python"), "python"), (Some(""), "")] {
+            let mut case = EmitterKind::Sentry.case();
+            let EmitterEntity::Sentry(SentryEmitter::Event(event)) = &mut case.connector else {
+                panic!("the Sentry fixture constructs an event entity");
+            };
+            event.platform = authored.map(str::to_owned);
+            let Ok(plan) = case.decide() else {
+                panic!("the Sentry fixture has its matching client");
+            };
+            let EmitterConnectorPlan::Sentry(SentryEmitterPlan::Event(event)) = plan.connector
+            else {
+                panic!("a Sentry entity produces its typed event plan");
+            };
+            assert_eq!(event.platform, expected);
+            let resolved = event.resolve_clients(&mut |client| {
+                Ok::<_, std::convert::Infallible>(ResolvedClientConfig {
+                    entries: client.config.entries.clone(),
+                    mounts: None,
+                })
+            });
+            let Ok(resolved) = resolved;
+            assert_eq!(resolved.platform, expected);
         }
     }
 

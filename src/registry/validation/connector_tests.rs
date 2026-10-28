@@ -419,6 +419,7 @@ fn batching_emitters_require_a_codec_container_their_emitter_can_publish() {
         .expect("a protobuf codec with BATCH MESSAGE has a batch container");
 
     *emitter.connector = EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
+        platform: None,
         mode: nervix_models::SentryEventPublishingMode::Ack {
             retry_policy: nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
@@ -614,6 +615,60 @@ fn http_request_type_failure_keeps_the_vm_compile_cause() {
                 && reason.contains("HTTP METHOD and PATH require exact non-sensitive STRING")
     ));
     assert!(error.contains::<nervix_vm::CompileError>());
+}
+
+#[test]
+fn otel_literal_domains_are_admitted_by_the_registry_with_typed_refusals() {
+    let domain = DomainName::parse("default").expect("valid domain");
+    let identifier: ModelName = named("outgoing");
+    for value in [-1, 0, 24, 25] {
+        let connector = OtelEmitter::Logs(OtelLogsEmitter {
+            mode: nervix_models::OtelLogsPublishingMode::Ack {
+                retry_policy: nervix_models::RetryPolicy {
+                    backoff: "250ms".into(),
+                    max_backoff: "1s".into(),
+                },
+            },
+            client: named("destination"),
+            mappings: OtelMappings {
+                values: vec![
+                    otel_mapping("time"),
+                    otel_mapping("body"),
+                    OtelValueMapping {
+                        column: "severity_number".into(),
+                        expression: Expression::Cast {
+                            expression: Box::new(Expression::Literal(nervix_models::Literal::I64(
+                                value,
+                            ))),
+                            target: ParseAsType::I32,
+                        },
+                    },
+                ],
+                attributes: Vec::new(),
+                resource: Vec::new(),
+                scope: None,
+            },
+        });
+        let result = validate_otel_mapping_contract(&domain, &identifier, &connector);
+        if (0..=24).contains(&value) {
+            result.expect("severity boundary is in the declared domain");
+        } else {
+            assert_eq!(
+                result
+                    .expect_err("literal severity is outside its declared domain")
+                    .current_context(),
+                &RegistryError::InvalidOtelMapping {
+                    domain: domain.clone(),
+                    identifier: identifier.clone(),
+                    issue: OtelMappingIssue::LiteralValue {
+                        signal: OtelMappingSignal::Logs,
+                        key: "severity_number",
+                        rule: nervix_models::OtelValueRule::SeverityNumber
+                    }
+                }
+            );
+        }
+    }
 }
 
 #[test]
@@ -1996,6 +2051,7 @@ fn sentry_emitter_rejects_http_client() {
     };
     sentry_emitter.connector = Box::new(EmitterEntity::Sentry(SentryEmitter::Event(
         SentryEventEmitter {
+            platform: None,
             mode: nervix_models::SentryEventPublishingMode::Ack {
                 retry_policy: nervix_models::RetryPolicy {
                     backoff: "250ms".to_string(),

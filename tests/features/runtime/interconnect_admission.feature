@@ -409,3 +409,73 @@ Feature: Interconnect relay admission
       """
     When 600 http payloads with distinct tenants and sequence 2 are acknowledged by node "node-3" with host "turnover-{{test_id}}.example.com" path "/events"
     Then within "120s" the observed broker receives every generated payload exactly once
+
+  # Each node a record waits on reports it alive to its source: the receiving node does once it has
+  # admitted a delivery, and the delivering node does until then. The source's ACK TIMEOUT is far
+  # shorter than the hold, so a delivery that stopped reporting its record would make the source
+  # read it again and the emitter send it twice. A one-node cluster delivers nothing to another
+  # node, so this behavior has no one-node example.
+  Scenario Outline: A record whose delivery <delivery> waits for admission keeps its source acknowledgement alive
+    Given Kafka is running
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "held_admission_in_{{test_id}}" exists with 1 partitions
+    And Kafka topic "held_admission_out_{{test_id}}" is observed
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification ( user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_main CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'held_admission_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'held_admission_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications
+        TO kafka_main TOPIC 'held_admission_out_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      RELOCATE INGESTOR kafka_notifications ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE RELAY notifications ONTO NODE <relay_owner> IGNORE PREFERENCES;
+      RELOCATE EMITTER kafka_forward ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then node "node-1" eventually reports status containing "kind=ingestor name=kafka_notifications owner=node-1"
+    And node "node-1" eventually reports status containing "kind=relay name=notifications owner=<relay_owner>"
+    And node "node-1" eventually reports status containing "kind=emitter name=kafka_forward owner=node-2"
+    Given remote relay admission for domain "{{domain}}" is paused
+    When Kafka message is published to topic "held_admission_in_{{test_id}}"
+      """
+      {"user_id":77}
+      """
+    Then the remote relay admission pause for domain "{{domain}}" is reached
+    And the observed broker does not receive a payload within "1200ms"
+    When the remote relay admission pause for domain "{{domain}}" is released
+    Then within "4s" the observed broker receives payloads
+      """
+      {"user_id":77}
+      """
+    And the observed broker does not receive a payload within "1200ms"
+
+    Examples:
+      | delivery                        | relay_owner |
+      | to the relay's owner            | node-2      |
+      | to the relay's attached emitter | node-1      |

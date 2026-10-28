@@ -92,6 +92,14 @@ impl ConfiguredFaultInjection {
     ) {
     }
 
+    pub(in crate::runtime) fn record_materialized_wait_if_armed(
+        &self,
+        _domain: &DomainName,
+        _kind: ModelKind,
+        _processor: &ModelName,
+    ) {
+    }
+
     pub(in crate::runtime) async fn hold_materialized_snapshot_fetch_if_armed(
         &self,
         _node_id: &ClusterNodeName,

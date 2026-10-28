@@ -659,19 +659,30 @@ jobs:
             "${base}:${build_id}-${{ matrix.image }}-amd64" \
             "${base}:${build_id}-${{ matrix.image }}-arm64"
 
+  # Renders the book, its PDF and the Plexus agent index, uploads them under an immutable prefix and
+  # repoints the `snapshot` alias that docs.nervix.io serves to it. A pull request from this
+  # repository builds it only with the `book` label, which it carries only when its task requires the
+  # rendered book; a manual run always builds it. The book needs no image, so adding the label builds
+  # it in that label's own run. Every pull request's checks job runs the script tests that
+  # `just book` runs first.
   build-book:
     name: build-book
-    needs: [meta, build-arch]
     runs-on: ubuntu-latest
     # `just book` recaptures the console screenshots and renders the nervix-cli
     # reference from the current binary, so this job compiles the workspace and
     # drives a real browser rather than only rendering Markdown.
     timeout-minutes: 60
+    # The label's run and a push's run of one pull request are in different workflow groups, so the
+    # newer book build replaces the older one here and only one of them publishes.
+    concurrency:
+      group: build-book-${{ github.ref }}
+      cancel-in-progress: true
     if: >-
-      github.event.action != 'labeled' &&
       github.event_name != 'schedule' &&
       (github.event_name != 'pull_request' ||
-        github.event.pull_request.head.repo.full_name == github.repository)
+        (github.event.pull_request.head.repo.full_name == github.repository &&
+          contains(github.event.pull_request.labels.*.name, 'book') &&
+          (github.event.action != 'labeled' || github.event.label.name == 'book')))
     steps:
       - name: Checkout
         uses: actions/checkout@v4

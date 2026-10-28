@@ -49,7 +49,12 @@ use nervix_vm::{
     program::{FunctionName, Span},
 };
 use regex::Regex;
-use roto::{FileTree, NoCtx, RegistrationError, RotoString, Runtime, TypedFunc, Val, library};
+use roto::{
+    Runtime, TypedFunc, library,
+    load::FileTree,
+    runtime::{RegistrationError, context::NoCtx, items::Registerable},
+    value::{RotoString, Val},
+};
 use thiserror::Error;
 
 const DEFAULT_WATCHDOG: Duration = Duration::from_secs(5);
@@ -545,7 +550,7 @@ macro_rules! float_column_library {
     };
 }
 
-fn base_library() -> impl roto::Registerable {
+fn base_library() -> impl Registerable {
     library! {
         #[clone] type NervixArgs = Val<UdfArgs>;
         #[copy] type Timestamp = Val<Timestamp>;
@@ -675,7 +680,7 @@ fn base_library() -> impl roto::Registerable {
     }
 }
 
-fn bool_library() -> impl roto::Registerable {
+fn bool_library() -> impl Registerable {
     library! {
         impl Val<BoolColumn> {
             fn len(value: Val<BoolColumn>) -> u64 { value.0.0.0.len().arch_into() }
@@ -739,7 +744,7 @@ fn bool_library() -> impl roto::Registerable {
     }
 }
 
-fn string_library() -> impl roto::Registerable {
+fn string_library() -> impl Registerable {
     library! {
         #[clone] type StringWhen = Val<StringWhen>;
 
@@ -830,7 +835,7 @@ fn string_library() -> impl roto::Registerable {
     }
 }
 
-fn cast_library() -> impl roto::Registerable {
+fn cast_library() -> impl Registerable {
     library! {
         impl Val<I64Column> {
             fn cast_f64(value: Val<I64Column>) -> Val<F64Column> {
@@ -843,7 +848,7 @@ fn cast_library() -> impl roto::Registerable {
     }
 }
 
-fn list_library() -> impl roto::Registerable {
+fn list_library() -> impl Registerable {
     library! {
         impl Val<VecStringColumn> {
             fn len(value: Val<VecStringColumn>) -> u64 { value.0.0.0.len().arch_into() }
@@ -899,7 +904,7 @@ fn list_library() -> impl roto::Registerable {
     }
 }
 
-fn datetime_library() -> impl roto::Registerable {
+fn datetime_library() -> impl Registerable {
     library! {
         impl Val<DatetimeColumn> {
             fn len(value: Val<DatetimeColumn>) -> u64 { value.0.0.0.len().arch_into() }
@@ -956,7 +961,7 @@ fn deterministic_runtime() -> error_stack::Result<Runtime<NoCtx>, UdfError> {
     Ok(runtime)
 }
 
-fn volatile_library() -> impl roto::Registerable {
+fn volatile_library() -> impl Registerable {
     library! {
         fn now() -> Val<Timestamp> {
             Val(call_timestamp())
@@ -1388,8 +1393,8 @@ fn compile_udf(
     }
     let wrapper = generated_wrapper(&model);
     let source = format!("{}\n{wrapper}", model.code);
-    let mut package = match FileTree::test_file("udf.roto", &source, 0).compile(&runtime) {
-        Ok(package) => package,
+    let mut blob = match runtime.compile(FileTree::test_file("udf.roto", &source, 0)) {
+        Ok(blob) => blob,
         Err(report) => {
             let mut diagnostics = String::new();
             report.write(&mut diagnostics, false).discarded(
@@ -1406,12 +1411,12 @@ fn compile_udf(
             return Err(Report::new(UdfError::Compile { diagnostics }));
         }
     };
-    if package.run_tests().is_err() {
+    if blob.run_tests().is_err() {
         return Err(Report::new(UdfError::TestsFailed));
     }
     let entry = {
         let mapping_input =
-            package.get_function::<fn(Val<UdfArgs>) -> Val<AnyColumn>>("__nervix_entry");
+            blob.get_function::<fn(Val<UdfArgs>) -> Val<AnyColumn>>("__nervix_entry");
         match mapping_input {
             Ok(mapped_value) => Ok(mapped_value),
             Err(error) => Err({

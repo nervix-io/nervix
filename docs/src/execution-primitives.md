@@ -147,6 +147,13 @@ request therefore refuses immediately when no room is available, releasing the i
 read can progress. Metadata and Arrow sections follow the same rule; framing reads release their
 charges before reading the next frame.
 
+Stream request envelopes, snapshot staging writes and captured checkpoint conversion admit
+additional allocations without queueing while their input remains charged.
+They refuse the additional allocation with its typed admission cause and release their retained
+work on failure. Consensus storage takes separate Commands and Bulk turns before charging a
+working set, and returns the bytes before the turn, so storage waiters do not reserve the room
+the class's other operations need to complete.
+
 The runtime attributes build the selected runtime through a crate path fixed to the boundary: Tokio's
 attribute builds whatever runtime its crate path names, and an attribute that named `tokio` at the
 call site would construct whichever crate a package happened to call `tokio`. Shuttle's own test
@@ -182,7 +189,7 @@ unverified:
 | The WASM runtime's epoch driver and guest-callback time | The epoch driver is an operating-system thread no model runs, which sleeps for real and is stopped by a flag; a guest callback reads its domain time from Tokio's task-local storage, which no model isolates | When the epoch thread observes shutdown, and a callback's time scope, which Shuttle tasks would share while polled |
 | The C binding's session | The binding owns the runtime its host's threads enter and shuts it down in the background, which is its contract with the host and which Shuttle's runtime does not provide | Everything the binding runs; the Rust client it drives has its own checks |
 | The cluster membership transport and its native watch fixtures | Chitchat hands out Tokio's own lock and watch receiver and runs on Tokio's runtime, so the transport tasks it drives wait, sleep and select on Tokio's primitives; native watcher fixtures construct that same external receiver type | Cluster membership gossip; the native watch assertions are not model-checking evidence |
-| Process-wide one-time state: the SIMD instruction level, the interconnect's cryptography provider, and the test and benchmark schema and certificate fixtures | Initialized once per process and read by every later model execution in it | Detection, installation and fixture construction |
+| Process-wide one-time state: the SIMD instruction level, the interconnect's cryptography provider, the ONNX Runtime environment, and the test and benchmark schema and certificate fixtures | Initialized once per process and read by every later model execution in it; ONNX Runtime allows a process one environment, so every node and model inspection in it shares the first | Detection, installation, environment creation and fixture construction |
 | The browser console: its executor installation, and the `futures` channel, `select!` and abort handles its tasks use on the browser's event loop | The browser target runs in no execution mode and has no native capability, so the console takes those families from the `futures` crate, which a native build takes from Tokio | Everything the console runs |
 | The VM benchmarks' allocation probe | A global allocator counts allocations made on every thread | Nothing; the benchmark claims nothing about synchronization |
 | The application unit-test fixtures | Test databases and node ports must differ across every unit test the process runs in parallel, so their identities outlive each test | Nothing a check claims; no model builds the fixtures |
@@ -413,6 +420,16 @@ The FIFO mutex is tracked by Deloxide. Its owner and public workloads are regist
 `tests/deloxide-inventory.toml`; Shuttle covers submission racing worker exit as well as cancellation,
 admission ordering and class isolation. No new atomic publication protocol is introduced.
 
+The public bulk-isolation scenario occupies every node's bulk workers while six sequential
+management mutations and a subsequent domain listing complete, on one- and three-node clusters.
+A production client connects before occupation; its initial follower route and any leader redirect
+remain inside the fully occupied cluster. The mutations share one ten-second budget and the listing
+has another. The harness drives and timestamps replies independently of its cooperative scenario
+runner, checking the sixth mutation's acknowledgement explicitly. Holds remain through readiness
+and stable-leader observations, then cleanup releases them before diagnostics and node stop, even
+after a failed assertion. These harness bounds provide public class-isolation evidence; product
+request deadlines keep their existing owners.
+
 ## Thread Creation Outside The Executor
 
 Starting a thread can bypass the executor's admission, memory charges and cancellation just as
@@ -515,12 +532,13 @@ delivery behavior exercised by external Chaos carries `chaos`. Labels enable evi
 replace the local checks or source-owned applicability review.
 
 Registered Bolero properties use the same production path and complete assertion in ordinary
-randomized/corpus execution and sanitizer fuzzing. Ordinary execution is required when the Bolero
-workflow runs. Sanitizer CI requires a pull request carrying `fuzz`; an unlabeled, scheduled or
-manually dispatched run expects a sanitizer skip. Check may exclude the entire reusable Bolero
-call only after verifying its prose-only selection without `fuzz`. A skip contributes no fuzz
-execution or coverage. [Property Testing And Fuzzing](./property-testing-and-fuzzing.md) owns this
-policy, its inventory and failure accounting.
+randomized/corpus execution and sanitizer fuzzing. Randomized/corpus CI requires a pull request
+carrying `bolero-random`, which a task requests only when it requires that run, and sanitizer CI,
+the preferred Bolero evidence, one carrying `fuzz`; an unlabeled pull request expects both skips,
+and a scheduled or manually dispatched run a sanitizer skip. Check may exclude the entire reusable
+Bolero call only after verifying its prose-only selection without either label. A skip contributes
+no execution or coverage of its mode. [Property Testing And Fuzzing](./property-testing-and-fuzzing.md)
+owns this policy, its inventory and failure accounting.
 
 Use the toolchain files' declared `llvm-tools`: stable instrumentation and exports use the stable
 compiler's tools, and the isolated architecture analysis and sanitizer campaigns use their own
