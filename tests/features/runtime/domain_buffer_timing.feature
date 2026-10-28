@@ -145,10 +145,12 @@ Feature: Domain-paced branch buffering
       """
       {"tenant":"beta","sequence":1,"path":"immediate"}
       """
-    Then within "500ms" the relay subscription receives payloads
+    # Keep the original receive deadline while this caller waits beyond it. At rate 0.0001,
+    # a wrongly logical 100us batching minimum would already require one physical second.
+    Then within "500ms" the relay subscription receives payloads with its caller delayed by "1s"
       """
-      {"path":"immediate","sequence":1,"tenant":"alpha"}
-      {"path":"immediate","sequence":1,"tenant":"beta"}
+      key={"tenant":"alpha"} payload={"path":"immediate","sequence":1,"tenant":"alpha"}
+      key={"tenant":"beta"} payload={"path":"immediate","sequence":1,"tenant":"beta"}
       """
 
     Examples:

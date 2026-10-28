@@ -21,7 +21,7 @@ use openraft::{
     entry::RaftEntry as _, type_config::alias::CommittedLeaderIdOf, vote::RaftLeaderId as _,
 };
 
-use super::{LogChunkState, LogEntryChunk};
+use super::{LogChunkState, LogEntryChunk, WorkingSet};
 use crate::{LogIdOf, TypeConfig};
 
 #[test]
@@ -52,7 +52,10 @@ fn shuttle_a_consumed_log_chunk_releases_its_charge_before_the_consumer_parks() 
                     .collect::<Vec<_>>();
                 let mut chunk = LogChunkState::Buffered(LogEntryChunk {
                     entries: entries.into_iter(),
-                    _reservation: charge,
+                    _working_set: WorkingSet {
+                        reservation: charge,
+                        turn: None,
+                    },
                 });
                 assert_eq!(
                     chunk

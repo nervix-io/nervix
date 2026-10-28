@@ -100,6 +100,7 @@ Build configuration in dependency order:
    is rejected until a selected domain exists.
 2. Register and upload resources before statements that reference their versions or mounted files.
    Resources are domain-owned, so declare and upload them in the domain that references them.
+   For pending replica diagnosis and upload completion, follow the resource lifecycle guidance.
    VHOST TLS, protobuf codec, protobuf signaling protocol, inferencer, WASM processor, hash map, and
    client mount bindings require `VERSION <n>` or `VERSION LATEST`. `LATEST` resolves to the highest
    completed version when the statement is applied (at `COMMIT` for queued statements) and the
@@ -508,11 +509,20 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   node, so size it for the node's whole workload rather than per emitter, and expect one pool per
   node the client is placed on. Read the dedicated `Common` → `Database Client Connection Pools`
   documentation entry before choosing values.
+- A `REDIS` client's command pool takes `pool_idle_timeout_ms` and `pool_max_lifetime_ms`, 10 and
+  30 minutes by default, and never applies them to a Pub/Sub ingestor's subscription connection.
+  Read `Connection lifetimes` in that same pools entry before choosing values; `DESCRIBE CLIENT
+  <name>` shows both, marking an omitted one `(default)`.
 - Give a `POSTGRES` client an absolute `postgres://` or `postgresql://` `addr` URL that selects
   either `sslmode=disable` or `sslmode=verify-full`; no other mode is accepted and there is no
   opportunistic fallback. Mounted `tls_ca_file`, `tls_cert_file`, and `tls_key_file` are the
   TLS-file interface, certificate and key must be supplied together, and TLS files require
   `verify-full`.
+- Give a `RABBITMQ` client an `amqp://` or `amqps://` `addr` that names a host and no port 0; Nervix
+  refuses any other address before commit. Mounted `tls_ca_file`, `tls_cert_file` and
+  `tls_key_file` apply to `amqps` only, certificate and key must be supplied together, and the
+  connection presents them to a broker that requires a client certificate. Read
+  [Ingestors → RabbitMQ](../../../docs/src/ingestors.md#rabbitmq).
 - Treat every route as a newly constructed output. Add `INHERIT` only where that node permits it,
   and initialize every required output field on set-only routes.
 - Add a route-local message error policy. Add the required general/global policy for the chosen

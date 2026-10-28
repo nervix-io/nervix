@@ -838,9 +838,9 @@ async fn a_range_is_split_where_the_next_entry_would_exceed_its_write() -> TestR
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
         nervix_primitives::task::consume_budget().await;
         let mut harness = Harness::new().await?;
-        let reservation = StoreInner::reserve(&harness.executor, StorageCharge::Commands).await?;
-        let limit = DurableBatch::byte_limit(&reservation)?;
-        drop(reservation);
+        let working_set = harness.store.inner.admit(StorageCharge::Commands).await?;
+        let limit = DurableBatch::byte_limit(&working_set.reservation)?;
+        drop(working_set);
         // Two small entries share a write, a large one does not fit beside both of them but fits
         // beside one, so the range is written as entries 1 and 2, then 3 and 4, then 5.
         let small = limit / 5;
@@ -889,9 +889,9 @@ async fn a_range_is_split_where_the_next_entry_would_exceed_its_write() -> TestR
 #[nervix_primitives::test]
 async fn entries_before_one_that_cannot_be_stored_are_written_first() -> TestResult {
     let mut harness = Harness::new().await?;
-    let reservation = StoreInner::reserve(&harness.executor, StorageCharge::Commands).await?;
-    let limit = DurableBatch::byte_limit(&reservation)?;
-    drop(reservation);
+    let working_set = harness.store.inner.admit(StorageCharge::Commands).await?;
+    let limit = DurableBatch::byte_limit(&working_set.reservation)?;
+    drop(working_set);
     let entries = vec![
         Ok((Harness::entry(1, Harness::admission(1, limit / 5)?), None)),
         Ok((Harness::entry(2, Harness::admission(2, limit)?), None)),
@@ -1059,6 +1059,100 @@ async fn exhausted_log_chunks_leave_room_for_another_reader_and_source_control()
         harness.executor.snapshot().commands_memory.reserved_bytes,
         0
     );
+    Ok(())
+}
+
+#[test]
+fn the_store_has_as_many_commands_turns_as_leave_room_beside_its_working_sets()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Command state working sets are 16 MiB with the default operation limits.
+    for (commands, turns) in [(16, 1), (24, 1), (32, 1), (48, 2)] {
+        let executor = Executor::new(ExecutionConfig {
+            budgets: MemoryBudgets {
+                commands: ByteUnit::Mebibyte(commands),
+                ..MemoryBudgets::default()
+            },
+            ..ExecutionConfig::default()
+        })?;
+        let admission = WorkingSetAdmission::new(&executor)?;
+        assert_eq!(
+            admission.commands_turns.available_permits(),
+            turns,
+            "a {commands} MiB Commands budget"
+        );
+    }
+    Ok(())
+}
+
+#[nervix_primitives::test]
+async fn a_log_read_waiting_behind_a_held_chunk_leaves_room_for_source_control() -> TestResult {
+    let mut harness = Harness::new().await?;
+    harness.append(2).await?;
+    let mut holding = LogEntryStream::new(harness.store.inner.clone(), .., None);
+    let mut waiting = LogEntryStream::new(harness.store.inner.clone(), .., None);
+
+    // A replication stream whose follower has not answered yet has taken part of its chunk, so the
+    // chunk keeps its whole working set charged until the stream takes the rest.
+    let first = holding.next().await?.verified("two entries were appended");
+    assert_eq!(first.log_id.index, 1);
+    // A second read's working set does not fit beside the held one, so it waits. Its wait must
+    // leave the rest of the Commands class to the class's other work.
+    let waiting_read = waiting.next();
+    tokio::pin!(waiting_read);
+    assert!(
+        waiting_read.as_mut().now_or_never().is_none(),
+        "a second working set does not fit beside the held chunk"
+    );
+    let control = harness
+        .executor
+        .try_reserve(MemoryClass::Commands, 176)
+        .assured("a log read waiting for its working set leaves room for a source control call");
+    drop(control);
+
+    let second = holding
+        .next()
+        .await?
+        .verified("the held chunk has one entry left");
+    assert_eq!(second.log_id.index, 2);
+    let waited = waiting_read
+        .await?
+        .verified("the waiting read finds the stored entries");
+    assert_eq!(waited.log_id.index, 1);
+    Ok(())
+}
+
+#[nervix_primitives::test]
+async fn a_storage_job_waiting_behind_a_held_chunk_leaves_room_for_source_control() -> TestResult {
+    let mut harness = Harness::new().await?;
+    harness.append(2).await?;
+    let mut holding = LogEntryStream::new(harness.store.inner.clone(), .., None);
+    let first = holding.next().await?.verified("two entries were appended");
+    assert_eq!(first.log_id.index, 1);
+
+    let mut reader = harness.store.get_log_reader().await;
+    let waiting_job = reader.try_get_log_entries(..);
+    tokio::pin!(waiting_job);
+    assert!(
+        waiting_job.as_mut().now_or_never().is_none(),
+        "a storage job's working set does not fit beside the held chunk"
+    );
+    let control = harness
+        .executor
+        .try_reserve(MemoryClass::Commands, 176)
+        .assured("a storage job waiting for its working set leaves room for a source control call");
+    drop(control);
+
+    let second = holding
+        .next()
+        .await?
+        .verified("the held chunk has one entry left");
+    assert_eq!(second.log_id.index, 2);
+    let entries = waiting_job.await?;
+    let indexes = entries
+        .iter()
+        .map(|entry| entry.log_id.index)
+        .collect::<Vec<_>>();
+    assert_eq!(indexes, vec![1, 2]);
     Ok(())
 }
 
@@ -1765,7 +1859,7 @@ impl CommitBackend for CrashDisk {
 #[nervix_primitives::test]
 async fn power_loss_discards_unsynced_records_and_keeps_whole_synced_revisions() -> TestResult {
     let harness = Harness::new().await?;
-    let reservation = StoreInner::reserve(&harness.executor, StorageCharge::Commands).await?;
+    let working_set = harness.store.inner.admit(StorageCharge::Commands).await?;
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
         nervix_primitives::task::consume_budget().await;
         let disk = CrashDisk::default();
@@ -1777,7 +1871,7 @@ async fn power_loss_discards_unsynced_records_and_keeps_whole_synced_revisions()
             DomainSchedule::new(domain.id.clone(), [], vec![]),
         );
         preceding.last_applied_log_id = Some(Harness::log_id(1));
-        let mut batch = DurableBatch::new(&reservation)?;
+        let mut batch = DurableBatch::new(&working_set.reservation)?;
         preceding.write_changes(
             &StateMachineData::default(),
             &mut batch,
@@ -1795,7 +1889,7 @@ async fn power_loss_discards_unsynced_records_and_keeps_whole_synced_revisions()
         succeeding.last_applied_log_id = Some(Harness::log_id(2));
         succeeding.runtime_revision = 2;
         disk.state.lock().fail_at = Some(boundary);
-        let mut batch = DurableBatch::new(&reservation)?;
+        let mut batch = DurableBatch::new(&working_set.reservation)?;
         succeeding.write_changes(&preceding, &mut batch, &harness.store.inner.sm)?;
         assert!(batch.commit(&disk).is_err());
         disk.power_loss();
@@ -1804,7 +1898,7 @@ async fn power_loss_discards_unsynced_records_and_keeps_whole_synced_revisions()
             StorageBoundary::BeforeCommit => assert_eq!(recovered, preceding_image),
             StorageBoundary::AfterSync => {
                 let expected_disk = CrashDisk::default();
-                let mut batch = DurableBatch::new(&reservation)?;
+                let mut batch = DurableBatch::new(&working_set.reservation)?;
                 succeeding.write_changes(
                     &StateMachineData::default(),
                     &mut batch,
@@ -1873,8 +1967,8 @@ async fn replica_update_writes_one_record_and_metadata_amid_unrelated_graphs() -
     assert_eq!(applied.response, ConsensusResponse::Applied);
     succeeding.last_applied_log_id = Some(Harness::log_id(20_000));
     succeeding.record_runtime_revision(20_000, &applied);
-    let reservation = StoreInner::reserve(&harness.executor, StorageCharge::Commands).await?;
-    let mut batch = DurableBatch::new(&reservation)?;
+    let working_set = harness.store.inner.admit(StorageCharge::Commands).await?;
+    let mut batch = DurableBatch::new(&working_set.reservation)?;
     succeeding.write_changes(&preceding, &mut batch, &harness.store.inner.sm)?;
     let disk = CrashDisk::default();
     batch.commit(&disk)?;

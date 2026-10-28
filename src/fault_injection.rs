@@ -61,10 +61,12 @@ mod handoff_gate_link;
 mod live_view_gap;
 #[cfg(test)]
 mod live_view_gap_tests;
+mod materialized_fetch_hold;
 mod model_publication;
 mod pause;
 mod relay_memory;
 mod relocation_commit;
+mod resource_discovery;
 mod resource_publication;
 #[cfg(test)]
 mod resource_publication_tests;
@@ -210,6 +212,9 @@ struct FaultInjectionState {
     /// Waits, keyed by a relay processor, that the processor spends before each read of its
     /// materialized dependencies, as a read slow to reach the node that holds the state would.
     delayed_materialized_dependency_reads: DashMap<DomainNodeRef, Duration, RandomState>,
+    /// Holds, keyed by node, of that node's next materialized snapshot fetch on its first received
+    /// chunk until the node's restore checkpoint maintenance asks for bulk memory.
+    materialized_snapshot_fetch_holds: DashMap<ClusterNodeName, Arc<TestPause>, RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
     /// Refusals of a node's next uploaded-version publication, each keeping whether a publication
@@ -447,6 +452,7 @@ enum CommandPausePoint {
     RelocationPublication(DomainName),
     ResponseDelivery(ClusterNodeName),
     ResourceInstallation(ClusterNodeName),
+    ResourceSourceDiscovery(ClusterNodeName),
     RestoreStep {
         node_id: ClusterNodeName,
         step: RestoreStep,
@@ -530,6 +536,7 @@ impl Default for FaultInjection {
                 delayed_source_confirmations: DashMap::default(),
                 delayed_stopped_state_writes: DashMap::default(),
                 delayed_materialized_dependency_reads: DashMap::default(),
+                materialized_snapshot_fetch_holds: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
                 refused_resource_publications: DashMap::default(),
                 failed_restore_checkpoint_stagings: DashMap::default(),

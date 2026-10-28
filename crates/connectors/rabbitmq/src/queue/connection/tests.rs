@@ -194,23 +194,6 @@ async fn loopback_listener(address: IpAddr) -> TcpListener {
         .assured("a loopback port is available")
 }
 
-#[test]
-fn hosts_are_read_with_the_url_grammar() {
-    for (addr, host) in [
-        ("amqp://guest:guest@[::1]:5672/%2f", "::1"),
-        ("amqps://guest:guest@[2001:db8::1]:5671/%2f", "2001:db8::1"),
-        ("amqp://guest:guest@127.0.0.1:5672/%2f", "127.0.0.1"),
-        ("amqp://guest:guest@rabbitmq.nervix.test:5672/%2f", BROKER),
-        (
-            "amqp://guest:guest@rabbitmq.nervix.test.:5672/%2f",
-            "rabbitmq.nervix.test.",
-        ),
-    ] {
-        let uri = RabbitMqBroker::uri(addr).assured("the address is a valid AMQP URI");
-        assert_eq!(uri.authority.host, host, "{addr}");
-    }
-}
-
 #[nervix_primitives::test]
 async fn invalid_addresses_and_ca_files_are_configuration_failures() {
     let fixture = Fixture::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
@@ -241,6 +224,11 @@ async fn invalid_addresses_and_ca_files_are_configuration_failures() {
         (
             entries("amqp://guest:secret@127.0.0.1:99999/%2f"),
             "an invalid port",
+        ),
+        (entries("amqp:/%2f"), "an address that names no host"),
+        (
+            entries("amqp://guest:secret@127.0.0.1:0/%2f"),
+            "an address whose port is zero",
         ),
         (tls(&not_utf8), "a CA file that is not UTF-8"),
         (tls(&missing), "a CA file that cannot be read"),
@@ -746,3 +734,9 @@ fn a_zero_connection_budget_leaves_nothing_for_address_attempts() {
         vec![Duration::ZERO, Duration::ZERO]
     );
 }
+
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod tls;
