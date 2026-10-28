@@ -1528,6 +1528,21 @@ coverage-visual-create-report output="target/visual-create.lcov":
 coverage-lib output *args:
     cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
 
+# Append the OTEL and related connector-admission scenarios to current-source ordinary profiles.
+# Start a new source generation with coverage-clean-workspace before collecting its owners.
+coverage-otel output="target/otel.lcov": build-web-console
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --no-clean --features testing --test scenarios \
+        --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/otel*.feature") }} \
+        --concurrency 4 --retry 0
+    cargo llvm-cov --no-clean --features testing --test scenarios \
+        --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/connector_validation*.feature") }} \
+        --concurrency 4 --retry 0
+
 # Complete public archive representation and restore/re-export coverage, including test sources.
 coverage-backup-archives output="target/backup-archives.lcov": tests-deps
     #!/usr/bin/env bash
@@ -3218,6 +3233,16 @@ client *args: build-deps
 
 build-web-console:
     python3 -m scripts.build_web_console
+
+# Keep the console build's wasm-bindgen CLI selection, installation and verification counters
+# beside the other tooling reports.
+coverage-wasm-bindgen:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    mkdir -p "{{ cargo_target_dir }}/wasm-bindgen-coverage"
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/wasm-bindgen-coverage/python.coverage" --branch --source=scripts.wasm_bindgen,scripts.tests.test_wasm_bindgen -m unittest scripts.tests.test_wasm_bindgen
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/wasm-bindgen-coverage/python.coverage" -o "{{ cargo_target_dir }}/wasm-bindgen-coverage/python.lcov"
 
 build-server:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/server cargo build {{ release_flag }} --package nervix-server --bin nervix-server

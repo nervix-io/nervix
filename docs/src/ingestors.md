@@ -136,6 +136,13 @@ Every source body declares its delivery mode with `MODE`, polled and listener so
   is the longest wait for a partial batch. A `CLIENT PRODUCER` ingestor writes `ACK PARALLEL MAX
   <n> ACK TIMEOUT ...` without `BATCH TIMEOUT`.
 
+`ACK TIMEOUT` bounds how long a payload may make no acknowledgement progress, not how long its
+processing takes. Work under way on its records reports them alive on the physical clock: a node
+that received a record from another node does for as long as it holds it, the node delivering a
+record to another node does until that node has admitted it, and an emitter whose publish waits for
+a retry does for the records it holds. A payload whose records report nothing for its `ACK TIMEOUT`
+is delivered again, and its earlier delivery is not cancelled and may still complete.
+
 Each entity accepts only the modes it can honor, and completion offers only those:
 
 `CREATE` and `ALTER` validate the complete delivery policy before accepting it. Durations must be

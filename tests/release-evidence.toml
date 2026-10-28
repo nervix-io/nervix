@@ -33,14 +33,16 @@ description = "The shipped Kubernetes operator initializes three ready Nervix po
 name = "operator-deployment"
 
 [[method]]
-checks = [
-  "bolero / bolero-random",
-  "bolero / bolero-fuzz-combined",
-  "bolero / bolero-gate",
-]
-description = "Every registered property's randomized and corpus run, its sanitizer-backed fuzz campaign in every shard, and the proof that the shards ran every target once"
+checks = ["bolero / bolero-random"]
+description = "Every registered property's ordinary randomized and corpus run with its configured case count, after compiled discovery of the inventory"
+label = "bolero-random"
+name = "bolero-random"
+
+[[method]]
+checks = ["bolero / bolero-fuzz-combined", "bolero / bolero-gate"]
+description = "Every registered property's sanitizer-backed fuzz campaign in every shard, the proof that the shards ran every target once, and the gate over the requested Bolero modes"
 label = "fuzz"
-name = "bolero"
+name = "bolero-fuzz"
 sharded = ["bolero / bolero-fuzz"]
 
 [[method]]

@@ -14,10 +14,10 @@ suites needs the ordinary workspace report the coverage job merged, the Shuttle,
 Deloxide primitive conformance collections of the extra-tests job, and the collections of the
 diagnostic-evidence job. The `shuttle`, `loom`, `turmoil` and `deloxide` labels add their jobs'
 canonical collections, and a pull request carrying `fuzz` adds the combined live Bolero fuzz
-campaign. The Bolero call's selection record must show that its randomized properties passed and
-that its sanitizer campaigns ran exactly when `fuzz` requested them: a deliberate skip is valid and
-supplies no report. Every required producer job must have succeeded, and every other one must have
-been skipped.
+campaign. The Bolero call's selection record must show that its randomized properties passed exactly
+when `bolero-random` requested them and that its sanitizer campaigns ran exactly when `fuzz`
+requested them: a deliberate skip is valid and supplies no report. Every required producer job must
+have succeeded, and every other one must have been skipped.
 
 Each input is validated before any of its lines joins the union. A native collection must be
 complete; at the tested revision with an unmodified working tree; from this run at an attempt no
@@ -102,6 +102,7 @@ BOLERO_SELECTION = "bolero-selection"
 FUZZ_PRODUCER = "bolero-fuzz"
 FUZZ_MODE = "fuzz"
 FUZZ_LABEL = "fuzz"
+RANDOMIZED_LABEL = "bolero-random"
 COMBINED_SCOPE = "combined shards"
 INVENTORY = Path("tests/bolero-targets.toml")
 PULL_REQUEST = "pull_request"
@@ -243,6 +244,11 @@ class Selection:
     def fuzz_requested(self) -> bool:
         return self.event == PULL_REQUEST and FUZZ_LABEL in self.labels
 
+    def randomized_requested(self) -> bool:
+        """A pull request runs the randomized properties only when `bolero-random` requests them, and
+        a Bolero run of any other event always runs them, as the Bolero call's gate requires."""
+        return self.event != PULL_REQUEST or RANDOMIZED_LABEL in self.labels
+
     def required(self) -> list[Requirement]:
         if not self.tests_required:
             return []
@@ -292,6 +298,7 @@ class Selection:
             "tests_required": self.tests_required,
             "bolero_required": self.bolero_required,
             "fuzz_requested": self.fuzz_requested(),
+            "randomized_requested": self.randomized_requested(),
             "jobs": dict(sorted(self.jobs.items())),
         }
 
@@ -933,8 +940,8 @@ class FullCoverage:
         return None
 
     def bolero_selection(self, found: Found) -> None:
-        """The Bolero call ran the randomized properties, and the sanitizer campaigns exactly when
-        `fuzz` requested them."""
+        """The Bolero call ran the randomized properties exactly when `bolero-random` requested them,
+        and the sanitizer campaigns exactly when `fuzz` requested them."""
         if not self.selection.bolero_required:
             for record in found.selections:
                 self.problem(f"{self.display(record.path)} is a Bolero selection, although this run did not call Bolero")
@@ -951,7 +958,7 @@ class FullCoverage:
 
     def bolero_selection_problem(self, content: Mapping[str, object]) -> str | None:
         """The first reason the Bolero call's record is not this run's, or does not show the
-        randomized properties passed and the sanitizer campaigns run exactly when requested."""
+        randomized properties and the sanitizer campaigns run exactly when requested."""
         run = {"provider": Provider.GITHUB, "run": content.get("run"), "attempt": content.get("attempt")}
         problem = self.selection.admits(run)
         if problem is not None:
@@ -961,8 +968,13 @@ class FullCoverage:
         problem = self.snapshot_problem(content)
         if problem is not None:
             return problem
-        if content.get("randomized") != SUCCESS:
-            return f"records the randomized properties as {content.get('randomized')}"
+        randomized = self.selection.randomized_requested()
+        if content.get("randomized_required") is not randomized:
+            return f"records the randomized properties as required: {content.get('randomized_required')}"
+        if randomized and content.get("randomized") != SUCCESS:
+            return f"records the requested randomized properties as {content.get('randomized')}"
+        if not randomized and content.get("randomized") != SKIPPED:
+            return f"records unrequested randomized properties as {content.get('randomized')}"
         requested = self.selection.fuzz_requested()
         if content.get("sanitizer_required") is not requested:
             return f"records the sanitizer campaigns as required: {content.get('sanitizer_required')}"

@@ -352,7 +352,7 @@ fn secret_metadata_controls_inspection_and_preserves_the_complete_entries() {
 
 #[test]
 fn bolero_schema_checked_client_entries_round_trip() {
-    use std::num::NonZeroUsize;
+    use std::{collections::BTreeMap, num::NonZeroUsize};
 
     use nervix_arbitrary::{Arbitrary, Domain};
     use strum::IntoEnumIterator as _;
@@ -370,6 +370,12 @@ fn bolero_schema_checked_client_entries_round_trip() {
                 .entropy()
                 .index(NonZeroUsize::new(schemas.len()).assured("clients declare schemas"));
             let schema = schemas[index];
+            let mut address_schemes = BTreeMap::new();
+            for key in schema.keys() {
+                if let ClientConfigPresence::OptionalForScheme { address, scheme } = key.presence {
+                    address_schemes.insert(address, scheme);
+                }
+            }
             let mut entries = Vec::new();
             for key in schema.keys() {
                 if matches!(key.presence, ClientConfigPresence::Defaulted(_))
@@ -379,6 +385,13 @@ fn bolero_schema_checked_client_entries_round_trip() {
                 }
                 let value = match key.value {
                     ClientConfigValue::String => arbitrary.string(),
+                    ClientConfigValue::PercentEncodedHeaders => format!(
+                        "x-fixture={}",
+                        percent_encoding::utf8_percent_encode(
+                            &arbitrary.string(),
+                            percent_encoding::NON_ALPHANUMERIC
+                        )
+                    ),
                     ClientConfigValue::Boolean => arbitrary.entropy().flag().to_string(),
                     ClientConfigValue::UnsignedInteger => arbitrary
                         .entropy()
@@ -397,10 +410,17 @@ fn bolero_schema_checked_client_entries_round_trip() {
                             .to_string()
                     }
                     ClientConfigValue::Url(schemes) => {
-                        let index = arbitrary.entropy().index(
-                            NonZeroUsize::new(schemes.len()).assured("a URL declares schemes"),
-                        );
-                        format!("{}://user:password@example.com/api", schemes[index])
+                        let scheme = match address_schemes.get(key.name) {
+                            Some(scheme) => *scheme,
+                            None => {
+                                let index = arbitrary.entropy().index(
+                                    NonZeroUsize::new(schemes.len())
+                                        .assured("a URL declares schemes"),
+                                );
+                                schemes[index]
+                            }
+                        };
+                        format!("{scheme}://user:password@example.com/api")
                     }
                     ClientConfigValue::DriverAddress => {
                         "redis://user:password@example.com/0".to_string()

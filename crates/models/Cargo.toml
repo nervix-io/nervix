@@ -25,6 +25,7 @@ meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }
 nervix-primitives = { workspace = true }
 nonzero_ext = { workspace = true }
+percent-encoding = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

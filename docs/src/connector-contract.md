@@ -91,7 +91,8 @@ Each ingestor and emitter entity declares its accepted modes, quiesce forms, cli
 form, codec and header support, and batching legality in the vocabulary. Direct-value entities
 also declare their mapped-value types there: destination columns accept the current Plexus scalar,
 array and vector types, while OTEL protocol fields require their declared exact types. The OTEL
-connector uses that same type table when checking its prepared input schema.
+connector verifies its prepared input schema against that same type table as an internal plan
+guarantee. An impossible mapped type is not a retryable connector initialization failure.
 
 The registry checks these declarations against the candidate graph before accepting `CREATE` or
 `ALTER`. It rejects duplicate `VALUES` keys, unsupported or wrongly typed mappings, and invalid
@@ -100,6 +101,12 @@ durations must be positive; a zero batch timeout gathers without waiting. Every 
 the shared schedulable deadline bound, and retry maximum must be at least its initial backoff.
 OTEL `RESOURCE` mappings remain literal-only. Required batching is established by validation, so
 planning consumes that guarantee rather than discovering a missing `BATCH` when an emitter starts.
+OTEL field declarations also own literal severity, identifier and enum-name constraints. The
+registry applies those constraints before storing CREATE or ALTER; values computed from records
+retain their per-record checks. Client declarations can restrict an optional key to one URL
+scheme. OTEL's TLS file keys require an HTTPS endpoint independently of the selected protocol,
+before file inspection. Its declared header-pair decoder validates configuration and supplies
+the decoded values to both OTLP transports; each export uses the same once-decoded values.
 An invalid alteration leaves the accepted graph intact. Driver configuration checks and external
 availability retain their own boundaries; these declaration checks perform no transport I/O.
 

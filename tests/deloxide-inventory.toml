@@ -1005,6 +1005,26 @@ scenario = "A resumed materialized cut preserves interleaved branches and genera
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Stopped materialized capture under held Bulk memory, followed by a complete backup and restored branch-local generator output. Existing checkpoint and consensus storage locks are tracked; async memory admission and store-local semaphore turns are outside the detector."
+examples = 2
+feature = "tests/features/cluster/backup_bulk_admission.feature"
+id = "scenario.materialized-bulk-overlap"
+invariant = "A captured reader refuses overlapping Bulk admission without retaining memory; a fresh backup after release restores both tenants completely."
+invocation = "scenarios"
+scenario = "A stopped materialized capture refuses overlapping bulk memory and succeeds after release on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: stopped materialized capture refusal and recovery, including the existing tracked checkpoint and consensus storage lifecycle."
+examples = 2
+feature = "tests/features/cluster/backup_bulk_admission.feature"
+id = "stress.materialized-bulk-overlap"
+invariant = "A captured reader refuses overlapping Bulk admission without retaining memory; a fresh backup after release restores both tenants completely."
+invocation = "stress-restore-scenarios"
+scenario = "A stopped materialized capture refuses overlapping bulk memory and succeeds after release on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "A domain stop that tells each materialized relay checkpoint writer to make its last write once its tasks have ended, holds that write past every task's stop grace and waits for it before the stopped cut reads it. The writers' signal and the snapshot task owner's map are outside the detector; the sealed-generation lock the write takes is tracked."
 examples = 2
 feature = "tests/features/cluster/backup_materialized.feature"
@@ -2853,6 +2873,8 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/storage.rs"
 workloads = [
+  "scenario.materialized-bulk-overlap",
+  "stress.materialized-bulk-overlap",
   "scenario.resource-source-discovery",
   "stress.resource-source-discovery",
   "scenario.resource-upload-publication",
