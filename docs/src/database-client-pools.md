@@ -91,9 +91,12 @@ An acquisition timeout, an inability to connect, or the loss of a connection is 
 failure instead, and follows the emitter's existing retry policy and general-error reporting.
 
 Postgres has a 30-second acquisition deadline covering pool wait, connection establishment,
-authentication and validation, independent of how long an accepted query then runs. MySQL and Redis
-have no separate pool-wait deadline. MongoDB retains its native server-selection and operation
-timeouts.
+authentication and validation, independent of how long an accepted query then runs. MySQL has no
+separate pool-wait deadline. A Redis publish checks its connection out within the client's
+`connect_timeout_ms`, 30 seconds by default, the same deadline that bounds opening each new command
+connection: a checkout that runs out of it reports `checking out a Redis command connection did not
+finish within connect_timeout_ms` with the bound. MongoDB retains its native server-selection and
+operation timeouts.
 
 ## What each bound counts
 
@@ -108,6 +111,55 @@ A Redis client used only by ingestors still declares both bounds but materialize
 until a local publisher needs one. Consequently a client with `POOL SIZE MIN 1 MAX 4`, one local
 publisher and two local Pub/Sub ingestors maintains one command connection and may use up to six
 Redis connections in total: four command connections and two dedicated subscription connections.
+
+## Connection lifetimes
+
+A `REDIS` client declares how long its command pool keeps a connection, with two Nervix-owned
+`CONFIG` keys that `CREATE CLIENT` validates:
+
+| Key | Default | What it limits |
+| --- | --- | --- |
+| `pool_idle_timeout_ms` | `600000`, 10 minutes | How long a command connection may sit idle in the pool |
+| `pool_max_lifetime_ms` | `1800000`, 30 minutes | How old a command connection may become |
+
+Each takes a positive whole number of schedulable milliseconds. A connection that has reached its
+maximum lifetime is closed when the publish that borrowed it returns it, or at the pool's next check
+while it is idle. A connection idle for `pool_idle_timeout_ms` is closed at the next check,
+including one the pool keeps for `MIN`; the pool then opens connections again to keep `MIN`, so a
+quiet client renews its minimum instead of holding the same connections indefinitely. The pool
+checks its idle connections against both lifetimes every 30 seconds, its driver's interval, so an
+idle connection closes up to 30 seconds after it reaches either lifetime.
+
+Set `pool_idle_timeout_ms` below the idle limit of a proxy or managed endpoint in front of Redis,
+and `pool_max_lifetime_ms` below any forced reconnection interval, so the pool retires a connection
+before the endpoint drops it. A replacement connection resolves `addr` again. Neither key affects a
+Redis Pub/Sub ingestor's dedicated subscription connection, which its client's `idle_timeout_ms`
+governs.
+
+```plexus
+CREATE REDIS CLIENT redis_edge
+  POOL SIZE MIN 1 MAX 4
+  CONFIG {
+    'addr' = 'redis://HOST:6379/0',
+    'pool_idle_timeout_ms' = '240000',
+    'pool_max_lifetime_ms' = '900000'
+  };
+```
+
+`DESCRIBE CLIENT redis_edge;` reports both keys:
+
+```plain
+client: redis_edge
+connector: REDIS
+config:
+addr: redis://HOST:6379/0
+pool_idle_timeout_ms: 240000
+pool_max_lifetime_ms: 900000
+```
+
+A client that omits a key reports its default, marked `(default)`, such as
+`pool_max_lifetime_ms: 1800000 (default)`. `SHOW CREATE CLIENT` reports only the keys the client
+was declared with.
 
 ## Accepted values
 
