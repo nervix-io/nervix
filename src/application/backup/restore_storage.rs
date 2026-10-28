@@ -24,11 +24,12 @@
 use std::io::{self, Read, Seek, SeekFrom};
 
 use error_stack::{Report, ResultExt as _};
-use nervix_execution::{MemoryClass, StorageClass};
+use meticulous::OptionExt as _;
+use nervix_execution::{AdmissionError, MemoryClass, Reservation, StorageClass};
 use nervix_interconnect::RemoteOperationFailure;
 use nervix_models::{DomainName, RestoreStateAuthority};
 use nervix_primitives::sync::Arc;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::interconnect::RestoreStateInventory;
 use crate::{
@@ -89,18 +90,26 @@ impl RestoredStateSource {
 use super::interconnect::failure_context;
 
 impl SessionServiceImpl {
+    /// Run one restore checkpoint maintenance sweep, when bulk memory has room for its working set.
     pub(in crate::application) async fn sweep_restore_checkpoint_staging(&self) {
-        let executor = self.inner.runtime.executor();
-        let charge = match executor
-            .reserve(MemoryClass::Bulk, RESTORE_STATE_WORKING_BYTES)
-            .await
-        {
-            Ok(charge) => charge,
+        let charge = self.restore_maintenance_working_set();
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .fault_injection()
+            .restore_maintenance_asked_for_bulk_memory(self.inner.consensus.local_node_id());
+        let charge = match charge {
+            Ok(Some(charge)) => charge,
+            Ok(None) => return,
             Err(error) => {
-                warn!(%error, "restore checkpoint maintenance admission failed");
+                warn!(
+                    error = %format_args!("{error:#}"),
+                    "restore checkpoint maintenance admission failed"
+                );
                 return;
             }
         };
+        let executor = self.inner.runtime.executor();
         let service = self.clone();
         let result = executor
             .run_storage(
@@ -128,7 +137,60 @@ impl SessionServiceImpl {
             Ok(Err(error)) => {
                 warn!(error = %format!("{error:#}"), "restore checkpoint maintenance failed")
             }
-            Err(error) => warn!(%error, "restore checkpoint maintenance executor failed"),
+            Err(error) => warn!(
+                error = %format_args!("{error:#}"),
+                "restore checkpoint maintenance executor failed"
+            ),
+        }
+    }
+
+    /// One sweep's working set, charged only from room the bulk class has free now, or `None` when
+    /// the class cannot hold it now and the sweep is deferred to the next round. A working set
+    /// larger than the whole class is refused.
+    ///
+    /// The charge never waits in the class's queue. A place there takes every byte the class
+    /// releases until it is satisfied, so it would hold every other bulk charge on the node behind
+    /// it, including the next charge of an operation that holds part of the room it waits for. That
+    /// operation could then never release its part, nor the sweep take its working set, while the
+    /// rest of the class stays occupied.
+    fn restore_maintenance_working_set(
+        &self,
+    ) -> Result<Option<Reservation>, Report<AdmissionError>> {
+        let executor = self.inner.runtime.executor();
+        let bulk = executor.memory(MemoryClass::Bulk);
+        let room = bulk
+            .capacity_bytes
+            .checked_sub(bulk.reserved_bytes)
+            .assured("a budget never reserves more than its capacity");
+        // A working set the whole class could never hold is still asked for, so the class refuses
+        // it at once instead of every round deferring a sweep that no room could ever admit.
+        let class_holds_working_set = RESTORE_STATE_WORKING_BYTES <= bulk.capacity_bytes;
+        if class_holds_working_set && room < RESTORE_STATE_WORKING_BYTES {
+            debug!(
+                room,
+                working_set = RESTORE_STATE_WORKING_BYTES,
+                "restore checkpoint maintenance deferred until bulk memory has room for its \
+                 working set"
+            );
+            return Ok(None);
+        }
+        match executor.try_reserve(MemoryClass::Bulk, RESTORE_STATE_WORKING_BYTES) {
+            Ok(charge) => Ok(Some(charge)),
+            // Other bulk work took the room between the read and the charge.
+            Err(refusal)
+                if matches!(
+                    refusal.current_context(),
+                    AdmissionError::BudgetExhausted { .. }
+                ) =>
+            {
+                debug!(
+                    working_set = RESTORE_STATE_WORKING_BYTES,
+                    "restore checkpoint maintenance deferred until bulk memory has room for its \
+                     working set"
+                );
+                Ok(None)
+            }
+            Err(refusal) => Err(refusal),
         }
     }
 
@@ -259,3 +321,15 @@ impl SessionServiceImpl {
             .change_context_lazy(|| failure_context(domain, "restore state installation failed"))?
     }
 }
+
+#[cfg(all(
+    test,
+    feature = "testing",
+    not(any(feature = "shuttle", feature = "loom"))
+))]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "restore_storage_tests.rs"]
+mod tests;
