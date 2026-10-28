@@ -1447,9 +1447,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
-| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>admitted publishes or compact discard acknowledgements the connection reads ahead of the host: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
+| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
-| Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound. |
+| Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound.<br>ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow only. NO ACK retains backpressure. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-ingest).
@@ -1490,12 +1490,17 @@ In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 
 is written to the connection, within one keep-alive interval; the broker answers none. Its
 connection keeps writing those acknowledgements and sending its keep-alive while the ingestor
 waits on a batch's acknowledgement trees, however long a downstream emitter holds them, so the
-broker keeps the session connected and delivers nothing again. The connection reads as many
-publishes as its Receive Maximum admits ahead of the ingestor, 64 under `NO ACK`. A QoS 0 publish,
-which a QoS 1 subscription receives from a publisher that sends at QoS 0, is not held back by the
-broker; once those fill the read-ahead while a batch waits, the connection stops reading, the
-batch's acknowledgement fails and the ingestor reconnects, and the broker delivers the
-unacknowledged QoS 1 publishes again. See
+broker keeps the session connected and delivers nothing again. In an `ACK` mode the read-ahead
+reserves its full Receive Maximum for QoS 1/2 outcomes and holds up to 64 QoS 0 outcomes alongside
+them. A QoS 0 publisher is not held back by the broker, even through a QoS 1 subscription. Nervix
+drops and counts QoS 0 publishes that do not fit, keeping the connection polling and retaining the
+reserved capacity and acknowledgements of QoS 1 publishes. Admitted outcomes retain packet order.
+The per-node Prometheus counter `nervix_ingestor_read_ahead_dropped_payloads_total`, labeled by
+`domain`, `ingestor` and `physical_node_id`, counts each overflow immediately, including during an
+acknowledgement wait. It is separate from the transport-redelivery count in `DESCRIBE INGESTOR`.
+An oversized QoS 0 publish dropped at this boundary counts as overflow only. Under `NO ACK` the
+64-outcome read-ahead applies backpressure when full, which also stops its keep-alive until the
+ingestor reads again. See
 [MQTT source connections](connector-contract.md#mqtt-source-connections).
 
 Every MQTT connection advertises the full protocol framing limit of 268,435,460 bytes in its

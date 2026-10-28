@@ -114,6 +114,12 @@ impl MqttTopicIngestorStartPlan {
             return Err(Report::new(IngestorConnectorStartError::NodeDnsUnavailable));
         };
         let default_client_id = format!("{}~{}", ingestor.domain.as_str(), ingestor.name.as_str());
+        let dispatcher = runtime.inner.remote_dispatcher.load();
+        let read_ahead_dropped = runtime.inner.metrics.ingestor_read_ahead_dropped_payloads(
+            &ingestor.domain,
+            &ingestor.name,
+            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+        );
         let connector = MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
             instances: instance_configs,
             client_id_conflict: MqttTopicIngestorPlan::client_id_conflict(
@@ -127,6 +133,7 @@ impl MqttTopicIngestorStartPlan {
             qos: self.mode.qos(),
             acknowledgement_window: self.mode.acknowledgement_window(),
             dns: dns.clone(),
+            read_ahead_dropped,
         });
         Ok(ResolvedMqttIngestor {
             connector,
