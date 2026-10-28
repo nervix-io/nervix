@@ -153,6 +153,8 @@ pub(crate) enum EmitterStartError {
     HttpRequests,
     #[error("the ordering group did not compile")]
     OrderingGroup,
+    #[error("the envelope did not compile")]
+    Envelope,
     #[error("the FROM WHERE of input relay '{relay}' did not compile")]
     SourceFilter { relay: RelayName },
     #[error("the emitter's client configuration is invalid")]
@@ -506,6 +508,7 @@ mod tests {
             body: nervix_models::EmitterBody::Codec {
                 codec: named("event_codec"),
             },
+            envelope: Box::new(nervix_models::EmitterEnvelope::default()),
             connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
                 ZeroMqPushEmitter {
                     mode: nervix_models::ZeroMqPushPublishingMode::NoAck {

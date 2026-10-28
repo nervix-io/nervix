@@ -128,6 +128,7 @@ tags = [
   "@client_io_03_generation",
   "@remote_ack_owners",
   "@backup_wait",
+  "@stopped_checkpoint_writes",
   "@backup_cut_diagnostics",
   "@backup_parked_wait",
   "@restarted_voter_observation",
@@ -999,6 +1000,16 @@ id = "scenario.materialized-cut"
 invariant = "A resumed materialized cut preserves interleaved branches and generators through restart."
 invocation = "scenarios"
 scenario = "A resumed materialized cut preserves interleaved branches and generators through restart"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A domain stop that tells each materialized relay checkpoint writer to make its last write once its tasks have ended, holds that write past every task's stop grace and waits for it before the stopped cut reads it. The writers' signal and the snapshot task owner's map are outside the detector; the sealed-generation lock the write takes is tracked."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "scenario.materialized-stopped-checkpoint"
+invariant = "STOP waits past the stop grace for a materialized relay's last checkpoint, written once the tasks that change its records have ended, so a stopped cut taken as soon as STOP returns holds the generation a quiesced cut held just before it, on one node and on three nodes with a replica."
+invocation = "scenarios"
+scenario = "A stopped cut taken as soon as STOP returns holds the materialized relay whose last write outlasts the stop grace"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1899,6 +1910,16 @@ id = "stress.materialized-cut"
 invariant = "A resumed materialized cut preserves interleaved branches and generators through restart."
 invocation = "stress-restore-scenarios"
 scenario = "A resumed materialized cut preserves interleaved branches and generators through restart"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: a domain stop that tells each materialized relay checkpoint writer to make its last write once its tasks have ended, holds that write past every task's stop grace and waits for it before the stopped cut reads it. The writers' signal and the snapshot task owner's map are outside the detector; the sealed-generation lock the write takes is tracked."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "stress.materialized-stopped-checkpoint"
+invariant = "STOP waits past the stop grace for a materialized relay's last checkpoint, written once the tasks that change its records have ended, so a stopped cut taken as soon as STOP returns holds the generation a quiesced cut held just before it, on one node and on three nodes with a replica."
+invocation = "stress-restore-scenarios"
+scenario = "A stopped cut taken as soon as STOP returns holds the materialized relay whose last write outlasts the stop grace"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
