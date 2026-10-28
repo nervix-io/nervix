@@ -819,14 +819,14 @@ impl SessionServiceImpl {
         // Reading metadata executes no inference. Keep optimization on the admitted bulk
         // worker too: ONNX's defaults create a physical-core-sized pool for every inspection.
         let builder = builder.with_intra_threads(1).map_err(|source| {
-            Report::new(ort::Error::from(source)).change_context(
+            Report::<ort::Error>::new(source.into()).change_context(
                 InferencerBindingValidationError::SessionBuilder {
                     node: processor_name.clone(),
                 },
             )
         })?;
         let mut builder = builder.with_inter_threads(1).map_err(|source| {
-            Report::new(ort::Error::from(source)).change_context(
+            Report::<ort::Error>::new(source.into()).change_context(
                 InferencerBindingValidationError::SessionBuilder {
                     node: processor_name.clone(),
                 },
