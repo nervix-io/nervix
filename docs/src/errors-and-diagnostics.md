@@ -660,6 +660,12 @@ injector follows the same typed path. WebSocket signaling compilation and execut
 frame encoding and transport causes. The runtime's Syslog source-plan and signaling compilation
 errors keep those reports as typed fields while preserving their startup messages.
 
+A MySQL pool is kept at its `POOL SIZE MIN` by a task no caller waits on, so that task is the only
+witness of a pass that ends below the minimum. It reports `PoolMinimumError::NotRestored`, naming
+the minimum, above the failed checkout's `PoolMinimumError::CheckOut` and the driver's error, at
+`debug`, returns the connections the pass held, and passes again a second later. An emitter that
+needs a connection meanwhile reports its own failed checkout.
+
 An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP emitter: a timeout, a
 DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
 authentication status with its number. The emitter keeps the resolver's `DnsLookupError`, the

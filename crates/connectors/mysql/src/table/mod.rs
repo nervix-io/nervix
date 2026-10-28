@@ -2,10 +2,11 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The node's shared MySQL pool and the task that keeps it at its declared minimum,
-//!   the multi-row insert every write becomes under the emitter's `BATCH` limits and the
-//!   placeholders one statement binds, its bind parameters and their exact encoded size, the
-//!   `ON DUPLICATE KEY` clause of a conflict action, and server-error classification.
+//! - **Owns.** The node's shared MySQL pool and how its driver counts and hands over the
+//!   connections the keeper of its declared minimum restores, the multi-row insert every write
+//!   becomes under the emitter's `BATCH` limits and the placeholders one statement binds, its bind
+//!   parameters and their exact encoded size, the `ON DUPLICATE KEY` clause of a conflict action,
+//!   and server-error classification.
 //! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
 //!   and the `mysql_async` driver.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -49,8 +50,11 @@ use nervix_models::{
     ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, MYSQL_MAX_PLACEHOLDERS, MySqlTableName,
 };
 use nervix_primitives::{sync::atomic::Ordering, time::Instant};
-use nervix_recovery::Reported as _;
 use tracing::{debug, trace};
+
+mod pool_minimum;
+
+use pool_minimum::{KeptPool, PoolMinimum, PoolMinimumError};
 
 const MYSQL: &str = "mysql";
 
@@ -66,18 +70,8 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
 /// The node's shared MySQL pool, with the task that keeps it at its declared minimum.
 pub struct MySqlPool {
     pool: DriverPool,
-    /// Aborted when the shared client closes, which is what stops maintenance with the pool it
-    /// maintains rather than leaving it reconnecting to a database nothing is writing to.
-    _maintenance: PoolMaintenance,
-}
-
-/// The maintenance task of one pool, stopped with the pool it maintains.
-struct PoolMaintenance(nervix_primitives::task::JoinHandle<()>);
-
-impl Drop for PoolMaintenance {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
+    /// Stopped when the shared client closes, together with the pool it keeps.
+    _minimum: PoolMinimum,
 }
 
 /// One connection borrowed from the shared pool, returned to it when this is dropped.
@@ -210,36 +204,21 @@ fn is_record_server_error(state: &str, code: u16) -> bool {
     state.starts_with("22") || state.starts_with("23") || matches!(code, 1153 | 1366 | 3819)
 }
 
-/// Keep `pool` at `minimum` established connections without waiting for traffic.
-///
-/// `mysql_async` treats its minimum as a retention floor: it keeps that many idle connections once
-/// they have been returned, but never opens one. A client whose emitters are idle would therefore
-/// sit below its declared minimum indefinitely, so the shortfall is opened here and released
-/// straight back. Only the shortfall is opened, so this neither exceeds the maximum nor takes
-/// capacity a writer already holds.
-async fn maintain_minimum(pool: DriverPool, minimum: usize) {
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        nervix_primitives::time::sleep(MAINTENANCE_INTERVAL).await;
-        let established = pool.metrics().connection_count.load(Ordering::Relaxed);
-        let Some(shortfall) = minimum.checked_sub(established) else {
-            continue;
-        };
-        // Held together and released together: taking them one at a time would let the pool hand
-        // the same connection back for the next iteration and never reach the minimum.
-        let mut opened = Vec::with_capacity(shortfall);
-        for _ in 0..shortfall {
-            match pool.get_conn().await {
-                Ok(conn) => opened.push(conn),
-                // Keep this attempt's diagnostic before maintenance retries on its next tick.
-                // A writer still reports the result of its own connection attempt separately.
-                Err(error) => {
-                    Err::<(), _>(Report::new(error)).reported("maintain MySQL connection pool");
-                    break;
-                }
-            }
-        }
-        drop(opened);
+/// The driver's pool as the keeper of its declared minimum counts and draws on it.
+impl KeptPool for DriverPool {
+    type Checkout = Conn;
+
+    /// The driver counts a connection from the moment it starts opening it until it closes it,
+    /// whether the connection is idle, checked out or being recycled.
+    fn established(&self) -> usize {
+        self.metrics().connection_count.load(Ordering::Relaxed)
+    }
+
+    /// The driver hands over a connection it holds idle before it opens a new one.
+    async fn check_out(&self) -> Result<Conn, Report<PoolMinimumError>> {
+        self.get_conn()
+            .await
+            .map_err(|error| Report::new(error).change_context(PoolMinimumError::CheckOut))
     }
 }
 
@@ -290,13 +269,10 @@ impl MySqlPool {
             connect().attach_printable(format!("failed to validate connection: {source}"))
         })?;
         drop(conn);
-        let maintenance = PoolMaintenance(nervix_primitives::task::spawn(maintain_minimum(
-            pool.clone(),
-            minimum,
-        )));
+        let kept_minimum = PoolMinimum::keep(pool.clone(), minimum, MAINTENANCE_INTERVAL);
         Ok(Self {
             pool,
-            _maintenance: maintenance,
+            _minimum: kept_minimum,
         })
     }
 

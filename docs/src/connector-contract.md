@@ -2502,9 +2502,11 @@ it does not classify network or server failures as validation outcomes. HTTP res
 retains its UTF-8 and numeric parsing causes beneath the response-head failure.
 
 A MySQL mapped column that the emitter cannot bind fails the whole publish with its exact column
-and Arrow type retained beneath the publish context. It is not a per-record rejection. Pool
-maintenance reports its own failed connection attempt before its next retry; a later writer's
-failure remains a separate diagnostic.
+and Arrow type retained beneath the publish context. It is not a per-record rejection. The task
+that keeps a MySQL pool at `POOL SIZE MIN` reports a pass that ends below it as
+`PoolMinimumError::NotRestored`, naming the minimum, above the failed checkout's `CheckOut` and the
+driver's error, before its next pass retries; a later writer's failure remains a separate
+diagnostic.
 
 The host's source start keeps every connector report it composes an ingestor from. A client
 configuration that does not resolve, a connector plan that fails, such as a Syslog, Redis,
