@@ -408,7 +408,7 @@ impl SessionServiceImpl {
             let action = if confirming {
                 BackupDrainAction::Observe
             } else {
-                BackupDrainAction::FlushIfIdle
+                BackupDrainAction::FlushHeldWork
             };
             let mut quiet = true;
             let mut flushes_complete = true;

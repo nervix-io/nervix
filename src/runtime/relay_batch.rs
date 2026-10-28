@@ -6,7 +6,7 @@ use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
 use nervix_primitives::sync::{Arc, StdArc};
 
-use super::{BranchKey, RecordMetadataColumns};
+use super::{AcknowledgementKeepalive, BranchKey, RecordMetadataColumns};
 use crate::{
     metrics::DeliveryObservation,
     runtime_ack::AckSet,
@@ -691,6 +691,15 @@ impl RelayRecordBatch {
     /// The batch's domain time: the latest ingestion high watermark of any of its rows.
     pub(super) fn domain_timestamp(&self) -> Option<Timestamp> {
         self.metadata.latest_high_watermark()
+    }
+}
+
+impl AcknowledgementKeepalive for RelayRecordBatch {
+    /// Reports every row's acknowledgement alive to its source.
+    fn keep_alive(&self) {
+        for acks in &self.acks {
+            acks.ack_alive();
+        }
     }
 }
 

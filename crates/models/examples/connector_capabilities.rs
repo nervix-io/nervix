@@ -453,6 +453,9 @@ fn client_key(key: &ClientConfigKey) -> Value {
         ClientConfigPresence::RequiredForScheme { address, scheme } => {
             format!("required when `{address}` uses `{scheme}`")
         }
+        ClientConfigPresence::OptionalForScheme { address, scheme } => {
+            format!("optional; requires `{address}` to use `{scheme}`")
+        }
     };
     let owner = match key.owner {
         ClientConfigOwner::Nervix => "Nervix; strict",

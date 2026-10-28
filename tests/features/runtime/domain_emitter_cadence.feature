@@ -302,6 +302,7 @@ Feature: Domain-paced emitter cadence
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
+    And Kafka topic "ack_keepalive_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "ack_keepalive_out_{{test_id}}" is observed
     When these Plexus commands are executed
       """
@@ -342,7 +343,13 @@ Feature: Domain-paced emitter cadence
       """
       {"user_id":77}
       """
-    Then the observed broker does not receive a payload within "1200ms"
+    # The stalled emitter reports this only once it holds the record, so the stall below outlasts
+    # the source's ACK TIMEOUT with the record in the emitter rather than still on its way there.
+    Then within "5s" DESCRIBE EMITTER "kafka_forward" on the leader node contains
+      """
+      transient error: fault injector stalled emitter publish
+      """
+    And the observed broker does not receive a payload within "1200ms"
     When emitter "kafka_forward" leaves stall mode
     Then within "4s" the observed broker receives payloads
       """

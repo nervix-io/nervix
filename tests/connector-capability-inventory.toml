@@ -509,7 +509,7 @@ scenarios = [
 capability = "RESOURCE"
 entity = "OTEL LOGS EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "OTEL refuses header writes and computed resources on <nodes> nodes" },
+  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "OTEL refuses unsupported attributes and computed resources on <nodes> nodes" },
   { feature = "tests/features/runtime/otel_export_retries.feature", scenario = "An OTEL Export request that timed out is sent again byte for byte" },
 ]
 

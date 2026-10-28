@@ -484,6 +484,49 @@ mod tests {
     }
 
     #[test]
+    fn independent_sources_seal_payloads_in_received_order() {
+        // A3 was received before B5/B6 and A4/A7 were admitted. Both input queues then became
+        // ready, so the input owner received B5, A4, B6, A7 while preserving each source's order.
+        let carriers = vec![
+            carrier(1, 0, "source_a", "one"),
+            carrier(2, 1, "source_a", "one"),
+            carrier(3, 2, "source_a", "one"),
+            carrier(5, 3, "source_b", "one"),
+            carrier(4, 4, "source_a", "divider"),
+            carrier(6, 5, "source_b", "one"),
+            carrier(7, 6, "source_a", "one"),
+        ];
+        let packed = pack_buffered_batches(&test_codec(), carriers, test_policy(2))
+            .assured("every carrier has the codec's required integer column");
+        let mut payloads = Vec::new();
+        for outcome in packed.outcomes {
+            let PackedOutcome::Payload(payload) = outcome else {
+                panic!("every selected row fits its payload, found {outcome:?}");
+            };
+            payloads.push((payload.rows, payload.payload));
+        }
+        let position = |batch_index| EmitterRecordPosition {
+            batch_index,
+            row_index: 0,
+        };
+        assert_eq!(
+            payloads,
+            vec![
+                (
+                    vec![position(0), position(1)],
+                    br#"[{"value":1},{"value":2}]"#.to_vec(),
+                ),
+                (vec![position(2)], br#"[{"value":3}]"#.to_vec()),
+                (vec![position(3)], br#"[{"value":5}]"#.to_vec()),
+                (vec![position(4)], br#"[{"value":4}]"#.to_vec()),
+                (vec![position(5)], br#"[{"value":6}]"#.to_vec()),
+                (vec![position(6)], br#"[{"value":7}]"#.to_vec()),
+            ],
+            "compatible rows of a source never rejoin across an intervening source"
+        );
+    }
+
+    #[test]
     fn a_rejected_row_seals_the_payload_between_compatible_carriers() {
         let mut rejected = carrier(2, 1, "source_a", "one");
         rejected.rows = vec![PackingRow::Seal];

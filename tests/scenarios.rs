@@ -2390,6 +2390,13 @@ enum CapturedExport {
 }
 
 impl CapturedExport {
+    fn header_values(&self, name: &str) -> Vec<&[u8]> {
+        match self {
+            Self::Http(request) => request.header_values(name),
+            Self::Grpc(call) => call.header_values(name),
+        }
+    }
+
     /// The path the request was sent to: an OTLP/HTTP path such as `/v1/logs`, or an OTLP/gRPC
     /// method.
     fn path(&self) -> &str {
@@ -2589,6 +2596,30 @@ async fn then_otlp_receiver_eventually_receives_requests(
                 panic!("OTLP receiver '{name}': {error}");
             }
         }
+    }
+}
+
+#[then(
+    expr = "every export request at OTLP receiver {string} has header {string} equal to {string}"
+)]
+fn then_otlp_receiver_exports_have_header(
+    world: &mut ScenarioWorld,
+    receiver: String,
+    header: String,
+    expected: String,
+) {
+    let expected = expand_placeholders(world, &expected);
+    let exports = captured_exports(world, &receiver);
+    assert!(
+        !exports.is_empty(),
+        "the OTLP receiver must have captured an export"
+    );
+    for export in exports {
+        assert_eq!(
+            export.header_values(&header),
+            [expected.as_bytes()],
+            "OTLP receiver '{receiver}' captured a different '{header}' header"
+        );
     }
 }
 
@@ -11983,6 +12014,28 @@ async fn given_junction_reads_materialized_state_slowly(
         nervix_models::DomainNodeRef::node_in(domain, nervix_models::ModelKind::Junction, junction),
         delay,
     );
+}
+
+/// The junction's first read of a message's dependency is slowed too, so a payload that reached
+/// the junction's input may still be read rather than parked. This waits until the junction, whose
+/// reads the scenario slowed, has parked a message on `REQUIRED WAIT`.
+#[then(expr = "junction {string} has parked a message on its materialized state")]
+async fn then_junction_parked_a_message(world: &mut ScenarioWorld, junction: String) {
+    let junction = expand_placeholders(world, &junction);
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let junction = nervix_models::ModelName::try_from(junction.as_str())
+        .assured("the scenario junction is an identifier-shaped name");
+    let processor =
+        nervix_models::DomainNodeRef::node_in(domain, nervix_models::ModelKind::Junction, junction);
+    // A loaded runner delays the slowed read and the delivery before it; the wait ends as soon as
+    // the junction parks the message.
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world.fault_injection.wait_for_materialized_wait(&processor),
+    )
+    .await
+    .expect("the junction parks the message on its materialized state");
 }
 
 #[then(expr = "the last shutdown of node {string} reports its drain-support phase {string}")]

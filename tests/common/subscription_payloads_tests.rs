@@ -16,6 +16,17 @@ use nervix_primitives::{
 
 use crate::subscription_payloads::{PayloadSubscription, SubscriptionPayloads};
 
+/// The receive budget of the slow historical domain's Immediate outline.
+const IMMEDIATE_BUDGET: Duration = Duration::from_millis(500);
+/// What the Immediate outline's 100-microsecond batching minimum would take at `TIME RATE 0.0001`
+/// if it were scaled as logical time.
+const IMMEDIATE_WRONG_CLOCK_CADENCE: Duration = Duration::from_secs(1);
+/// The receive budget of the paced branch-buffering outline.
+const PACED_BUDGET: Duration = Duration::from_secs(5);
+/// What the paced outline's one-minute logical flush and collection would each hold if they ran
+/// on the physical clock instead of the domain's `TIME RATE 1200`.
+const PACED_WRONG_CLOCK_CADENCE: Duration = Duration::from_secs(60);
+
 struct ScriptedSubscription {
     rows: mpsc::Receiver<String>,
     reads: mpsc::Sender<String>,
@@ -41,10 +52,8 @@ async fn immediate_rows_are_received_before_the_delayed_caller_first_polls() {
     let (send, rows) = mpsc::channel(2);
     let (reads, mut read) = mpsc::channel(2);
     let began_at = Instant::now();
-    let observation = SubscriptionPayloads::new(&expected).observe(
-        ScriptedSubscription { rows, reads },
-        Duration::from_millis(500),
-    );
+    let observation = SubscriptionPayloads::new(&expected)
+        .observe(ScriptedSubscription { rows, reads }, IMMEDIATE_BUDGET);
 
     advance(Duration::from_millis(100)).await;
     for payload in &expected {
@@ -70,7 +79,7 @@ async fn immediate_rows_are_received_before_the_delayed_caller_first_polls() {
     assert_eq!(observed.receipts.len(), expected.len());
     for (receipt, expected) in observed.receipts.iter().zip(expected) {
         assert_eq!(receipt.payload, expected);
-        assert!(receipt.received_at.duration_since(began_at) < Duration::from_millis(500));
+        assert!(receipt.received_at.duration_since(began_at) < IMMEDIATE_BUDGET);
     }
     drop(observed.subscription);
 }
@@ -85,8 +94,7 @@ async fn timely_second_sequences_survive_a_caller_stalled_after_the_first_row() 
     send.send(expected[0].clone())
         .await
         .assured("the observer owns the receiver");
-    let observation =
-        SubscriptionPayloads::new(&expected).observe(subscription, Duration::from_millis(800));
+    let observation = SubscriptionPayloads::new(&expected).observe(subscription, PACED_BUDGET);
     let mut observation = std::pin::pin!(observation);
     assert!(poll!(observation.as_mut()).is_pending());
     assert_eq!(read.recv().await, Some(expected[0].clone()));
@@ -107,7 +115,7 @@ async fn timely_second_sequences_survive_a_caller_stalled_after_the_first_row() 
         }
     })
     .await;
-    advance(Duration::from_secs(1)).await;
+    advance(Duration::from_secs(6)).await;
     let observed = observation.await;
     assert!(
         drained.is_ok(),
@@ -116,7 +124,7 @@ async fn timely_second_sequences_survive_a_caller_stalled_after_the_first_row() 
     assert_eq!(observed.receipts.len(), expected.len());
     for (receipt, expected) in observed.receipts.iter().zip(expected) {
         assert_eq!(receipt.payload, expected);
-        assert!(receipt.received_at.duration_since(began_at) < Duration::from_millis(800));
+        assert!(receipt.received_at.duration_since(began_at) < PACED_BUDGET);
     }
     drop(observed.subscription);
 }
@@ -134,8 +142,7 @@ async fn a_duplicate_first_row_cannot_replace_a_missing_second_sequence() {
             .assured("the observer owns the receiver");
     }
     let began_at = Instant::now();
-    let observation =
-        SubscriptionPayloads::new(&expected).observe(subscription, Duration::from_millis(800));
+    let observation = SubscriptionPayloads::new(&expected).observe(subscription, PACED_BUDGET);
     let result = std::panic::AssertUnwindSafe(observation)
         .catch_unwind()
         .await;
@@ -147,7 +154,7 @@ async fn a_duplicate_first_row_cannot_replace_a_missing_second_sequence() {
     };
     assert!(message.contains("timed out waiting for subscription payloads"));
     assert!(message.contains("beta:2"));
-    assert_eq!(began_at.elapsed(), Duration::from_millis(800));
+    assert_eq!(began_at.elapsed(), PACED_BUDGET);
     drop(send);
 }
 
@@ -157,10 +164,8 @@ async fn a_disconnected_subscription_reports_its_cause_without_waiting_for_the_b
     let (reads, _read) = mpsc::channel(1);
     drop(send);
     let began_at = Instant::now();
-    let observation = SubscriptionPayloads::new(&["alpha:2".to_string()]).observe(
-        ScriptedSubscription { rows, reads },
-        Duration::from_millis(800),
-    );
+    let observation = SubscriptionPayloads::new(&["alpha:2".to_string()])
+        .observe(ScriptedSubscription { rows, reads }, PACED_BUDGET);
     let result = std::panic::AssertUnwindSafe(observation)
         .catch_unwind()
         .await;
@@ -175,11 +180,14 @@ async fn a_disconnected_subscription_reports_its_cause_without_waiting_for_the_b
     assert_eq!(began_at.elapsed(), Duration::ZERO);
 }
 
-struct PhysicalCadenceSubscription;
+/// A subscription whose next row arrives only after a cadence the wrong clock would impose.
+struct WrongClockSubscription {
+    cadence: Duration,
+}
 
-impl PayloadSubscription for PhysicalCadenceSubscription {
+impl PayloadSubscription for WrongClockSubscription {
     async fn next_payload(&mut self, budget: Duration) -> io::Result<Option<String>> {
-        match timeout(budget, sleep(Duration::from_secs(1))).await {
+        match timeout(budget, sleep(self.cadence)).await {
             Ok(()) => Ok(Some("alpha:2".to_string())),
             Err(_) => Ok(None),
         }
@@ -187,12 +195,15 @@ impl PayloadSubscription for PhysicalCadenceSubscription {
 }
 
 #[nervix_primitives::test(start_paused = true)]
-async fn a_one_second_physical_cadence_cannot_pass_either_sample_budget() {
-    for budget in [Duration::from_millis(500), Duration::from_millis(800)] {
+async fn each_sample_budget_rejects_the_cadence_of_the_wrong_clock() {
+    for (budget, cadence) in [
+        (IMMEDIATE_BUDGET, IMMEDIATE_WRONG_CLOCK_CADENCE),
+        (PACED_BUDGET, PACED_WRONG_CLOCK_CADENCE),
+    ] {
         nervix_primitives::task::consume_budget().await;
         let began_at = Instant::now();
         let observation = SubscriptionPayloads::new(&["alpha:2".to_string()])
-            .observe(PhysicalCadenceSubscription, budget);
+            .observe(WrongClockSubscription { cadence }, budget);
         let result = std::panic::AssertUnwindSafe(observation)
             .catch_unwind()
             .await;
@@ -200,7 +211,7 @@ async fn a_one_second_physical_cadence_cannot_pass_either_sample_budget() {
             panic!("the wrong clock must fail the same sample");
         };
         let Some(message) = failure.downcast_ref::<String>() else {
-            panic!("the physical cadence must report the receive timeout");
+            panic!("the wrong clock's cadence must report the receive timeout");
         };
         assert!(message.contains("timed out waiting for subscription payloads"));
         assert!(message.contains("alpha:2"));
@@ -220,7 +231,7 @@ impl PayloadSubscription for LateReceiptSubscription {
 
 #[nervix_primitives::test(start_paused = true)]
 async fn a_final_row_at_or_after_the_deadline_cannot_complete_the_sample() {
-    for budget in [Duration::from_millis(500), Duration::from_millis(800)] {
+    for budget in [IMMEDIATE_BUDGET, PACED_BUDGET] {
         for lateness in [Duration::ZERO, Duration::from_nanos(1)] {
             nervix_primitives::task::consume_budget().await;
             let read_elapsed = budget + lateness;
