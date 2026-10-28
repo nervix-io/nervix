@@ -304,7 +304,7 @@ mod tests {
                 .await
                 .expect("loopback listener");
         let address = listener.local_addr().expect("listener address");
-        let server = tokio::spawn(async move {
+        let server = nervix_primitives::task::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("request connection");
             let mut request = tokio::io::BufReader::new(&mut stream);
             let mut line = Vec::new();
