@@ -106,6 +106,7 @@ kind = "cucumber"
 package = "nervix-server"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@execution_class_drain",
   "@kafka_start_generation",
   "@kafka_start_generation_restore",
   "@wasm_reset_authority_recovery",
@@ -128,6 +129,7 @@ tags = [
   "@client_io_03_generation",
   "@remote_ack_owners",
   "@backup_wait",
+  "@stopped_checkpoint_writes",
   "@backup_cut_diagnostics",
   "@backup_parked_wait",
   "@restarted_voter_observation",
@@ -999,6 +1001,16 @@ id = "scenario.materialized-cut"
 invariant = "A resumed materialized cut preserves interleaved branches and generators through restart."
 invocation = "scenarios"
 scenario = "A resumed materialized cut preserves interleaved branches and generators through restart"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A domain stop that tells each materialized relay checkpoint writer to make its last write once its tasks have ended, holds that write past every task's stop grace and waits for it before the stopped cut reads it. The writers' signal and the snapshot task owner's map are outside the detector; the sealed-generation lock the write takes is tracked."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "scenario.materialized-stopped-checkpoint"
+invariant = "STOP waits past the stop grace for a materialized relay's last checkpoint, written once the tasks that change its records have ended, so a stopped cut taken as soon as STOP returns holds the generation a quiesced cut held just before it, on one node and on three nodes with a replica."
+invocation = "scenarios"
+scenario = "A stopped cut taken as soon as STOP returns holds the materialized relay whose last write outlasts the stop grace"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1942,6 +1954,16 @@ scenario = "A resumed materialized cut preserves interleaved branches and genera
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
+coverage = "Under scheduling stress: a domain stop that tells each materialized relay checkpoint writer to make its last write once its tasks have ended, holds that write past every task's stop grace and waits for it before the stopped cut reads it. The writers' signal and the snapshot task owner's map are outside the detector; the sealed-generation lock the write takes is tracked."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "stress.materialized-stopped-checkpoint"
+invariant = "STOP waits past the stop grace for a materialized relay's last checkpoint, written once the tasks that change its records have ended, so a stopped cut taken as soon as STOP returns holds the generation a quiesced cut held just before it, on one node and on three nodes with a replica."
+invocation = "stress-restore-scenarios"
+scenario = "A stopped cut taken as soon as STOP returns holds the materialized relay whose last write outlasts the stop grace"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Under scheduling stress: the first restore route loses leadership before submission, the admitted coordinator is held at its publication hook, and a successor completes the same restore before refusing the held publication. Existing archive and materialized assignment locks are tracked; the async hook selection is outside the detector."
 examples = 1
 feature = "tests/features/cluster/backup_materialized.feature"
@@ -2630,6 +2652,37 @@ invariant = "A model step whose coordinator stopped after pausing its domain run
 invocation = "stress-scenarios"
 scenario = "A model command whose publication met a lapsed leader lease releases its own pause on <cluster_size> nodes"
 selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Class-local executor FIFO admission and drain fences while bulk work is occupied and a sequence of management mutations completes on one and three nodes. Callbacks execute outside the fence; async admission and network waits remain untracked."
+examples = 2
+feature = "tests/features/cluster/bounded_execution.feature"
+id = "scenario.execution-class-drain"
+invariant = "Occupied bulk workers do not prevent management command batches from completing or the cluster from retaining a stable leader."
+invocation = "scenarios"
+scenario = "Occupied bulk execution leaves management work responsive"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: class-local executor FIFO admission and drain fences during bulk saturation and repeated public management mutations."
+examples = 2
+feature = "tests/features/cluster/bounded_execution.feature"
+id = "stress.execution-class-drain"
+invariant = "Occupied bulk workers do not prevent management command batches from completing or the cluster from retaining a stable leader."
+invocation = "stress-scenarios"
+scenario = "Occupied bulk execution leaves management work responsive"
+selections = ["deloxide-stress"]
+
+
+[[owner]]
+gap = "CPU-worker interruption between simulated callbacks belongs to the mutually exclusive Turmoil mode. Native blocking-task teardown before its first callback is not deterministically reached by these public scenarios. Native workloads reach normal FIFO admission, cancellation and draining; the ordinary interrupted-worker regression covers selected and queued destructor cleanup without claiming tracked-lock interleavings."
+path = "crates/execution/src/workers.rs"
+workloads = [
+  "scenario.execution-class-drain",
+  "stress.execution-class-drain",
+  "scenario.materialized-bulk-generations",
+  "stress.materialized-bulk-generations",
+]
 
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"

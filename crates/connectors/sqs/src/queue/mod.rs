@@ -134,12 +134,14 @@ impl PreparedSqsRecord {
         const ENCODED_IN_MEMORY: &str =
             "every term counts bytes of a record this node already holds in memory";
 
+        // SQS QUEUE declares no envelope clause, so the envelope a record carries is empty.
         let EmitterRecord {
             id: record,
             key: _,
             payload,
             headers,
             message_group: group_id,
+            envelope: _,
             occurred_at,
         } = record;
         let body = match XmlChars::into_string(payload) {

@@ -195,10 +195,12 @@ struct FaultInjectionState {
     /// acknowledged through the graph and letting the source confirm the batch's positions on its
     /// transport, as a transport slow to answer an acknowledgement would.
     delayed_source_confirmations: DashMap<DomainNodeRef, Duration, RandomState>,
-    /// Waits, keyed by a deduplicator or window processor, that the snapshot task of each of its
-    /// branches spends after the branch stopped before it writes what the branch published last,
-    /// as storage slow to take a large checkpoint would.
-    delayed_stopped_branch_state_writes: DashMap<DomainNodeRef, Duration, RandomState>,
+    /// Waits, keyed by the node whose state is written, that a snapshot task spends before the last
+    /// write it makes as that state stops, as storage slow to take a large checkpoint would: the
+    /// snapshot task of each branch of a deduplicator or window processor once the branch stopped,
+    /// and the checkpoint writer of the state the node's placement keeps, such as a materialized
+    /// relay's records, once its domain's stop told it to write.
+    delayed_stopped_state_writes: DashMap<DomainNodeRef, Duration, RandomState>,
     /// Waits, keyed by a relay processor, that the processor spends before each read of its
     /// materialized dependencies, as a read slow to reach the node that holds the state would.
     delayed_materialized_dependency_reads: DashMap<DomainNodeRef, Duration, RandomState>,
@@ -519,7 +521,7 @@ impl Default for FaultInjection {
                 transaction_binding_drops: DashMap::default(),
                 delayed_shutdown_cordon_releases: DashMap::default(),
                 delayed_source_confirmations: DashMap::default(),
-                delayed_stopped_branch_state_writes: DashMap::default(),
+                delayed_stopped_state_writes: DashMap::default(),
                 delayed_materialized_dependency_reads: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
                 refused_resource_publications: DashMap::default(),
@@ -1188,14 +1190,15 @@ impl FaultInjection {
             .insert(ingestor, delay);
     }
 
-    /// Makes the snapshot task of every branch of `processor`, a deduplicator or window
-    /// processor, wait `delay` after its branch stops before it writes what the branch published
-    /// last, as storage slow to take a large checkpoint would. A wait longer than a branch's stop
-    /// grace leaves that write running after the branch's task was ended.
-    pub fn delay_stopped_branch_state_writes(&self, processor: DomainNodeRef, delay: Duration) {
-        self.inner
-            .delayed_stopped_branch_state_writes
-            .insert(processor, delay);
+    /// Makes every snapshot task that writes the state of `node` wait `delay` before the last
+    /// write it makes as that state stops, as storage slow to take a large checkpoint would: the
+    /// snapshot task of every branch of a deduplicator or window processor, after its branch
+    /// stopped, and the checkpoint writer of the state `node`'s placement keeps, such as a
+    /// materialized relay's records, on each cluster node that keeps it, after its domain's stop
+    /// told it to write. A wait longer than a stop grace leaves that write running after the task
+    /// that owned the state was ended.
+    pub fn delay_stopped_state_writes(&self, node: DomainNodeRef, delay: Duration) {
+        self.inner.delayed_stopped_state_writes.insert(node, delay);
     }
 
     /// Makes `processor`, a relay processor, wait `delay` before each read of its materialized
@@ -2257,17 +2260,14 @@ impl FaultInjection {
         Some(*delay)
     }
 
-    pub(crate) fn stopped_branch_state_write_delay(
+    pub(crate) fn stopped_state_write_delay(
         &self,
         domain: &DomainName,
         kind: ModelKind,
         entity: &ModelName,
     ) -> Option<Duration> {
-        let processor = DomainNodeRef::node_in(domain.clone(), kind, entity.clone());
-        let delay = self
-            .inner
-            .delayed_stopped_branch_state_writes
-            .get(&processor)?;
+        let node = DomainNodeRef::node_in(domain.clone(), kind, entity.clone());
+        let delay = self.inner.delayed_stopped_state_writes.get(&node)?;
         Some(*delay)
     }
 
