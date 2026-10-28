@@ -743,7 +743,10 @@ and a DNS result by itself never marks a Syslog record delivered.
 Redis command connections receive the node resolver through the driver's DNS hook. A failed
 initial or later pool connection keeps the resolver's typed failure in
 `RedisClientError::Resolve`; a later failure sits beneath `EmitterWriteError::Publish` for the
-emitter host to retry.
+emitter host to retry. No caller waits on the connections a pool opens to restore its
+`POOL SIZE MIN`, so the pool itself is the only witness of a restoration that fails: it reports
+`PoolMinimumError::NotRestored`, naming the minimum, above the checkout's `DeadlineElapsed` for
+`connect_timeout_ms`, at `debug`, and tries again.
 A Pub/Sub source resolves before opening its dedicated stream and retains `DnsLookupError` beneath
 `RedisPubSubIngestorError::Resolve` and `IngestorError::Resume`. A refused address, failed TLS name
 check or failed Redis protocol setup is also a connection failure. None rejects an input message

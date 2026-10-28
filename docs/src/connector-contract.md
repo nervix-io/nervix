@@ -376,6 +376,17 @@ seconds, `bb8`'s reaper interval, so an idle connection closes up to 30 seconds 
 either lifetime. A replacement socket resolves the host again. Neither lifetime closes a Pub/Sub source's dedicated
 connection.
 
+The connector keeps `POOL SIZE MIN` itself rather than through `bb8`'s idle minimum, which counts
+idle connections only and would open another connection beside every one a publisher checks out.
+Opening the pool establishes the minimum as dedicated connections added to the pool before any
+publisher borrows from it, so a connection that fails keeps its typed cause in the open's failure.
+Every pooled connection then signals the pool's keeper task when the pool closes it. The keeper
+counts the established connections, checked-out ones with idle ones, and, below the minimum, holds
+one checkout for every idle connection and every connection missing until all of them finish: the
+idle ones are taken once and `bb8` opens the rest, within the maximum it accounts for and the
+client's `connect_timeout_ms`. A failed restoration is retried as soon as it ends. The keeper stops
+with the pool's last handle.
+
 The driver's Pub/Sub convenience connection does not accept that DNS hook. A source instead
 resolves the configured `redis://` or `rediss://` hostname through the node resolver on every
 initial subscribe and resume, and opens a dedicated TCP or TLS stream. It tries the returned
