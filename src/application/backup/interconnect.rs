@@ -235,21 +235,21 @@ impl SessionServiceImpl {
                 .change_context_lazy(|| {
                     failure_context(&request.domain, "backup state section operation failed")
                 })?;
-            match request.action {
-                BackupDrainAction::FlushIfIdle => {
-                    self.inner
-                        .runtime
-                        .force_flush_domain_if_idle(&request.domain);
+            let status = match request.action {
+                BackupDrainAction::FlushHeldWork => {
+                    self.inner.runtime.flush_held_domain_work(&request.domain)
                 }
                 BackupDrainAction::Confirm => {
                     self.inner.runtime.force_flush_domain(&request.domain);
+                    self.inner
+                        .runtime
+                        .local_domain_drain_status(&request.domain)
                 }
-                BackupDrainAction::Observe => {}
-            }
-            let status = self
-                .inner
-                .runtime
-                .local_domain_drain_status(&request.domain);
+                BackupDrainAction::Observe => self
+                    .inner
+                    .runtime
+                    .local_domain_drain_status(&request.domain),
+            };
             Ok(BackupDrainStatus {
                 admitting_ingestors: status.admitting_ingestors.arch_into(),
                 active_generators: status.active_generators.arch_into(),

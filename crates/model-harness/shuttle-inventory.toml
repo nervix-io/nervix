@@ -274,6 +274,7 @@ checks = [
   "restore::tests::shuttle_restore_reclamation_holds_the_revision_through_queued_installation",
   "storage::chunk_shuttle_tests::shuttle_a_consumed_log_chunk_releases_its_charge_before_the_consumer_parks",
   "storage::working_set_shuttle_tests::shuttle_a_working_set_waiting_for_its_turn_leaves_room_for_source_control",
+  "storage::working_set_shuttle_tests::shuttle_a_bulk_working_set_waiting_for_its_turn_leaves_room_for_snapshot_progress",
 ]
 name = "nervix-consensus"
 

@@ -593,7 +593,7 @@ fn validate_otel_mapping_contract(
     } = connector.mappings();
     let types = nervix_models::EmitterEntityBody::mapped_value_types(connector)
         .verified("every OTEL signal declares its mapped field types");
-    let mut value_keys = HashSet::default();
+    let mut value_expressions = HashMap::default();
     for mapping in values {
         if types
             .value_type(nervix_models::MappedValueSection::Values, &mapping.column)
@@ -604,7 +604,10 @@ fn validate_otel_mapping_contract(
                 key: mapping.column.clone(),
             }));
         }
-        if !value_keys.insert(mapping.column.as_str()) {
+        if value_expressions
+            .insert(mapping.column.as_str(), &mapping.expression)
+            .is_some()
+        {
             return Err(invalid(OtelMappingIssue::DuplicateValue {
                 signal,
                 key: mapping.column.clone(),
@@ -612,7 +615,17 @@ fn validate_otel_mapping_contract(
         }
     }
     for field in connector.value_fields() {
-        if !field.presence.is_required(connector.is_delta()) || value_keys.contains(field.key) {
+        if let Some(expression) = value_expressions.get(field.key) {
+            if !field.rule.admits_literal(expression) {
+                return Err(invalid(OtelMappingIssue::LiteralValue {
+                    signal,
+                    key: field.key,
+                    rule: field.rule,
+                }));
+            }
+            continue;
+        }
+        if !field.presence.is_required(connector.is_delta()) {
             continue;
         }
         let issue = match field.presence {

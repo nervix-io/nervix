@@ -322,6 +322,7 @@ Feature: Configuration backup into a public archive
       """
       {"id":7,"source":"input"}
       """
+    And junction "wait_for_state" has parked a message on its materialized state
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}} --timeout 10s" from node "{{leader}}" into "slow-parked.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"

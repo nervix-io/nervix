@@ -35,6 +35,7 @@ mod emitter;
 mod entity_union;
 mod external_name;
 mod header_model;
+mod header_pairs;
 mod http;
 mod iceberg;
 mod ingestor;
@@ -62,10 +63,10 @@ use strum::{AsRefStr, Display, EnumIter, IntoStaticStr};
 
 pub use self::{
     bounds::*, clickhouse::*, client::*, config_schema::*, configured_client::*, deadline::*,
-    declaration::*, emitter::*, external_name::ExternalNameError, header_model::*, http::*,
-    iceberg::*, ingestor::*, ingestor_metadata::*, kafka::*, mapped_values::*, mongodb::*, mqtt::*,
-    mysql::*, nats::*, otel::*, postgres::*, prometheus::*, pulsar::*, rabbitmq::*, redis::*,
-    sentry::*, sqs::*, syslog::*, websockets::*, zeromq::*,
+    declaration::*, emitter::*, external_name::ExternalNameError, header_model::*, header_pairs::*,
+    http::*, iceberg::*, ingestor::*, ingestor_metadata::*, kafka::*, mapped_values::*, mongodb::*,
+    mqtt::*, mysql::*, nats::*, otel::*, postgres::*, prometheus::*, pulsar::*, rabbitmq::*,
+    redis::*, sentry::*, sqs::*, syslog::*, websockets::*, zeromq::*,
 };
 pub(crate) use self::{entity_union::ALTERED_PAIR_CHECKED, ingestor::AlteredIngestorEntity};
 

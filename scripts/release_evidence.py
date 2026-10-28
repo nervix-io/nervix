@@ -4,10 +4,10 @@
 
 `tests/release-evidence.toml` declares the evidence methods a release is qualified by: the ordinary
 checks every pull request runs, and the label-gated jobs of the Loom, Shuttle, Turmoil, Deloxide,
-Bolero sanitizer, client conformance and external Chaos methods, the Chaos ones against both the
-release image and the Deloxide diagnostic image of the revision. Each method names the label that
-makes CI run it and the checks it must leave behind; a sharded check names the prefix of a matrix
-whose shards must all be present.
+Bolero randomized, Bolero sanitizer, client conformance and external Chaos methods, the Chaos ones
+against both the release image and the Deloxide diagnostic image of the revision. Each method names
+the label that makes CI run it and the checks it must leave behind; a sharded check names the prefix
+of a matrix whose shards must all be present.
 
 `check --pr N` reads the pull request's head revision and labels and every check run GitHub recorded
 on that revision. A revision qualifies only when the pull request carries every method's label and
