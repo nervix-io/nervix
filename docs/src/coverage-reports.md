@@ -67,6 +67,10 @@ the downloaded artifact:
 Only reports the artifact actually exports are inputs; running a focused coverage recipe does not
 register it in CI by itself. Focused Backup, Visual Create, client and runtime recipes export local
 ordinary reports for `coverage-patch`, using the same normalization as the workspace merge.
+`just coverage-otel` appends the OTEL and related connector-admission scenarios to current-source
+ordinary profiles, with the browser build and configured ORT environment. It exports a local
+focused report, rather than a CI merge input. Start a new source generation with
+`just coverage-clean-workspace`; owner collections and this focused recipe can then append to it.
 Checks [outside collected counters](#verification-outside-collected-counters) retain their own
 verdicts, including Deloxide supervision and compiler-cache qualification.
 
