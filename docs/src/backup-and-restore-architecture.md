@@ -188,15 +188,21 @@ after the freeze ends. The leader's backup coordinator runs it in this order:
    and generators, outstanding source acknowledgement roots, relays that admitted a batch while the
    node read its view, relay and node buffers, and emitter buffers and publishes. That is the view
    the shutdown drain uses. A scheduled node that stops answering keeps the round open until the
-   deadline. Two kinds of held work are exempt,
-   because their acknowledgements wait for input the paused domain does not admit and the cut
-   captures them as state: messages parked by `REQUIRED WAIT`, and the rows a window retains until
-   it steps past them, whose acknowledgement shares park the same way. Each force-flush generation
-   re-evaluates the parked messages against the state present, and a message whose dependency is
-   still absent stays parked through that read, so the re-evaluation adds no admitted work and
-   cannot restart the round, however slowly the state is read. Once every node reports no
-   admitted work, the coordinator asks every node to start a confirming force-flush generation and
-   waits until every node reports it finished with no admitted work. New work restarts the round.
+   deadline. A polled node that still holds admitted work starts a force-flush generation to
+   release it, unless one is already running; a node that holds none starts none. Two kinds of held
+   work are exempt, because their acknowledgements wait for input the paused domain does not admit
+   and the cut captures them as state: messages parked by `REQUIRED WAIT`, and the rows a window
+   retains until it steps past them, whose acknowledgement shares park the same way. Each
+   force-flush generation re-evaluates the parked messages against the state present, and a
+   message whose dependency is still absent stays parked through that read, so the re-evaluation
+   adds no admitted work and cannot restart the round, however slowly the state is read. Once every
+   node reports no admitted work, the coordinator asks every node to start a confirming force-flush
+   generation and waits until every node reports it finished with no admitted work. New work
+   restarts the round. A domain that holds no admitted work therefore re-evaluates its parked
+   messages for the confirming generation alone, so a slow dependency read holds the cut for that
+   read, after any periodic re-evaluation already under way when the confirmation arrives. A
+   generation started for a node with nothing to release would be superseded by the confirmation
+   after its participant had taken it, and the participant would read the dependency for both.
 6. **Capture.** Under the remaining budget, the coordinator checks its tenure, reads the domain's
    configuration at the applied revision, which becomes the revision and Raft log entry the archive
    records, and asks every scheduled state owner to capture at that revision, as described in
@@ -321,7 +327,7 @@ sending process:
 
 | Operation | Direction and form | Pool and subquota | Deadline | What the receiver checks |
 | --- | --- | --- | --- | --- |
-| Drain status | The coordinator to every live node and every node the schedule assigns the domain's work to, unary, polled every 50 ms; the coordinator answers itself in-process | Management, Liveness | 2 seconds per request, within the cut's budget | The sender is the current leader. The node applies the current cluster state, then flushes if idle, starts a confirming force-flush generation, or only observes, and reports its admitted-work counters. |
+| Drain status | The coordinator to every live node and every node the schedule assigns the domain's work to, unary, polled every 50 ms; the coordinator answers itself in-process | Management, Liveness | 2 seconds per request, within the cut's budget | The sender is the current leader. The node applies the current cluster state, then starts a force-flush generation while it holds admitted work and none is running, starts a confirming force-flush generation, or only observes, and reports its admitted-work counters. |
 | Capture | The coordinator to every scheduled state owner, and for a live cut every other live node too, concurrently; the coordinator answers itself in-process | Management, Shared | What remains of the cut's budget | The sender is the current leader, the node has applied the cut revision within five seconds, its runtime plan is current and the sender is still the leader. |
 | Capture inventory | The coordinator to each node, unary | Management, Shared | 5 seconds | The sender is the current leader. The reply lists that capture's sections in path order within one management message of at most 64 KiB. |
 | Section fetch | The coordinator to the node that staged a section; a streamed response with its exact length | Bulk, Shared | 30 seconds to open the stream, then 5 seconds without progress | The sender is the current leader and the capture's coordinator. The stage is removed as it is served, so a section is fetched once, in 1 MiB reads. |
@@ -724,10 +730,13 @@ its 2 MiB only from room the bulk class has free when it begins, and otherwise i
 reclaims and measures nothing, publishes no series, and the next sweep tries again. It never waits
 in the class's queue. A place there takes every byte the class releases until it is satisfied, so
 it would hold every other bulk charge on the node behind it, including the next charge of an
-operation that holds part of the room it waits for. Such an operation can never release what it
-holds, and the sweep never gets its room: a materialized snapshot fetch that holds its encoded
-request while it charges the request's envelope, or a received chunk while it charges the write
-that stages it, would stall for as long as the rest of the class stays occupied. Under sustained
+operation that holds part of the room it waits for. Additional admission for a materialized
+snapshot's request envelope, staging operations, stored section reads and captured-group
+conversion therefore refuses without queueing while its input or reader remains charged.
+Refusal releases the operation's retained memory and preserves its typed admission cause;
+incomplete capture publishes no inventory, and a later backup can capture afresh once room
+returns. Consensus Bulk storage independently admits working sets through store-local turns,
+so a second storage working set leaves the rest of the class available for progress. Under sustained
 bulk contention, reclamation therefore waits for room instead of delaying the node's bulk work. A
 bulk class smaller than the working set refuses every sweep at once instead, counting the refusal
 and logging it as a warning, because no free room could ever admit one.
@@ -1088,10 +1097,10 @@ operation under the capability its binding grants is checked by the assignment a
 checks and Loom models. Quiesced capture, restore, offset, generation and ownership behavior is
 established by the ordinary, public and model evidence above, not by those examples.
 
-Ordinary Bolero properties run when the reusable Bolero workflow is selected. Check excludes that
-workflow only for a verified prose-only pull request without `fuzz`; a labeled pull request runs
-both the ordinary properties and sanitizer campaigns. A skipped campaign is neither execution nor
-coverage evidence. Coverage uses the
+The reusable Bolero workflow runs the ordinary randomized properties only for a pull request
+labeled `bolero-random`, and the sanitizer campaigns, the preferred Bolero evidence, only for one
+labeled `fuzz`. Check excludes that workflow only for a verified prose-only pull request carrying
+neither label. A skipped run is neither execution nor coverage evidence. Coverage uses the
 LLVM tools the toolchain declares, and patch coverage is advisory. The measured freeze durations,
 archive throughput and restore times, with their commands and image identities, are recorded on
 [Backup 07](https://app.clickup.com/t/86bc8dbxv); the freeze grows with a domain's branches and

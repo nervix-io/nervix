@@ -1506,7 +1506,7 @@ impl Transport {
                     subquota: M::SUBQUOTA,
                 })
             })?;
-        let (payload, _payload_reservation) = message
+        let (payload, payload_reservation) = message
             .encode_rkyv(
                 self.inner.executor().clone(),
                 M::CLASS,
@@ -1519,15 +1519,9 @@ impl Transport {
             request: M::NAME.to_string(),
             payload,
         };
-        let body = wire::encode_rkyv(
-            self.inner.executor(),
-            M::CLASS.memory_class(),
-            M::CLASS.cpu_class(),
-            M::CLASS.control_body_limit(self.inner.executor()),
-            request,
-        )
-        .await
-        .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
+        let body = wire::encode_stream_request(self.inner.executor(), request, payload_reservation)
+            .await
+            .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
         self.inner
             .open_byte_stream(
                 node,

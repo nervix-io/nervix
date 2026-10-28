@@ -14,6 +14,20 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+An OTEL literal outside its declared field domain is a typed registry mapping issue that names
+the signal, key and required constraint. It carries no literal value. A TLS file key with a
+plaintext endpoint is a typed client-schema scheme refusal before file inspection, for either
+OTLP protocol. Header-pair parsing retains its typed cause beneath the value-free client key
+context. Neither path includes configured header values, file paths or endpoint credentials.
+The encoder verifies mapped types as a plan invariant; a violated invariant does not become a
+repeated connector initialization attempt.
+
+Sentry's offline DSN check retains `sentry_types::ParseDsnError` beneath
+`OfflineClientConfigError` for `dsn`, and connector initialization retains that same report
+beneath its open context. Public command refusals render the reviewed key context, never the
+secret DSN. Its required request deadline uses the shared schema's `MissingRequired` or
+`InvalidValue` refusal for `timeout_ms` before initialization.
+
 MongoDB's explicit-seed URL and delegated options are checked by its native parser without
 network I/O. Pool query options produce the typed `PoolSizing` outcome naming `POOL SIZE`;
 other native refusals retain the driver's error beneath the value-free key context. Its resolved
@@ -593,6 +607,13 @@ a decoding failure. A caller keeps the storage report beneath its own context:
 `OwnershipHandoffError::Persistence` for a handoff, and the domain build's `ExecutionBuildError`
 step, which names the node and the state kind, for a state assignment.
 
+Bulk overlap refusals retain `AdmissionError` beneath `MaterializedSnapshotError::Admission`
+for captured checkpoint reads and group metadata, and beneath `SnapshotStagingError::Admission`
+for staged file operations. These are capacity failures, not malformed snapshots. A stopped
+materialized backup keeps the report beneath its capture context and refuses the backup without
+publishing an inventory. Its incomplete staged sections are released; a new backup after capacity
+returns reads the complete checkpoint afresh.
+
 Native Kafka stream conversion retains the rkyv validation failure beneath `DecodeState` and the
 placement-qualified `StateReplicationError::Capture`. A cancelled conversion keeps `Cancelled` at
 that same boundary without publishing the candidate table. Installation refused after an assignment
@@ -743,7 +764,10 @@ and a DNS result by itself never marks a Syslog record delivered.
 Redis command connections receive the node resolver through the driver's DNS hook. A failed
 initial or later pool connection keeps the resolver's typed failure in
 `RedisClientError::Resolve`; a later failure sits beneath `EmitterWriteError::Publish` for the
-emitter host to retry.
+emitter host to retry. No caller waits on the connections a pool opens to restore its
+`POOL SIZE MIN`, so the pool itself is the only witness of a restoration that fails: it reports
+`PoolMinimumError::NotRestored`, naming the minimum, above the checkout's `DeadlineElapsed` for
+`connect_timeout_ms`, at `debug`, and tries again.
 A Pub/Sub source resolves before opening its dedicated stream and retains `DnsLookupError` beneath
 `RedisPubSubIngestorError::Resolve` and `IngestorError::Resume`. A refused address, failed TLS name
 check or failed Redis protocol setup is also a connection failure. None rejects an input message
@@ -1711,7 +1735,9 @@ the stream even when a large frame spans several progress intervals.
 The interconnect owns three kinds of failure. `TransportError` is a connection, TLS, framing,
 limit, deadline or relay delivery failure of the transport itself, or a prerequisite refusal:
 `RefusedByPeer` when the dialed node refused this node and `IncompatiblePeer` when this node
-refused a peer, each with the peer and the typed `PrerequisiteMismatch`. A judged mismatch, and the
+refused a peer, each with the peer and the typed `PrerequisiteMismatch`. `StaleRoute` names an
+endpoint the stored membership recorded for a member that now leads to another cluster, above the
+cluster-identity mismatch it replaces; it refuses no one. A judged mismatch, and the
 `JoinRefusal` the transport's join progress holds, are declared outcome boundaries: they are what a
 join decided, not a failure of the node that judged it, and the server decides from their typed
 values. `RequestError` is a typed request that could not be admitted, encoded, delivered or
@@ -1926,11 +1952,13 @@ evaluated it. The proposer wraps the typed refusal in a new report as
 `ConsensusTransactionError::Mutation`, beside `Consensus` for a proposal that failed and
 `InvalidResponse` for a response of another kind.
 
-A leader that leaves a gossip-discovered node outside the membership records why as a typed
-admission refusal rather than a report: the node has published no prerequisite record the leader
-can read, or it cannot run beside a live voter, which it names with the mismatch. The refusal is an
-outcome of membership reconciliation, logged once while it holds, and never fails the
-reconciliation.
+A leader that refuses a run, or leaves a gossip-discovered node outside the membership, records why
+as a typed admission refusal rather than a report: the node has published no prerequisite record the
+leader can read, or it cannot run beside a live voter whose run the leader accepted, which it names
+with the mismatch. The refusal is an outcome of membership reconciliation, logged once while it
+holds, and never fails the reconciliation. The leader publishes a refused run's `AdmissionVerdict`
+in gossip, and the joining node turns its own into the `JoinRefusal` it stops with, the mismatch
+reversed to read from its side.
 
 The durable store's own failure is a `StorageFailure`: a write beyond its admitted byte budget, a
 record that does not encode, a failed database write, stored state of an unrecognized shape, a
@@ -2837,9 +2865,11 @@ refuse, and unit tests beside each owner.
 | The formatter reports rejected source with its stage and exit status | `plexus_format.feature` |
 | Input a decoder must refuse fails with the owner's typed error and never panics | The registered Bolero targets `plexus-statement-text`, `models-duration-text`, `wasm-protocol-malformed`, `runtime-arrow-bodies-malformed`, `client-producer-batches-malformed`, `relay-wire-messages-malformed`, `client-discriminators`, `backup-malformed-records` and `consensus-state-corruption` |
 
-Every registered Bolero property runs as an ordinary randomized and corpus test for each pull
-request. The sanitizer-backed fuzz campaign over the same targets runs in CI only for a pull
-request labeled `fuzz`; any other run skips it, and a skipped campaign is no fuzz evidence.
+Every registered Bolero property runs as an ordinary test in the ordinary suites. CI's randomized
+and corpus job over the registered targets runs only for a pull request labeled `bolero-random`,
+and the sanitizer-backed fuzz campaign over the same targets, the preferred Bolero evidence, only
+for one labeled `fuzz`; any other pull request skips them, and a skipped run is no evidence of its
+mode.
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md#commands-and-enforcement) owns the
 commands and the gate.
 

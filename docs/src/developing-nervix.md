@@ -17,7 +17,7 @@ cd nervix
 Nervix is developed on Linux x86_64, Linux aarch64, and macOS arm64. The `just` recipes fetch an
 ONNX Runtime build for the host and stop on any other.
 
-The server uses `ort` 2.0.0-rc.13 with its highest supported C API level, 28. The downloader pins
+The server uses `ort` 2.0.0-rc.15 with C API level 28. The downloader pins
 ONNX Runtime 1.30.0 and installs it under `.nervix-deps/onnxruntime`. Download the CPU package or,
 on Linux x86_64, the CUDA 13 package:
 
@@ -324,7 +324,10 @@ For representation properties and sanitizer fuzzing, see
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md). The focused entry points are
 `just test-bolero [filter]`, `just fuzz-list` and
 `just fuzz <target> [duration]`. These commands and the dedicated Bolero workflow own target
-discovery; repository validation does not run Bolero checks. `just help` lists the recipes.
+discovery; repository validation does not run Bolero checks. In CI, that workflow runs the
+sanitizer campaigns, the preferred Bolero evidence, for a pull request labeled `fuzz`, and the
+randomized properties for one labeled `bolero-random`, which a pull request carries only when its
+task requires that run. `just help` lists the recipes.
 
 Native CI builds for validation, unit tests, scenarios, client conformance, Turmoil, Shuttle,
 Loom, Bolero and extra checks use Clang 23 with Wild. Cargo's `x86_64-unknown-linux-gnu` linker
@@ -689,8 +692,9 @@ on the task and pull request. A green job from an earlier revision cannot qualif
 owner. For async-only or otherwise untracked changes, name the other checks that cover the changed
 path; for documentation-only work, record why no diagnostic execution applies. Use the toolchain
 files' declared `llvm-tools` for the compiler that produced each coverage profile, retaining the
-configured kache wrapper. Ordinary registered Bolero properties run on every pull request;
-sanitizer CI runs only with `fuzz`, and a skipped campaign supplies no execution evidence. API
+configured kache wrapper. Registered Bolero properties run as ordinary tests in the ordinary
+suites; sanitizer CI, the preferred Bolero evidence, runs only with `fuzz`, the randomized Bolero
+job only with `bolero-random`, and a skipped run supplies no execution evidence. API
 rejections use paired current `compile_fail` and compiling doctests in normal tests and CI.
 [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) has the lane's
 classes, its record, proof requirements, current graph limits and the paths detection does not
@@ -771,9 +775,9 @@ run.
 
 `tests/release-evidence.toml` declares the evidence a revision needs before it qualifies for
 release: the checks every pull request runs, the release images, and each label-gated method with
-its label and checks, Bolero's sanitizer fuzzing, Loom and its weakening qualification, Shuttle,
-Turmoil, every Deloxide lane selection, client conformance, and the smoke and soak suites
-against both the release image and the diagnostic image of the revision.
+its label and checks, Bolero's randomized run and its sanitizer fuzzing, Loom and its weakening
+qualification, Shuttle, Turmoil, every Deloxide lane selection, client conformance, and the smoke
+and soak suites against both the release image and the diagnostic image of the revision.
 
 ```bash
 just release-evidence <pull-request>
@@ -803,10 +807,11 @@ and build-target matrix, result guarantees, and recorded performance evidence. N
 generated-instruction inspection, complete scalar/level differential checks including forced
 fallback, and a measured caller. Use its [qualification recipes](./simd-kernels.md#qualification)
 and [measurement recipes](./simd-kernels.md#measurement-and-recorded-evidence), retaining kache.
-Ordinary registered Bolero properties run on PRs; sanitizer CI requires the `fuzz` label, and a
-skip supplies no execution or coverage evidence. API-rejection checks use paired current
-`compile_fail` and compiling doctests. Publish new benchmark and validation artifacts on the
-corresponding ClickUp task; keep durable architectural conclusions in the chapter.
+Registered Bolero properties run as ordinary tests in the ordinary suites; sanitizer CI, the
+preferred Bolero evidence, requires the `fuzz` label, the randomized Bolero job the `bolero-random`
+label, and a skip supplies no execution or coverage evidence. API-rejection checks use paired
+current `compile_fail` and compiling doctests. Publish new benchmark and validation artifacts on
+the corresponding ClickUp task; keep durable architectural conclusions in the chapter.
 
 ### Coverage reports and complexity
 
@@ -869,3 +874,15 @@ cargo install mdbook --version <MDBOOK_VERSION> --locked
 ```
 
 Building the PDF also needs `pandoc` and a XeLaTeX installation on `PATH`.
+
+In CI, the Docker Build workflow's `build-book` job runs `just publish-book`: it renders the book,
+its PDF and the Plexus agent index, uploads them under an immutable prefix, repoints the `snapshot`
+alias that docs.nervix.io serves and comments the preview's links on the pull request. It runs for
+a manual run of the workflow and, for a pull request from a branch of this repository, only when
+the pull request carries the `book` label. The book needs no image, so adding the label builds it
+at once, and each later push to the labeled pull request builds it again; a newer build of one pull
+request replaces an older one before it publishes. Label a pull request `book` only when its task
+requires the rendered book, such as a change to the book's build, theme, structure, screenshots or
+generated chapters, or a preview a reviewer needs. Every pull request's `checks` job runs
+`just test-docs`, the script tests and docs worker tests that `just book` runs first, so a pull
+request without the label still checks the book's structure and its tooling.

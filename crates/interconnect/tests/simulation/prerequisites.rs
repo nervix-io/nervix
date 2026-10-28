@@ -3,15 +3,16 @@
 //! Layer: test harness outside the product layer order.
 //!
 //! - **Owns.** The plans that partition a joiner whose heartbeat is beyond the compatibility bound
-//!   from the member it dials and that roll a heartbeat change through three hosts, each host's join
-//!   terms, and the checks of every host's join progress, typed refusal and connections.
+//!   from the member it dials, that roll a heartbeat change through three hosts, and that put a
+//!   node of another cluster at an endpoint a returning node recorded for a member, each host's
+//!   join terms, and the checks of every host's join progress, typed refusal and connections.
 //! - **Depends on.** The transport fixture, the production handshake, its join progress and its
 //!   connection observations.
 //! - **Must not know.** Gossip, consensus admission, or how a server stops when it is refused.
 
 use std::collections::BTreeMap;
 
-use nervix_interconnect::{JoinProgress, JoinRefusal};
+use nervix_interconnect::{BootstrapExpectation, JoinProgress, JoinRefusal};
 use nervix_models::{PrerequisiteMismatch, TimingPrerequisite};
 use nervix_primitives::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -20,6 +21,11 @@ use super::*;
 const MEMBER: &str = "member";
 const JOINER: &str = "joiner";
 const LATECOMER: &str = "latecomer";
+const RETURNING: &str = "returning";
+/// The host a departed member was recorded at, which a node of another cluster now serves.
+const DEPARTED: &str = "departed";
+const STRANGER: &str = "stranger";
+const ELSEWHERE: &str = "elsewhere";
 const ALPHA: &str = "alpha";
 const BRAVO: &str = "bravo";
 const CHARLIE: &str = "charlie";
@@ -640,4 +646,229 @@ async fn wait_for_stage(stage: &mut watch::Receiver<u8>, expected: u8) {
     })
     .await
     .assured("the roll reaches each stage within the simulated deadline");
+}
+
+#[test]
+fn a_recorded_endpoint_another_cluster_now_serves_is_a_stale_route() {
+    let scenario = Scenario {
+        name: "a recorded endpoint another cluster now serves is a stale route",
+        fault_plan: "the endpoint a returning node recorded for a departed member is served by a \
+                     node of another cluster sharing the certificate authority, while a recorded \
+                     member still answers at its own endpoint",
+        seeds: &[115],
+    };
+    scenario.check(config, cross_a_stale_route);
+}
+
+/// Binds node `node` of `cluster` on the simulated host `host`, with the fixture's join terms.
+async fn bind_in_cluster(
+    host: &'static str,
+    node: &str,
+    cluster: &str,
+    credentials: Credentials,
+    seed: u64,
+) -> Transport {
+    let mut options = TransportOptions::default();
+    let entropy = SimulatedEntropy::new(seed, host);
+    options.entropy = TransportEntropy::from_source(move || entropy.next_u64());
+    let (transport, _incoming) = Transport::bind(
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, PORT)),
+        TransportIdentity {
+            cluster_id: cluster.to_string(),
+            node_id: named(node),
+            advertised_host: host.to_string(),
+            join_terms: fixture_join_terms(),
+        },
+        credentials.bundle(),
+        options,
+        Executor::default(),
+        PeerResolver::simulated(),
+    )
+    .await
+    .assured("fixture transport binds on its simulated host");
+    transport
+}
+
+/// The address `host` resolves to, with its name as the certificate name, as a node dials an
+/// endpoint its stored membership recorded.
+async fn recorded_target(transport: &Transport, host: &str) -> PeerTarget {
+    transport
+        .resolve(&NodeEndpoint::new(host, PORT))
+        .await
+        .assured("simulated DNS resolves the recorded host")
+        .into_iter()
+        .next()
+        .assured("simulated DNS returned an address")
+}
+
+fn cross_a_stale_route(run: ScenarioRun) -> Result<(), SimulationError> {
+    let member_seed = run.seed();
+    let stranger_seed = member_seed
+        .checked_add(1)
+        .assured("fixture seeds are below u64::MAX");
+    let returning_seed = member_seed
+        .checked_add(2)
+        .assured("fixture seeds are below u64::MAX");
+    let trace = run.trace();
+    let authority = Authority::new();
+    let member_credentials = authority.issue(MEMBER);
+    let stranger_credentials = authority.issue_for(ELSEWHERE, STRANGER, DEPARTED);
+    let returning_credentials = authority.issue(RETURNING);
+    let (ready_tx, ready_rx) = watch::channel(0_usize);
+    let (done_tx, done_rx) = watch::channel(false);
+    let (finished_tx, finished_rx) = watch::channel(0_usize);
+    run.simulate(move |simulation| {
+        let member_ready = ready_tx.clone();
+        let member_done = done_rx.clone();
+        let member_finished = finished_tx.clone();
+        simulation.host(MEMBER, move || {
+            let credentials = member_credentials.clone();
+            let ready = member_ready.clone();
+            let done = member_done.clone();
+            let finished = member_finished.clone();
+            async move {
+                let result = HostSupervisor::run(async move {
+                    let member =
+                        bind_with_terms(MEMBER, credentials, member_seed, join_terms(HEARTBEAT))
+                            .await;
+                    member.replace_live_nodes(&live(&[MEMBER, RETURNING]));
+                    ready.send_modify(|count| {
+                        *count = count.checked_add(1).assured("two hosts announce readiness");
+                    });
+                    let mut done = done;
+                    wait_for(&mut done).await;
+                    member.shutdown().await;
+                    Ok::<(), io::Error>(())
+                })
+                .await;
+                finished.send_modify(|count| {
+                    *count = count
+                        .checked_add(1)
+                        .assured("only three fixture hosts finish");
+                });
+                result
+            }
+        });
+
+        let stranger_ready = ready_tx.clone();
+        let stranger_done = done_rx.clone();
+        let stranger_finished = finished_tx.clone();
+        simulation.host(DEPARTED, move || {
+            let credentials = stranger_credentials.clone();
+            let ready = stranger_ready.clone();
+            let done = stranger_done.clone();
+            let finished = stranger_finished.clone();
+            async move {
+                let result = HostSupervisor::run(async move {
+                    let stranger =
+                        bind_in_cluster(DEPARTED, STRANGER, ELSEWHERE, credentials, stranger_seed)
+                            .await;
+                    ready.send_modify(|count| {
+                        *count = count.checked_add(1).assured("two hosts announce readiness");
+                    });
+                    let mut done = done;
+                    wait_for(&mut done).await;
+                    stranger.shutdown().await;
+                    Ok::<(), io::Error>(())
+                })
+                .await;
+                finished.send_modify(|count| {
+                    *count = count
+                        .checked_add(1)
+                        .assured("only three fixture hosts finish");
+                });
+                result
+            }
+        });
+
+        let returning_finished = finished_tx.clone();
+        let returning_trace = trace.clone();
+        simulation.host(RETURNING, move || {
+            let credentials = returning_credentials.clone();
+            let ready = ready_rx.clone();
+            let done = done_tx.clone();
+            let finished = returning_finished.clone();
+            let trace = returning_trace.clone();
+            async move {
+                let result = HostSupervisor::run(async move {
+                    let returning = bind_with_terms(
+                        RETURNING,
+                        credentials,
+                        returning_seed,
+                        join_terms(HEARTBEAT),
+                    )
+                    .await;
+                    let mut ready = ready;
+                    wait_for_count(&mut ready, 2).await;
+
+                    let departed = recorded_target(&returning, DEPARTED).await;
+                    let stale = returning
+                        .bootstrap_target(
+                            departed,
+                            BootstrapExpectation::RecordedMember(named(DEPARTED)),
+                        )
+                        .await;
+                    let error = match stale {
+                        Ok(node) => panic!("node '{node}' answered for the departed member"),
+                        Err(error) => error,
+                    };
+                    let TransportError::StaleRoute { endpoint, member } = error.current_context()
+                    else {
+                        panic!(
+                            "another cluster at a recorded endpoint is a stale route: {error:?}"
+                        );
+                    };
+                    assert_eq!(endpoint, &NodeEndpoint::new(DEPARTED, PORT));
+                    assert_eq!(member, &named(DEPARTED));
+                    assert_eq!(
+                        *returning.join_progress().borrow(),
+                        JoinProgress::Joining,
+                        "a stale route refuses no one, so the join goes on"
+                    );
+                    assert_eq!(prerequisite_failures(&returning), 0);
+                    trace.record(
+                        RETURNING,
+                        "the departed member's endpoint led to another cluster and refused no one",
+                    );
+
+                    let recorded = recorded_target(&returning, MEMBER).await;
+                    let through = returning
+                        .bootstrap_target(
+                            recorded,
+                            BootstrapExpectation::RecordedMember(named(MEMBER)),
+                        )
+                        .await
+                        .assured("the recorded member still answers at its endpoint");
+                    assert_eq!(through, named(MEMBER));
+                    returning.replace_live_nodes(&live(&[MEMBER, RETURNING]));
+                    assert_eq!(
+                        join_outcome(&returning).await,
+                        JoinProgress::Joined {
+                            through: named(MEMBER),
+                        },
+                    );
+                    trace.record(
+                        RETURNING,
+                        "the returning node joined through the member that still answers",
+                    );
+                    done.send_replace(true);
+                    returning.shutdown().await;
+                    Ok::<(), io::Error>(())
+                })
+                .await;
+                finished.send_modify(|count| {
+                    *count = count
+                        .checked_add(1)
+                        .assured("only three fixture hosts finish");
+                });
+                result
+            }
+        });
+
+        simulation.client("observer", async move {
+            let mut finished = finished_rx;
+            wait_for_count(&mut finished, 3).await;
+            Ok(())
+        });
+    })
 }

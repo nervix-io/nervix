@@ -40,6 +40,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names, BSON field-name admission, native widths/date precision, conflict filters, client URL configuration and paired TLS identity files | `Emitters` → `MongoDB`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions and client pool options | `Emitters` → `MySQL`, and `Database Client Connection Pools` |
+| Sentry platform options, event defaults, batch transformations and strict DSN/timeout configuration | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
 | Session subscriptions and domain clock attachment | `Sessions` |
@@ -347,7 +348,10 @@ current connection, retry and deadline limits.
   tables and `Emitters` → `OTEL` before constructing mappings.
   Follow `Ingestors` → `Delivery Modes` for duration bounds and retry ordering, and `Emitters` →
   `Direct-emitter values` for exact types and literal-only OTEL resources. For example, supply an
-  I32 expression for OTEL `severity_number`; an integer literal is I64. A refused alteration
+  I32 expression for OTEL `severity_number`; an integer literal is I64. OTEL also checks literal
+  field ranges before storing the statement. Read its client header-pair format before supplying
+  credentials: values are percent-decoded once, and TLS file keys require an HTTPS endpoint for
+  either transport. A refused alteration
   preserves the accepted graph.
 - For acknowledged HTTP or WebSocket endpoint intake in Plexus, read `Ingestors` → `HTTP ENDPOINT
   And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
@@ -511,6 +515,9 @@ Choose checks relevant to the configured graph:
   refused while a node that owns the domain's state is down or no node can host part of it, and a
   normal backup also while a node that runs its work is; send it again once the node is back,
   failover has moved its work, or a node is uncordoned.
+  Materialized capture also refuses insufficient overlapping bulk memory; release competing bulk
+  work and send a fresh backup rather than extending `TIMEOUT`. Read the backup chapter's capacity
+  failures before sizing or retrying a capture.
   `WITHOUT PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures
   only configuration. `DESCRIBE BACKUP '<file>';` verifies one offline in `nervix-cli` and inventories
   its state, domains, users, and resource versions. Treat an archive as a secret. Kafka offset and

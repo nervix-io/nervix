@@ -1007,6 +1007,26 @@ scenario = "A resumed materialized cut preserves interleaved branches and genera
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Stopped materialized capture under held Bulk memory, followed by a complete backup and restored branch-local generator output. Existing checkpoint and consensus storage locks are tracked; async memory admission and store-local semaphore turns are outside the detector."
+examples = 2
+feature = "tests/features/cluster/backup_bulk_admission.feature"
+id = "scenario.materialized-bulk-overlap"
+invariant = "A captured reader refuses overlapping Bulk admission without retaining memory; a fresh backup after release restores both tenants completely."
+invocation = "scenarios"
+scenario = "A stopped materialized capture refuses overlapping bulk memory and succeeds after release on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: stopped materialized capture refusal and recovery, including the existing tracked checkpoint and consensus storage lifecycle."
+examples = 2
+feature = "tests/features/cluster/backup_bulk_admission.feature"
+id = "stress.materialized-bulk-overlap"
+invariant = "A captured reader refuses overlapping Bulk admission without retaining memory; a fresh backup after release restores both tenants completely."
+invocation = "stress-restore-scenarios"
+scenario = "A stopped materialized capture refuses overlapping bulk memory and succeeds after release on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "A domain stop that tells each materialized relay checkpoint writer to make its last write once its tasks have ended, holds that write past every task's stop grace and waits for it before the stopped cut reads it. The writers' signal and the snapshot task owner's map are outside the detector; the sealed-generation lock the write takes is tracked."
 examples = 2
 feature = "tests/features/cluster/backup_materialized.feature"
@@ -2697,21 +2717,21 @@ scenario = "An accepted restore waits for client inspection capacity on <cluster
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
-coverage = "Class-local executor FIFO admission and drain fences while bulk work is occupied and a sequence of management mutations completes on one and three nodes. Callbacks execute outside the fence; async admission and network waits remain untracked."
+coverage = "Class-local executor FIFO admission and drain fences while every node's bulk workers are held and a prepared production client completes six sequential management mutations on one and three nodes. Cleanup releases the tracked holds before diagnostics and node stop. Callbacks execute outside the fence; async admission and network waits remain untracked."
 examples = 2
 feature = "tests/features/cluster/bounded_execution.feature"
 id = "scenario.execution-class-drain"
-invariant = "Occupied bulk workers do not prevent management command batches from completing or the cluster from retaining a stable leader."
+invariant = "Occupied bulk workers on every node do not prevent management command batches or a stable leader; cleanup releases retained holds before stopping the nodes."
 invocation = "scenarios"
 scenario = "Occupied bulk execution leaves management work responsive"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Under scheduling stress: class-local executor FIFO admission and drain fences during bulk saturation and repeated public management mutations."
+coverage = "Under scheduling stress: class-local executor FIFO admission and drain fences during all-node bulk saturation, prepared-client sequential management mutations and cleanup's tracked hold release."
 examples = 2
 feature = "tests/features/cluster/bounded_execution.feature"
 id = "stress.execution-class-drain"
-invariant = "Occupied bulk workers do not prevent management command batches from completing or the cluster from retaining a stable leader."
+invariant = "Occupied bulk workers on every node do not prevent management command batches or a stable leader; cleanup releases retained holds before stopping the nodes."
 invocation = "stress-scenarios"
 scenario = "Occupied bulk execution leaves management work responsive"
 selections = ["deloxide-stress"]
@@ -2897,6 +2917,8 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/storage.rs"
 workloads = [
+  "scenario.materialized-bulk-overlap",
+  "stress.materialized-bulk-overlap",
   "scenario.resource-source-discovery",
   "stress.resource-source-discovery",
   "scenario.resource-upload-publication",
@@ -3162,7 +3184,9 @@ workloads = [
 [[owner]]
 path = "src/fault_injection/execution.rs"
 workloads = [
+  "scenario.execution-class-drain",
   "scenario.inferencer-inspection-admission",
+  "stress.execution-class-drain",
   "stress.inferencer-inspection-admission",
 ]
 

@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
     sync::{blocking::mpsc, oneshot},
     time::{Instant, sleep},
@@ -125,6 +125,61 @@ async fn an_observation_meets_its_deadline_while_the_caller_is_stalled() {
         Err(mpsc::RecvTimeoutError::Timeout)
     ));
     assert_eq!(observation.await, 42);
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn sequential_command_replies_progress_before_delayed_result_collection() {
+    #[derive(Debug)]
+    struct Request {
+        position: usize,
+        reply: oneshot::Sender<usize>,
+    }
+
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(10);
+    let (requests, mut pending) = nervix_primitives::sync::mpsc::channel::<Request>(1);
+    let (finished, completion) = oneshot::channel();
+    let observation = observe_off_the_runner(async move {
+        for position in 0..6 {
+            nervix_primitives::task::consume_budget().await;
+            let (reply, received) = oneshot::channel();
+            requests
+                .send(Request { position, reply })
+                .await
+                .assured("the controlled server receives every request");
+            let answer = nervix_primitives::time::timeout_at(deadline, received)
+                .await
+                .assured("the controlled server replies within the probe deadline")
+                .assured("the controlled server answers each command");
+            assert_eq!(answer, position);
+        }
+        let completed_at = Instant::now();
+        finished
+            .send(())
+            .assured("the test waits for command completion before delaying collection");
+        completed_at
+    });
+
+    // This task plays the server while the scenario never polls its observation future.
+    for position in 0..6 {
+        let request = nervix_primitives::time::timeout_at(deadline, pending.recv())
+            .await
+            .assured("the independent probe dispatches every command without runner polling")
+            .assured("the independent probe retains its request sender");
+        assert_eq!(request.position, position);
+        nervix_primitives::time::advance(Duration::from_secs(1)).await;
+        request
+            .reply
+            .send(position)
+            .assured("the independent probe keeps polling every reply");
+    }
+    completion
+        .await
+        .assured("the independent probe completes all six commands");
+    nervix_primitives::time::advance(Duration::from_secs(11)).await;
+    let completed_at = observation.await;
+    assert_eq!(completed_at.duration_since(started), Duration::from_secs(6));
+    assert!(Instant::now() > deadline);
 }
 
 #[nervix_primitives::test]

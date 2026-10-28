@@ -655,7 +655,7 @@ impl Application {
         } else {
             JoinStanding::Newcomer
         };
-        let mut recovery_endpoints = BTreeSet::new();
+        let mut recovered_endpoints = BTreeMap::new();
         for (member, address) in recovered_members {
             if member == node_id {
                 continue;
@@ -670,10 +670,10 @@ impl Application {
                     return Err(report);
                 }
             };
-            recovery_endpoints.insert(endpoint);
+            recovered_endpoints.insert(member, endpoint);
         }
         let has_bootstrap_candidates =
-            cluster_bootstrap_host.is_some() || !recovery_endpoints.is_empty();
+            cluster_bootstrap_host.is_some() || !recovered_endpoints.is_empty();
         let cluster_result = cluster::start_cluster(cluster::ClusterSettings {
             cluster_id,
             node_id: node_id.clone(),
@@ -682,7 +682,7 @@ impl Application {
             console_advertise_url: web_console_advertise_url.clone(),
             interconnect_advertise_addr,
             bootstrap_host: cluster_bootstrap_host.clone(),
-            recovery_endpoints,
+            recovered_members: recovered_endpoints,
             interconnect: interconnect.clone(),
             membership: settings.membership,
             prerequisites: interconnect.local_prerequisites(),
@@ -875,6 +875,12 @@ impl Application {
                 {
                     warn!(%error, "raft membership reconciliation failed");
                 }
+                // Published whether or not a membership change failed: the verdicts were judged
+                // before any change was attempted, and a node that stopped leading withdraws them.
+                let verdicts = administrator_for_membership_reconcile.admission_verdicts();
+                cluster_for_membership_reconcile
+                    .publish_admission_verdicts(verdicts.as_ref())
+                    .await;
                 nervix_primitives::select! {
                     _ = membership_reconcile_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_secs(1)) => {}

@@ -91,7 +91,8 @@ Each ingestor and emitter entity declares its accepted modes, quiesce forms, cli
 form, codec and header support, and batching legality in the vocabulary. Direct-value entities
 also declare their mapped-value types there: destination columns accept the current Plexus scalar,
 array and vector types, while OTEL protocol fields require their declared exact types. The OTEL
-connector uses that same type table when checking its prepared input schema.
+connector verifies its prepared input schema against that same type table as an internal plan
+guarantee. An impossible mapped type is not a retryable connector initialization failure.
 
 The registry checks these declarations against the candidate graph before accepting `CREATE` or
 `ALTER`. It rejects duplicate `VALUES` keys, unsupported or wrongly typed mappings, and invalid
@@ -100,6 +101,12 @@ durations must be positive; a zero batch timeout gathers without waiting. Every 
 the shared schedulable deadline bound, and retry maximum must be at least its initial backoff.
 OTEL `RESOURCE` mappings remain literal-only. Required batching is established by validation, so
 planning consumes that guarantee rather than discovering a missing `BATCH` when an emitter starts.
+OTEL field declarations also own literal severity, identifier and enum-name constraints. The
+registry applies those constraints before storing CREATE or ALTER; values computed from records
+retain their per-record checks. Client declarations can restrict an optional key to one URL
+scheme. OTEL's TLS file keys require an HTTPS endpoint independently of the selected protocol,
+before file inspection. Its declared header-pair decoder validates configuration and supplies
+the decoded values to both OTLP transports; each export uses the same once-decoded values.
 An invalid alteration leaves the accepted graph intact. Driver configuration checks and external
 availability retain their own boundaries; these declaration checks perform no transport I/O.
 
@@ -375,6 +382,17 @@ then opens connections again to keep the minimum. The pool checks idle connectio
 seconds, `bb8`'s reaper interval, so an idle connection closes up to 30 seconds after it reaches
 either lifetime. A replacement socket resolves the host again. Neither lifetime closes a Pub/Sub source's dedicated
 connection.
+
+The connector keeps `POOL SIZE MIN` itself rather than through `bb8`'s idle minimum, which counts
+idle connections only and would open another connection beside every one a publisher checks out.
+Opening the pool establishes the minimum as dedicated connections added to the pool before any
+publisher borrows from it, so a connection that fails keeps its typed cause in the open's failure.
+Every pooled connection then signals the pool's keeper task when the pool closes it. The keeper
+counts the established connections, checked-out ones with idle ones, and, below the minimum, holds
+one checkout for every idle connection and every connection missing until all of them finish: the
+idle ones are taken once and `bb8` opens the rest, within the maximum it accounts for and the
+client's `connect_timeout_ms`. A failed restoration is retried as soon as it ends. The keeper stops
+with the pool's last handle.
 
 The driver's Pub/Sub convenience connection does not accept that DNS hook. A source instead
 resolves the configured `redis://` or `rediss://` hostname through the node resolver on every
@@ -789,7 +807,8 @@ an optional Redis subscription capacity passes the same range parser its ingesto
 Ingestor-only presence requirements stay with that plan.
 MQTT's representative first instance uses the same instance-template renderer as execution.
 Connector-owned offline parsers check librdkafka property names and values, sqlx and mysql_async
-options, Redis connection information, lapin AMQP URIs, NATS server addresses and ZeroMQ endpoints.
+options, Redis connection information, lapin AMQP URIs, NATS server addresses, ZeroMQ endpoints
+and Sentry project DSNs.
 They create no connection, consumer, producer, DNS lookup or remote side effect. Checks requiring
 the remote service still belong to client initialization. The registry names no connector crate
 and runtime receives entries and pinned mounts rather than a Model.
@@ -1880,13 +1899,15 @@ For a record emitter using the emitter `BATCH` clause, the host selects rows fro
 Arc-backed Arrow carriers released by one flush. It retains each carrier's source relay, exact
 branch key, execution time and original batch and row position. The host prepares members in
 arrival order and seals a payload when the source relay, branch, key, ordered headers, ordering
-group or codec container metadata changes. The codec encodes each candidate under `MAX SIZE`, and
-the host subdivides a candidate that does not fit; Arrow memory accounting still belongs to
-`FLUSH`. The connector sees one encoded record per completed payload and answers for it under the
-record's identity, without learning which rows the payload carries. A candidate whose container
-cannot be produced fails each of its members with one message error, which the container failure's
-typed reason decides; the evaluation failure beneath that reason can quote the payload it
-evaluated and is never rendered.
+group or codec container metadata changes. That order is the host's receive order across its
+independent input queues; intake admission on one source does not order another source's delivery.
+The host never rejoins compatible members across an intervening source. The codec encodes each
+candidate under `MAX SIZE`, and the host subdivides a candidate that does not fit; Arrow memory
+accounting still belongs to `FLUSH`. The connector sees one encoded record per completed payload
+and answers for it under the record's identity, without learning which rows the payload carries.
+A candidate whose container cannot be produced fails each of its members with one message error,
+which the container failure's typed reason decides; the evaluation failure beneath that reason can
+quote the payload it evaluated and is never rendered.
 
 The connector owns the destination's own limit on each record, whether the record carries one row
 or a whole batch payload, because only the connector knows what it writes around the payload.
@@ -1911,10 +1932,14 @@ Syslog sends a completed codec payload as one transport frame. Its UDP writer re
 non-transparent TCP rejects one containing LF. The Sentry writer accepts one
 JSON event per envelope and prepares that envelope once, before the host retains it. Preparation
 validates the event, preserves a supplied `event_id` with its exact spelling, generates one UUID
-only when the field is absent, and fills absent `timestamp` and `platform` fields. Both the
+only when the field is absent, and fills an absent `timestamp` from the batch's execution time.
+An absent `platform` takes the typed plan's platform, resolved from the entity's `PLATFORM` option
+or its declared `other` default. A codec-supplied platform is preserved. The strict Sentry client
+schema requires a positive request timeout, and its native DSN parser runs at the existing
+pre-commit offline boundary without network I/O. Both the
 envelope header and the event carry that identity, and every attempt sends the retained envelope
 byte for byte, including after the host reopens the emitter. Preparation checks the final event
-against the 1 MB decompressed event limit. It writes every other member as the codec wrote it, a number to
+against the vocabulary-owned 1 MB decompressed event limit. It writes every other member as the codec wrote it, a number to
 its last digit. Both classify a definite local refusal as a record rejection;
 their transport and service failures retain their existing retry boundaries.
 

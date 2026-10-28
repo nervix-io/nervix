@@ -1085,6 +1085,45 @@ fn the_store_has_as_many_commands_turns_as_leave_room_beside_its_working_sets()
 }
 
 #[nervix_primitives::test]
+async fn commands_progress_independently_of_a_waiting_bulk_working_set() -> TestResult {
+    let executor = Executor::default();
+    let admission = WorkingSetAdmission::new(&executor)?;
+    let held = admission.admit(&executor, StorageCharge::Bulk).await?;
+    let waiting = admission.admit(&executor, StorageCharge::Bulk);
+    let mut waiting = std::pin::pin!(waiting);
+    assert!(waiting.as_mut().now_or_never().is_none());
+    let commands = admission
+        .admit(&executor, StorageCharge::Commands)
+        .now_or_never()
+        .assured("Commands has independent capacity and turns")?;
+    drop(commands);
+    drop(held);
+    drop(waiting.await?);
+    assert_eq!(executor.memory(MemoryClass::Commands).reserved_bytes, 0);
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+    Ok(())
+}
+
+#[nervix_primitives::test]
+async fn a_bulk_working_set_waiter_leaves_room_for_snapshot_progress() -> TestResult {
+    let executor = Executor::default();
+    let admission = WorkingSetAdmission::new(&executor)?;
+    let held = admission.admit(&executor, StorageCharge::Bulk).await?;
+    let waiting = admission.admit(&executor, StorageCharge::Bulk);
+    let mut waiting = std::pin::pin!(waiting);
+    assert!(waiting.as_mut().now_or_never().is_none());
+    let progress = executor
+        .try_reserve(MemoryClass::Bulk, 4096)
+        .assured("a waiting storage working set leaves room for a snapshot chunk");
+    drop(progress);
+    drop(held);
+    let next = waiting.await?;
+    drop(next);
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+    Ok(())
+}
+
+#[nervix_primitives::test]
 async fn a_log_read_waiting_behind_a_held_chunk_leaves_room_for_source_control() -> TestResult {
     let mut harness = Harness::new().await?;
     harness.append(2).await?;

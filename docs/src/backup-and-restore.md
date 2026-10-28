@@ -891,8 +891,11 @@ that compare restored and re-exported state.
 | Freeze of one running domain | From its pause until its owners have staged their state, at most the backup's `TIMEOUT`, or the 60-second domain drain timeout when none is given; archive assembly and the download follow the resume |
 
 The freeze covers only the drain of admitted work, the confirming force flush and the owners'
-staging. The leader resumes the domain before it assembles the archive, so neither the archive's
-size nor the client's download rate lengthens the freeze, and a domain whose emitter stops
+staging. The confirming force flush re-reads the materialized state each message parked by
+`REQUIRED WAIT` waits for, so a slow state read lengthens the freeze by that read, and by the rest
+of a periodic re-read already under way; the drain starts no other flush on a node that holds no
+admitted work. The leader resumes the domain before it assembles the archive, so neither the
+archive's size nor the client's download rate lengthens the freeze, and a domain whose emitter stops
 acknowledging stays frozen only until the timeout fails the backup. A state owner that crashes or
 loses contact with its peers during the freeze, while the cluster still reports it live, fails the
 backup with `backup failed:`, and the domain resumes either way, a node that was unreachable
@@ -941,6 +944,10 @@ contents. The reasons are:
 - a resource version's bytes are not installed on the leader, or do not match their catalog entry
 - the archive could not be staged on this node, because it is larger than one archive may be or
   staging failed, or a record does not encode
+- a materialized checkpoint's next read, request envelope, staging operation or group conversion
+  cannot fit beside the Bulk memory it retains; the additional allocation refuses immediately
+  and releases its retained memory. Release the contention and start a new backup; extending
+  `TIMEOUT` does not make the overlapping allocations fit
 - a captured branch lifecycle or Kafka offset checkpoint does not decode, its record exceeds the
   64 MiB record limit, or its lifecycle keys or serializer scratch cannot be admitted to
   `restore_metadata` now, naming the entity; the checkpoint's own conversion charge waits for room

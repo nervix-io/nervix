@@ -1302,6 +1302,67 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn independent_sources_preserve_each_queue_without_a_global_order() {
+        let (source_a, sender_a) = source("source_a", 2, None);
+        let (source_b, sender_b) = source("source_b", 2, None);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
+        let mut interaction =
+            RelayInteraction::new(vec![source_a, source_b], shutdown_rx, None, None)
+                .assured("both source queues are distinct and the input list is non-empty");
+
+        // The emitter has consumed A3 before the next source's requests are admitted.
+        sender_a
+            .broadcast(batch(3))
+            .await
+            .assured("the interaction retains A's receiver and its queue has room");
+        let RelayInteractionEvent::Batch {
+            relay,
+            batch: first,
+        } = event(&mut interaction, RuntimeWake::never()).await
+        else {
+            panic!("A3 is the only ready carrier");
+        };
+        assert_eq!(relay.as_str(), "source_a");
+        assert_eq!(value(&first), 3);
+
+        // Admission completes B5, B6, A4, A7 in that order while the emitter is not polled.
+        // Each queue preserves its own order; receiving still services both ready sources.
+        for next in [5, 6] {
+            nervix_primitives::task::consume_budget().await;
+            sender_b
+                .broadcast(batch(next))
+                .await
+                .assured("the interaction retains B's receiver and both carriers fit its queue");
+        }
+        for next in [4, 7] {
+            nervix_primitives::task::consume_budget().await;
+            sender_a
+                .broadcast(batch(next))
+                .await
+                .assured("the interaction retains A's receiver and both carriers fit its queue");
+        }
+        let mut received = Vec::new();
+        for _ in 0..4 {
+            nervix_primitives::task::consume_budget().await;
+            let RelayInteractionEvent::Batch { relay, batch } =
+                event(&mut interaction, RuntimeWake::never()).await
+            else {
+                panic!("all four admitted carriers must arrive");
+            };
+            received.push((relay.as_str().to_string(), value(&batch)));
+        }
+        assert_eq!(
+            received,
+            [
+                ("source_b".to_string(), 5),
+                ("source_a".to_string(), 4),
+                ("source_b".to_string(), 6),
+                ("source_a".to_string(), 7),
+            ]
+        );
+    }
+
+    #[nervix_primitives::test]
     async fn ready_hot_source_cannot_starve_another_source() {
         let (hot, hot_broadcast) = source("hot", 3, None);
         let (other, other_broadcast) = source("other", 1, None);

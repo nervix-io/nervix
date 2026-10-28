@@ -97,7 +97,10 @@ rather than by an unverified endpoint claim.
 On restart, the node also uses the peer endpoints in its recovered Raft membership as gossip seeds,
 excluding its own endpoint. These are contact hints, not current discovery advertisements: the
 bootstrap exchange authenticates the answering node, and gossip then replaces the hint with that
-node's current incarnation and advertised endpoint. This lets a former bootstrap node contact
+node's current incarnation and advertised endpoint. Each recovered seed carries the member it was
+recorded for, so a node of another cluster answering there under another name is a stale route
+rather than a refusal, as [The Join Contract](#the-join-contract) describes. This lets a former
+bootstrap node contact
 survivors even when its deployment has no configured bootstrap host. A node with recovered peer
 endpoints can also start when its configured bootstrap host does not resolve: it logs that lookup
 failure and contacts the peers whose recovered endpoints do resolve.
@@ -223,7 +226,8 @@ when all of the following are true:
 
 - its certificate chains to the configured cluster CA
 - its identity URI names the same cluster; a certificate that names another one is refused as a
-  cluster-identity mismatch, as [The Join Contract](#the-join-contract) describes
+  cluster-identity mismatch, as [The Join Contract](#the-join-contract) describes, unless it answers
+  at an endpoint recorded for a member it does not name, which is a stale route
 - its node identifier is the expected peer identifier, once that identifier is known
 - its endpoint subject alternative name matches the advertised endpoint being contacted
 - its certificate is currently valid
@@ -427,13 +431,26 @@ address, the prerequisite and the refusal, and the dialing node logs
 pool connection is counted with reason `prerequisite` and reconnects with its slot's backoff like
 any other failed attempt; the refusal decides nothing else inside the transport.
 
+A node bootstraps through an endpoint whose node it does not know yet with what it expects to find
+there: `BootstrapExpectation::AnyMember` at a bootstrap host an operator named, where any member of
+the cluster may answer, and `BootstrapExpectation::RecordedMember` at an endpoint its stored
+membership recorded for a member, which may have moved since. At a recorded member's endpoint, a
+certificate that names another cluster and a node other than that member is
+`TransportError::StaleRoute`, naming the endpoint and the member above the cluster-identity mismatch
+it replaces: the endpoint no longer leads to the member, so the attempt refuses no one and leaves
+the join progress where it was. A certificate that names the recorded member itself in another
+cluster stays a cluster-identity refusal, and so does any certificate of another cluster at a
+bootstrap host.
+
 The transport also reports how far its node has come in joining the cluster. That progress starts
 as joining and leaves it exactly once, whichever comes first: at the first outbound pool connection
 the process completes, naming the peer it joined through, or at the first outbound attempt, a
 bootstrap exchange included, that ends in a refusal. A connection a peer dials never moves it, so a
 node that has joined never leaves because a newcomer cannot run beside it. The server stops a
 joining node whose progress ends in a refusal, as
-[Prerequisites At Join](node-settings.md#prerequisites-at-join) describes.
+[Prerequisites At Join](node-settings.md#prerequisites-at-join) describes. Whether the cluster can
+run beside a node that has joined through a peer is the leader's verdict on its run, which the
+server reads from gossip; the transport judges only the connections it binds.
 
 A joining node bounds its clock skew to each peer it completes a handshake with, the one it joined
 through first, with the typed `peer_clock` request. The request uses the management pool's
@@ -626,6 +643,13 @@ follower whose receive window is full can still produce the answer that releases
 validates the relationships among operation limits and these budgets, including the paired work
 that must fit for independent operations to keep making progress.
 
+A typed stream request admits its envelope without queueing while its nested payload remains
+charged; bounded writer growth also refuses immediately when the class has no room. The encoding
+job owns that payload and charge through cancellation, and returns the payload charge once the
+envelope is encoded, before waiting for a connection lease or response headers. Insufficient room
+for both allocations is a typed encoding admission failure, which releases both allocations
+rather than waiting while retaining the input. The request is not sent after such a refusal.
+
 Stream slots are isolated per connection, and therefore per peer. Admission quotas, memory budgets,
 and CPU wait queues are isolated per class and shared by every peer of the node. A slow or stalled
 peer therefore holds at most the stream slots of its own connections. Once it holds the 32 shared
@@ -817,6 +841,18 @@ remaining handoff shares are parked, on `REQUIRED WAIT` or in a window that reta
 own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
 The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
 source or persist an acknowledgement. Admission progress carries no parked state.
+
+Before admission the receiver reports nothing about a delivery's records: their acknowledgement
+watches start only once it has admitted them. Until then the sending node holds the records on their
+sources' behalf, so it reports them alive to their sources itself, every 100 milliseconds the
+delivery is still under way, whether it waits for the relay's dispatch gate, its channel, the
+storage of its records, a grant or the receiver's admission. This applies to a delivery to the
+relay's owner and to one from the owner to a consumer on another node. A delivery admitted within
+its first 100 milliseconds reports nothing. A source's `ACK TIMEOUT` therefore measures how long its
+records make no progress, not how long their delivery takes to reach the next node. A record still
+on its way when that timeout would have passed is not read again and emitted twice. The bounds
+above still end a delivery: five seconds without progress, or five minutes from storing its records
+to its admission, fails it, and the source's retry takes over.
 
 Progress and terminal acknowledgements share the bounded application receive queue. The application
 keeps consuming progress while terminal delivery waits for queue capacity. The one-slot transport
@@ -1196,9 +1232,11 @@ Admission to consensus membership requires an available interconnect endpoint. A
 without one is not an admission candidate, so it is neither added as a learner nor promoted to
 voter, and it becomes eligible on the round that publishes an endpoint this node accepts. The
 leader also admits a candidate only when its published prerequisite record is one the leader can
-read and is compatible with the record of every live voter; it logs a candidate it leaves out for
-that reason once while the reason holds, at `warn` for a record that cannot run beside a voter and
-at `debug` for a record not yet published. The
+read and is compatible with the record of every live voter whose run it accepted; it logs a
+candidate it leaves out for that reason once while the reason holds, at `warn` for a record that
+cannot run beside a voter and at `debug` for a record not yet published. It publishes its verdicts
+on the live runs it judged under the gossip key `admission_verdicts`, as
+[Prerequisites At Join](node-settings.md#prerequisites-at-join) describes. The
 client and web-console advertisements are independent of admission: a node joins, votes, and leads
 with either of them unavailable. Membership replaces the recorded address of an existing member
 when its advertised endpoint changes. A returning voter remains a voter, while a learner still
@@ -1252,8 +1290,10 @@ Consensus separates traffic according to the progress it protects:
 
 The ordered append stream can keep multiple batches in flight while preserving follower order. Its
 consensus-level window bounds a follower to 16 outstanding batches and 16 MiB of unacknowledged log
-data. Heartbeats and elections remain on management capacity, so a full append window does not block
-leadership traffic.
+data. Each batch stops at 256 entries or the 1 MiB byte target, so a newly elected leader can
+learn that a lagging follower rejects its previous-log boundary without first transferring a larger
+speculative entry batch over a slow link. Heartbeats and elections remain on management capacity,
+so a full append window does not block leadership traffic.
 
 The consensus adapter obtains its first append request before opening the duplex transport. This
 lets the caller's retry and cancellation gate pace a setup attempt even when the transport refuses
@@ -1309,7 +1349,8 @@ node fetches a resource archive and how it verifies and records the fetched vers
 
 Backup state capture uses typed drain, capture, inventory, and fetch operations. The leader reads
 the admitted work of every live node and every node the domain's schedule assigns its work to
-through a management-class drain request, and requests a separate confirming force-flush round after
+through a management-class drain request, which starts a force-flush generation on a node only
+while that node holds admitted work, and requests a separate confirming force-flush round after
 all nodes appear quiet. The leader sends a management-class capture request with its coordination
 identity and applied cut revision to the scheduled primary of every placement whose state the
 archive captures, and for a `WITHOUT PAUSE` capture, whose schedule may move, to every other live
@@ -1351,6 +1392,11 @@ Materialized metadata and Arrow decoders refuse additional bulk scratch without 
 their encoded input holds a charge in that pool. Refusal releases the local input and preserves
 its typed admission cause; a generator retries a complete read on its next occurrence. No stream
 or request permit survives for that retry.
+Staging file creation, writes and finalization also refuse additional Bulk admission without
+queueing. A received chunk is released on a refused write, so a charge already waiting for those
+bytes can finish. Captured
+checkpoint readers apply the same rule while retaining their working set or a decoded identity
+group. These refusals preserve the underlying admission cause and publish no partial snapshot.
 
 The coordinator streams native lifecycle and Kafka metadata into quota-owned files before
 installation. It retains the verified description's separate `restore_metadata` preparation

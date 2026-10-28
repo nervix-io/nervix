@@ -148,10 +148,7 @@ enum InferencerBindingValidationError {
     #[error("failed to inspect ONNX model '{file}' for inferencer '{node}': inspection panicked")]
     InspectionPanic { node: InferencerName, file: String },
     #[error("failed to initialize ONNX session builder for inferencer '{node}'")]
-    SessionBuilder {
-        node: InferencerName,
-        source: ort::Error,
-    },
+    SessionBuilder { node: InferencerName },
     #[error("failed to inspect ONNX model '{file}' for inferencer '{node}'")]
     SessionModel {
         node: InferencerName,
@@ -813,25 +810,31 @@ impl SessionServiceImpl {
             model_file = %processor_file,
             "ONNX metadata session builder initializing"
         );
-        let builder = Session::builder().map_err(|source| {
-            Report::new(InferencerBindingValidationError::SessionBuilder {
+        let environment = crate::runtime::onnx_environment().change_context_lazy(|| {
+            InferencerBindingValidationError::SessionBuilder {
                 node: processor_name.clone(),
-                source,
-            })
+            }
+        })?;
+        let builder = Session::builder(environment).change_context_lazy(|| {
+            InferencerBindingValidationError::SessionBuilder {
+                node: processor_name.clone(),
+            }
         })?;
         // Reading metadata executes no inference. Keep optimization on the admitted bulk
         // worker too: ONNX's defaults create a physical-core-sized pool for every inspection.
         let builder = builder.with_intra_threads(1).map_err(|source| {
-            Report::new(InferencerBindingValidationError::SessionBuilder {
-                node: processor_name.clone(),
-                source: source.into(),
-            })
+            Report::<ort::Error>::new(source.into()).change_context(
+                InferencerBindingValidationError::SessionBuilder {
+                    node: processor_name.clone(),
+                },
+            )
         })?;
         let mut builder = builder.with_inter_threads(1).map_err(|source| {
-            Report::new(InferencerBindingValidationError::SessionBuilder {
-                node: processor_name.clone(),
-                source: source.into(),
-            })
+            Report::<ort::Error>::new(source.into()).change_context(
+                InferencerBindingValidationError::SessionBuilder {
+                    node: processor_name.clone(),
+                },
+            )
         })?;
         tracing::debug!(
             node = %processor_name,
@@ -1412,14 +1415,15 @@ mod tests {
         }
 
         // A fresh process prevents another parallel test's runtime or database threads from
-        // changing this count. Initialize the dependency's environment before the observation;
-        // no session has been loaded and no ONNX operator pool has been created yet.
+        // changing this count. Create the process's ONNX environment before the observation; no
+        // session has been loaded and no ONNX operator pool has been created yet.
         tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
             .with_writer(std::io::sink)
             .try_init()
             .assured("the isolated owner regression has installed no other tracing subscriber");
-        drop(Session::builder().assured("ONNX Runtime creates its environment"));
+        crate::runtime::onnx_environment()
+            .assured("ONNX Runtime creates the process's environment");
         let before = std::fs::read_dir("/proc/self/task")
             .assured("Linux exposes the current process's tasks")
             .count();
