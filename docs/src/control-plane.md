@@ -15,6 +15,11 @@ It is responsible for:
 
 The most important property is that control-plane state is authoritative. A runtime node only exists because the control plane says it exists.
 
+Session admission consumes pure statement-routing decisions for request-domain, existing-domain,
+leader and persistence requirements. These decisions depend only on typed statements; the session
+edge performs registry reads and dispatch. `DESCRIBE CLIENT` requires an existing request domain
+and reads its committed declaration without leader or persistent-command admission.
+
 Execution graph configuration is part of this control-plane state. Plexus models, domain schedules, and lifecycle transitions are persisted with strong consistency guarantees before runtime nodes execute them. The committed schedule becomes an in-memory typed execution revision at the application boundary; [Execution Plans](./execution-plans.md) describes its installation and recovery.
 
 Schedule planning captures live voter incarnations separately from destination candidates, which

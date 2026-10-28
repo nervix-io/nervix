@@ -126,6 +126,7 @@ tags = [
   "@client_io_03_generation",
   "@remote_ack_owners",
   "@backup_wait",
+  "@backup_parked_wait",
   "@restarted_voter_observation",
   "@domain_clock_takeover",
   "@udf_column_builder",
@@ -878,6 +879,16 @@ id = "scenario.wasm-kafka-restore"
 invariant = "A quiesced backup restores two WASM branches and the domain's Kafka offsets on one and three nodes."
 invocation = "scenarios"
 scenario = "A quiesced backup restores two WASM branches and Kafka domain offsets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A quiesced cut's drain and its force-flush generations while a junction re-evaluates a message parked on REQUIRED WAIT through slow materialized state reads, then the message's release once its state arrives."
+examples = 2
+feature = "tests/features/cluster/backup.feature"
+id = "scenario.backup-parked-wait-slow-reads"
+invariant = "A message parked on REQUIRED WAIT stays parked while every flush generation re-evaluates it, so a quiesced backup completes within its declared timeout on one and three nodes."
+invocation = "scenarios"
+scenario = "A parked required wait whose state reads are slow does not hold the cut"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1754,6 +1765,16 @@ id = "stress.wasm-kafka-restore"
 invariant = "A quiesced backup restores two WASM branches and the domain's Kafka offsets on one and three nodes."
 invocation = "stress-restore-scenarios"
 scenario = "A quiesced backup restores two WASM branches and Kafka domain offsets"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: a quiesced cut's drain and its force-flush generations while a junction re-evaluates a message parked on REQUIRED WAIT through slow materialized state reads, then the message's release once its state arrives."
+examples = 2
+feature = "tests/features/cluster/backup.feature"
+id = "stress.backup-parked-wait-slow-reads"
+invariant = "A message parked on REQUIRED WAIT stays parked while every flush generation re-evaluates it, so a quiesced backup completes within its declared timeout on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A parked required wait whose state reads are slow does not hold the cut"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
@@ -2991,6 +3012,8 @@ workloads = [
   "scenario.wasm-kafka-restore",
   "stress.client-alter-drain",
   "stress.wasm-kafka-restore",
+  "scenario.backup-parked-wait-slow-reads",
+  "stress.backup-parked-wait-slow-reads",
 ]
 
 [[owner]]
@@ -3035,6 +3058,8 @@ workloads = [
   "stress.shutdown-flush-before-freeze",
   "scenario.client-alter-drain",
   "stress.client-alter-drain",
+  "scenario.backup-parked-wait-slow-reads",
+  "stress.backup-parked-wait-slow-reads",
 ]
 
 [[owner]]
@@ -3121,6 +3146,8 @@ workloads = [
   "stress.materialized-bulk-generations",
   "stress.materialized-retention-activation",
   "stress.materialized-restart-retention",
+  "scenario.backup-parked-wait-slow-reads",
+  "stress.backup-parked-wait-slow-reads",
 ]
 
 [[owner]]
@@ -3135,6 +3162,8 @@ workloads = [
   "scenario.client-alter-drain",
   "stress.wasm-kafka-restore",
   "stress.client-alter-drain",
+  "scenario.backup-parked-wait-slow-reads",
+  "stress.backup-parked-wait-slow-reads",
 ]
 
 [[owner]]

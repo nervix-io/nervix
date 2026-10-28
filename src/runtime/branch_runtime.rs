@@ -104,9 +104,27 @@ pub(super) struct MaterializedDomainHandles<'a> {
     pub(super) domain: &'a DomainName,
 }
 
+/// A message taken from its processor's `REQUIRED WAIT` queue to be re-evaluated, still holding
+/// the park that keeps its acknowledgement out of drains and ownership handoffs.
+pub(super) struct ParkedMaterializedBatch {
+    pub(super) input_relay: RelayName,
+    pub(super) batch: RelayRecordBatch,
+    pub(super) required_wait: AckParkGuard,
+}
+
 impl PendingMaterializedBatch {
     pub(super) fn new(input_relay: RelayName, batch: RelayRecordBatch) -> Self {
         let required_wait = AckParkGuard::new(batch.acks.iter());
+        Self::parked_again(input_relay, batch, required_wait)
+    }
+
+    /// Queues `batch` with `required_wait`, the park it already holds, so a message that waits
+    /// again keeps its acknowledgement parked from one wait to the next.
+    pub(super) fn parked_again(
+        input_relay: RelayName,
+        batch: RelayRecordBatch,
+        required_wait: AckParkGuard,
+    ) -> Self {
         Self {
             input_relay,
             batch: Some(batch),
@@ -114,13 +132,21 @@ impl PendingMaterializedBatch {
         }
     }
 
-    pub(super) fn into_parts(mut self) -> (RelayName, RelayRecordBatch) {
-        drop(self.required_wait.take());
+    /// Takes the message out of the queue to be re-evaluated, keeping its park.
+    pub(super) fn into_parked(mut self) -> ParkedMaterializedBatch {
         let batch = self
             .batch
             .take()
-            .verified("the pending entry holds its batch from construction until this take");
-        (self.input_relay.clone(), batch)
+            .assured("the pending entry holds its batch from construction until this take");
+        let required_wait = self
+            .required_wait
+            .take()
+            .assured("the pending entry holds its park from construction until this take");
+        ParkedMaterializedBatch {
+            input_relay: self.input_relay.clone(),
+            batch,
+            required_wait,
+        }
     }
 }
 
@@ -520,14 +546,7 @@ impl BranchRuntime {
         let Some(mut processor) = self.processors.remove(processor_id) else {
             return;
         };
-        let pending_count = processor.pending_materialized.len();
-        for _ in 0..pending_count {
-            let Some(pending) = processor.pending_materialized.pop_front() else {
-                break;
-            };
-            let (incoming_relay, batch) = pending.into_parts();
-            processor.execute(self, &incoming_relay, batch).await;
-        }
+        processor.retry_parked(self).await;
         self.processors.insert(processor_id.clone(), processor);
     }
 
@@ -549,17 +568,11 @@ impl BranchRuntime {
             .map(|(identifier, _)| identifier.clone())
             .collect::<Vec<_>>();
         for processor_id in processor_ids {
+            nervix_primitives::task::consume_budget().await;
             let Some(mut processor) = self.processors.remove(&processor_id) else {
                 continue;
             };
-            let pending_count = processor.pending_materialized.len();
-            for _ in 0..pending_count {
-                let Some(pending) = processor.pending_materialized.pop_front() else {
-                    break;
-                };
-                let (incoming_relay, batch) = pending.into_parts();
-                processor.execute(self, &incoming_relay, batch).await;
-            }
+            processor.retry_parked(self).await;
             self.processors.insert(processor_id, processor);
         }
     }
@@ -2553,6 +2566,99 @@ mod tests {
         );
         assert_eq!(tracker.outstanding(), 0);
         assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+    }
+
+    /// Every force-flush generation and every state poll re-evaluates a message parked on
+    /// `REQUIRED WAIT`. While its dependency stays absent, the message stays parked throughout the
+    /// re-evaluation: its acknowledgement never reads as active work for a drain or an ownership
+    /// handoff, and its root publishes no progress, so the node that admitted the message has
+    /// nothing new to learn. A re-evaluation that unparked the message for its read and parked it
+    /// again afterwards would publish the message active and then parked once more.
+    #[nervix_primitives::test]
+    async fn a_parked_message_that_still_waits_stays_parked_through_its_re_evaluation() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
+        let profiles = named::<RelayName>("profiles");
+        publish_state_identity(
+            &runtime,
+            &domain,
+            ModelKind::Relay,
+            ModelName::from(&profiles),
+        );
+        let processor = named::<ModelName>("wait_for_customer");
+        let input_relay = named::<RelayName>("orders");
+        let mut template = junction_branch_template(processor.as_str(), input_relay.as_str());
+        template
+            .processors
+            .get_mut(&processor)
+            .assured("the junction fixture declares its processor")
+            .materialized_state = vec![nervix_models::MaterializedStateDependency {
+            relay: profiles.clone(),
+            policy: nervix_models::MaterializedStatePolicy::RequiredWait,
+        }];
+        let mut branch = template
+            .instantiate(&runtime, &domain, None, 1)
+            .await
+            .assured("a junction branch instantiates on the test domain")
+            .into_inner();
+        let state_schema = test_schema(&[("status", ParseAsType::String)]);
+        let routing = runtime
+            .inner
+            .domain_routings
+            .get(&domain)
+            .verified("the test domain publishes its routing")
+            .clone();
+        routing.store(StdArc::new(DomainRoutingSnapshot {
+            materialized_stream_specs: [(
+                profiles.clone(),
+                RuntimeMaterializedRelaySpec::new(
+                    state_schema.arrow_schema(),
+                    VmSchemaSensitivity::default(),
+                    ResolvedBranching::unbranched(),
+                ),
+            )]
+            .into_iter()
+            .collect(),
+            ..DomainRoutingSnapshot::default()
+        }));
+        let tracker = Arc::new(AckRootTracker::default());
+        let (acks, completion) = AckSet::tracked_root(tracker.clone());
+        let batch = RelayRecordBatch::single(
+            test_schema(&[("value", ParseAsType::I64)]),
+            None,
+            test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]),
+            acks,
+        )
+        .assured("the single-row fixture batch matches its schema");
+
+        branch
+            .execute_processor_input(&processor, &input_relay, batch)
+            .await;
+        assert!(
+            branch.processor_has_pending_materialized(&processor),
+            "the absent dependency parks the message"
+        );
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+        let parked = completion.remote_progress();
+        assert!(parked.1, "the parked root publishes its park");
+
+        branch
+            .retry_processor_pending_materialized(&processor)
+            .await;
+        branch.retry_materialized_waiters(&profiles).await;
+
+        assert!(
+            branch.processor_has_pending_materialized(&processor),
+            "the dependency is still absent, so the message is still parked"
+        );
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+        assert_eq!(
+            completion.remote_progress(),
+            parked,
+            "a re-evaluation that found the dependency still absent published the message active \
+             and parked it again"
+        );
     }
 
     #[test]
