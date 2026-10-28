@@ -1342,7 +1342,8 @@ node fetches a resource archive and how it verifies and records the fetched vers
 
 Backup state capture uses typed drain, capture, inventory, and fetch operations. The leader reads
 the admitted work of every live node and every node the domain's schedule assigns its work to
-through a management-class drain request, and requests a separate confirming force-flush round after
+through a management-class drain request, which starts a force-flush generation on a node only
+while that node holds admitted work, and requests a separate confirming force-flush round after
 all nodes appear quiet. The leader sends a management-class capture request with its coordination
 identity and applied cut revision to the scheduled primary of every placement whose state the
 archive captures, and for a `WITHOUT PAUSE` capture, whose schedule may move, to every other live

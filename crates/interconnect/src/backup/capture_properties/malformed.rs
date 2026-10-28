@@ -95,7 +95,7 @@ fn bolero_backup_capture_messages_refuse_damage_or_round_trip() {
                 case.check(&executor, class, Ok::<(), RemoteOperationFailure>(()))
                     .await;
                 for action in [
-                    BackupDrainAction::FlushIfIdle,
+                    BackupDrainAction::FlushHeldWork,
                     BackupDrainAction::Confirm,
                     BackupDrainAction::Observe,
                 ] {
