@@ -2472,9 +2472,14 @@ no cause. Its reproducer is the run's own when it recorded one, and otherwise th
 
 ### Signals And Suite Cleanup
 
-Each run executes in the background and leads a session of its own. An interrupt, termination or
-hangup therefore reaches the suite at once, and reaches the run only through the suite, even when a
-terminal signals the suite's whole process group. The suite passes one TERM to the run. The run's
+Each run executes in the background and leads a session of its own. The suite owns an interrupt,
+termination or hangup, which reaches the run only through the suite, even when a terminal signals
+the suite's whole process group. Each atomic record publication runs in a subprocess that ignores
+INT, TERM and HUP through temporary-file creation, JSON rendering and rename. The controller handles
+the pending signal after that publication finishes, preserving the child's identity before it
+passes one TERM to the run. The verifier controls hold both JSON rendering and the completed rename
+while sending a group hangup, then verify the interrupted record, one TERM and complete log output.
+The run's
 own exit trap then heals, captures and cleans up as on any exit, and records the run as interrupted.
 The suite starts no later entry. The verifier self-check executes the same way: a signal while it
 executes reaches it as the suite's one TERM, the suite records the check as interrupted, and no
