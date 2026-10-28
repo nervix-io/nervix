@@ -791,8 +791,9 @@ owners:
   attach and detach statements, and of the clock requests, replies and frames. Mutations of a
   current clock frame decode deterministically or fail within the verification budgets.
 
-The Bolero properties run as ordinary randomized and corpus tests on every pull request. Their
-sanitizer-backed libFuzzer campaigns run in CI only for a pull request labeled `fuzz`; every other
-event deliberately skips them, and a skip supplies no fuzz evidence.
+The Bolero properties run as ordinary tests in the ordinary suites. Their sanitizer-backed
+libFuzzer campaigns, the preferred Bolero evidence, run in CI only for a pull request labeled
+`fuzz`, and their randomized and corpus job only for one labeled `bolero-random`; any other pull
+request deliberately skips them, and a skip supplies no evidence of its mode.
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md#commands-and-enforcement) owns
 that policy.

@@ -752,11 +752,13 @@ test rather than timed in a live probe, and that those probes do not qualify TLS
 tests and CI. They qualify specific Rust API restrictions; C ABI ownership, runtime behavior and
 client conformance keep their own evidence.
 
-Registered Bolero properties run ordinary randomized/corpus checks on every PR. Sanitizer CI runs
-only for a pull request carrying `fuzz`; unlabeled, scheduled and workflow-dispatch runs expect a
-sanitizer skip. That skip proves no sanitizer execution or coverage. Explicit local `just fuzz`
-and `just fuzz-all` remain available. [Property Testing And Fuzzing](./property-testing-and-fuzzing.md)
-owns the inventory, bounded campaigns, exact replay and failure retention.
+Registered Bolero properties run as ordinary tests in the ordinary suites. Sanitizer CI, the
+preferred Bolero evidence, runs only for a pull request carrying `fuzz`, and the randomized/corpus
+job only for one carrying `bolero-random`; unlabeled, scheduled and workflow-dispatch runs expect a
+sanitizer skip, and an unlabeled pull request a randomized skip. A skip proves no execution or
+coverage of its mode. Explicit local `just fuzz` and `just fuzz-all` remain available.
+[Property Testing And Fuzzing](./property-testing-and-fuzzing.md) owns the inventory, bounded
+campaigns, exact replay and failure retention.
 
 Shuttle explores interleavings of production credit, admission, attempt and close owners. Loom
 addresses registered memory-ordering claims; Turmoil addresses the supported simulated-network

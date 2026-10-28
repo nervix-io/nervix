@@ -2516,6 +2516,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_bulk_request_envelopes_preserve_payload_and_release_charges/corpus"
+domain_version = 1
+features = []
+id = "bulk-request-envelope-wire"
+invariant = "A complete current Bulk request envelope preserves class, request name and every payload byte through the production stream encoder and wire decoder; encoding returns the input charge before stream admission, and dropping the decoded value returns all charges."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-interconnect"
+random_iterations = 64
+source = "crates/interconnect/src/wire_properties.rs"
+test = "wire::properties::bolero_bulk_request_envelopes_preserve_payload_and_release_charges"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message/corpus"
 domain_version = 5
 features = []

@@ -196,7 +196,7 @@ fn bolero_backup_capture_messages_round_trip() {
                 }
                 assert_round_trip(&executor, class, Ok::<(), RemoteOperationFailure>(())).await;
                 for action in [
-                    BackupDrainAction::FlushIfIdle,
+                    BackupDrainAction::FlushHeldWork,
                     BackupDrainAction::Confirm,
                     BackupDrainAction::Observe,
                 ] {

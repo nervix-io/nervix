@@ -158,6 +158,7 @@ records their scope without treating a passing qualification as a completed camp
 | `remote-relay-rows` | `nervix-server` routed relay batch equality from the sender's payload to the receiver's rows, branch key bits and watermarks | every field type, concrete and absent branches and per-row registrations, v3 | 128 | 2048 bytes |
 | `remote-relay-rows-malformed` | `nervix-server` the first payload defect in the receiver's check order | foreign bodies, miscounted watermarks and registrations and invalid branch keys, v3 | 128 | 2048 bytes |
 | `relay-wire-messages` | `nervix-interconnect` relay grant, reply, admission, acknowledgement and connection binding equality through the bounded codec | every message variant, branch key values with any float bits and per-row metadata, v5 | 256 | 2048 bytes |
+| `bulk-request-envelope-wire` | `nervix-interconnect` complete Bulk stream request envelope equality and input/output charge lifetimes through the production encoder and wire decoder | bounded opaque payload bytes, including empty input and writer growth, v1 | 64 | 4096 bytes |
 | `relay-wire-messages-malformed` | `nervix-interconnect` typed decode failure or a message that encodes and decodes back to itself, with every allocation of the decoder freed | damaged encodings of every message and arbitrary bytes, v5 | 256 | 2048 bytes |
 | `client-producer-link-frames` | `nervix-server` complete equality of every client producer link frame through the bounded duplex codec of its stream, with nothing left charged | the opening message, every serving-node frame and every owning-node answer, with schemas of any field type, limits and counts at their ends, opaque batch bytes, every refusal, outcome, admission state and end reason, v3 | 256 | 2048 bytes |
 | `client-producer-link-frames-malformed` | `nervix-server` typed decode failure, never an admission or execution refusal, or a frame that encodes and decodes back to itself | damaged encodings of every link frame, frames read as another direction's type and arbitrary bytes, v3 | 256 | 2048 bytes |
@@ -495,10 +496,10 @@ build path that runs its campaigns. `CARGO_BUILD_JOBS=1 just prepare-archive-cou
 command for the declared server library shared by the registry and window count properties.
 Then run the registered campaigns with `just fuzz`. Preparation records its own build log and
 metadata with a 7,200-second compilation deadline; it does not count as a completed fuzz campaign.
-An expected sanitizer skip contributes no execution or coverage evidence. The Check workflow's
-validation job and the Bolero randomized job retain their separate scopes and limits. Check calls
-the reusable Bolero workflow with its exact tested SHA, event and label snapshot. Scheduled and
-manual Bolero runs execute randomized checks and record a deliberate sanitizer skip.
+An expected sanitizer or randomized skip contributes no execution or coverage evidence. The Check
+workflow's validation job and the Bolero randomized job retain their separate scopes and limits.
+Check calls the reusable Bolero workflow with its exact tested SHA, event and label snapshot.
+Scheduled and manual Bolero runs execute randomized checks and record a deliberate sanitizer skip.
 
 ### Documentation-only Selection
 
@@ -530,10 +531,11 @@ no evidence about this choice.
 
 A verified documentation-only selection excludes the ordinary tests, scenarios, extra tests,
 diagnostic evidence and their coverage aggregation. It excludes the entire reusable Bolero call
-unless the event carries `fuzz`. Validation and the conventional PR title check remain independent
-and mandatory. Label-selected mode checks remain selected by their labels; `fuzz` still requires
-both ordinary properties and the complete sanitizer inventory even for documentation. Label
-addition and removal compute a fresh selection from that event's label snapshot.
+unless the event carries `bolero-random` or `fuzz`. Validation, the script tests of the `checks`
+job and the conventional PR title check remain independent and mandatory. Label-selected mode
+checks remain selected by their labels; `bolero-random` still requires the ordinary properties and
+`fuzz` the complete sanitizer inventory even for documentation. Label addition and removal compute
+a fresh selection from that event's label snapshot.
 
 The `ci-test-selection` artifact records run, attempt, job, event and action, the tested merge, the
 event's base, the tested base and the head, every changed path, labels and each ordinary/Bolero
@@ -599,10 +601,10 @@ estimated at most 114 minutes per shard before discovery, failure qualification 
 Funding 1.5 times that estimate left 69 minutes for those surrounding operations and cold-build
 variation, including the separately bounded server preparation. Recompute the plan from the
 current inventory with `just fuzz-plan 3`; historical estimates are not a current campaign
-verdict. `bolero-gate` requires the randomized job, every shard and the
-combined proof when the PR carries `fuzz`, and requires all of the sanitizer jobs to be skipped
-otherwise. `tests/release-evidence.toml` holds a qualifying revision to the same checks, every shard
-of the matrix included.
+verdict. `bolero-gate` requires every shard and the combined proof when the PR carries `fuzz`, and
+requires all of the sanitizer jobs to be skipped otherwise; it holds the randomized job to
+`bolero-random` the same way. `tests/release-evidence.toml` holds a qualifying revision to the same
+checks, every shard of the matrix included, and to the randomized job under its own label.
 
 The fuzz profile uses one codegen unit, optimization level two and debug level one. The full
 server package uses optimization level one and no debug output to keep its instrumented build
@@ -628,7 +630,7 @@ Ordinary execution prepares each selected package, harness and exact feature set
 the union of a package's features; its binary does not prepare a target with a different declared
 feature set. Each property still has a 240-second execution bound and must complete its exact
 randomized iteration count and replay every checked-in corpus input. A failed preparation ends
-the run before that harness executes any property. The ordinary CI job reserves 90 minutes for
+the run before that harness executes any property. The randomized CI job reserves 90 minutes for
 discovery, the declared feature builds and every registered target. Run 39649567371 took 47m10s;
 1.5 times that measurement is 70m45s, leaving more than 19 minutes for publication and further
 runner variation.
@@ -676,10 +678,13 @@ corpus paths different from Bolero's actual work directory. Discovery executes o
 mode; it cannot start the server's scenario harness. It reports discovered, selected, executed and
 completed counts.
 `just validate` and `just validate-ci` do not run Bolero checks. Bolero commands perform discovery
-before their selected action, and the dedicated ordinary Bolero CI job owns this check. The inventory includes server-owned Arrow
-properties, so Bolero recipes prepare the web console assets the server library embeds through
-`just bolero-deps`. This compiles assets only; it starts no live service. Both Bolero CI jobs install
-Trunk, the browser Rust target and native server build dependencies before compiled discovery.
+before their selected action, and the Bolero CI jobs own this check: the randomized job before its
+properties and every sanitizer shard before its campaigns. A pull request carrying neither
+`bolero-random` nor `fuzz` therefore runs no inventory check in CI. The inventory includes
+server-owned Arrow properties, so Bolero recipes prepare the web console assets the server library
+embeds through `just bolero-deps`. This compiles assets only; it starts no live service. Both Bolero
+CI jobs install Trunk, the browser Rust target and native server build dependencies before compiled
+discovery.
 Console builds stage the complete real Trunk output and publish only changed assets. Identical
 assets retain their file identity and timestamps, so repeated preparation preserves an already
 instrumented server build; failed builds leave the published assets intact.
@@ -714,15 +719,26 @@ CI shard does before its campaigns.
 The target must subsequently pass `just fuzz <id>` with the ordinary build and case
 limits; CI campaigns continue to use that bounded runner.
 
-PR CI runs a required ordinary randomized/corpus job through Check's reusable Bolero call. The
-sanitizer libFuzzer shards run only when the PR has the `fuzz` label, with 30 seconds of engine
-time per target. Every job uses the native
+PR CI runs each Bolero mode through Check's reusable Bolero call only when the PR carries its
+label. The sanitizer libFuzzer shards run with `fuzz`, with 30 seconds of engine time per target,
+and the ordinary randomized/corpus job runs with `bolero-random`. Every job uses the native
 [CI linker](./developing-nervix.md#validation-and-tests), including sanitizer builds that supply
-their own compiler flags. Adding or removing the label reevaluates the jobs, and a push to a
-labeled PR runs the shards again. Scheduled and manual workflow runs execute the ordinary
-properties. Job limits reserve additional time for compilation, artifacts and cleanup. A
-cache may seed a campaign but cannot skip a target or replace checked-in regressions. An empty
-selection, timeout, engine failure, sanitizer finding or property failure fails the job.
+their own compiler flags. Adding or removing a label reevaluates the jobs, and a push to a labeled
+PR runs them again. Scheduled and manual workflow runs execute the ordinary properties. Job limits
+reserve additional time for compilation, artifacts and cleanup. A cache may seed a campaign but
+cannot skip a target or replace checked-in regressions. An empty selection, timeout, engine
+failure, sanitizer finding or property failure fails the job.
+
+`fuzz` is the preferred Bolero evidence in CI. Its shards discover the inventory, run a
+coverage-guided sanitizer campaign of every registered target from its checked-in corpus, measure
+the Rust source those campaigns execute and qualify the runner's failure paths. A pull request whose
+diff requires the ordinary suites runs each property there as an ordinary Rust test that replays its
+checked-in corpus, whatever its labels. The randomized job adds the run of each harness with its
+exact declared features and the check that every property ran the inventory's case count and
+replayed its whole corpus. Label a pull request `bolero-random` only when its task requires
+that run, such as a change to the randomized run itself, its runner or its job, or a release
+qualification, whose register requires it. A new or changed target is checked locally with
+`just test-bolero <id>`; in CI, label its pull request `fuzz`.
 
 Each fuzz run retains its corpus, crashes, log and metadata with revision, target, domain version,
 toolchain, features, flags, result and exact-input reproduction commands. Retain failure
@@ -760,7 +776,7 @@ runner proves its own failure paths.
 inputs the live libFuzzer process executes, including candidates it discards from its retained
 corpus. `just coverage-bolero <seconds>` runs the command/artifact tests, all live campaigns and
 failure qualification while collecting the separate Python runner report. It does not rerun the
-randomized producer that CI already requires independently.
+randomized producer, which CI runs as a job of its own when `bolero-random` requests it.
 
 The shared build path adds `-C instrument-coverage` to cargo-bolero's sanitizer flags, retaining
 the pinned nightly, assertions, optimization settings, case/input limits and kache wrapper.
@@ -811,10 +827,12 @@ remain separate from ordinary workspace coverage and its CRAP report. A sanitize
 fuzz coverage artifact.
 
 Check's `coverage-full` job reads both artifacts. For a pull request carrying `fuzz`, it requires
-the gate's successful randomized and sanitizer verdicts and the combined campaign of this run's
-shards over every target of the tested inventory, and adds the campaign's lines to the
+the gate's successful sanitizer verdicts and the combined campaign of this run's shards over every
+target of the tested inventory, and adds the campaign's lines to the
 [full workspace union](./coverage-reports.md#the-full-workspace-union). Without `fuzz`, it requires
-the recorded deliberate skip and refuses any fuzz report.
+the recorded deliberate skip and refuses any fuzz report. It holds the randomized verdict to
+`bolero-random` the same way: success when the label requests the job, and the recorded deliberate
+skip otherwise.
 
 ## Adding A Target
 
@@ -824,7 +842,9 @@ test name, source, domain version, features, corpus, budgets and invariant in th
 Check in current-domain seeds, run `just validate-bolero`,
 `just test-bolero <id>` and `just fuzz <id> 30`, then run
 `just validate`. Both CI jobs include the target in the same change; the shard plan places it with
-its harness, or deals a new harness to a shard, so a target needs no shard assignment. A new harness
+its harness, or deals a new harness to a shard, so a target needs no shard assignment. Label the
+pull request `fuzz`, so CI discovers the inventory and runs the target's campaign; `bolero-random`
+is added only when the task requires the ordinary randomized run as well. A new harness
 whose sanitizer build exceeds a campaign's build deadline joins `prepared_targets`. A public product
 bug found this way first gets a failing focused reproducer and affected public Cucumber scenario
 before its fix.

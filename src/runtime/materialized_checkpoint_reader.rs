@@ -117,8 +117,7 @@ impl MaterializedCheckpointReader {
             .checked_mul(8)
             .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
         let metadata = executor
-            .reserve(MemoryClass::Bulk, metadata_bytes.max(1))
-            .await
+            .try_reserve(MemoryClass::Bulk, metadata_bytes.max(1))
             .change_context(MaterializedSnapshotError::Admission)?;
         let identities =
             decode_rkyv::<SealedRecordIdentities>(executor, bytes, identity_limit).await?;
@@ -170,6 +169,7 @@ impl MaterializedCheckpointReader {
 mod tests {
     use std::io::Cursor;
 
+    use futures_util::FutureExt as _;
     use meticulous::OptionExt as _;
     use nervix_models::Timestamp;
 
@@ -208,6 +208,67 @@ mod tests {
         )
         .open(executor)
         .await
+    }
+
+    #[nervix_primitives::test]
+    async fn captured_header_bulk_admission_refuses_overlap_without_waiting() {
+        let executor = Executor::default();
+        let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+        let room = crate::runtime::RESTORE_STATE_WORKING_BYTES + 1024;
+        let held = executor
+            .try_reserve(MemoryClass::Bulk, capacity - room)
+            .assured("the untouched class holds the contention fixture");
+        let result = open(&executor, container(1)).now_or_never();
+        assert!(
+            result.is_some(),
+            "a captured reader must refuse its overlapping read instead of waiting while holding \
+             its working set"
+        );
+        let error = result
+            .verified("the read returned without waiting")
+            .err()
+            .assured("the read and working set do not fit together");
+        assert!(error.contains::<nervix_execution::AdmissionError>());
+        drop(held);
+        assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+    }
+
+    #[nervix_primitives::test]
+    async fn captured_group_bulk_admission_refuses_without_losing_its_next_group() {
+        let executor = Executor::default();
+        let mut reader = open(&executor, container(1))
+            .await
+            .assured("the header opens");
+        let memory = executor.memory(MemoryClass::Bulk);
+        let held = executor
+            .try_reserve(
+                MemoryClass::Bulk,
+                memory.capacity_bytes - memory.reserved_bytes,
+            )
+            .assured("the fixture occupies all remaining room");
+        let result = reader
+            .next_group(&executor, 1024 * 1024, 1024 * 1024)
+            .now_or_never();
+        assert!(
+            result.is_some(),
+            "a captured group must refuse its read instead of waiting while holding its reader \
+             working set"
+        );
+        let error = result
+            .verified("the group returned without waiting")
+            .err()
+            .assured("the bulk class is full");
+        assert!(error.contains::<nervix_execution::AdmissionError>());
+        drop(held);
+        let group = reader
+            .next_group(&executor, 1024 * 1024, 1024 * 1024)
+            .await
+            .assured("a refused first frame consumed nothing")
+            .assured("the group is still present");
+        assert_eq!(group.columns.as_ref(), vec![0; 513]);
+        drop(group);
+        drop(reader);
+        assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
     }
 
     #[nervix_primitives::test]

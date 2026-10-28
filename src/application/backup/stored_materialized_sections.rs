@@ -107,8 +107,7 @@ impl SessionServiceImpl {
                 })?
             {
                 let charge = executor
-                    .reserve(MemoryClass::Bulk, 4 * MATERIALIZED_IDENTITIES_BYTES)
-                    .await
+                    .try_reserve(MemoryClass::Bulk, 4 * MATERIALIZED_IDENTITIES_BYTES)
                     .change_context_lazy(|| {
                         failure_context(&request.domain, "backup state section operation failed")
                     })?;

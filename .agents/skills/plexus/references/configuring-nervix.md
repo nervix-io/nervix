@@ -515,6 +515,9 @@ Choose checks relevant to the configured graph:
   refused while a node that owns the domain's state is down or no node can host part of it, and a
   normal backup also while a node that runs its work is; send it again once the node is back,
   failover has moved its work, or a node is uncordoned.
+  Materialized capture also refuses insufficient overlapping bulk memory; release competing bulk
+  work and send a fresh backup rather than extending `TIMEOUT`. Read the backup chapter's capacity
+  failures before sizing or retrying a capture.
   `WITHOUT PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures
   only configuration. `DESCRIBE BACKUP '<file>';` verifies one offline in `nervix-cli` and inventories
   its state, domains, users, and resource versions. Treat an archive as a secret. Kafka offset and
