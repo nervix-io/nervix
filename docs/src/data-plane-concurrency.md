@@ -1779,6 +1779,20 @@ checks below establish what a caller may do with them.
 
 ## Diagnostic Deadlock Detection
 
+The resource-source-discovery workload exercises resource publication, a pending replica and
+installation once source visibility resumes, followed by a lookup of the replicated file. Its
+active, order and stressed records name the consensus-storage and cluster lifecycle owners it
+reaches. The scenario's command-pause map, watch observation and source filter are test-only and
+outside Deloxide's tracked locks; they establish the public interleaving directly. No data-plane
+lock, memory-ordering protocol or production wait-and-notify mechanism changes.
+
+The resource-upload-publication workload reaches the recovery caller on one and three nodes: it
+refuses publication after installation, lets reconciliation read the matching local manifest and
+publish that copy, and observes the original upload complete with one version. Its active, order
+and stressed records reach the same consensus-storage and cluster owners. The scenario's refusal
+map and watch remain outside tracked-lock detection; the public assertions establish that recovery
+took up the refused upload before the client's retry could supply the archive again.
+
 The backup cut diagnostics scenario exercises capture-budget expiry and resumption on one and
 three nodes in the active, order and stressed-restore Deloxide selections. The coordinator's phase
 measurements are task-owned administrative state and add no synchronization. The existing capture
@@ -2222,6 +2236,15 @@ observations and transport waits remain outside Deloxide; the public outcomes an
 state-machine regressions cover the retention decision. No synchronization protocol or memory
 ordering changes at this boundary.
 
+The MongoDB client-identity workloads reach the filesystem executor's tracked class-queue fences
+while preparing a private combined PEM and constructing native TLS on one- and three-node
+clusters. Active, order-analysis and lifecycle-stress selections use the real mutual-TLS server,
+require an identity-equipped client to write, and require its CA-only control to fail. Both
+callbacks run outside the queue fence; driver-internal locks, certificate I/O and network waits
+remain outside Deloxide's observation. All four diagnostic lanes apply to these lifecycle jobs;
+restore stress retains its existing selection. The jobs add no synchronization or memory-ordering
+protocol of their own, so they add no Shuttle or Loom model.
+
 The WASM reset publication workloads reach tracked transaction state and impact recording during
 initial application and recovery on one- and three-node clusters. Ordinary, order-analysis and
 stressed selections distinguish typed loss of publication leadership from a retained genuine
@@ -2597,6 +2620,15 @@ outline checks source readiness and Commands-memory headroom after restoring ont
 allowing the retirement reservations that live Kafka consumers retain.
 The semaphore waits are asynchronous and outside Deloxide's tracked-lock detection; the diagnostic
 restore workloads exercise the surrounding storage and restore lifecycle.
+
+Consensus storage admits each Commands working set through one of the store's turns before it asks
+the Commands class, and a working set returns its bytes before its turn passes. Its Shuttle check
+holds one working set while a second admission waits for its turn and a source control call races
+both, then ends the held working set: the control call finds room at every interleaving, the second
+working set is admitted, and the class ends with nothing reserved. The real-storage owner tests
+hold a chunk with an unread entry while a log read and a storage job wait behind it, and require
+the control call's room while they wait. Like the chunk check, this is a control-plane admission
+check without a memory-ordering claim, and its waits are outside Deloxide's detection.
 
 The checks below hold the scheduler-visible parts of each protocol to their invariants. Test
 names are given relative to their owning module; the `shuttle` feature selects the modeled build.

@@ -46,6 +46,8 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
             K::required("addr", V::DriverAddress),
             K::CONNECT_TIMEOUT,
             K::IDLE_TIMEOUT,
+            K::defaulted("pool_idle_timeout_ms", V::Milliseconds, "600000"),
+            K::defaulted("pool_max_lifetime_ms", V::Milliseconds, "1800000"),
             K::optional("subscription_buffer_messages", V::PositiveInteger),
             K::TLS_CA,
             K::TLS_CERT,

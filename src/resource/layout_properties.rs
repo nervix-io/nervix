@@ -22,7 +22,7 @@ use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_execution::Executor;
 use nervix_models::{ClusterNodeName, DomainName, ResourceId, ResourceName, Timestamp};
 
-use super::{ResourceManifest, ResourceStore, ResourceStoreError};
+use super::{ResourceManifest, ResourceStore};
 
 /// The one file every generated archive holds. Its bytes name the version it was built for.
 const IDENTITY_FILE: &str = "identity";
@@ -90,7 +90,8 @@ async fn install(store: &ResourceStore, id: &ResourceId) -> ResourceManifest {
 async fn assert_holds(store: &ResourceStore, installed: &ResourceManifest) {
     let id = &installed.resource.id;
     let manifest = match store.read_manifest(id).await {
-        Ok(manifest) => manifest,
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => panic!("installed resource version {id:?} has no local manifest"),
         Err(report) => panic!(
             "version {} of resource `{}` in domain `{}` has no manifest: {report:?}",
             id.version,
@@ -208,24 +209,21 @@ fn bolero_resource_versions_keep_their_own_directories() {
                     assert_holds(&store, manifest).await;
                 }
 
-                let Some((removed, kept)) = installed.split_first() else {
+                let Some((deleted, kept)) = installed.split_first() else {
                     return;
                 };
                 store
-                    .remove_version(&removed.resource.id)
+                    .remove_version(&deleted.resource.id)
                     .await
                     .assured("an installed version is removed");
                 for manifest in kept {
                     assert_holds(&store, manifest).await;
                 }
-                let failure = store
-                    .read_manifest(&removed.resource.id)
+                let manifest = store
+                    .read_manifest(&deleted.resource.id)
                     .await
-                    .expect_err("a removed version has no manifest");
-                assert!(
-                    matches!(failure.current_context(), ResourceStoreError::ReadFile),
-                    "{failure:?}"
-                );
+                    .assured("absence is an ordinary resource-store outcome");
+                assert_eq!(manifest, None);
             });
         });
 }

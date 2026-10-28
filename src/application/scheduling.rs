@@ -2357,10 +2357,9 @@ impl SessionServiceImpl {
                     Err(error) => {
                         service.broadcast_error(format!(
                             "failed to resolve Kafka partition watcher client config for ingestor \
-                             '{}' in domain '{}': {}",
+                             '{}' in domain '{}': {error:#}",
                             spec_for_task.ingestor.as_str(),
                             spec_for_task.domain.as_str(),
-                            error
                         ));
                         return;
                     }
@@ -2399,10 +2398,9 @@ impl SessionServiceImpl {
                             Err(error) => {
                                 service.broadcast_error(format!(
                                     "failed to inspect Kafka partitions for ingestor '{}' in \
-                                     domain '{}': {}",
+                                     domain '{}': {error:#}",
                                     spec_for_task.ingestor.as_str(),
                                     spec_for_task.domain.as_str(),
-                                    error
                                 ));
                                 nervix_primitives::select! {
                                     _ = service.inner.drain_support_shutdown.cancelled() => break,
@@ -2425,10 +2423,9 @@ impl SessionServiceImpl {
                         {
                             service.broadcast_error(format!(
                                 "failed to publish Kafka partition schedule for ingestor '{}' in \
-                                 domain '{}': {}",
+                                 domain '{}': {error:#}",
                                 spec_for_task.ingestor.as_str(),
                                 spec_for_task.domain.as_str(),
-                                error
                             ));
                         } else {
                             last_observed = Some(partitions);
