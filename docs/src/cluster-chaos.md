@@ -1861,7 +1861,9 @@ Four pipelines have their own sources, which the run produces to directly:
 
 On three nodes, one acknowledged `RELOCATE` moves every processor, relay and emitter of the
 materialized, generated, window, rotating, expiring and pooled paths onto the observed follower that
-the faults target, and their ingestors onto another node. The deployment uses a one-second state
+the faults target, and a second moves their ingestors onto another node. The run reads every
+entity's owner from `DESCRIBE RELOCATION ... ONTO NODE ... IGNORE PREFERENCES`, a dry run that moves
+nothing, because `DESCRIBE` has no form for a generator. The deployment uses a one-second state
 snapshot interval and, on three nodes, one state replica.
 
 **The phases.** The run holds the life load after a record count, waits until the source has
