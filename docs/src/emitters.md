@@ -1117,6 +1117,8 @@ Transport-specific expectations:
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
 - `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
+  An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses
+  `tls_cert_file` and `tls_key_file`.
 - `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; Nervix honors the
   client's `tls_ca_file`, `tls_cert_file`, and `tls_key_file`.
 - `OTEL`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file`, `tls_cert_file`, and
@@ -1777,6 +1779,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sqs-queue-emit).
 <!-- connector-matrix:emit-sqs-queue:end -->
+
+`QUEUE` uses the same rule as [SQS ingestion](ingestors.md#sqs): 1 to 80 ASCII letters, digits,
+`-` and `_`, a FIFO queue's `.fifo` suffix included, preserved exactly as written. `write_header`
+writes message attributes, and the emitter declares no envelope clause or `PROPERTIES` block. The
+`SQS CLIENT` it names declares the keys the [SQS ingestion section](ingestors.md#sqs) lists.
 
 `SINGLE` issues one request per message. `BATCH` groups messages within SQS's fixed limit of ten
 entries and 256 KiB per request; both modes issue requests sequentially and acknowledge service

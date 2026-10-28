@@ -1,0 +1,344 @@
+//! Tests of the SQS vocabulary's executable queue contract.
+//!
+//! Layer: test harness.
+//! - **Owns.** SQS declaration, client configuration and queue-name contract checks through the
+//!   public vocabulary.
+//! - **Depends on.** SQS Models, entity kinds and shared declaration types.
+//! - **Must not know.** The SQS SDK, parsing, planning or how a queue is received from or sent to.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
+use meticulous::{OptionExt as _, ResultExt as _};
+use rstest::rstest;
+
+use super::*;
+use crate::{
+    ClientConfigEntry, ClientConfigFile, ClientConfigOwner, ClientConfigPresence,
+    ClientConfigSchemaError, ClientConfigValue, ClientPooling, CreateClientSqs, EmitterEntityKind,
+    EmitterPublishingModeKind, IngestDeliveryKind, IngestQuiesceKind, IngestorEntityKind,
+};
+
+#[test]
+fn queue_declarations_match_the_sequentially_acknowledged_transport() {
+    let ingest = IngestorEntityKind::Sqs(SqsIngestorEntity::Queue).capabilities();
+    let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
+
+    assert_eq!(ingest.delivery, &[DeclaredDelivery::ACK_SEQUENTIAL]);
+    for undeclared in [
+        IngestDeliveryKind::NoAck,
+        IngestDeliveryKind::AckParallel,
+        IngestDeliveryKind::AckRequest,
+    ] {
+        assert_eq!(ingest.declared_delivery(undeclared), None);
+    }
+    assert_eq!(ingest.position_class, PositionClass::BrokerRedelivered);
+    assert_eq!(
+        ingest.acknowledgement_confirmation,
+        AcknowledgementConfirmation::Answered
+    );
+    assert!(!ingest.executes_on_every_cluster_node);
+    assert_eq!(ingest.quiesce, &[DeclaredQuiesce::SUSPEND]);
+    for undeclared in [
+        IngestQuiesceKind::Buffer,
+        IngestQuiesceKind::Drop,
+        IngestQuiesceKind::Reject,
+    ] {
+        assert_eq!(ingest.declared_quiesce(undeclared), None);
+    }
+    assert_eq!(
+        emit.publishing_modes,
+        &[
+            EmitterPublishingModeKind::SqsSingle,
+            EmitterPublishingModeKind::SqsBatch
+        ]
+    );
+    assert_eq!(emit.body, EmitterBodyForm::Codec);
+    assert!(!emit.requires_batch_transformation);
+}
+
+#[test]
+fn both_queue_directions_share_the_queue_rule_and_the_client() {
+    let ingest = IngestorEntityKind::Sqs(SqsIngestorEntity::Queue).capabilities();
+    let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
+    let queue = Some(LocatorDeclaration {
+        keywords: "QUEUE",
+        name: LocatorName::External(SqsQueueName::DECLARATION),
+    });
+
+    assert_eq!(ingest.locator, queue);
+    assert_eq!(emit.locator, queue);
+    assert_eq!(
+        ingest.reference,
+        IngestorReferenceKind::Client(ConnectorKind::Sqs)
+    );
+    assert_eq!(
+        emit.reference,
+        EmitterReferenceKind::Client(ConnectorKind::Sqs)
+    );
+    assert_eq!(
+        CreateClientSqs::<u64>::DECLARATION.pooling,
+        ClientPooling::Unpooled
+    );
+    assert!(CreateClientSqs::<u64>::DECLARATION.options.is_empty());
+}
+
+#[test]
+fn queue_declares_message_attributes_as_headers_and_no_envelope() {
+    let ingest = IngestorEntityKind::Sqs(SqsIngestorEntity::Queue).capabilities();
+    let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
+    let attributes = Some(HeaderModel::exact(HeaderLayout::LastWins));
+
+    assert_eq!(ingest.headers, attributes);
+    assert_eq!(emit.headers, attributes);
+    assert_eq!(ingest.metadata, IngestorMetadataScope::Headers);
+    assert!(ingest.metadata.fields().is_empty());
+    assert_eq!(ingest.options, &[OptionDeclaration::INSTANCES]);
+    assert!(emit.envelope.is_empty());
+    assert!(emit.properties.is_empty());
+}
+
+#[test]
+fn fifo_group_is_an_optional_expression_or_the_branch() {
+    let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
+    let [fifo_group] = emit.options else {
+        panic!("an SQS queue emitter declares exactly one option, its FIFO GROUP");
+    };
+
+    assert_eq!(fifo_group.keywords, "FIFO GROUP");
+    assert_eq!(
+        fifo_group.presence,
+        OptionPresence::Optional { default: None }
+    );
+    let OptionForm::Choice([expression, branch]) = fifo_group.form else {
+        panic!("FIFO GROUP is a choice between an expression and the record's branch");
+    };
+    assert_eq!(expression.value, Some(OptionValue::Expression));
+    assert_eq!(branch.name, "FROM BRANCH");
+    assert_eq!(branch.value, None);
+}
+
+#[test]
+fn batching_is_optional_up_to_the_largest_message_sqs_accepts() {
+    let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
+    let EmitterBatchLegality::Optional {
+        maximum: Some(maximum),
+    } = emit.batch
+    else {
+        panic!("an SQS queue emitter batches optionally within the SQS message limit");
+    };
+
+    assert_eq!(maximum.bytes().get(), 256 * 1024);
+}
+
+#[test]
+fn only_the_send_is_bounded_by_a_client_deadline_key() {
+    let ingest = IngestorEntityKind::Sqs(SqsIngestorEntity::Queue).capabilities();
+    let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
+
+    assert!(ingest.bounds.buffers.is_empty());
+    assert!(emit.bounds.buffers.is_empty());
+    assert!(ingest.bounds.deadline_keys().is_empty());
+    let ingest_waits: Vec<WaitBound> = ingest.bounds.waits.iter().map(|wait| wait.bound).collect();
+    assert_eq!(
+        ingest_waits,
+        vec![WaitBound::Driver("3.1 s"), WaitBound::Unbounded]
+    );
+    assert_eq!(emit.bounds.deadline_keys(), vec![DeadlineKey::Timeout]);
+    let emit_waits: Vec<WaitBound> = emit.bounds.waits.iter().map(|wait| wait.bound).collect();
+    assert_eq!(
+        emit_waits,
+        vec![
+            WaitBound::Driver("3.1 s"),
+            WaitBound::Unbounded,
+            WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
+        ]
+    );
+}
+
+fn config_entry(key: &str, value: &str) -> ClientConfigEntry {
+    ClientConfigEntry {
+        key: key.to_string(),
+        value: value.to_string(),
+    }
+}
+
+#[test]
+fn client_schema_declares_exactly_the_keys_both_directions_read() {
+    let config = CreateClientSqs::<u64>::DECLARATION.config;
+    let declared: Vec<&str> = config.keys().iter().map(|key| key.name).collect();
+
+    assert_eq!(
+        declared,
+        vec![
+            "access_key_id",
+            "endpoint",
+            "region",
+            "secret_access_key",
+            "timeout_ms",
+            "tls_ca_file"
+        ]
+    );
+    let endpoint = config
+        .key("endpoint")
+        .assured("the declared key list above names the endpoint");
+    assert_eq!(endpoint.presence, ClientConfigPresence::Required);
+    assert_eq!(endpoint.value, ClientConfigValue::Url(&["http", "https"]));
+    assert_eq!(endpoint.owner, ClientConfigOwner::Nervix);
+    for credential in ["access_key_id", "secret_access_key"] {
+        let key = config
+            .key(credential)
+            .assured("the declared key list above names both credentials");
+        assert!(key.confidential, "{credential} is redacted by inspection");
+        assert_eq!(key.presence, ClientConfigPresence::Optional);
+    }
+    let trust = config
+        .key("tls_ca_file")
+        .assured("the declared key list above names the trusted CA file");
+    assert_eq!(
+        trust.value,
+        ClientConfigValue::File(ClientConfigFile::CertificateAuthority)
+    );
+    assert_eq!(config.ownership_label(), "Nervix");
+    assert!(config.namespaces().is_empty());
+    assert!(config.reserved().is_empty());
+}
+
+#[test]
+fn client_schema_accepts_every_declared_key() {
+    CreateClientSqs::<u64>::DECLARATION
+        .config
+        .validate(&[
+            config_entry("endpoint", "https://sqs.eu-west-1.amazonaws.com"),
+            config_entry("region", "eu-west-1"),
+            config_entry("access_key_id", "AKIDEXAMPLE"),
+            config_entry("secret_access_key", "declared-secret"),
+            config_entry("timeout_ms", "5000"),
+            config_entry("tls_ca_file", "trust.pem"),
+        ])
+        .assured("every declared SQS key with a valid value is accepted before mount resolution");
+}
+
+#[test]
+fn client_schema_requires_the_endpoint() {
+    let refusal = CreateClientSqs::<u64>::DECLARATION
+        .config
+        .validate(&[config_entry("region", "eu-west-1")])
+        .expect_err("an SQS client cannot reach the service without its endpoint");
+
+    assert_eq!(
+        refusal.current_context(),
+        &ClientConfigSchemaError::MissingRequired { key: "endpoint" }
+    );
+}
+
+#[rstest]
+#[case("endpoint", "ftp://127.0.0.1:9324")]
+#[case("endpoint", "sqs.eu-west-1.amazonaws.com")]
+#[case("timeout_ms", "0")]
+#[case("timeout_ms", "soon")]
+fn client_schema_refuses_values_outside_their_declared_type(
+    #[case] key: &str,
+    #[case] value: &str,
+) {
+    let mut entries = vec![config_entry(key, value)];
+    if key != "endpoint" {
+        entries.push(config_entry("endpoint", "http://127.0.0.1:9324"));
+    }
+
+    let refusal = CreateClientSqs::<u64>::DECLARATION
+        .config
+        .validate(&entries)
+        .expect_err("a declared key holds only values of its declared type");
+    assert!(
+        matches!(refusal.current_context(), ClientConfigSchemaError::InvalidValue { key: refused, .. } if refused == key)
+    );
+}
+
+#[test]
+fn client_schema_refuses_an_undeclared_key() {
+    let refusal = CreateClientSqs::<u64>::DECLARATION
+        .config
+        .validate(&[
+            config_entry("endpoint", "http://127.0.0.1:9324"),
+            config_entry("regoin", "eu-west-1"),
+        ])
+        .expect_err("an SQS client is strict: only declared keys configure it");
+
+    assert_eq!(
+        refusal.current_context(),
+        &ClientConfigSchemaError::UnknownKey {
+            key: "regoin".to_string()
+        }
+    );
+}
+
+#[rstest]
+#[case("orders")]
+#[case("Orders-EU_1")]
+#[case("Orders-EU_1.fifo")]
+#[case("a")]
+fn queue_names_preserve_every_literal_character(#[case] raw: &str) {
+    let queue = SqsQueueName::try_from(raw).assured("each fixture is a valid SQS queue name");
+
+    assert_eq!(queue.as_str(), raw);
+    assert_eq!(queue.to_string(), raw);
+}
+
+#[test]
+fn the_fifo_suffix_counts_against_the_80_character_bound() {
+    let fifo_at_bound = format!("{}.fifo", "q".repeat(75));
+    let fifo = SqsQueueName::try_from(fifo_at_bound.as_str())
+        .assured("75 characters and the suffix fit the 80-character bound");
+    assert!(fifo.is_fifo());
+    let standard_at_bound = "q".repeat(80);
+    let standard = SqsQueueName::try_from(standard_at_bound.as_str())
+        .assured("80 characters fit the 80-character bound");
+    assert!(!standard.is_fifo());
+
+    let fifo_above_bound = format!("{}.fifo", "q".repeat(76));
+    assert_eq!(
+        SqsQueueName::try_from(fifo_above_bound.as_str()),
+        Err(ExternalNameError::TooLong {
+            max: 80,
+            actual: 81,
+        })
+    );
+    let standard_above_bound = "q".repeat(81);
+    assert_eq!(
+        SqsQueueName::try_from(standard_above_bound.as_str()),
+        Err(ExternalNameError::TooLong {
+            max: 80,
+            actual: 81,
+        })
+    );
+}
+
+#[rstest]
+#[case("", ExternalNameError::Empty)]
+#[case(".fifo", ExternalNameError::EmptyBeforeSuffix { suffix: ".fifo" })]
+#[case("orders.v2", ExternalNameError::InvalidChar { ch: '.' })]
+#[case("orders.FIFO", ExternalNameError::InvalidChar { ch: '.' })]
+#[case("Orders EU", ExternalNameError::InvalidChar { ch: ' ' })]
+#[case("orders/eu", ExternalNameError::InvalidChar { ch: '/' })]
+#[case("commandes-été", ExternalNameError::InvalidChar { ch: 'é' })]
+fn queue_names_outside_the_sqs_rule_are_refused(
+    #[case] raw: &str,
+    #[case] refusal: ExternalNameError,
+) {
+    assert_eq!(SqsQueueName::try_from(raw), Err(refusal));
+}
+
+#[test]
+fn only_a_name_ending_in_the_fifo_suffix_names_a_fifo_queue() {
+    let fifo = SqsQueueName::try_from("orders.fifo").assured("a FIFO queue name is valid");
+    let standard = SqsQueueName::try_from("orders-fifo").assured("a standard queue name is valid");
+
+    assert!(fifo.is_fifo());
+    assert!(!standard.is_fifo());
+}
