@@ -148,6 +148,7 @@ impl ConnectionFailureReason {
             | TransportError::ProgressTimeout { .. }
             | TransportError::Closed(_) => Self::Setup,
             TransportError::InvalidHandshake(_)
+            | TransportError::StaleRoute { .. }
             | TransportError::InvalidServerName(_)
             | TransportError::InvalidOptions { .. }
             | TransportError::BulkReceiveWindowUnbacked { .. }
@@ -218,7 +219,8 @@ impl StreamResetReason {
             | TransportError::RelayIndeterminate
             | TransportError::RelayRejected(_)
             | TransportError::RefusedByPeer { .. }
-            | TransportError::IncompatiblePeer { .. } => Self::Peer,
+            | TransportError::IncompatiblePeer { .. }
+            | TransportError::StaleRoute { .. } => Self::Peer,
         }
     }
 }

@@ -107,8 +107,8 @@ use crate::common::{
     cluster::{
         AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster,
         DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
-        InterconnectCredentialFault, JoinAttempt, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME,
-        TestClusterConfig, TestSession, WebsocketExchangeAction,
+        InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
+        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
         assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
         command_connect_options, observe_kafka_through, publish_kafka_record_through,
     },
@@ -12058,6 +12058,61 @@ async fn when_node_attempts_to_join(world: &mut ScenarioWorld, node_id: String) 
     let failure = match attempt {
         JoinAttempt::Admitted => None,
         JoinAttempt::Stopped(failure) => Some(failure),
+    };
+    world.node_start_attempt = Some(NodeStartAttempt {
+        node: node_id,
+        failure,
+    });
+}
+
+/// Starts a node whose only bootstrap host is a running member, and records whether the cluster
+/// admitted it as a voter or how it stopped, for a later step to assert.
+#[when(expr = "node {string} attempts to join through node {string}")]
+async fn when_node_attempts_to_join_through(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    member_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let member_id = expand_placeholders(world, &member_id);
+    let attempt = world
+        .cluster_mut()
+        .attempt_join_through(&node_id, &member_id)
+        .await
+        .expect("the joining node was neither admitted nor stopped");
+    let failure = match attempt {
+        JoinAttempt::Admitted => None,
+        JoinAttempt::Stopped(failure) => Some(failure),
+    };
+    world.node_start_attempt = Some(NodeStartAttempt {
+        node: node_id,
+        failure,
+    });
+}
+
+/// Starts a node that joins the running cluster through a running member and requires the
+/// cluster to admit it as a voter.
+#[given(expr = "node {string} has joined the cluster")]
+async fn given_node_has_joined_the_cluster(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let attempt = world
+        .cluster_mut()
+        .attempt_join(&node_id)
+        .await
+        .expect("the joining node was neither admitted nor stopped");
+    if let JoinAttempt::Stopped(failure) = attempt {
+        panic!("node '{node_id}' stopped instead of joining: {failure}");
+    }
+}
+
+/// Starts a stopped member again and records how its return ended, for a later step to assert.
+#[when(expr = "node {string} attempts to rejoin")]
+async fn when_node_attempts_to_rejoin(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let attempt = world.cluster_mut().attempt_rejoin(&node_id).await;
+    let failure = match attempt {
+        RejoinAttempt::KeptRunning => None,
+        RejoinAttempt::Stopped(failure) => Some(failure),
     };
     world.node_start_attempt = Some(NodeStartAttempt {
         node: node_id,

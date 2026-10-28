@@ -97,7 +97,10 @@ rather than by an unverified endpoint claim.
 On restart, the node also uses the peer endpoints in its recovered Raft membership as gossip seeds,
 excluding its own endpoint. These are contact hints, not current discovery advertisements: the
 bootstrap exchange authenticates the answering node, and gossip then replaces the hint with that
-node's current incarnation and advertised endpoint. This lets a former bootstrap node contact
+node's current incarnation and advertised endpoint. Each recovered seed carries the member it was
+recorded for, so a node of another cluster answering there under another name is a stale route
+rather than a refusal, as [The Join Contract](#the-join-contract) describes. This lets a former
+bootstrap node contact
 survivors even when its deployment has no configured bootstrap host. A node with recovered peer
 endpoints can also start when its configured bootstrap host does not resolve: it logs that lookup
 failure and contacts the peers whose recovered endpoints do resolve.
@@ -223,7 +226,8 @@ when all of the following are true:
 
 - its certificate chains to the configured cluster CA
 - its identity URI names the same cluster; a certificate that names another one is refused as a
-  cluster-identity mismatch, as [The Join Contract](#the-join-contract) describes
+  cluster-identity mismatch, as [The Join Contract](#the-join-contract) describes, unless it answers
+  at an endpoint recorded for a member it does not name, which is a stale route
 - its node identifier is the expected peer identifier, once that identifier is known
 - its endpoint subject alternative name matches the advertised endpoint being contacted
 - its certificate is currently valid
@@ -427,13 +431,26 @@ address, the prerequisite and the refusal, and the dialing node logs
 pool connection is counted with reason `prerequisite` and reconnects with its slot's backoff like
 any other failed attempt; the refusal decides nothing else inside the transport.
 
+A node bootstraps through an endpoint whose node it does not know yet with what it expects to find
+there: `BootstrapExpectation::AnyMember` at a bootstrap host an operator named, where any member of
+the cluster may answer, and `BootstrapExpectation::RecordedMember` at an endpoint its stored
+membership recorded for a member, which may have moved since. At a recorded member's endpoint, a
+certificate that names another cluster and a node other than that member is
+`TransportError::StaleRoute`, naming the endpoint and the member above the cluster-identity mismatch
+it replaces: the endpoint no longer leads to the member, so the attempt refuses no one and leaves
+the join progress where it was. A certificate that names the recorded member itself in another
+cluster stays a cluster-identity refusal, and so does any certificate of another cluster at a
+bootstrap host.
+
 The transport also reports how far its node has come in joining the cluster. That progress starts
 as joining and leaves it exactly once, whichever comes first: at the first outbound pool connection
 the process completes, naming the peer it joined through, or at the first outbound attempt, a
 bootstrap exchange included, that ends in a refusal. A connection a peer dials never moves it, so a
 node that has joined never leaves because a newcomer cannot run beside it. The server stops a
 joining node whose progress ends in a refusal, as
-[Prerequisites At Join](node-settings.md#prerequisites-at-join) describes.
+[Prerequisites At Join](node-settings.md#prerequisites-at-join) describes. Whether the cluster can
+run beside a node that has joined through a peer is the leader's verdict on its run, which the
+server reads from gossip; the transport judges only the connections it binds.
 
 A joining node bounds its clock skew to each peer it completes a handshake with, the one it joined
 through first, with the typed `peer_clock` request. The request uses the management pool's
@@ -1196,9 +1213,11 @@ Admission to consensus membership requires an available interconnect endpoint. A
 without one is not an admission candidate, so it is neither added as a learner nor promoted to
 voter, and it becomes eligible on the round that publishes an endpoint this node accepts. The
 leader also admits a candidate only when its published prerequisite record is one the leader can
-read and is compatible with the record of every live voter; it logs a candidate it leaves out for
-that reason once while the reason holds, at `warn` for a record that cannot run beside a voter and
-at `debug` for a record not yet published. The
+read and is compatible with the record of every live voter whose run it accepted; it logs a
+candidate it leaves out for that reason once while the reason holds, at `warn` for a record that
+cannot run beside a voter and at `debug` for a record not yet published. It publishes its verdicts
+on the live runs it judged under the gossip key `admission_verdicts`, as
+[Prerequisites At Join](node-settings.md#prerequisites-at-join) describes. The
 client and web-console advertisements are independent of admission: a node joins, votes, and leads
 with either of them unavailable. Membership replaces the recorded address of an existing member
 when its advertised endpoint changes. A returning voter remains a voter, while a learner still
