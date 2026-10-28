@@ -10,7 +10,10 @@
     nervix::layer(vocabulary, reason = "owns declared client configuration contracts")
 )]
 
-use std::collections::{BTreeMap, btree_map::Entry};
+use std::{
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    time::Duration,
+};
 
 use error_stack::{Report, ResultExt as _};
 use thiserror::Error;
@@ -20,6 +23,12 @@ use crate::{ClientConfigEntry, ClientDeadline};
 
 /// The value public client inspection uses for a confidential configuration entry.
 pub const CLIENT_CONFIG_REDACTION: &str = "********";
+
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "Linux TCP_KEEPIDLE accepts at most 32767 seconds")
+)]
+const MAX_TCP_KEEPALIVE: Duration = Duration::from_secs(32_767);
 
 /// The reader that owns a declared key's interpretation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +41,7 @@ pub enum ClientConfigOwner {
 pub enum ClientConfigPresence {
     Required,
     Optional,
+    Defaulted(&'static str),
     RequiredForScheme {
         address: &'static str,
         scheme: &'static str,
@@ -55,6 +65,7 @@ pub enum ClientConfigValue {
     UnsignedInteger,
     PositiveInteger,
     Milliseconds,
+    TcpKeepaliveMilliseconds,
     Url(&'static [&'static str]),
     DriverAddress,
     Choice(&'static [&'static str]),
@@ -69,6 +80,9 @@ impl ClientConfigValue {
             Self::UnsignedInteger => "unsigned integer",
             Self::PositiveInteger => "positive integer",
             Self::Milliseconds => "positive, schedulable whole milliseconds",
+            Self::TcpKeepaliveMilliseconds => {
+                "whole seconds from 1000 through 32767000 milliseconds"
+            }
             Self::Url(_) => "URL",
             Self::DriverAddress => "driver address, including its delegated query options",
             Self::Choice(_) => "declared choice",
@@ -99,6 +113,14 @@ impl ClientConfigValue {
             }
             Self::Milliseconds => {
                 ClientDeadline::parse(value).change_context(invalid())?;
+            }
+            Self::TcpKeepaliveMilliseconds => {
+                let interval = ClientDeadline::parse(value)
+                    .change_context(invalid())?
+                    .duration();
+                if interval.subsec_nanos() != 0 || interval > MAX_TCP_KEEPALIVE {
+                    return Err(Report::new(invalid()));
+                }
             }
             Self::Url(schemes) => {
                 let parsed = Url::parse(value).change_context(invalid())?;
@@ -192,6 +214,22 @@ impl ClientConfigKey {
             presence: ClientConfigPresence::Optional,
             ..Self::required(name, value)
         }
+    }
+
+    /// Apply this declared value only when the authored configuration omits the key.
+    pub const fn defaulted(
+        name: &'static str,
+        value: ClientConfigValue,
+        default: &'static str,
+    ) -> Self {
+        Self {
+            presence: ClientConfigPresence::Defaulted(default),
+            ..Self::required(name, value)
+        }
+    }
+
+    pub fn validate(self, value: &str) -> Result<(), Report<ClientConfigSchemaError>> {
+        self.value.validate(self.name, value)
     }
 
     pub const fn secret(self) -> Self {
@@ -393,7 +431,7 @@ impl ClientConfigSchema {
                 continue;
             }
             if key.owner == ClientConfigOwner::Nervix {
-                key.value.validate(key.name, &entry.value)?;
+                key.validate(&entry.value)?;
             }
         }
         for key in self.keys {
@@ -467,6 +505,24 @@ impl ClientConfigSchema {
             }
         }
         Ok(())
+    }
+
+    /// The effective configuration retains authored values and fills only omitted defaults.
+    /// This projection never changes the stored entries or their complete serialization.
+    pub fn effective_entries(self, entries: &[ClientConfigEntry]) -> Vec<ClientConfigEntry> {
+        let authored: BTreeSet<_> = entries.iter().map(|entry| entry.key.as_str()).collect();
+        let mut effective = entries.to_vec();
+        for key in self.keys {
+            if let ClientConfigPresence::Defaulted(value) = key.presence
+                && !authored.contains(key.name)
+            {
+                effective.push(ClientConfigEntry {
+                    key: key.name.to_string(),
+                    value: value.to_string(),
+                });
+            }
+        }
+        effective
     }
 
     /// Delegated keys without an explicit public declaration remain confidential. Complete

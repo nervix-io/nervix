@@ -8,7 +8,7 @@ use error_stack::Report;
 use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    CommandDisposition, LeaderEndpoints, LeaderRedirect, RestoreDisposition, RestoreMessage,
+    CommandDisposition, LeaderRedirect, NodeEndpoints, RestoreDisposition, RestoreMessage,
     RestoreReply, RestoreUploadFailure, UnknownOutcomeCause,
     websocket::{ServerRestoreWebSocketCodec, WebSocketData},
 };
@@ -152,7 +152,7 @@ fn received_by_server(sent: &[Vec<u8>]) -> Vec<RestoreMessage> {
 }
 
 fn redirect_to(console: Option<&str>) -> LeaderRedirect {
-    let leader = console.map(|console| LeaderEndpoints {
+    let leader = console.map(|console| NodeEndpoints {
         node: ClusterNodeName::parse("node-2").assured("the test node name is valid"),
         grpc_uri: None,
         web_console_uri: Some(url::Url::parse(console).assured("the test URL parses")),

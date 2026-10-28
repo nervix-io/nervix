@@ -126,6 +126,7 @@ tags = [
   "@client_io_03_generation",
   "@remote_ack_owners",
   "@backup_wait",
+  "@backup_parked_wait",
   "@restarted_voter_observation",
   "@domain_clock_takeover",
   "@udf_column_builder",
@@ -161,6 +162,7 @@ tags = [
   "@redis_idle_subscription",
   "@rabbitmq_consumer_modes",
   "@node_prerequisite_refusal",
+  "@backup_holder_download",
 ]
 target = "test:scenarios"
 
@@ -882,6 +884,16 @@ scenario = "Export potential findings and retain an explicit non-overlap review"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "The retained archive registry's release of an archive the recorded outcome does not name, a download sent to the node that assembled the archive after leadership moved, and that node's collection of it."
+examples = 1
+feature = "tests/features/cluster/backup.feature"
+id = "scenario.backup-holder-download"
+invariant = "A backup recovered after leadership moves downloads the archive from the node that assembled it, and that node refuses it once a download collected it."
+invocation = "scenarios"
+scenario = "A backup recovered after leadership moves streams its archive from the node that assembled it"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "The applied-state authority guard and restore publication across a leadership transfer."
 examples = 1
 feature = "tests/features/cluster/backup.feature"
@@ -899,6 +911,16 @@ id = "scenario.wasm-kafka-restore"
 invariant = "A quiesced backup restores two WASM branches and the domain's Kafka offsets on one and three nodes."
 invocation = "scenarios"
 scenario = "A quiesced backup restores two WASM branches and Kafka domain offsets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A quiesced cut's drain and its force-flush generations while a junction re-evaluates a message parked on REQUIRED WAIT through slow materialized state reads, then the message's release once its state arrives."
+examples = 2
+feature = "tests/features/cluster/backup.feature"
+id = "scenario.backup-parked-wait-slow-reads"
+invariant = "A message parked on REQUIRED WAIT stays parked while every flush generation re-evaluates it, so a quiesced backup completes within its declared timeout on one and three nodes."
+invocation = "scenarios"
+scenario = "A parked required wait whose state reads are slow does not hold the cut"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1768,6 +1790,16 @@ scenario = "A stale restore coordinator cannot republish after a new leader resu
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
+coverage = "Under scheduling stress: the retained archive registry's release of an archive the recorded outcome does not name, a download sent to the node that assembled the archive after leadership moved, and that node's collection of it."
+examples = 1
+feature = "tests/features/cluster/backup.feature"
+id = "stress.backup-holder-download"
+invariant = "A backup recovered after leadership moves downloads the archive from the node that assembled it, and that node refuses it once a download collected it."
+invocation = "stress-restore-scenarios"
+scenario = "A backup recovered after leadership moves streams its archive from the node that assembled it"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Under scheduling stress: quiesced capture and restore of WASM guest state and Kafka source offsets, followed by source readiness and Commands-memory headroom on the fresh cluster."
 examples = 2
 feature = "tests/features/cluster/backup.feature"
@@ -1775,6 +1807,16 @@ id = "stress.wasm-kafka-restore"
 invariant = "A quiesced backup restores two WASM branches and the domain's Kafka offsets on one and three nodes."
 invocation = "stress-restore-scenarios"
 scenario = "A quiesced backup restores two WASM branches and Kafka domain offsets"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: a quiesced cut's drain and its force-flush generations while a junction re-evaluates a message parked on REQUIRED WAIT through slow materialized state reads, then the message's release once its state arrives."
+examples = 2
+feature = "tests/features/cluster/backup.feature"
+id = "stress.backup-parked-wait-slow-reads"
+invariant = "A message parked on REQUIRED WAIT stays parked while every flush generation re-evaluates it, so a quiesced backup completes within its declared timeout on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A parked required wait whose state reads are slow does not hold the cut"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
@@ -2790,8 +2832,10 @@ path = "src/application/backup/retained.rs"
 workloads = [
   "scenario.wasm-kafka-restore",
   "scenario.restore-generation",
+  "scenario.backup-holder-download",
   "stress.wasm-kafka-restore",
   "stress.restore-generation",
+  "stress.backup-holder-download",
 ]
 
 [[owner]]
@@ -3032,6 +3076,8 @@ workloads = [
   "scenario.wasm-kafka-restore",
   "stress.client-alter-drain",
   "stress.wasm-kafka-restore",
+  "scenario.backup-parked-wait-slow-reads",
+  "stress.backup-parked-wait-slow-reads",
 ]
 
 [[owner]]
@@ -3076,6 +3122,8 @@ workloads = [
   "stress.shutdown-flush-before-freeze",
   "scenario.client-alter-drain",
   "stress.client-alter-drain",
+  "scenario.backup-parked-wait-slow-reads",
+  "stress.backup-parked-wait-slow-reads",
 ]
 
 [[owner]]
@@ -3162,6 +3210,8 @@ workloads = [
   "stress.materialized-bulk-generations",
   "stress.materialized-retention-activation",
   "stress.materialized-restart-retention",
+  "scenario.backup-parked-wait-slow-reads",
+  "stress.backup-parked-wait-slow-reads",
 ]
 
 [[owner]]
@@ -3176,6 +3226,8 @@ workloads = [
   "scenario.client-alter-drain",
   "stress.wasm-kafka-restore",
   "stress.client-alter-drain",
+  "scenario.backup-parked-wait-slow-reads",
+  "stress.backup-parked-wait-slow-reads",
 ]
 
 [[owner]]

@@ -190,7 +190,10 @@ after the freeze ends. The leader's backup coordinator runs it in this order:
    deadline. Two kinds of held work are exempt,
    because their acknowledgements wait for input the paused domain does not admit and the cut
    captures them as state: messages parked by `REQUIRED WAIT`, and the rows a window retains until
-   it steps past them, whose acknowledgement shares park the same way. Once every node reports no
+   it steps past them, whose acknowledgement shares park the same way. Each force-flush generation
+   re-evaluates the parked messages against the state present, and a message whose dependency is
+   still absent stays parked through that read, so the re-evaluation adds no admitted work and
+   cannot restart the round, however slowly the state is read. Once every node reports no
    admitted work, the coordinator asks every node to start a confirming force-flush generation and
    waits until every node reports it finished with no admitted work. New work restarts the round.
 6. **Capture.** Under the remaining budget, the coordinator checks its tenure, reads the domain's
@@ -346,15 +349,30 @@ at most 128 GiB of artifacts at once, archives and snapshot transfers alike.
 
 A finished backup records its outcome in its command execution: the archive's size, digest, capture
 time, retention deadline, whether resources are included, its user count and each domain's
-revision, cut, section count and section bytes. The archive itself, the staged sections and the
-manifest are never written to consensus.
+revision, cut, section count and section bytes, and the process incarnation of the node that
+assembled the archive and retains it. The archive itself, the staged sections and the manifest are
+never written to consensus.
 
 The coordinator retains the archive in memory, under the execution reference, until the first
 download that queues its last frame or until the reference's retry validity ends: 15 minutes by
 default, counted from the time the reference was issued. A restart loses every archive a node
-retained. A download is served only to the user who ran the backup. A node that does not hold the
-archive redirects the download to the leader, which answers from the recorded outcome: the archive,
-or why it is not retained. The download streams chunks of at most 256 KiB with four frames queued
+retained. A download is served only to the user who ran the backup, and only by the node the
+recorded outcome names: leadership can move after a backup completes, and the client can recover
+the outcome from any node, so the leader is not necessarily the node that holds the archive.
+
+- A node that the recorded outcome names streams the archive while it retains it, and refuses the
+  download once a download collected it.
+- Any other node that applied the outcome sends the client to the named node, with that node's
+  endpoints, while the named process incarnation is live, and refuses the download once it
+  restarted or left the cluster.
+- A node that has not applied the outcome redirects the download to the leader, which answers from
+  it. An outcome reaches a client only once every live node applied it, so this happens only for a
+  reference no backup recorded or one still applying.
+- An archive a node retains under a reference whose recorded outcome names another node belongs to
+  a run whose outcome was not recorded. It is released when a download asks for it, and never
+  streamed. A run whose outcome the cluster refuses to record releases its archive at once.
+
+The download streams chunks of at most 256 KiB with four frames queued
 ahead of the client, and each frame must reach the client within its request timeout; the
 download as a whole has no deadline, because an archive can take far longer to transfer than a
 command takes to run. [Sessions](./sessions.md#backup-downloads) and the [Client Session
@@ -809,6 +827,7 @@ A retained archive's read failure is reported before its download sends the fixe
 | Owner capture | An owner cannot apply the revision, convert a checkpoint, or stage a section | No archive is assembled. The coordinator's copies and the failing owner's partial files are dropped; other owners' staged sections expire after 600 seconds | Send the backup again; it takes a new cut. |
 | Section transfer or assembly | A fetch fails, or the archive cannot be staged or encoded | No archive is retained | Send the backup again. |
 | Retained archive | The node restarts, the retry validity ends, or a download collects it | The recorded outcome remains; its download is refused | Take a new backup. |
+| Archive download from another node | Leadership moved after the outcome was recorded, or another run lost the race to record it, and the client asks a node that does not hold the archive | The archive stays retained on the node the outcome names. A losing run's archive is never streamed; it is released when a download asks for it, or at once when the cluster refuses its outcome | The download is sent on to the named node while its process is live; once that process restarted or left the cluster, the download is refused: take a new backup. |
 | Restore intake | The stream is abandoned, oversized, truncated or has another digest, or staging cannot hold it | Nothing changed; staging quota returned | Send the archive again from its first byte. |
 | Restore preparation and planning | Verification, preparation memory, parsing, the plan, a branch key or a conversion is refused | Nothing changed | Correct the archive, the target or the options; a refusal for room alone is retried for 30 seconds first. |
 | A step | A consensus refusal, a version that does not install, a model batch the leader refuses, or state that does not convert or install | The recorded steps stay applied; a created domain stays stopped with its gate closed if installation did not complete | Restore the archive again under another name. |
@@ -915,7 +934,7 @@ keyspaces' disk allocation; until the first sweep completes they read zero.
 | Guarantee | Evidence |
 | --- | --- |
 | Archive fidelity | Registered Bolero properties over complete archives, records and descriptors, streamed records against rkyv's encoding, Arrow groups, native lifecycle and Kafka conversion, the capture section mapping, and the restore installation and staging records, each with a malformed-input target; [Property Testing And Fuzzing](./property-testing-and-fuzzing.md) lists them. |
-| Cut and capture | `backup.feature` and `backup_wait.feature` on one and three nodes: configuration-only, stopped, live and quiesced cuts, parked `REQUIRED WAIT` work, an unavailable emitter, a committing transaction's lease, a leader change during a cut and between cuts, and a leader change while the leader holds a backup's outcome before recording it, after which the backup runs again under its reference, holds its delayed cuts again and returns the second domain's expiry again; `backup_owners.feature` on three nodes, where a quiesced and a stopped cut, with no replica and with one, refuse once their deduplicator's scheduled owner has stopped and the leader no longer reports it live, a quiesced cut refuses before it pauses once the deduplicator's owner, or a node that only runs the domain's work, has stopped, and a quiesced and a live cut refuse while no node can host the deduplicator; `backup_stored_branch_capture.feature`, `backup_metadata.feature` and `backup_guest_saves.feature` for stored and large state within the bulk budget. |
+| Cut and capture | `backup.feature` and `backup_wait.feature` on one and three nodes: configuration-only, stopped, live and quiesced cuts, parked `REQUIRED WAIT` work, including work whose every re-evaluation reads its state slowly, an unavailable emitter, a committing transaction's lease, a leader change during a cut and between cuts, and a leader change while the leader holds a backup's outcome before recording it, after which the backup runs again under its reference, holds its delayed cuts again and returns the second domain's expiry again; `backup_owners.feature` on three nodes, where a quiesced and a stopped cut, with no replica and with one, refuse once their deduplicator's scheduled owner has stopped and the leader no longer reports it live, a quiesced cut refuses before it pauses once the deduplicator's owner, or a node that only runs the domain's work, has stopped, and a quiesced and a live cut refuse while no node can host the deduplicator; `backup_stored_branch_capture.feature`, `backup_metadata.feature` and `backup_guest_saves.feature` for stored and large state within the bulk budget. |
 | Capture fence | The Loom models `server.backup.cut-includes-publication` and `server.backup.cut-generation`, each qualified by weakenings that must fail, and the Shuttle checks of the fence, of forced deduplicator and window publication at the cut, and of materialized capture against eviction. |
 | Downloads and retention | `backup.feature` and `backup_delivery.feature`, and the Shuttle checks that a download stays bounded, a lost client releases its hold once, and concurrent downloads collect an archive once. |
 | Restore progress | `restore.feature` on one and three nodes: verification refusals, a failed step, an interrupted upload, joined retries and a leader change while applying; the Shuttle checks that a resumed restore never repeats a recorded effect, an abandoned upload releases its quota once, and concurrent retries join one execution. |
