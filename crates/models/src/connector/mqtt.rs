@@ -124,6 +124,10 @@ pub struct MqttTopicIngestor {
 /// Larger publishes are acknowledged and counted as oversized before decoding their payloads.
 pub const MQTT_SOURCE_MAXIMUM_PACKET_BYTES: u64 = 10 * 1024;
 
+/// Extra acknowledged publishes advertised to the broker and the separate QoS 0 read-ahead quota.
+/// Automatic acknowledgement uses this quota alone, with backpressure instead of overflow drops.
+pub const MQTT_SOURCE_READ_AHEAD_HEADROOM: u64 = 64;
+
 /// MQTT's largest packet: a 28-bit Remaining Length plus the five-byte fixed header.
 #[cfg_attr(
     nervix_lint,
@@ -164,13 +168,33 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredBuffer {
-            holds: "admitted publishes or compact discard acknowledgements the connection reads \
-                    ahead of the host",
+            holds: "ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Setting(
                     "the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under \
-                     ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK",
+                     ACK SEQUENTIAL plus 64 up to 65,535",
                 ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the \
+                    same packet-ordered read-ahead queue",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: MQTT_SOURCE_READ_AHEAD_HEADROOM,
+                    unit: "outcome",
+                },
+                overflow: BufferOverflow::DropAndCount,
+            },
+        },
+        DeclaredBuffer {
+            holds: "NO ACK outcomes in the packet-ordered read-ahead queue",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: MQTT_SOURCE_READ_AHEAD_HEADROOM,
+                    unit: "outcome",
+                },
                 overflow: BufferOverflow::Backpressure,
             },
         },
@@ -224,6 +248,9 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         "A publish above the admission bound is acknowledged before it is counted as oversized; \
          its topic, payload and properties never enter read-ahead. The raw framing bound is \
          MQTT's protocol maximum, separate from the admission bound.",
+        "ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged \
+         outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow \
+         only. NO ACK retains backpressure.",
     ],
 };
 
