@@ -275,6 +275,23 @@ impl EmitterEntityCapabilities {
             .find(|option| option.keywords == keywords)
     }
 
+    /// Whether its emitters may write the envelope clause `kind`.
+    ///
+    /// An entity declares each of the nine clause kinds at most once.
+    pub fn declares_envelope_clause(&self, kind: EnvelopeClauseKind) -> bool {
+        self.envelope.contains(&kind)
+    }
+
+    /// The property its emitters' `PROPERTIES { … }` may set as `name`, where it declares one.
+    ///
+    /// An entity declares its closed property set in one constant, so scanning it is bounded by the
+    /// declaration rather than by any statement.
+    pub fn property(&self, name: &str) -> Option<&'static PropertyDeclaration> {
+        self.properties
+            .iter()
+            .find(|property| property.name == name)
+    }
+
     /// What a statement can make every emitter of the entity do at run time: publish in each
     /// declared mode, write each option or choice, batch where batching is available, and set
     /// each envelope clause and property.

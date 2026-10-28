@@ -227,6 +227,7 @@ mod emitter_buffer;
 mod emitter_client;
 mod emitter_connectors;
 mod emitter_encoding;
+mod emitter_envelope;
 mod emitter_http_requests;
 mod emitter_ordering_group;
 mod emitter_publishing;
@@ -234,6 +235,7 @@ mod emitter_record_writes;
 mod emitter_retry;
 mod emitter_supervision;
 mod emitter_task;
+mod emitter_task_programs;
 mod emitter_values;
 mod endpoint;
 mod endpoint_acknowledgement;
@@ -414,6 +416,7 @@ use emitter_buffer::{
 use emitter_client::{ClientConsumerConnector, ClientPayload};
 use emitter_connectors::EmitterConnectorStarter;
 use emitter_encoding::EncodedRecordEmitter;
+use emitter_envelope::{CompiledEnvelope, EnvelopeError, EnvelopeInput, RowEnvelopes};
 use emitter_ordering_group::{CompiledOrderingGroup, OrderingGroupError, OrderingGroups};
 use emitter_publishing::{
     EmitterConnector, EmitterConnectorState, EmitterPublishBatchOwner, EmitterPublishControl,
@@ -437,6 +440,7 @@ use emitter_task::{
     EmitterConnectorContext, EmitterRuntimeError, EmitterRuntimeResult, emitter_error_message,
     emitter_init_error, emitter_publish_error_is_retryable, emitter_report,
 };
+use emitter_task_programs::EmitterTaskPrograms;
 use emitter_values::{
     MappedRequestEmitter, MappedRowEmitter, MappedValuesProjection, MappedValuesProjectionInit,
 };
@@ -598,7 +602,7 @@ use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteAckStorage, RemoteDispatc
 use reorderer::{ReordererFlushContext, flush_branch_reorderer_output, reorder_key_part};
 use schedule_apply::ScheduleApplication;
 use scheduled_node::{
-    EmitterTaskBuildDeps, EmitterTaskDeps, ExecutionBuildDeps, PlacedNodeState,
+    EmitterTaskBuildDeps, EmitterTaskDeps, ExecutionBuildDeps, PlacedNodeState, PlacementTasks,
     ScheduledNodePlacement, ScheduledNodeTask,
 };
 pub(in crate::runtime) use shared_clients::{SharedClientError, SharedClientLease};
@@ -607,7 +611,7 @@ pub(crate) use snapshot_staging::{
     SnapshotStagingError, StagedArtifact, StagedArtifactReader, StagedSnapshotWriter,
 };
 use state_replication::{
-    ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
+    ActivatedRuntimeStateHandoff, CheckpointWriter, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
     DEFAULT_STATE_SNAPSHOT_INTERVAL, PreparedForcedRuntimeStateRecovery,
     PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot, PublishedBranchState,
     RestorableBranchLifecycle,
