@@ -1257,7 +1257,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__streams__bolero_stream_frames_keep_values_and_chunk_ownership/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "client-streams"
 invariant = "Every upload, restore and backup stream root preserves complete typed values and retained chunk ownership."

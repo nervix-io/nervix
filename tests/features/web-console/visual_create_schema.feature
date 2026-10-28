@@ -9,6 +9,7 @@ Feature: Web console visual schema and branch creation
       CREATE DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='schema']" is clicked
@@ -54,6 +55,7 @@ Feature: Web console visual schema and branch creation
       CREATE DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='<kind>']" is clicked
@@ -88,6 +90,7 @@ Feature: Web console visual schema and branch creation
       CREATE WIRE CBOR SCHEMA same_name MODE LOOSE (payload string);
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='wire-avro-schema']" is clicked
@@ -117,6 +120,7 @@ Feature: Web console visual schema and branch creation
       CREATE DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -161,6 +165,7 @@ Feature: Web console visual schema and branch creation
       CREATE SCHEMA byte_key (payload BYTES);
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='schema']" is clicked
@@ -196,6 +201,7 @@ Feature: Web console visual schema and branch creation
       CREATE SCHEMA tenant_key (tenant U32);
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='schema']" is clicked
@@ -242,6 +248,7 @@ Feature: Web console visual schema and branch creation
       CREATE SCHEMA tenant_key (tenant U32);
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='branch']" is clicked
@@ -275,6 +282,7 @@ Feature: Web console visual schema and branch creation
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     When the web console is opened on node "{{old_leader}}"
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='branch']" is clicked

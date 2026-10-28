@@ -2193,15 +2193,19 @@ wait is a domain capture failure. A leadership change during that wait refuses t
 state is read. The failed command's message is `backup failed:` followed by the complete
 domain-capture context and cause chain, including an interrupted guest or native-metadata capture.
 A download the server does not serve is answered with a typed refusal,
-`InvalidRequest`, `NotRetained`, `Expired`, `NotOwner` or `ReadFailed`, or with a redirect to the
-leader, and a call without valid credentials ends with `UNAUTHENTICATED`. The client reports a
+`InvalidRequest`, `NotRetained`, `Expired`, `NotOwner` or `ReadFailed`, with the endpoints of the
+node that retains the archive, or with a redirect to the leader, and a call without valid
+credentials ends with `UNAUTHENTICATED`. A `NotRetained` refusal names why no live node retains the
+archive: the backup is still assembling it, assembled none, a download collected it, or the node
+the recorded outcome names restarted or left the cluster. The client reports a
 `BackupDownloadError` beneath `ClientError::BackupDownload`, which carries the backup's execution
 reference: the server's refusal, a transport failure, a stalled or interrupted stream, a missing
-leader or a redirect loop, frames out of order or undecodable, an archive that differs from the
-backup's summary, or a local write failure. An undecodable frame and a request that does not
-encode keep the codec's report beneath `InvalidFrame` and `EncodeRequest`, rather than a copy of
-its error in the context. Only a transport failure, a stall, and an interrupted
-stream are retried, from the archive's first byte. The C binding classifies a refusal as
+leader or a redirect loop, a holder that could not be reached, frames out of order or undecodable,
+an archive that differs from the backup's summary, or a local write failure. An undecodable frame,
+a request that does not encode and a failed connection to the holder keep their report beneath
+`InvalidFrame`, `EncodeRequest` and `HolderUnreachable`, rather than a copy of its error in the
+context. Only a transport failure, a stall, an interrupted stream and an unreachable holder are
+retried, from the archive's first byte. The C binding classifies a refusal as
 `NX_ERROR_REJECTED`, a transport failure as `NX_ERROR_TRANSPORT`, a mismatched or malformed
 archive as `NX_ERROR_PROTOCOL`, and a write failure as `NX_ERROR_INVALID_ARGUMENT`, and names the
 execution reference so a host can run the backup again. No diagnostic of a backup includes archive

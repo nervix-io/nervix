@@ -10411,7 +10411,7 @@ mod tests {
 
         let node = ClusterNodeName::parse("node-2").assured("a literal node name");
         let unadvertised = LeaderRedirect {
-            leader: Some(nervix_client_wire::LeaderEndpoints {
+            leader: Some(nervix_client_wire::NodeEndpoints {
                 node: node.clone(),
                 grpc_uri: None,
                 web_console_uri: None,
@@ -10425,7 +10425,7 @@ mod tests {
 
         let console = Url::parse("http://node-2:17420/console/").assured("a literal URL");
         let advertised = LeaderRedirect {
-            leader: Some(nervix_client_wire::LeaderEndpoints {
+            leader: Some(nervix_client_wire::NodeEndpoints {
                 node,
                 grpc_uri: None,
                 web_console_uri: Some(console.clone()),
