@@ -731,6 +731,21 @@ test_target = "test:representations"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/prerequisites__bolero_admission_verdicts_round_trip_through_their_gossip_text/corpus"
+domain_version = 1
+features = []
+id = "models-admission-verdicts"
+invariant = "The verdicts a leader publishes keep their term and, for every run, whether it was accepted or refused, the voter a refusal names and both values of its mismatch, through their gossip text."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/prerequisites.rs"
+test = "prerequisites::bolero_admission_verdicts_round_trip_through_their_gossip_text"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/prerequisites__bolero_prerequisite_records_round_trip_through_every_representation/corpus"
 domain_version = 1
 features = []

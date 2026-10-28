@@ -13,6 +13,7 @@ Feature: Pipelined raft replication and bounded log retention
     Given a 3 node nervix cluster is started
     When node "node-3" is stopped
     And 1024 domains named "moving_append" are created on the leader node
+    And leadership is transferred to node "node-2"
     Given inbound interconnect traffic to stopped node "node-3" is paced at 32768 bytes per second
     When node "node-3" starts catching up through its paced interconnect
     Then within "120s" the paced follower applies 1024 domains named "moving_append"
