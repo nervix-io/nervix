@@ -1166,6 +1166,12 @@ The harness keeps these boundaries explicit.
   Its initial burst of domain creation also uses one production client, retaining each command's
   execution identity across a leadership change during finalization. A raw session's recoverable
   disposition cannot end the fixture before follower catch-up starts.
+  The domain write load fixture keeps several production client sessions committing domain
+  creations through the leader, each waiting for its previous command. With slow consensus commits,
+  another storage operation then keeps waiting behind the one that commits while a scenario acts.
+  Stopping it finishes each session's submitted command and then requires every session to have
+  committed at least one domain without a failed write. A session that reaches its write limit
+  fails instead of filling the cluster.
   A listener bind failure retries only that listener family: the gRPC pair, HTTP, HTTPS,
   observability, web console, or interconnect. A readiness timeout may still move all listeners
   within the same startup budget. A changed interconnect address remains reserved while a peer
@@ -1801,8 +1807,8 @@ The after hook runs every scenario's cleanup through the phases above.
 body complete
      |
 teardown started      release paused health responses, domain-clock progress pauses, and
-     |                command pauses; stop durable catch-up writers and clear consensus
-     |                commit delays
+     |                command pauses; stop durable catch-up writers and domain write load
+     |                sessions, and clear consensus commit delays
 teardown diagnostics  every node's status at once within 10 s; the scenario's context
      |
 stopping              abort CLI output readers and kill their child processes;
