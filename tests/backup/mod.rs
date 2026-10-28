@@ -37,6 +37,7 @@ mod materialized;
 pub(crate) mod memory;
 mod native_metadata;
 pub(crate) mod restore;
+mod snapshot_receive;
 mod staging;
 mod wait;
 

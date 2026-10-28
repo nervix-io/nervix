@@ -52,8 +52,8 @@ const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
     )
 )]
 pub const WIRE_CONTRACT: WireContractFingerprint = WireContractFingerprint::from_digest([
-    0xb7, 0x18, 0xa5, 0xd3, 0xa6, 0x6f, 0xa5, 0x92, 0x29, 0x14, 0x30, 0x7c, 0x35, 0xef, 0x28, 0xb5,
-    0xfc, 0x4b, 0x9c, 0x06, 0xf1, 0x08, 0x4d, 0x6f, 0xe0, 0x86, 0x4c, 0x2f, 0x2c, 0x54, 0x78, 0x1d,
+    0xa5, 0xa8, 0x72, 0xa6, 0x14, 0x8c, 0xe8, 0x29, 0x90, 0xdd, 0x9a, 0x77, 0x7f, 0xea, 0xb5, 0xfe,
+    0xa3, 0x26, 0x8b, 0x35, 0xf6, 0x3e, 0xe1, 0x1a, 0x0f, 0x13, 0x3c, 0x29, 0xa9, 0x15, 0xb7, 0xf2,
 ]);
 
 /// The first message of every connection: who dials, for which pool, and everything the dialing
@@ -137,7 +137,7 @@ pub(crate) struct Decoded<T> {
     _reservation: Reservation,
 }
 
-/// A nested rkyv payload and the charge that covers it until the outer request has been encoded.
+/// An owned rkyv payload with the charge that covers its bytes through encoding or decoding.
 pub(crate) struct EncodedPayload {
     bytes: Vec<u8>,
     reservation: Reservation,
@@ -148,6 +148,18 @@ impl EncodedPayload {
         (self.bytes, self.reservation)
     }
 }
+
+impl AsRef<[u8]> for EncodedPayload {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// Only owned carriers whose bytes retain their reservation may enter a decoding job.
+trait ChargedRkyvInput: AsRef<[u8]> + Send + 'static {}
+
+impl ChargedRkyvInput for ChargedBytes {}
+impl ChargedRkyvInput for EncodedPayload {}
 
 impl<T> Decoded<T> {
     pub(crate) fn into_parts(self) -> (T, Reservation) {
@@ -322,7 +334,8 @@ where
     Ok(EncodedPayload { bytes, reservation })
 }
 
-/// Validate and deserialize one bounded rkyv payload off the async workers.
+/// Validate and deserialize one bounded rkyv payload off the async workers. Its input already
+/// holds memory, so additional admission must refuse rather than queue behind that input.
 pub(crate) async fn decode_rkyv<T>(
     executor: &Executor,
     class: MemoryClass,
@@ -335,8 +348,7 @@ where
         + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
 {
     let decoded_charge = executor
-        .reserve(class, bytes.len().arch_into())
-        .await
+        .try_reserve(class, bytes.len().arch_into())
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
     decode_rkyv_charged(executor, cpu, bytes, decoded_charge).await
 }
@@ -373,7 +385,7 @@ where
 async fn decode_rkyv_charged<T>(
     executor: &Executor,
     cpu: CpuClass,
-    bytes: ChargedBytes,
+    bytes: impl ChargedRkyvInput,
     decoded_charge: Reservation,
 ) -> Result<Decoded<T>, Report<TransportError>>
 where
@@ -387,8 +399,9 @@ where
             cancellation.check().map_err(|error| {
                 TransportError::with_cause(Report::new(error), TransportError::Decode)
             })?;
+            let bytes = bytes.as_ref();
             let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
-            aligned.extend_from_slice(bytes.as_ref());
+            aligned.extend_from_slice(bytes);
             let value = decode_aligned::<T>(&aligned, max_depth)?;
             Ok(Decoded {
                 value,
@@ -400,7 +413,8 @@ where
 }
 
 /// Validate and deserialize a nested typed-request payload while its outer envelope remains
-/// charged by the caller.
+/// charged by the caller. The job takes its own input charge because cancellation can end that
+/// caller before a submitted CPU job exits. Both overlapping charges refuse without queueing.
 pub(crate) async fn decode_rkyv_payload<T>(
     executor: &Executor,
     class: MemoryClass,
@@ -412,26 +426,14 @@ where
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
         + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
 {
-    let max_depth = validation_depth(executor)?;
-    let decoded_charge = executor
-        .reserve(class, bytes.len().arch_into())
-        .await
+    let reservation = executor
+        .try_reserve(class, bytes.len().arch_into())
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
-    executor
-        .run_cpu(cpu, decoded_charge, move |charge, cancellation| {
-            cancellation.check().map_err(|error| {
-                TransportError::with_cause(Report::new(error), TransportError::Decode)
-            })?;
-            let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
-            aligned.extend_from_slice(&bytes);
-            let value = decode_aligned::<T>(&aligned, max_depth)?;
-            Ok(Decoded {
-                value,
-                _reservation: charge,
-            })
-        })
-        .await
-        .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?
+    let bytes = EncodedPayload { bytes, reservation };
+    let decoded_charge = executor
+        .try_reserve(class, bytes.as_ref().len().arch_into())
+        .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
+    decode_rkyv_charged(executor, cpu, bytes, decoded_charge).await
 }
 
 fn validation_depth(executor: &Executor) -> Result<NonZeroUsize, Report<TransportError>> {
@@ -463,6 +465,14 @@ where
 #[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
 #[path = "wire_properties.rs"]
 mod properties;
+
+#[cfg(all(test, not(feature = "turmoil")))]
+#[path = "wire_admission_tests.rs"]
+mod admission_tests;
+
+#[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
+#[path = "wire_admission_properties.rs"]
+mod admission_properties;
 
 #[cfg(all(test, feature = "turmoil"))]
 mod simulation_checks {

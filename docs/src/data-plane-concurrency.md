@@ -335,6 +335,21 @@ loading instead of waiting while retaining earlier groups. A pinned database rea
 snapshot and one stored chunk through all section reads. Replica installation checks monotonic
 revision under the existing exclusive assignment barrier before replacing any entry.
 
+The interconnect's outer and nested rkyv receive decoders acquire overlapping memory only through
+immediate admission. A queued reservation that needs the retained input therefore cannot form a
+cycle with its decoder. A nested CPU job owns an independent charge for its encoded input as well
+as its decoded-value reservation, so cancelling the request cannot leave the job's bytes
+uncharged. Deloxide does not observe the asynchronous semaphore waits. The worker FIFO uses a
+tracked lock, so `scenario.snapshot-receive-admission` and its stressed restore twin cover actual
+decode admission and completion in the diagnostic selections. Queued callback cancellation uses
+that existing FIFO owner without acquiring a new lock; the explicit cancellation interleaving
+is covered by Shuttle. Explicit-poll owner regressions and public snapshot receive scenarios
+cover refusal, release and complete-checkpoint recovery. The registered Shuttle check
+`wire::admission_tests::shuttle_bulk_receive_admission_releases_held_input_and_cancelled_jobs`
+executes these production decoders with a queued budget reservation and an occupied CPU worker,
+checks the independent input charge after the outer envelope ends, cancels the queued decode and
+requires a fresh complete decode with every charge returned. It makes no memory-ordering claim.
+
 `RESUME` changes the domain to running at its archived lifecycle in the consensus effect that
 records complete publication and releases the installation gate. No atomic field or memory
 ordering in the capture epoch, assignment protocol or relay revision changed. Existing Loom

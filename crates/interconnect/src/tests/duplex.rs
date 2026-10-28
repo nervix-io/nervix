@@ -40,6 +40,65 @@ impl InterconnectDuplexRequest for CountingStream {
 
 const PIPELINED_ITEMS: u64 = 32;
 
+#[derive(Debug, Archive, Serialize, Deserialize)]
+struct BulkOpening;
+
+impl InterconnectDuplexRequest for BulkOpening {
+    type Item = CountingItem;
+    type Response = CountingAnswer;
+    const NAME: &'static str = "test_bulk_opening";
+    const CLASS: PoolClass = PoolClass::Bulk;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
+    const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+#[nervix_primitives::test]
+async fn a_duplex_opening_reports_decode_capacity_and_recovers_after_release() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        executor_b,
+        ..
+    } = connected_transports().await;
+    transport_b
+        .register_duplex_handler::<BulkOpening, _, _>(|_, _, _| async {
+            Ok(DuplexResponses::new(futures_util::stream::empty()))
+        })
+        .assured("the fresh transport registers one bulk opening handler");
+    let capacity = executor_b.memory(MemoryClass::Bulk).capacity_bytes;
+    let held = executor_b
+        .try_reserve(MemoryClass::Bulk, capacity - 4096)
+        .assured("the fixture leaves the opening reader's initial allocation");
+    let refused = transport_a.open_duplex_stream(&node_b, BulkOpening).await;
+    drop(held);
+    let recovered = transport_a.open_duplex_stream(&node_b, BulkOpening).await;
+    if let Ok((_sender, mut receiver)) = recovered {
+        assert!(
+            receiver
+                .next()
+                .await
+                .assured("the recovered stream completes")
+                .is_none()
+        );
+    } else {
+        panic!("the duplex stream must open once memory is released");
+    }
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+    match refused {
+        Err(error) => assert!(
+            matches!(
+                error.downcast_ref::<TransportError>(),
+                Some(TransportError::RemoteRejected { status: 503, .. })
+            ),
+            "opening decode pressure must be a service-unavailable response: {error:#}"
+        ),
+        Ok(_) => panic!("the opening reader leaves no room for its decoder"),
+    }
+    assert_eq!(executor_b.memory(MemoryClass::Bulk).reserved_bytes, 0);
+}
+
 /// Answer every frame with its value plus the stream's starting offset, in arrival order.
 fn register_counting_handler(transport: &Transport) {
     transport

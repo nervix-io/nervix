@@ -362,6 +362,15 @@ one compare-and-exchange chooses an irreversible verdict. Borrowed admitted work
 transport permits have separate lifetimes. [Cluster Interconnect](./interconnect.md#bounded-correlation-and-peer-owners)
 owns their delivery guarantees and bounds.
 
+**Receive decoding admission.** `RemoteRequestFailure` distinguishes a full memory budget,
+an input above that budget, a closed budget, a full execution queue and a closed execution pool.
+The wire projection retains the traffic class and applicable byte or queue dimensions; callers
+recognize capacity by the variant. These refusals judge admission before inspecting the input,
+while `InvalidPayload` represents validation or deserialization failure. A nested decoding job
+owns its encoded bytes together with their independent reservation until the job exits, even if
+the enclosing request ends. [Cluster Interconnect](./interconnect.md#traffic-and-resource-isolation)
+owns receive admission and its stream responses.
+
 **Client ingestors.** An ingestor's input is either a transport, which carries its source and the
 codec that decodes it, or a client source, which carries the schema its batches hold and its
 producer policy. There is no optional codec beside an optional schema, so an ingestor cannot claim

@@ -168,6 +168,7 @@ tags = [
   "@rabbitmq_consumer_modes",
   "@node_prerequisite_refusal",
   "@backup_holder_download",
+  "@snapshot_receive_admission",
 ]
 target = "test:scenarios"
 
@@ -269,6 +270,26 @@ package = "nervix-server"
 selections = ["deloxide-stress-restore"]
 tags = ["@deloxide_stress_restore"]
 target = "test:scenarios"
+
+[[workload]]
+coverage = "Actual outer and nested snapshot decoders, their execution worker FIFO admission and callback destruction, and native checkpoint readers. The independent input charge uses untracked semaphore permits; explicit queued cancellation is covered by the production-owner Shuttle check."
+examples = 4
+feature = "tests/features/cluster/snapshot_receive_admission.feature"
+id = "scenario.snapshot-receive-admission"
+invariant = "On one and three nodes, outer and nested receive overlap returns 503, capacity release permits an exact complete checkpoint transfer for both interleaved branches, and every receive charge returns."
+invocation = "scenarios"
+scenario = "A snapshot receive refuses overlapping decode memory and preserves both branches on <cluster_size> nodes with <key_bytes> byte keys"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: actual snapshot decode worker admission and completion beside refused receive memory, public backup and native checkpoint reads. Semaphore waits remain outside the detector; queued decode cancellation remains covered by Shuttle."
+examples = 4
+feature = "tests/features/cluster/snapshot_receive_admission.feature"
+id = "stress.snapshot-receive-admission"
+invariant = "On one and three nodes, outer and nested receive overlap returns 503, capacity release permits an exact complete checkpoint transfer for both interleaved branches, and every receive charge returns."
+invocation = "stress-restore-scenarios"
+scenario = "A snapshot receive refuses overlapping decode memory and preserves both branches on <cluster_size> nodes with <key_bytes> byte keys"
+selections = ["deloxide-stress-restore"]
 
 [[workload]]
 coverage = "Tracked mutex acquisitions waiting in a two-thread wait-for cycle."
@@ -2719,6 +2740,8 @@ selections = ["deloxide-stress"]
 gap = "CPU-worker interruption between simulated callbacks belongs to the mutually exclusive Turmoil mode. Native blocking-task teardown before its first callback is not deterministically reached by these public scenarios. Native workloads reach normal FIFO admission, cancellation and draining; the ordinary interrupted-worker regression covers selected and queued destructor cleanup without claiming tracked-lock interleavings."
 path = "crates/execution/src/workers.rs"
 workloads = [
+  "scenario.snapshot-receive-admission",
+  "stress.snapshot-receive-admission",
   "scenario.execution-class-drain",
   "stress.execution-class-drain",
   "scenario.materialized-bulk-generations",

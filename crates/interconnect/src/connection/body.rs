@@ -10,11 +10,46 @@ use error_stack::Report;
 use h2::{RecvStream, SendStream, server};
 use http::{Response, StatusCode, Version};
 use meticulous::OptionExt as _;
-use nervix_execution::{AdmissionError, BudgetedBuffer, ChargedBytes, Executor, MemoryClass};
+use nervix_execution::{
+    AdmissionError, BudgetedBuffer, ChargedBytes, ExecutionError, Executor, MemoryClass,
+};
 use nervix_primitives::time::timeout;
 
 use super::BODY_CHUNK_BYTES;
-use crate::{TransportError, wire::FreeRoom};
+use crate::{PoolClass, TransportError, request::RemoteRequestFailure, wire::FreeRoom};
+
+/// Answer an opening decode's admission refusal before the response stream is established.
+/// Other decoder failures retain their transport report and its original failure behavior.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the transport answers receive admission at each stream opening"
+    )
+)]
+pub(super) async fn send_decode_refusal(
+    respond: &mut server::SendResponse<Bytes>,
+    class: PoolClass,
+    error: Report<TransportError>,
+    progress_timeout: Duration,
+) -> Result<(), Report<TransportError>> {
+    let admission = error.contains::<AdmissionError>()
+        || matches!(
+            error.downcast_ref::<ExecutionError>(),
+            Some(ExecutionError::QueueFull { .. } | ExecutionError::PoolClosed { .. })
+        );
+    if !admission {
+        return Err(error);
+    }
+    let failure = RemoteRequestFailure::decode(error, class);
+    send_static_error(
+        respond,
+        failure.status(),
+        &failure.to_string(),
+        progress_timeout,
+    )
+    .await
+}
 
 #[cfg_attr(
     nervix_lint,
