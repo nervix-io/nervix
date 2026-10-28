@@ -3,9 +3,10 @@
 //! Layer: test harness.
 //!
 //! - **Owns.** Coverage of the join judge's decisions: which peers a joining node probes and in
-//!   what order, when a newcomer's or a recovered member's join ends, and when a peer's clock or
-//!   record refuses it.
-//! - **Depends on.** The join judge, the clock skew one probe proves and the prerequisite refusal.
+//!   what order, when a newcomer's or a recovered member's join ends, and when a peer's clock, a
+//!   record or the leader's verdict refuses it.
+//! - **Depends on.** The join judge, the clock skew one probe proves, the leader's verdict and the
+//!   prerequisite refusal.
 //! - **Must not know.** The transport, gossip and consensus the supervision reads its views from.
 
 #![cfg_attr(
@@ -17,9 +18,11 @@ use std::time::Duration;
 
 use meticulous::ResultExt as _;
 use nervix_interconnect::JoinRefusal;
-use nervix_models::{ClusterNodeName, PrerequisiteMismatch};
+use nervix_models::{AdmissionVerdict, ClusterNodeName, PrerequisiteMismatch, TimingPrerequisite};
 
-use super::{JoinJudge, JoinOutcome, JoinRefusedError, JoinStanding, JoinStep, JoinView};
+use super::{
+    JoinJudge, JoinOutcome, JoinRefusedError, JoinStanding, JoinStep, JoinView, ProbeAnswer,
+};
 use crate::cluster::ClockSkew;
 
 const TOLERANCE: Duration = Duration::from_millis(500);
@@ -43,7 +46,15 @@ fn view(admitted: bool, connected: &[&str]) -> JoinView {
     JoinView {
         admitted,
         incompatible_member: None,
+        verdict: None,
         connected: connected.iter().map(|name| node(name)).collect(),
+    }
+}
+
+fn judged(verdict: AdmissionVerdict, connected: &[&str]) -> JoinView {
+    JoinView {
+        verdict: Some(verdict),
+        ..view(false, connected)
     }
 }
 
@@ -69,6 +80,31 @@ fn another_cluster(peer: &str) -> JoinRefusal {
     }
 }
 
+/// The verdict of a leader that judged this run's 400ms heartbeat from the side of node-2, a
+/// voter whose heartbeat is 166ms.
+fn refused_by_node_2() -> AdmissionVerdict {
+    AdmissionVerdict::Refused {
+        voter: node("node-2"),
+        mismatch: PrerequisiteMismatch::Timing {
+            prerequisite: TimingPrerequisite::RaftHeartbeatInterval,
+            local: Duration::from_millis(166),
+            peer: Duration::from_millis(400),
+        },
+    }
+}
+
+/// The refusal the run reads from that verdict: its own heartbeat first.
+fn cannot_run_beside_node_2() -> JoinOutcome {
+    JoinOutcome::Refused(JoinRefusedError::Prerequisite(JoinRefusal {
+        peer: node("node-2"),
+        mismatch: PrerequisiteMismatch::Timing {
+            prerequisite: TimingPrerequisite::RaftHeartbeatInterval,
+            local: Duration::from_millis(400),
+            peer: Duration::from_millis(166),
+        },
+    }))
+}
+
 #[test]
 fn a_newcomer_probes_the_peer_it_joined_through_first_and_each_peer_until_it_answers_within() {
     let mut judge = judge(JoinStanding::Newcomer);
@@ -77,10 +113,13 @@ fn a_newcomer_probes_the_peer_it_joined_through_first_and_each_peer_until_it_ans
         judge.step(view(false, &["node-3", "node-1", "node-2"])),
         probes(&["node-1", "node-2", "node-3"])
     );
-    assert_eq!(judge.record(node("node-1"), WITHIN, false), None);
+    assert_eq!(
+        judge.record(node("node-1"), WITHIN, false),
+        ProbeAnswer::Within
+    );
     assert_eq!(
         judge.record(node("node-3"), ClockSkew::WithinProbe, false),
-        None
+        ProbeAnswer::Within
     );
 
     // node-2 did not answer, so only it is probed again.
@@ -127,12 +166,40 @@ fn a_newcomer_is_refused_by_a_live_member_it_cannot_run_beside() {
 }
 
 #[test]
+fn a_newcomer_the_leader_refused_stops_naming_the_voter_it_cannot_run_beside() {
+    let mut judge = judge(JoinStanding::Newcomer);
+    assert_eq!(
+        judge.record(node("node-1"), WITHIN, false),
+        ProbeAnswer::Within
+    );
+
+    assert_eq!(
+        judge.step(judged(refused_by_node_2(), &["node-1"])),
+        JoinStep::Ended(cannot_run_beside_node_2())
+    );
+}
+
+#[test]
+fn a_newcomer_waits_for_its_admission_whatever_the_leader_accepted() {
+    let mut judge = judge(JoinStanding::Newcomer);
+    assert_eq!(
+        judge.record(node("node-1"), WITHIN, false),
+        ProbeAnswer::Within
+    );
+
+    assert_eq!(
+        judge.step(judged(AdmissionVerdict::Accepted, &["node-1"])),
+        probes(&[])
+    );
+}
+
+#[test]
 fn a_newcomer_whose_peer_proves_a_clock_beyond_tolerance_before_admission_is_refused() {
     let mut judge = judge(JoinStanding::Newcomer);
 
     assert_eq!(
         judge.record(node("node-2"), BEYOND, false),
-        Some(clock_refusal("node-2", BEYOND))
+        ProbeAnswer::Ended(clock_refusal("node-2", BEYOND))
     );
 }
 
@@ -142,21 +209,53 @@ fn a_skew_proven_once_the_membership_admitted_a_newcomer_does_not_refuse_it() {
 
     assert_eq!(
         judge.record(node("node-1"), BEYOND, true),
-        Some(JoinOutcome::Admitted)
+        ProbeAnswer::Ended(JoinOutcome::Admitted)
     );
 }
 
 #[test]
-fn a_recovered_member_is_not_ended_by_its_membership_and_ends_at_the_first_answer() {
+fn a_recovered_member_returns_once_the_leader_accepted_its_run_and_a_clock_answered_within() {
     let mut judge = judge(JoinStanding::RecoveredMember);
 
+    // Its own membership holds it from the start, which ends nothing.
     assert_eq!(
         judge.step(view(true, &["node-2"])),
         probes(&["node-1", "node-2"])
     );
     assert_eq!(
         judge.record(node("node-2"), WITHIN, true),
-        Some(JoinOutcome::Admitted)
+        ProbeAnswer::Within
+    );
+    // A clock within tolerance is not enough while the leader has not judged the run.
+    assert_eq!(judge.step(view(true, &["node-2"])), probes(&["node-1"]));
+
+    assert_eq!(
+        judge.step(judged(AdmissionVerdict::Accepted, &["node-2"])),
+        JoinStep::Ended(JoinOutcome::Admitted)
+    );
+}
+
+#[test]
+fn a_recovered_member_the_leader_accepted_keeps_probing_until_a_clock_answers_within() {
+    let judge = judge(JoinStanding::RecoveredMember);
+
+    assert_eq!(
+        judge.step(judged(AdmissionVerdict::Accepted, &["node-1", "node-2"])),
+        probes(&["node-1", "node-2"])
+    );
+}
+
+#[test]
+fn a_recovered_member_the_leader_refused_stops_naming_the_voter_whatever_answered_first() {
+    let mut judge = judge(JoinStanding::RecoveredMember);
+    assert_eq!(
+        judge.record(node("node-1"), WITHIN, true),
+        ProbeAnswer::Within
+    );
+
+    assert_eq!(
+        judge.step(judged(refused_by_node_2(), &["node-1"])),
+        JoinStep::Ended(cannot_run_beside_node_2())
     );
 }
 
@@ -166,7 +265,7 @@ fn a_recovered_member_whose_first_answer_is_beyond_tolerance_is_refused() {
 
     assert_eq!(
         judge.record(node("node-1"), BEYOND, true),
-        Some(clock_refusal("node-1", BEYOND))
+        ProbeAnswer::Ended(clock_refusal("node-1", BEYOND))
     );
 }
 
@@ -179,6 +278,6 @@ fn a_skew_equal_to_the_tolerance_is_within_it() {
 
     assert_eq!(
         judge.record(node("node-1"), at_tolerance, true),
-        Some(JoinOutcome::Admitted)
+        ProbeAnswer::Within
     );
 }

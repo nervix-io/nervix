@@ -370,7 +370,7 @@ pub(super) async fn attach_loopback_cluster(
         ),
         interconnect_advertise_addr: interconnect_addr.into(),
         bootstrap_host: None,
-        recovery_endpoints: Default::default(),
+        recovered_members: Default::default(),
         interconnect: interconnect.clone(),
         membership: crate::cluster::MembershipSettings::default(),
         prerequisites: interconnect.local_prerequisites(),

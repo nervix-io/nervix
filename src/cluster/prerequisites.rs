@@ -1,16 +1,17 @@
-//! The prerequisite records nodes publish in gossip, and the clock probe a joining node bounds its
-//! skew to a peer with.
+//! The prerequisite records nodes publish in gossip, the leader's verdicts on the runs it judged,
+//! and the clock probe a joining node bounds its skew to a peer with.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Reading a node's prerequisite record from its gossip state, the view of every live
 //!   node's record that readers share and the membership task replaces, republishing this node's
-//!   own record, and the management request that reads a peer's physical clock with the bound on
-//!   skew one answer proves.
+//!   own record, publishing the verdicts this node holds while it leads and reading the newest
+//!   leader's verdict on one run, and the management request that reads a peer's physical clock
+//!   with the bound on skew one answer proves.
 //! - **Depends on.** The parent module's gossip state and wall-clock read, the vocabulary's
-//!   prerequisite record, and authenticated interconnect requests.
-//! - **Must not know.** How two records are judged, how a node is admitted, or what a joining node
-//!   does with a skew.
+//!   prerequisite record and admission verdicts, and authenticated interconnect requests.
+//! - **Must not know.** How two records or a run are judged, how a node is admitted, or what a
+//!   joining node does with a skew or a verdict.
 
 #![cfg_attr(
     nervix_lint,
@@ -33,8 +34,8 @@ use nervix_interconnect::{
     Transport as InterconnectTransport,
 };
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, NodePrerequisites,
-    TimingPrerequisite,
+    AdmissionVerdict, AdmissionVerdicts, ClusterNodeIdentity, ClusterNodeIncarnation,
+    ClusterNodeName, NodePrerequisites, TimingPrerequisite,
 };
 use nervix_primitives::{
     publication::{ArcSwap, Guard},
@@ -47,6 +48,8 @@ use super::{ClusterHandle, GossipExchange, cluster_node_identity};
 
 /// Everything the node brings to the cluster, as its prerequisite record's gossip text.
 const KEY_PREREQUISITES: &str = "prerequisites";
+/// The verdicts a leader holds on the live runs it judged, as their gossip text.
+const KEY_ADMISSION_VERDICTS: &str = "admission_verdicts";
 
 /// The gossip key and value that publish `prerequisites` from a node's first gossip round.
 pub(super) fn initial_key_value(prerequisites: &NodePrerequisites) -> (String, String) {
@@ -291,6 +294,60 @@ impl ClusterHandle {
         chitchat
             .self_node_state()
             .set(KEY_PREREQUISITES, prerequisites.to_gossip_text());
+    }
+
+    /// Publishes the verdicts this node holds while it leads, or withdraws the ones it published
+    /// once it no longer leads.
+    pub async fn publish_admission_verdicts(&self, verdicts: Option<&AdmissionVerdicts>) {
+        let mut chitchat = self.chitchat.lock().await;
+        let state = chitchat.self_node_state();
+        match verdicts {
+            Some(verdicts) => state.set(KEY_ADMISSION_VERDICTS, verdicts.to_gossip_text()),
+            None => {
+                if state.get(KEY_ADMISSION_VERDICTS).is_some() {
+                    state.delete(KEY_ADMISSION_VERDICTS);
+                }
+            }
+        }
+    }
+
+    /// The verdict on `run` of the newest leader whose verdicts this node's gossip holds, or
+    /// `None` while that leader has not judged the run. A node that stopped leading withdraws its
+    /// verdicts; until gossip carries that, the newer leader's win by their term.
+    pub async fn admission_verdict_of(
+        &self,
+        run: &ClusterNodeIdentity,
+    ) -> Option<AdmissionVerdict> {
+        let chitchat = self.chitchat.lock().await;
+        let mut newest: Option<AdmissionVerdicts> = None;
+        for node in chitchat.live_nodes() {
+            let Some(state) = chitchat.node_state(node) else {
+                continue;
+            };
+            let Some(text) = state.get(KEY_ADMISSION_VERDICTS) else {
+                continue;
+            };
+            let verdicts = match AdmissionVerdicts::from_gossip_text(text) {
+                Ok(verdicts) => verdicts,
+                Err(error) => {
+                    debug!(
+                        node = %node.node_id,
+                        error = %format!("{error:#}"),
+                        "a node's gossip state holds admission verdicts this build does not read"
+                    );
+                    continue;
+                }
+            };
+            let newer = match &newest {
+                Some(current) => current.leader_term() < verdicts.leader_term(),
+                None => true,
+            };
+            if newer {
+                newest = Some(verdicts);
+            }
+        }
+        let newest = newest?;
+        newest.verdict_of(run).cloned()
     }
 
     /// Bounds how far `peer`'s physical clock is from this node's with one probe over the

@@ -595,7 +595,10 @@ async fn bootstrap_respects_the_peer_quota_before_registering_a_new_identity() {
     .await
     .expect("third test transport should bind");
     let error = transport_a
-        .bootstrap_target(PeerTarget::new(transport_c.local_addr(), "localhost"))
+        .bootstrap_target(
+            PeerTarget::new(transport_c.local_addr(), "localhost"),
+            BootstrapExpectation::AnyMember,
+        )
         .await
         .expect_err("bootstrap must respect the existing peer quota");
     assert!(matches!(
@@ -2605,7 +2608,10 @@ async fn bootstrap_rejects_a_certificate_from_another_cluster() {
     .expect("second test transport should bind");
 
     let error = transport_a
-        .bootstrap_target(PeerTarget::new(transport_b.local_addr(), "localhost"))
+        .bootstrap_target(
+            PeerTarget::new(transport_b.local_addr(), "localhost"),
+            BootstrapExpectation::AnyMember,
+        )
         .await
         .expect_err("a peer certificate from another cluster must be rejected");
     let TransportError::IncompatiblePeer { peer, mismatch } = error.current_context() else {
@@ -2626,6 +2632,134 @@ async fn bootstrap_rejects_a_certificate_from_another_cluster() {
             mismatch: mismatch.clone(),
         }),
         "a bootstrap exchange that ends in a refusal ends the join"
+    );
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+#[nervix_primitives::test]
+async fn a_recorded_endpoint_another_clusters_node_answers_is_a_stale_route() {
+    let authority = TestCertificateAuthority::new();
+    let node_a = ClusterNodeName::parse("node-a").expect("test node name should be valid");
+    let recorded = ClusterNodeName::parse("node-b").expect("test node name should be valid");
+    let stranger = ClusterNodeName::parse("node-x").expect("test node name should be valid");
+    let (transport_a, _incoming_a) = Transport::bind(
+        "127.0.0.1:0".parse().expect("test address should be valid"),
+        localhost_identity("cluster-a", node_a.clone()),
+        authority.issue("cluster-a", &node_a),
+        TransportOptions::default(),
+        Executor::default(),
+        test_resolver().await,
+    )
+    .await
+    .expect("first test transport should bind");
+    let (transport_x, _incoming_x) = Transport::bind(
+        "127.0.0.1:0".parse().expect("test address should be valid"),
+        localhost_identity("cluster-b", stranger.clone()),
+        authority.issue("cluster-b", &stranger),
+        TransportOptions::default(),
+        Executor::default(),
+        test_resolver().await,
+    )
+    .await
+    .expect("the other cluster's transport should bind");
+    let endpoint = PeerTarget::new(transport_x.local_addr(), "localhost");
+
+    let error = transport_a
+        .bootstrap_target(
+            endpoint.clone(),
+            BootstrapExpectation::RecordedMember(recorded.clone()),
+        )
+        .await
+        .expect_err("another cluster's node never answers for a recorded member");
+
+    let TransportError::StaleRoute {
+        endpoint: stale,
+        member,
+    } = error.current_context()
+    else {
+        panic!("another cluster's node at a recorded endpoint is a stale route: {error:?}");
+    };
+    assert_eq!(stale, &endpoint.endpoint());
+    assert_eq!(member, &recorded);
+    let mut answered_by = None;
+    for frame in error.frames() {
+        if let Some(TransportError::IncompatiblePeer { peer, .. }) =
+            frame.downcast_ref::<TransportError>()
+        {
+            answered_by = Some(peer.clone());
+        }
+    }
+    assert_eq!(
+        answered_by,
+        Some(stranger),
+        "the stale route keeps the node that answered beneath it: {error:?}"
+    );
+    assert_eq!(
+        *transport_a.join_progress().borrow(),
+        JoinProgress::Joining,
+        "a stale route refuses no one, so the join goes on"
+    );
+
+    transport_a.shutdown().await;
+    transport_x.shutdown().await;
+}
+
+#[nervix_primitives::test]
+async fn a_recorded_member_that_moved_to_another_cluster_is_a_cluster_identity_refusal() {
+    let authority = TestCertificateAuthority::new();
+    let node_a = ClusterNodeName::parse("node-a").expect("test node name should be valid");
+    let recorded = ClusterNodeName::parse("node-b").expect("test node name should be valid");
+    let (transport_a, _incoming_a) = Transport::bind(
+        "127.0.0.1:0".parse().expect("test address should be valid"),
+        localhost_identity("cluster-a", node_a.clone()),
+        authority.issue("cluster-a", &node_a),
+        TransportOptions::default(),
+        Executor::default(),
+        test_resolver().await,
+    )
+    .await
+    .expect("first test transport should bind");
+    let (transport_b, _incoming_b) = Transport::bind(
+        "127.0.0.1:0".parse().expect("test address should be valid"),
+        localhost_identity("cluster-b", recorded.clone()),
+        authority.issue("cluster-b", &recorded),
+        TransportOptions::default(),
+        Executor::default(),
+        test_resolver().await,
+    )
+    .await
+    .expect("second test transport should bind");
+
+    let error = transport_a
+        .bootstrap_target(
+            PeerTarget::new(transport_b.local_addr(), "localhost"),
+            BootstrapExpectation::RecordedMember(recorded.clone()),
+        )
+        .await
+        .expect_err("the recorded member's certificate names another cluster");
+
+    let mismatch = PrerequisiteMismatch::ClusterIdentity {
+        local: "cluster-a".to_string(),
+        peer: "cluster-b".to_string(),
+    };
+    let TransportError::IncompatiblePeer {
+        peer,
+        mismatch: seen,
+    } = error.current_context()
+    else {
+        panic!("the recorded member of another cluster is a cluster-identity mismatch: {error:?}");
+    };
+    assert_eq!(peer, &recorded);
+    assert_eq!(seen, &mismatch);
+    assert_eq!(
+        *transport_a.join_progress().borrow(),
+        JoinProgress::Refused(JoinRefusal {
+            peer: recorded,
+            mismatch,
+        }),
+        "the node the endpoint was recorded for names another cluster, so this node is refused"
     );
 
     transport_a.shutdown().await;
@@ -2655,12 +2789,15 @@ async fn bootstrap_times_out_when_a_tcp_peer_never_completes_tls() {
         .expect("unresponsive TCP peer should bind");
     let error = timeout(
         Duration::from_secs(2),
-        transport_a.bootstrap_target(PeerTarget::new(
-            listener
-                .local_addr()
-                .expect("test peer should have an address"),
-            "localhost",
-        )),
+        transport_a.bootstrap_target(
+            PeerTarget::new(
+                listener
+                    .local_addr()
+                    .expect("test peer should have an address"),
+                "localhost",
+            ),
+            BootstrapExpectation::AnyMember,
+        ),
     )
     .await
     .expect("bootstrap must honor its setup deadline")
@@ -2683,7 +2820,10 @@ async fn shutdown_refuses_bootstrap_before_opening_a_connection() {
     } = bound_transports_with_options(TransportOptions::default()).await;
     transport_a.shutdown().await;
     let error = transport_a
-        .bootstrap_target(PeerTarget::new(transport_b.local_addr(), "localhost"))
+        .bootstrap_target(
+            PeerTarget::new(transport_b.local_addr(), "localhost"),
+            BootstrapExpectation::AnyMember,
+        )
         .await
         .expect_err("shutdown must fence new bootstrap attempts");
     assert!(matches!(

@@ -25,9 +25,10 @@ A node begins shutting down for exactly three reasons:
 - It receives its first `SIGINT` or `SIGTERM`.
 - One of its public listeners stops, whether it failed or returned.
 - It is refused as it joins the cluster: a connection it dials is refused, before any has
-  completed, because the two nodes cannot run together; a live member of the membership it has
-  applied publishes prerequisites it cannot run beside before it is a member itself; or the clock
-  of a peer it completed a handshake with is beyond its tolerance.
+  completed, because the two nodes cannot run together; the leader's verdict refuses its run
+  because it cannot run beside a live voter; a live member of the membership it has applied
+  publishes prerequisites it cannot run beside before it is a member itself; or the clock of a peer
+  it completed a handshake with is beyond its tolerance.
   [Prerequisites At Join](./node-settings.md#prerequisites-at-join) describes each. The refused
   node requests its own stop; a node that has joined never stops because of a newcomer.
 

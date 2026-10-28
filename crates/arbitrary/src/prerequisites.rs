@@ -1,18 +1,25 @@
-//! The prerequisite record a node publishes in gossip and carries in its connection handshake, and
-//! the mismatch that names why two records cannot run together.
+//! The prerequisite record a node publishes in gossip and carries in its connection handshake, the
+//! mismatch that names why two records cannot run together, and the verdicts a leader publishes on
+//! the runs it judged.
 //!
 //! A record is compared for equality and for the bounded distance of its timings, never read for
-//! meaning, so any text, digest, count and duration is as valid as a production one.
+//! meaning, so any text, digest, count and duration is as valid as a production one. A verdict
+//! names any run, any voter and any mismatch, under any term.
 
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use meticulous::ResultExt as _;
 use nervix_models::{
-    ConsensusFloors, NodePrerequisites, PrerequisiteMismatch, PrerequisiteTimings,
-    RaftLogDurability, TimingPrerequisite, TrustRootFingerprint, WireContractFingerprint,
+    AdmissionVerdict, AdmissionVerdicts, ConsensusFloors, NodePrerequisites, PrerequisiteMismatch,
+    PrerequisiteTimings, RaftLogDurability, TimingPrerequisite, TrustRootFingerprint,
+    WireContractFingerprint,
 };
 
 use crate::Arbitrary;
+
+/// The most runs one leader's verdicts hold here, a few more than a cluster's live nodes in the
+/// generated cases.
+const MAX_JUDGED_RUNS: u64 = 6;
 
 impl Arbitrary<'_> {
     /// A prerequisite record with any cluster identity, digests, consensus floors and timings.
@@ -76,6 +83,27 @@ impl Arbitrary<'_> {
                 peer: self.any_duration(),
             },
         }
+    }
+
+    /// The verdicts one leader holds under any term: none to a handful of runs, each accepted or
+    /// refused naming any voter and any mismatch.
+    pub fn admission_verdicts(&mut self) -> AdmissionVerdicts {
+        let leader_term = self.entropy.boundary_biased(0..=u64::MAX);
+        let runs = self.entropy.boundary_biased(0..=MAX_JUDGED_RUNS);
+        let mut verdicts = BTreeMap::new();
+        for _ in 0..runs {
+            let run = self.node_identity();
+            let verdict = if self.entropy.flag() {
+                AdmissionVerdict::Accepted
+            } else {
+                AdmissionVerdict::Refused {
+                    voter: self.rule_name(),
+                    mismatch: self.prerequisite_mismatch(),
+                }
+            };
+            verdicts.insert(run, verdict);
+        }
+        AdmissionVerdicts::new(leader_term, verdicts)
     }
 
     /// Any duration: whole seconds across the full range, landing on its ends as often as

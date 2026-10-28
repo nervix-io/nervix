@@ -67,10 +67,10 @@ use self::{
     stream_releases::StreamReleases,
 };
 use super::{
-    ControlEnvelope, CoordinationIdentityAllocationError, Envelope, JoinProgress, JoinTerms,
-    PeerTarget, PoolClass, RELAY_GRANT_LIFETIME, ReceivedEnvelope, RelayAdmissionDecision,
-    RelayAdmissionStatus, RelayDelivery, RelayGrantRefusal, RelayPayload, RequestSubquota,
-    TlsConfigBundle, TransportError, TransportIdentity, TransportOptions, wire,
+    BootstrapExpectation, ControlEnvelope, CoordinationIdentityAllocationError, Envelope,
+    JoinProgress, JoinTerms, PeerTarget, PoolClass, RELAY_GRANT_LIFETIME, ReceivedEnvelope,
+    RelayAdmissionDecision, RelayAdmissionStatus, RelayDelivery, RelayGrantRefusal, RelayPayload,
+    RequestSubquota, TlsConfigBundle, TransportError, TransportIdentity, TransportOptions, wire,
 };
 use crate::{
     identity::CertificateIdentity,
@@ -1100,6 +1100,7 @@ impl TransportState {
     pub(crate) async fn bootstrap_target(
         &self,
         target: PeerTarget,
+        expectation: BootstrapExpectation,
     ) -> Result<ClusterNodeName, Report<TransportError>> {
         if self.admission_closed.is_cancelled() {
             return Err(Report::new(TransportError::ShuttingDown));
@@ -1126,7 +1127,8 @@ impl TransportState {
             let tls = self.tls.current().bundle;
             let session = tls
                 .connect(tcp, &target.server_name, &self.cluster_id, None)
-                .await?;
+                .await
+                .map_err(|error| expectation.judge_handshake_failure(target.endpoint(), error))?;
             let identity = session.peer;
             if !identity.matches_endpoint(&target.server_name) {
                 return Err(Report::new(TransportError::InvalidHandshake(format!(
