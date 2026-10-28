@@ -622,6 +622,20 @@ class WorkspaceWrapperTests(unittest.TestCase):
     def record(self) -> dict:
         return json.loads((self.reports / "compilations/example-abcd.json").read_text())
 
+    @staticmethod
+    def stop_driver(pid: int) -> None:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+    def test_driver_cleanup_tolerates_exit_between_its_status_check_and_signal(self) -> None:
+        with mock.patch("os.kill", side_effect=ProcessLookupError) as kill:
+            self.stop_driver(12345)
+        kill.assert_called_once_with(12345, signal.SIGKILL)
+
+    def test_driver_cleanup_preserves_other_signal_failures(self) -> None:
+        with mock.patch("os.kill", side_effect=PermissionError), self.assertRaises(PermissionError):
+            self.stop_driver(12345)
+
     def test_wrapper_forwards_compiler_and_arguments_with_optional_coverage_recording(self) -> None:
         for coverage in ("", "/attempt"):
             with mock.patch.dict(os.environ, {"NERVIX_LINT_DRIVER": "/driver", "NERVIX_LINT_REPORTS": str(self.reports), "NERVIX_NATIVE_COVERAGE_ATTEMPT": coverage}), mock.patch("sys.argv", ["wrapper", "/rustc", "--crate-name", "example"]), mock.patch("subprocess.Popen", side_effect=RuntimeError("started")) as start:
@@ -663,7 +677,7 @@ class WorkspaceWrapperTests(unittest.TestCase):
                 return False
             return state != "Z"
 
-        self.addCleanup(lambda: running() and os.kill(pid, signal.SIGKILL))
+        self.addCleanup(lambda: running() and self.stop_driver(pid))
         wrapper.kill()
         wrapper.wait()
         deadline = time.monotonic() + 60

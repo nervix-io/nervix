@@ -38,6 +38,8 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
             K::required("addr", V::Url(&["http", "https"])),
             K::optional("database", V::String),
             K::optional("password", V::String).secret(),
+            K::defaulted("pool_idle_timeout_ms", V::Milliseconds, "2000"),
+            K::defaulted("tcp_keepalive_ms", V::TcpKeepaliveMilliseconds, "60000"),
             K::required("timeout_ms", V::Milliseconds),
             K::TLS_CA.required_for_scheme("addr", "https"),
             K::TLS_CERT,
@@ -239,7 +241,52 @@ fn clickhouse_table_name(text: &str) -> Result<(), super::external_name::Externa
 
 #[cfg(test)]
 mod tests {
+    use meticulous::{OptionExt as _, ResultExt as _};
+
     use super::*;
+
+    #[test]
+    fn client_declares_positive_connection_intervals() {
+        let entries = vec![
+            ClientConfigEntry {
+                key: "addr".into(),
+                value: "http://localhost:8123".into(),
+            },
+            ClientConfigEntry {
+                key: "timeout_ms".into(),
+                value: "5000".into(),
+            },
+            ClientConfigEntry {
+                key: "tcp_keepalive_ms".into(),
+                value: "30000".into(),
+            },
+            ClientConfigEntry {
+                key: "pool_idle_timeout_ms".into(),
+                value: "250".into(),
+            },
+        ];
+        CLIENT_CONFIG
+            .validate_rendered(&entries)
+            .assured("the declared connection intervals configure a ClickHouse client");
+        for name in ["tcp_keepalive_ms", "pool_idle_timeout_ms"] {
+            for invalid in ["0", "invalid", "-1", "1.5", "18446744073709551615"] {
+                let mut invalid_entries = entries.clone();
+                let entry = invalid_entries
+                    .iter_mut()
+                    .find(|entry| entry.key == name)
+                    .assured("the fixture contains both connection intervals");
+                entry.value = invalid.to_string();
+                let refusal = CLIENT_CONFIG
+                    .validate_rendered(&invalid_entries)
+                    .expect_err("connection intervals must be positive schedulable milliseconds");
+                assert!(
+                    matches!(refusal.current_context(),
+                    ClientConfigSchemaError::InvalidValue { key, .. } if key == name),
+                    "{name}={invalid}: {refusal:#}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn table_name_keeps_one_or_two_nonempty_case_sensitive_levels() {

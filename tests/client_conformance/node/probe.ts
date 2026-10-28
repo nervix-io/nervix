@@ -896,6 +896,13 @@ function downloadLines(frame: Uint8Array): string[] {
           : `DOWNLOAD LEADER node=${leader.node()} grpc=${leader.grpcUri() ?? 'none'} console=${leader.webConsoleUri() ?? 'none'}`,
       ];
     }
+    case wire.BackupDownloadPart.BackupArchiveHolder: {
+      const answer = member(message.part(new wire.BackupArchiveHolder()) as wire.BackupArchiveHolder | null);
+      const holder = member(answer.holder());
+      return [
+        `DOWNLOAD HOLDER node=${holder.node()} grpc=${holder.grpcUri() ?? 'none'} console=${holder.webConsoleUri() ?? 'none'}`,
+      ];
+    }
     default:
       throw new Error(`undeclared download part ${message.partType()}`);
   }

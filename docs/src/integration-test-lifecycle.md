@@ -172,7 +172,7 @@ resubmitting an outcome that might already have produced output.
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | Unaccepted addresses | No task: a listening socket at a chosen loopback address and the one connection that fills its accept queue, so the kernel drops every later handshake. The scenario world owns both until the scenario ends | `tests/common/unaccepted_address.rs` |
 | Backup cut holds | No harness task: the fault injector's lease or capture gate holds each backup cut that reaches it on that cut's own task in the node, until the scenario releases the gate or for the duration the scenario timed from the cut's arrival | `src/fault_injection/backup_cut.rs`, driven by the backup steps in `tests/backup/mod.rs` and `tests/backup/wait.rs` |
-| Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and sequences, and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
+| Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact payload multiplicities, generator occurrences, broker counts and sequences, and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs` and `subscription_payloads.rs`, used by the payload, generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
 | Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
 | Syslog TLS publication and split-frame writes | One abort-on-drop task on the binary's runtime, owning TCP connection establishment, the TLS handshake and the complete prepared write. Publication closes the connection there; a split-frame write returns its sender for the later remainder | `tests/common/syslog_tls.rs`, using `tests/common/runner_observation.rs` |
@@ -817,15 +817,26 @@ bounds and do not shorten the product's completion deadline.
 
 An injected hold is the opposite case: a product deadline races it. The scenario holds a controlled
 operation at a gate for a workload duration, and the node keeps its own deadline running while the
-operation waits. The backup wait scenarios hold one domain's quiesced cuts for 12 seconds and the
-next one's for 14 seconds, each inside its own 20-second cut budget. The scenario's margin is the
-part of the budget the hold leaves, and a runner task that another scenario's synchronous step
-stalls for longer than that margin would lengthen a hold timed on the runner task until the product
-deadline expires. The backup cut gate in `src/fault_injection/backup_cut.rs` therefore times each
-hold itself, from the cut's own arrival and on the cut's own task in the node, and the step that
-injects the holds only learns when the first one ended. A stalled runner delays when the step
-learns of a release, never the release itself. When the command is expected to outlast every hold,
-the step still watches it and reports a command that ends early with its own outcome.
+operation waits. The scenario's margin is the part of the deadline the hold leaves.
+
+The independent-budget backup outline holds one domain's quiesced cuts for 20 seconds and the next
+one's for 22 seconds, each inside its own 40-second cut budget. Together the holds outlast one
+budget, so a budget the two cuts shared would expire the second, and each hold leaves its cut at
+least 18 seconds; the step refuses to start a probe whose holds break either relation. A cut spends
+that margin on its lease, its pause, its drain and its capture. On a loaded runner the leader's
+raft lease can lapse, and the leader then refuses every proposal, the cut's lease included, until
+the lease recovers, while the cut's deadline keeps running. Loaded CI runs keep a backup's lease
+refused for seconds at a time, and the margin is several times what such a refusal and a loaded
+drain take together. The expiry outline gives its 12-second first hold a 30-second budget for the
+same reason, so that only its held second cut expires.
+
+A runner task that another scenario's synchronous step stalls for longer than the margin would
+lengthen a hold timed on the runner task until the product deadline expires. The backup cut gate
+in `src/fault_injection/backup_cut.rs` therefore times each hold itself, from the cut's own arrival
+and on the cut's own task in the node, and the step that injects the holds only learns when the
+first one ended. A stalled runner delays when the step learns of a release, never the release
+itself. When the command is expected to outlast every hold, the step still watches it and reports a
+command that ends early with its own outcome.
 
 A gate holds every cut that reaches it, not only the first. When the leader cannot record a
 backup's outcome, because leadership moved or because it could not confirm that it still leads,
@@ -838,7 +849,7 @@ holds each delayed cut again` force that later run on three nodes: they hold the
 finalization and move leadership before releasing it. They give each cut a 30-second budget. A cut
 that passed its gate unheld lasts a few seconds whatever its budget, and the wider margin leaves the
 held cuts room for the new leader's first lease. The expiry outline's CLI wait covers a second run
-of its 12-second hold and 20-second cut budget.
+of its 12-second hold and 30-second cut budget.
 
 A step waits up to 120 seconds for a backup to reach a gate, as the pause steps do. A cut arrives
 only after its lease, its pause and its drain, which a loaded runner delays, and a run that starts
@@ -855,6 +866,22 @@ bound from dispatch on a runtime worker, waits independently for both controlled
 through a fresh client under the original reference. The recovery orchestration also runs off the
 runner, so delayed step polling cannot restart the wait bound or leave the second cut held. The
 archive must retain both quiesced cuts and the measured first hold.
+
+The paced branch-buffering outline keeps its one-second logical input flush and collection, rate
+20, and 800 ms physical receive budget. Its bounded payload sample owns the raw session on a
+runtime task and records every receipt instant, while Cucumber only awaits the completed sample.
+Checking the deadline between rows on the runner task could fail after the first tenant rows even
+when both second rows were already queued within the budget. A paused-clock regression supplies
+those rows at 100 ms and delays the caller past 800 ms; another requires a missing second row to
+expire at exactly 800 ms despite a duplicate first row. A transport disconnect instead fails
+immediately with its cause. The public outline checks each concrete tenant key and both exact
+payloads while deliberately delaying collection of the result for one second, beyond the
+unchanged receive budget. That delay yields to the runtime and other scenarios; it does not block
+the shared runner. A scripted one-second physical cadence still expires the same 800 ms sample.
+Every returned row must also have a receipt instant strictly before the original deadline: a
+paused-clock reader that resumes at or beyond either the 500 ms or 800 ms bound must fail even
+when its final row is ready. Offloading removes runner polling gaps; it neither extends the budget
+nor proves that runtime workers cannot be delayed.
 
 The duration window outline establishes its observation boundary through a public subscription:
 it first waits for a probe branch's window to emit, then submits all four interleaved tenant rows
@@ -1679,19 +1706,28 @@ scenario first waits for the restored clock's `PACED` state, then observes the c
 period and advancing ticks. Leader confirmation and the clock's attach reply are separate events;
 the bounded selector predicate establishes clock readiness before the stability observation starts.
 
-Visual ingestor and processor fixtures wait for the exact domain's active menu item before opening
-their create form. Page load and leader confirmation do not establish that the initial domain
-publication has arrived. A form opened while the domain list is loading captures no
-domain; the later sidebar selection does not replace that retained scope, so its controls correctly
-report a missing prerequisite without issuing a choice lookup. The fixtures keep their original
-ten-second choice probes and their sensitivity, domain-change and repartitioning assertions.
+A visual creation fixture whose scenario has already provisioned its domain waits for that exact
+domain's active menu item before it opens a domain-scoped form or types a domain-scoped statement,
+such as `BEGIN`. The visual creation and connector presentation features follow this rule, as does
+the console REPL case that opens a resource form inside a transaction. Every create form except the
+domain and user forms is domain-scoped. Page load and leader confirmation do not establish that the
+initial domain publication has arrived: `CONNECTED` follows the server's leadership event, a frame
+independent of the domain list. A form opened while the domain list is loading captures no domain.
+The later sidebar selection does not replace that retained scope, so its controls correctly report
+a missing prerequisite without issuing a choice lookup, and its local validation refuses the
+submission for want of a domain. A statement typed in that interval is sent without a domain, and
+the server refuses it when the statement needs one. The fixtures keep their original ten-second choice probes and their
+sensitivity, domain-change, transaction, leader-following and repartitioning assertions. Fixtures
+that provision no domain keep their no-domain refusals and cluster-scoped domain forms unchanged.
 
 The delayed-initial-domain feature exercises this ordering on one and three nodes through the
 ordinary browser flow. A page-local gate holds actual session frames until the scenario releases
 them, with at most 64 frames and 1 MiB retained. It preserves the bytes and delivery order and fails
 on overflow, a non-binary frame or a connection closed before release. After release, the fixture
-observes the exact selected domain before opening either form and requires its real endpoint or
-input choice. The gate adds no sleep, retry or suite admission rule. Selector-existence failures
+observes the exact selected domain before opening a form, then requires the form's captured scope
+and a real choice from each scoped form family: an ingestor's endpoint, a processor's input, a
+branch's schema, a subscription's relay, a codec's internal schema, an endpoint's VHOST and a hash
+map's resource. The gate adds no sleep, retry or suite admission rule. Selector-existence failures
 include the sidebar domain, captured form scope and neutral or failed choice states, without
 recording draft input values.
 
@@ -2801,14 +2837,15 @@ scenarios in one process, their nodes contended on it and missed startup and req
 that a plain diagnostic build of the same scenarios met.
 [Two Stressed Scenarios In One Process](#two-stressed-scenarios-in-one-process) records what made
 them miss. `deloxide-stress` runs the active-only selection's probes, conformance checks and
-owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 110
-lifecycle scenario runs tagged `@deloxide_stress`, bounded at 45 minutes, and the
+owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of
+the inventory's lifecycle scenario runs tagged `@deloxide_stress`, bounded at 45 minutes, and the
 `stress-paced-simulation` invocation of the 36 paced-driver runs with the stressed Rust driver,
 bounded at 40. The six transaction-retention and ten endpoint ACK examples run in separate serial
 invocations, each bounded at 15 minutes, within the same selection workload budget.
 `deloxide-stress-restore` runs the build's probes and the `stress-restore-scenarios`
-invocation of 53 capture, restore and checkpoint-transfer runs tagged `@deloxide_stress_restore`,
-bounded at 70 minutes. Each selection has the inventory's 80-minute budget and its own CI runner.
+invocation of the inventory's capture, restore and checkpoint-transfer runs tagged
+`@deloxide_stress_restore`, bounded at 70 minutes. Each selection has the inventory's 80-minute
+budget and its own CI runner.
 
 The split follows from what the disturbance costs. It barely lengthens a scenario, because the
 lifecycle scenarios wait on product cadences, timers and deadlines rather than on the CPU: in the CI

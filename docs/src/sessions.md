@@ -335,12 +335,15 @@ single frame:
 | Refused `InvalidRequest` | The request does not decode. |
 | Refused `Expired` | The retry validity of the execution reference has ended. |
 | Refused `NotOwner` | Another user ran the backup. |
-| Redirect to the leader | The node does not retain the archive and is not the leader. |
-| Refused `NotRetained` | The leader does not retain the archive: the backup is still assembling it, the command assembled no archive, a download already collected it, the node that assembled it restarted, or the reference names no backup. |
+| Sent to the archive's holder | The backup's recorded outcome names another live node as the one retaining the archive; the answer carries that node's endpoints. |
+| Redirect to the leader | The node does not retain the archive, has not applied the backup's recorded outcome, and is not the leader. |
+| Refused `NotRetained` | No live node retains the archive: the backup is still assembling it, the command assembled no archive, a download already collected it, the node that assembled it restarted or left, or the reference names no backup. |
 | Refused `ReadFailed` | The node could not read the archive it retains; the archive stays retained. |
 
-The first download whose completion frame was queued collects the archive, and a later download of
-it is refused. A download whose client goes away releases only its own hold, so the archive stays
+A node streams an archive only when the backup's recorded outcome names it as the node that
+retains it, so a client that recovered the outcome from another node, for example after leadership
+moved, is sent to the node that assembled the archive. The first download whose completion frame
+was queued collects the archive, and a later download of it is refused. A download whose client goes away releases only its own hold, so the archive stays
 retained for the client to download again. The call is not bounded by the request timeout; the
 Rust client bounds the wait for each frame by it instead, and starts a failed download again from
 the first byte. [Backup And Restore](backup-and-restore.md) describes backups and their archives,

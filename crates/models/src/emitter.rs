@@ -32,6 +32,9 @@ pub struct CreateEmitter {
     pub name: EmitterName,
     pub from: ProcessorInputs,
     pub body: EmitterBody,
+    /// The envelope clauses and properties the statement writes after the payload, which set what
+    /// the transport carries beside each payload.
+    pub envelope: Box<crate::EmitterEnvelope>,
     pub connector: Box<EmitterEntity>,
     /// `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, absent when the emitter publishes one record per
     /// message. A emitter whose [`EmitterEntity::batch_legality`] requires it never omits it.
@@ -205,6 +208,7 @@ impl CreateEmitter {
             AlterEmitterOperation::SetTo {
                 destination,
                 body,
+                envelope,
                 construction,
             } => {
                 if self.connector.kind() != destination.kind() {
@@ -215,6 +219,7 @@ impl CreateEmitter {
                 }
                 self.connector = destination.clone();
                 self.body = body.clone();
+                self.envelope = envelope.clone();
                 if let Some(construction) = construction {
                     self.construction = construction.clone();
                 }
@@ -330,9 +335,12 @@ pub enum AlterEmitterOperation {
     AlterFromDropWhere {
         relay: RelayName,
     },
+    /// The complete destination: its entity, payload and envelope, and, where written, its
+    /// construction.
     SetTo {
         destination: Box<EmitterEntity>,
         body: EmitterBody,
+        envelope: Box<crate::EmitterEnvelope>,
         construction: Option<crate::RouteConstruction>,
     },
     SetClient {
