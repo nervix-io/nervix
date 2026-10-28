@@ -652,8 +652,9 @@ measurement and failure attribution for every emitter — is defined in
 [Optional emitter batching](https://github.com/nervix-io/nervix/blob/main/docs/specifications/emitter-batching.md).
 The database emitters bound every insert or bulk write by both limits, as
 [Database writes](#database-writes) describes. An OTEL emitter with the clause bounds each export
-request; without it, OTEL keeps one request per pending Arrow batch. Iceberg keeps its data-file
-and commit boundaries.
+request; without it, OTEL keeps one request per pending Arrow batch, and with or without it a
+request never combines records of two pending Arrow batches. Iceberg keeps its data-file and commit
+boundaries.
 
 ### Batch payloads
 
@@ -1125,7 +1126,8 @@ Transport-specific expectations:
 - `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; Nervix honors the
   client's `tls_ca_file`, `tls_cert_file`, and `tls_key_file`.
 - `OTEL`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file`, `tls_cert_file`, and
-  `tls_key_file` for both OTLP/gRPC and OTLP/HTTP-protobuf.
+  `tls_key_file` for both OTLP/gRPC and OTLP/HTTP-protobuf. `tls_ca_file` adds a server trust root,
+  and TLS file keys with an `http://` endpoint are refused; see [OTEL](#otel).
 - `CLICKHOUSE`: use an `https://...` `addr` with mounted `tls_ca_file` and required positive
   `timeout_ms`; HTTP addresses refuse TLS file keys.
 - `POSTGRES`: use `sslmode=verify-full` in the `addr` URL; Nervix honors `tls_ca_file`, `tls_cert_file`, and `tls_key_file`. `sslmode=disable` is the only other accepted policy.
@@ -2077,9 +2079,16 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [OTEL METRICS capability and mirror reference](connector-capabilities.md#otel-metrics-emit).
 <!-- connector-matrix:emit-otel-metrics:end -->
 
-OTEL emission is a codec-free direct emitter for OTLP logs, traces, and metric data points. It uses a
-`OTEL CLIENT` and supports both OTLP/gRPC and OTLP/HTTP-protobuf. The protocol is always
-explicit; there is no hidden default:
+OTEL emission is a codec-free direct emitter for OTLP logs, traces and metric data points. Each
+signal is its own entity, `OTEL LOGS`, `OTEL TRACES` or `OTEL METRICS`, and each one takes
+`MODE ACK RETRY POLICY ...` as its only mode. The three generated tables above are the
+declaration: a signal's closed `VALUES` keys with their exact types, requiredness and value
+constraints, what `ATTRIBUTES` and `RESOURCE` accept, and the OTLP features Nervix does not
+support, each with its reason. The [OTEL client](connector-capabilities.md#otel-client) reference
+renders the client's `CONFIG` keys from the same declaration.
+
+Every OTEL emitter exports through an `OTEL CLIENT`, which selects OTLP/gRPC or
+OTLP/HTTP-protobuf explicitly; there is no default protocol:
 
 ```plexus
 CREATE OTEL CLIENT otel_main
@@ -2092,23 +2101,40 @@ CREATE OTEL CLIENT otel_main
   };
 ```
 
-`endpoint`, `protocol`, and `timeout_ms` are required. `protocol` is exactly `grpc` or
-`http/protobuf`. `headers` is comma-separated `key=value`: Nervix splits each pair at its first
-`=`, trims surrounding whitespace, lowercases keys, and percent-decodes each value once.
-A literal `+` remains `+`; `%2B` also decodes to `+`, and `%252C` decodes to the literal `%2C`.
-Encode a comma inside a value as `%2C` and a space as `%20`. Encoded leading and trailing spaces
-belong to the value. This follows the [OTLP header format](https://opentelemetry.io/docs/specs/otel/protocol/exporter/#specifying-headers-via-environment-variables).
-Empty input supplies no headers. `compression` accepts only `gzip`, and an
-absent compression key sends an uncompressed request. `timeout_ms` is a positive request bound.
-For `http/protobuf`, Nervix appends `/v1/logs`, `/v1/traces`, or `/v1/metrics` to the endpoint path.
-Mount TLS files and use `tls_ca_file`, `tls_cert_file`, and `tls_key_file` in the same client; the
-certificate and key must be supplied together, and TLS files require an `https` endpoint on either
-protocol. CREATE and ALTER CLIENT check this relationship before inspecting files or opening a
-transport. Both protocols resolve the endpoint's host through
-the node's configured DNS resolver for every new connection, and keep the endpoint's host for the
-HTTP authority and the TLS server name. A `timeout_ms` covers the lookup and connection setup as
-well as the response, and for `grpc` it is also the connection timeout. A failed lookup is an
-export failure that the emitter retries on its `RETRY POLICY`.
+`endpoint`, `protocol` and `timeout_ms` are required, and `protocol` is exactly `grpc` or
+`http/protobuf`. `timeout_ms` bounds one export: name resolution, connection setup, TLS and the
+answer. For `grpc` it is also the connection timeout. `compression` accepts only `gzip`; without
+it, requests are sent uncompressed. For `http/protobuf`, Nervix posts each request to the
+endpoint's path, without its trailing slash, followed by `/v1/logs`, `/v1/traces` or `/v1/metrics`.
+
+`headers` holds comma-separated `name=value` pairs in the
+[OTLP header format](https://opentelemetry.io/docs/specs/otel/protocol/exporter/#specifying-headers-via-environment-variables).
+Nervix splits each pair at its first `=`, trims the whitespace around the name and the value,
+lowercases the name and percent-decodes the value once. A literal `+` remains `+`; `%2B` also
+decodes to `+`, and `%252C` decodes to the literal `%2C`. Encode a comma inside a value as `%2C`
+and a space as `%20`; encoded leading and trailing spaces belong to the value. Empty input supplies
+no headers, and a name given more than once sends only its last value. `CREATE CLIENT` and
+`ALTER CLIENT` refuse a pair without `=` or with an empty name. When the emitter opens, it refuses
+a name that is not a valid HTTP header name; for `grpc`, a name ending in `-bin`, which gRPC
+reserves for binary metadata; and a decoded value that holds a control character other than tab.
+Client inspection shows `headers` as `********`.
+
+The TLS file keys need an `https` endpoint on either protocol, and `tls_cert_file` and
+`tls_key_file` go together; `CREATE CLIENT` and `ALTER CLIENT` check both before reading a file or
+opening a transport. Mount the files as resources. The certificate and key are the emitter's client
+identity. `tls_ca_file` adds a trust root rather than replacing the built-in ones: `grpc` trusts the
+bundled WebPKI roots and the file, and `http/protobuf` trusts the platform's trust store and the
+file.
+
+Opening an emitter reads its TLS files and builds its transport, but contacts no endpoint: the
+`grpc` channel connects when an export first needs a connection, and the `http/protobuf` client
+connects when a request needs one. Both resolve the endpoint's host through the node's configured
+DNS resolver for every new connection, and keep that host for the HTTP authority and the TLS server
+name. An endpoint that does not resolve, refuses the connection or never answers is therefore never
+an initialization error: the export fails, `DESCRIBE EMITTER` reports a transient error, and the
+emitter retries the export on its `RETRY POLICY`. A missing or invalid TLS file, or a header the
+emitter refuses, fails its initialization instead. Nervix does not provision collectors, indexes,
+tenants or vendor-side telemetry objects; the OTLP receiver must already exist.
 
 One log record is mapped as follows:
 
@@ -2139,20 +2165,18 @@ CREATE OTEL LOGS EMITTER audit_to_otel
 
 The clause order is fixed: destination and metric options, `MODE`, required `VALUES`, optional
 `ATTRIBUTES`, optional `RESOURCE`, then optional `SCOPE '<name>' [VERSION '<version>']`.
-`RESOURCE` values must be literals or
-literal arrays. `ATTRIBUTES` may use exact-typed `STRING`, `BOOL`, integer-family, `F32`, `F64`,
-`DATETIME`, or array values; datetimes become RFC 3339 strings. Null attribute values are omitted.
-Normal sensitivity rules apply to every expression, including `ATTRIBUTES`.
+`RESOURCE` is literal-only and `SCOPE` is fixed, so every request an emitter sends carries the
+same resource and scope. Normal sensitivity rules apply to every expression, including
+`ATTRIBUTES`.
 
-Each signal's generated table above gives its closed `VALUES` keys, exact types, requiredness,
-and record constraints. Those tables also list the unsupported OTLP features and their reasons.
-Timestamps cannot precede the Unix epoch. Key/type and required-mapping checks happen at CREATE
-and ALTER. Literal severities, identifiers and enum names are also checked against the declared
-value domains before the statement is accepted. For example, `(25 AS I32)` is outside the severity
-range even though it has the required type. Record-dependent ranges and histogram cardinality
-are checked while encoding each row.
+`CREATE` and `ALTER` check the mappings against the signal's table above: every key must be
+declared and have its exact type, and every required key must be mapped. Literal severities,
+identifiers and enum names are also checked against the declared value domains before the
+statement is accepted. For example, `(25 AS I32)` is outside the severity range even though it has
+the required type. Ranges that depend on a record's values, and a histogram's bucket cardinality,
+are checked while that record is encoded.
 
-Each metric emitter defines exactly one metric stream:
+Each metric emitter exports exactly one metric:
 
 ```plexus,ignore
 CREATE OTEL METRICS EMITTER requests FROM windows
@@ -2170,29 +2194,28 @@ ATTRIBUTES { 'http.route' = input.route }
 RESOURCE { 'service.name' = 'checkout-pipeline' }
 ```
 
-Metric shapes are `GAUGE`, `SUM [MONOTONIC] (DELTA | CUMULATIVE)`, and `HISTOGRAM (DELTA |
-CUMULATIVE)`. `DESCRIPTION` is optional and follows the required `UNIT`. Gauge and sum points
-require `time` (`DATETIME`) and `value` (an exact integer-family, `F32`, or `F64` value). Integer
-values use OTLP `as_int`; floating-point values use `as_double`. `start_time` is required for a
-delta sum and optional otherwise.
-
-Histogram points require `time`, `U64` `count`, a `U64` ARRAY or VEC `bucket_counts`, and an `F32`
-or `F64` ARRAY or VEC `explicit_bounds`. Optional keys are `start_time` and floating-point `sum`, `min`, and `max`;
-`start_time` is required for delta histograms. At runtime, counts must be non-negative and
-`len(bucket_counts)` must equal `len(explicit_bounds) + 1`. Exponential histograms and summaries
-are not supported.
+`METRIC` names the metric and its required `UNIT`, with an optional `DESCRIPTION`, followed by its
+kind: `GAUGE`, `SUM [MONOTONIC] (DELTA | CUMULATIVE)` or `HISTOGRAM (DELTA | CUMULATIVE)`. A gauge or
+sum maps the keys of the generated table's `GAUGE / SUM` rows, and a histogram those of its
+`HISTOGRAM` rows. An integer `value` is sent as OTLP `as_int` and a floating-point one as
+`as_double`.
 
 BATCH is optional and has no learned protocol maximum. A Collector's common 4 MiB gRPC receive
 default is deployment advice: configure the receiver and the emitter's `MAX SIZE` together.
 Nervix does not impose that receiver default as a limit on every Export request.
 
-Without `BATCH`, each pending Arrow batch becomes one Export request containing one resource, one
-scope, and all successfully converted records. With `BATCH`, the connector keeps that resource and
-scope in every request, takes successfully converted records in source order, and divides them by
-`MAX MESSAGES` and the exact protobuf size of each Export request. When a candidate exceeds `MAX
-SIZE`, it is halved until each request fits, and a record whose request alone exceeds it follows
-`ON MESSAGE ERROR` as a `validation` error of the `encode` operation. The byte limit measures the uncompressed protobuf request before optional gzip; HTTP and gRPC
-framing and headers are outside it. `FLUSH ... MAX BATCH SIZE` continues to measure the Arrow batch.
+Nervix builds Export requests from one pending Arrow batch at a time. Without `BATCH`, a batch
+becomes one Export request carrying the emitter's resource and scope and every record the batch
+converted successfully; a metrics request carries the emitter's one metric with a data point for
+each such record. With `BATCH`, Nervix takes the batch's converted records in source order and
+divides them by `MAX MESSAGES` and the exact protobuf size of each request, keeping the resource and
+scope in every one. A request never combines records of two Arrow batches, even when one flush
+hands over several batches of the same relay and branch that `MAX MESSAGES` and `MAX SIZE` would
+hold together. When a candidate exceeds `MAX SIZE`, it is halved until each request fits, and a
+record whose request alone exceeds it follows `ON MESSAGE ERROR` as a `validation` error of the
+`encode` operation. The byte limit measures the uncompressed protobuf request before optional gzip;
+HTTP and gRPC framing and headers are outside it. `FLUSH ... MAX BATCH SIZE` continues to measure
+the Arrow batch.
 
 Nervix prepares each Export request once. It stamps log `observed_time_unix_nano` from the node's
 actual UTC clock when it prepares the request, and keeps the request's exact protobuf bytes, and
@@ -2211,16 +2234,15 @@ the gRPC codes the OTLP specification lists as retryable — `CANCELLED`, `DEADL
 severity values, numeric ranges, or histogram shapes reject only the affected record through `ON
 MESSAGE ERROR`. HTTP `400` and gRPC `INVALID_ARGUMENT` reject every record in that request without
 retry, with one shared error reference. Any other HTTP status or gRPC code the receiver answers
-with means the endpoint cannot accept the export as configured, and the emitter's unresolved
-records follow `ON MESSAGE ERROR`. OTLP `partial_success` cannot be retried safely: Nervix
-acknowledges every record and logs a warning, so records rejected by the receiver in that response
-are lost.
+with means the endpoint cannot accept the export as configured: Nervix does not retry it, and the
+emitter's unresolved records follow `ON MESSAGE ERROR` as errors of the `publish` operation. HTTP
+`413 Payload Too Large` is such an answer, so a request the receiver finds too large is neither
+retried nor divided further; declare `BATCH` with a `MAX SIZE` within the receiver's limit. OTLP
+`partial_success` cannot be retried safely: Nervix acknowledges every record and logs a warning, so
+records rejected by the receiver in that response are lost.
 For a local conversion failure, the rejected record identifies its `otel.<key>` field and gives a
 bounded reason without quoting that field's value. The conversion cause stays in the connector's
 internal report; the failure does not reject other records in the request.
-
-Nervix does not provision collectors, indexes, tenants, or vendor-side telemetry objects. The OTLP
-endpoint must already exist; an unreachable endpoint remains an initialization or publish error.
 
 ### ClickHouse
 

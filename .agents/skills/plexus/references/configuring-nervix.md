@@ -263,11 +263,13 @@ current connection, retry and deadline limits.
   A batching OTEL emitter bounds each export request by the number of successfully mapped source
   records and the exact uncompressed protobuf size, including resource and scope. An oversized
   candidate is divided and an oversized singleton follows `ON MESSAGE ERROR`; without the clause,
-  OTEL keeps one export request per pending Arrow batch. With or without it, a request whose outcome
-  is unknown, such as one that timed out or lost its response, is retried with the same bytes and
-  records rather than prepared again. A batching Sentry emitter places its
-  members inside one event in one envelope, and a `SYSLOG` codec places complete member messages
-  in one frame's JSON-array `MSG`.
+  OTEL keeps one export request per pending Arrow batch. Unlike the database emitters, an OTEL
+  request never combines records of two Arrow batches, with or without the clause. A receiver's
+  HTTP `413` is not retried or divided, so keep `MAX SIZE` within the receiver's limit. With or
+  without the clause, a request whose outcome is unknown, such as one that timed out or lost its
+  response, is retried with the same bytes and records rather than prepared again. A batching
+  Sentry emitter places its members inside one event in one envelope, and a `SYSLOG` codec places
+  complete member messages in one frame's JSON-array `MSG`.
   SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
   only with branched input.
 - Every MongoDB emitter maps integers that fit the BSON signed 64-bit range. A `U64` value above
@@ -353,8 +355,8 @@ current connection, retry and deadline limits.
   reading another connector or entity takes `DROP INGESTOR` and a new `CREATE`.
 - Delivery-policy durations and direct-value keys and types are checked at `CREATE` and `ALTER`.
   For OTEL's per-signal field constraints, histogram types, required client deadline, header
-  decoding, TLS pairing and unsupported features, read the generated `Connector Capabilities`
-  tables and `Emitters` → `OTEL` before constructing mappings.
+  decoding, TLS pairing and trust roots, receiver answers and unsupported features, read the
+  generated `Connector Capabilities` tables and `Emitters` → `OTEL` before constructing mappings.
   Follow `Ingestors` → `Delivery Modes` for duration bounds and retry ordering, and `Emitters` →
   `Direct-emitter values` for exact types and literal-only OTEL resources. For example, supply an
   I32 expression for OTEL `severity_number`; an integer literal is I64. OTEL also checks literal
