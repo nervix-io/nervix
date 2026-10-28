@@ -844,6 +844,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "PLATFORM"
+entity = "SENTRY EVENT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/sentry_emission.feature", scenario = "Sentry declares its platform and uses it for events without a platform" },
+]
+
+[[capability]]
 capability = "STALLED PEER timeout_ms"
 entity = "SENTRY EVENT EMITTER"
 scenarios = [

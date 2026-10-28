@@ -383,6 +383,17 @@ seconds, `bb8`'s reaper interval, so an idle connection closes up to 30 seconds 
 either lifetime. A replacement socket resolves the host again. Neither lifetime closes a Pub/Sub source's dedicated
 connection.
 
+The connector keeps `POOL SIZE MIN` itself rather than through `bb8`'s idle minimum, which counts
+idle connections only and would open another connection beside every one a publisher checks out.
+Opening the pool establishes the minimum as dedicated connections added to the pool before any
+publisher borrows from it, so a connection that fails keeps its typed cause in the open's failure.
+Every pooled connection then signals the pool's keeper task when the pool closes it. The keeper
+counts the established connections, checked-out ones with idle ones, and, below the minimum, holds
+one checkout for every idle connection and every connection missing until all of them finish: the
+idle ones are taken once and `bb8` opens the rest, within the maximum it accounts for and the
+client's `connect_timeout_ms`. A failed restoration is retried as soon as it ends. The keeper stops
+with the pool's last handle.
+
 The driver's Pub/Sub convenience connection does not accept that DNS hook. A source instead
 resolves the configured `redis://` or `rediss://` hostname through the node resolver on every
 initial subscribe and resume, and opens a dedicated TCP or TLS stream. It tries the returned
@@ -784,7 +795,8 @@ an optional Redis subscription capacity passes the same range parser its ingesto
 Ingestor-only presence requirements stay with that plan.
 MQTT's representative first instance uses the same instance-template renderer as execution.
 Connector-owned offline parsers check librdkafka property names and values, sqlx and mysql_async
-options, Redis connection information, lapin AMQP URIs, NATS server addresses and ZeroMQ endpoints.
+options, Redis connection information, lapin AMQP URIs, NATS server addresses, ZeroMQ endpoints
+and Sentry project DSNs.
 They create no connection, consumer, producer, DNS lookup or remote side effect. Checks requiring
 the remote service still belong to client initialization. The registry names no connector crate
 and runtime receives entries and pinned mounts rather than a Model.
@@ -1906,10 +1918,14 @@ Syslog sends a completed codec payload as one transport frame. Its UDP writer re
 non-transparent TCP rejects one containing LF. The Sentry writer accepts one
 JSON event per envelope and prepares that envelope once, before the host retains it. Preparation
 validates the event, preserves a supplied `event_id` with its exact spelling, generates one UUID
-only when the field is absent, and fills absent `timestamp` and `platform` fields. Both the
+only when the field is absent, and fills an absent `timestamp` from the batch's execution time.
+An absent `platform` takes the typed plan's platform, resolved from the entity's `PLATFORM` option
+or its declared `other` default. A codec-supplied platform is preserved. The strict Sentry client
+schema requires a positive request timeout, and its native DSN parser runs at the existing
+pre-commit offline boundary without network I/O. Both the
 envelope header and the event carry that identity, and every attempt sends the retained envelope
 byte for byte, including after the host reopens the emitter. Preparation checks the final event
-against the 1 MB decompressed event limit. It writes every other member as the codec wrote it, a number to
+against the vocabulary-owned 1 MB decompressed event limit. It writes every other member as the codec wrote it, a number to
 its last digit. Both classify a definite local refusal as a record rejection;
 their transport and service failures retain their existing retry boundaries.
 
