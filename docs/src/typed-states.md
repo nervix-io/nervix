@@ -193,6 +193,14 @@ Entity presentation distinguishes a written option from its declared effective d
 shows both, while canonical Plexus emits only written options, preserving optional Model fields
 through a complete round trip. This is a display projection, never a stored shape or runtime plan.
 
+The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an explicitly
+written string, including an empty string or `other`. Its serialized field is required and holds
+either that string or an explicit null. Planning resolves the declared default into a required
+platform string; connector preparation uses it only when the codec's event omits the field.
+The registry's `NERVIX MODEL SEP` archive signature and consensus's `raft_platform_` keyspaces
+identify this current shape before decoding. An unrecognized signature or namespace fails with
+the owning storage error and requires the stored data to be recreated.
+
 ## Absence And Distinct States
 
 **Installed resource manifests.** The resource store returns an optional manifest: a filesystem

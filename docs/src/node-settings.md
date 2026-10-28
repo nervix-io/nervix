@@ -477,6 +477,10 @@ operator capacity. Its fixed constant states that a cancelled native mutation ca
 overtaken by the next operation. The source control-call budget is the external client's
 `socket.timeout.ms`; [Connector Contract](connector-contract.md) owns that per-system value.
 
+Sentry's 1,000,000-byte event limit is a fixed external ingestion contract. The connector
+vocabulary declares its one constant; [Sentry's event contract](emitters.md#sentry) defines which bytes
+count toward the limit.
+
 `Setting<D>` copies or compares a resolved value when its semantic value supports those
 operations, without imposing value traits on the definition marker. Generic debug formatting
 identifies the declaration; the owning settings renderer controls value exposure and redaction.

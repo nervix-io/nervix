@@ -4,6 +4,12 @@ Names drawn from `nervix-arbitrary` include current Plexus keyword spellings whe
 kind and domain admit them. The [property register](../docs/src/property-testing-and-fuzzing.md)
 records each generated domain's revision and input bounds.
 
+Sentry event generators retain the optional authored platform, including empty and Unicode
+strings. The Model/archive, registry, consensus and canonical Plexus properties preserve that
+complete field; entity presentation distinguishes omission from an explicitly written default.
+The registry's current archive signature and consensus keyspace namespace fence this shape before
+decoding; existing current-header corruption and namespace validation tests qualify those owners.
+
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions
 run in both modes. A target writes through the storage engine its boundary owns when it has one:

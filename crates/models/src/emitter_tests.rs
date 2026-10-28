@@ -472,6 +472,7 @@ fn database_emitters_require_the_batch_clause_and_the_others_do_not() {
             },
         },
         client: named("sentry"),
+        platform: None,
     }));
     assert_eq!(batch_violation(&batching_emitter(sentry, None)), None);
 }
