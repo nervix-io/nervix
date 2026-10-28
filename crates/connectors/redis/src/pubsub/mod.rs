@@ -40,6 +40,7 @@ pub use ingestor::{
     RedisPubSubIngestor, RedisPubSubIngestorError, RedisPubSubIngestorMessage,
     RedisPubSubIngestorPlan,
 };
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle,
     EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError, PerRecordOutcome,
@@ -48,7 +49,6 @@ use nervix_connector::{
 use nervix_dns::{
     DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver, HOOK_LOOKUP_BUDGET,
 };
-use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClientConfigEntry, ClientConfigSchema, ClientDeadline, ClientPoolBounds, ConnectorKind,
     RedisChannelName,

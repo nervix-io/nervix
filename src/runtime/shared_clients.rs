@@ -625,11 +625,10 @@ mod tests {
 
     #[test]
     fn an_invalid_redis_pool_lifetime_names_its_key_when_a_shared_client_reports_it() {
-        let error = OpenClientError::from_redis(Report::new(
-            RedisClientError::InvalidPoolLifetime {
+        let error =
+            OpenClientError::from_redis(Report::new(RedisClientError::InvalidPoolLifetime {
                 key: "pool_max_lifetime_ms",
-            },
-        ));
+            }));
         assert!(matches!(
             error.current_context(),
             OpenClientError::InvalidPoolLifetime {

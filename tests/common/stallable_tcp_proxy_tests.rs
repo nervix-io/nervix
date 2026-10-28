@@ -238,8 +238,14 @@ async fn an_endpoint_records_when_it_accepted_each_connection_in_order() {
     let second = endpoint
         .accepted_at(1)
         .assured("the endpoint recorded the connection it accepted second");
-    assert!(before <= first, "a connection was recorded before it was opened");
-    assert!(first <= second, "the endpoint recorded its connections out of order");
+    assert!(
+        before <= first,
+        "a connection was recorded before it was opened"
+    );
+    assert!(
+        first <= second,
+        "the endpoint recorded its connections out of order"
+    );
     assert_eq!(endpoint.accepted_at(2), None);
 }
 

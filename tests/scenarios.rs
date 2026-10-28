@@ -1458,15 +1458,16 @@ fn endpoint_connection_accepted_at(world: &ScenarioWorld, name: &str, ordinal: u
     let Some(index) = ordinal.checked_sub(1) else {
         panic!("connections to the endpoint '{name}' are counted from 1");
     };
-    proxy.accepted_at(index).unwrap_or_else(|| {
-        panic!("the endpoint '{name}' has not accepted connection {ordinal}")
-    })
+    proxy
+        .accepted_at(index)
+        .unwrap_or_else(|| panic!("the endpoint '{name}' has not accepted connection {ordinal}"))
 }
 
 /// A measured delay between two connections the endpoint accepted, which load only lengthens: the
 /// endpoint records each one when it accepts it.
 #[then(
-    expr = "the stallable endpoint {string} accepted connection {int} at least {string} after connection {int}"
+    expr = "the stallable endpoint {string} accepted connection {int} at least {string} after \
+            connection {int}"
 )]
 async fn then_the_stallable_endpoint_accepted_connection_after(
     world: &mut ScenarioWorld,
@@ -1488,8 +1489,8 @@ async fn then_the_stallable_endpoint_accepted_connection_after(
     ));
     assert!(
         measured >= minimum,
-        "the endpoint '{name}' accepted connection {later} {} after connection {earlier}, expected \
-         at least {}",
+        "the endpoint '{name}' accepted connection {later} {} after connection {earlier}, \
+         expected at least {}",
         humantime::format_duration(measured),
         humantime::format_duration(minimum)
     );
