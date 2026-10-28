@@ -2370,6 +2370,10 @@ impl Runtime {
 #[path = "relay_boundary_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "relay_boundary_keepalive_tests.rs"]
+mod keepalive_tests;
+
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "relay_branch_presence_shuttle_tests.rs"]
 mod branch_presence_shuttle_tests;
