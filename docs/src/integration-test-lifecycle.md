@@ -1059,8 +1059,9 @@ The harness keeps these boundaries explicit.
   batch shows how long each node's control work queued for its control-class worker, apart from
   any wait on the silent peer. The readings run beside the probe and delay neither its dispatch
   nor its deadline. Relay creation in the probe's running domain pauses the domain, so the batch
-  crosses three prepare and ready barriers on every live node, and under parallel load its
-  latency follows each node's control queue.
+  crosses three prepare and ready barriers on every live node. Under parallel load its latency
+  grows with every node's wait for CPU, its control-class queue included, whether or not a peer is
+  silent.
   Its completion regression also holds every application-revision reply from the two followers
   after sampling the reply. Local revision publication and gossip continue, so the same prepared
   client's user creation, relay creation and cluster-status query must finish in order while
