@@ -14,7 +14,8 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::node_execution::{NodeExecutionEndpoint, NodeExecutionReading, ProbeExecution};
 
-/// An exposition with the counters a reading takes, beside series that share their prefixes.
+/// An exposition with the counters a reading takes, beside series that share their prefixes and a
+/// labelled series that shares the reactor delay's whole name.
 fn exposition(queued: &str, worked: &str, completed: u64, scheduler_delay: &str) -> String {
     let lines = [
         "# HELP nervix_execution_job_queue_seconds_total Time admitted jobs spent waiting."
@@ -26,6 +27,7 @@ fn exposition(queued: &str, worked: &str, completed: u64, scheduler_delay: &str)
         "nervix_execution_jobs_completed_total{class=\"consensus_storage\"} 77".to_string(),
         format!("nervix_execution_jobs_completed_total{{class=\"control_cpu\"}} {completed}"),
         "nervix_node_scheduler_delay_peak_seconds 4.25".to_string(),
+        "nervix_node_scheduler_delay_seconds_total{worker=\"0\"} 9.75".to_string(),
         format!("nervix_node_scheduler_delay_seconds_total {scheduler_delay}"),
     ];
     lines.join("\n")
@@ -101,7 +103,53 @@ fn a_sample_that_is_not_a_count_is_refused() {
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 }
 
-/// A stand-in metrics endpoint that answers each of its scripted bodies to one request, in order.
+#[test]
+fn seconds_that_are_not_a_number_or_not_a_duration_are_refused() {
+    let not_a_number = NodeExecutionReading::parse(&exposition("soon", "1", 1, "1"))
+        .expect_err("queued time is a number of seconds");
+    assert_eq!(not_a_number.kind(), io::ErrorKind::InvalidData);
+    assert!(
+        not_a_number.to_string().starts_with(
+            "nervix_execution_job_queue_seconds_total{class=\"control_cpu\"} is not a number: \
+             soon: "
+        ),
+        "unexpected refusal of a queued time that is not a number: {not_a_number}"
+    );
+
+    let negative = NodeExecutionReading::parse(&exposition("1", "1", 1, "-0.5"))
+        .expect_err("a reactor delay is never negative");
+    assert_eq!(negative.kind(), io::ErrorKind::InvalidData);
+    assert!(
+        negative
+            .to_string()
+            .starts_with("nervix_node_scheduler_delay_seconds_total is not a duration: -0.5: "),
+        "unexpected refusal of a negative reactor delay: {negative}"
+    );
+}
+
+/// One answer of the stand-in metrics endpoint: its HTTP status and body.
+struct ScriptedAnswer {
+    status: &'static str,
+    body: String,
+}
+
+impl ScriptedAnswer {
+    fn metrics(body: String) -> Self {
+        Self {
+            status: "200 OK",
+            body,
+        }
+    }
+
+    fn unavailable() -> Self {
+        Self {
+            status: "503 Service Unavailable",
+            body: "draining".to_string(),
+        }
+    }
+}
+
+/// A stand-in metrics endpoint that gives each of its scripted answers to one request, in order.
 struct ScriptedMetricsEndpoint {
     url: String,
     /// Ends the stand-in with the test that owns it.
@@ -109,16 +157,16 @@ struct ScriptedMetricsEndpoint {
 }
 
 impl ScriptedMetricsEndpoint {
-    async fn serve(bodies: Vec<String>) -> io::Result<Self> {
+    async fn serve(answers: Vec<ScriptedAnswer>) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let server = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
-            for body in bodies {
+            for answer in answers {
                 nervix_primitives::task::consume_budget().await;
                 let (mut stream, _) = listener
                     .accept()
                     .await
-                    .assured("the test's client connects once per scripted body");
+                    .assured("the test's client connects once per scripted answer");
                 let mut request = Vec::new();
                 let mut buffer = [0_u8; 1024];
                 while !request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -131,8 +179,10 @@ impl ScriptedMetricsEndpoint {
                     request.extend_from_slice(&buffer[..read]);
                 }
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
+                    "HTTP/1.1 {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    answer.status,
+                    answer.body.len(),
+                    answer.body
                 );
                 stream
                     .write_all(response.as_bytes())
@@ -150,8 +200,8 @@ impl ScriptedMetricsEndpoint {
 #[nervix_primitives::test]
 async fn a_probe_describes_each_node_from_its_readings_around_the_window() {
     let answering = ScriptedMetricsEndpoint::serve(vec![
-        exposition("1.5", "0.25", 300, "0.5"),
-        exposition("11.5", "0.5", 800, "0.75"),
+        ScriptedAnswer::metrics(exposition("1.5", "0.25", 300, "0.5")),
+        ScriptedAnswer::metrics(exposition("11.5", "0.5", 800, "0.75")),
     ])
     .await
     .assured("a loopback listener binds");
@@ -183,4 +233,61 @@ async fn a_probe_describes_each_node_from_its_readings_around_the_window() {
         "unexpected description of an unreachable node: {}",
         lines[1]
     );
+}
+
+#[nervix_primitives::test]
+async fn a_probe_names_a_node_unreadable_after_the_window_and_one_whose_counters_went_back() {
+    let unavailable_after = ScriptedMetricsEndpoint::serve(vec![
+        ScriptedAnswer::metrics(exposition("1.5", "0.25", 300, "0.5")),
+        ScriptedAnswer::unavailable(),
+    ])
+    .await
+    .assured("a loopback listener binds");
+    let restarted = ScriptedMetricsEndpoint::serve(vec![
+        ScriptedAnswer::metrics(exposition("1.5", "0.25", 300, "0.5")),
+        ScriptedAnswer::metrics(exposition("0.1", "0.01", 4, "0.02")),
+    ])
+    .await
+    .assured("a loopback listener binds");
+
+    let execution = ProbeExecution::begin(vec![
+        NodeExecutionEndpoint::new("node-1".to_string(), unavailable_after.url.clone()),
+        NodeExecutionEndpoint::new("node-2".to_string(), restarted.url.clone()),
+    ]);
+    let lines = execution.describe().await;
+
+    assert_eq!(
+        lines,
+        [
+            "node=node-1 reading after the probe failed: metrics answered 503 Service Unavailable",
+            "node=node-2 counters went back between the readings",
+        ]
+    );
+}
+
+/// The listener completes connections but never answers them, so only the reading budget ends a
+/// reading. The paused clock reaches that budget as soon as the runtime idles.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_node_that_does_not_answer_within_the_reading_budget_is_reported() {
+    let silent = TcpListener::bind("127.0.0.1:0")
+        .await
+        .assured("a loopback listener binds");
+    let silent_url = format!(
+        "http://{}/metrics",
+        silent
+            .local_addr()
+            .assured("a bound listener has an address")
+    );
+
+    let execution = ProbeExecution::begin(vec![NodeExecutionEndpoint::new(
+        "node-1".to_string(),
+        silent_url,
+    )]);
+    let lines = execution.describe().await;
+
+    assert_eq!(
+        lines,
+        ["node=node-1 reading before the probe failed: no metrics within 2s"]
+    );
+    drop(silent);
 }
