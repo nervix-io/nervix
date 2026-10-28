@@ -68,8 +68,11 @@ use crate::{
 #[cfg(test)]
 mod append_setup_tests;
 
-/// How many entries one append batch may gather before the byte target stops it.
-pub(crate) const MAX_APPEND_BATCH_ENTRIES: u64 = 1024;
+/// How many entries one append batch may gather before the byte target stops it. A newly elected
+/// leader may send from a previous-log boundary its follower does not have. The follower can
+/// report that conflict only after the whole batch crosses the link, so bound speculative entry
+/// count independently of the byte target.
+pub(crate) const MAX_APPEND_BATCH_ENTRIES: u64 = 256;
 /// How many submitted batches one follower may leave unacknowledged.
 pub(crate) const MAX_OUTSTANDING_APPEND_BATCHES: usize = 16;
 /// How many submitted bytes one follower may leave unacknowledged. The node's aggregate command
@@ -231,6 +234,14 @@ where
         S: Stream<Item = AppendEntriesRequest<TypeConfig>> + Send + Unpin + 'static,
     {
         self.connectivity.check().map_err(unreachable_err)?;
+        debug!(
+            target = %self.target,
+            previous = ?first.prev_log_id,
+            first_entry = ?first.entries.first().map(|entry| &entry.log_id),
+            last_entry = ?first.entries.last().map(|entry| &entry.log_id),
+            entry_count = first.entries.len(),
+            "raft append stream opening with first batch"
+        );
         self.append_stream_open_recorder
             .record_append_stream_attempt(&self.target);
         let input = futures_util::stream::iter([first]).chain(input);
@@ -454,6 +465,12 @@ impl AppendStreamGeneration {
             // Partial acceptance and every append failure end this generation. OpenRaft resumes
             // from the progress this answer confirmed.
             _ => {
+                debug!(
+                    target = %self.target,
+                    submitted = ?outstanding.last_log_id,
+                    result = ?answer,
+                    "raft append stream ended after follower response"
+                );
                 self.finished = true;
                 Some(Ok(answer))
             }
@@ -464,6 +481,7 @@ impl AppendStreamGeneration {
         &mut self,
         error: RPCError<TypeConfig>,
     ) -> Option<Result<StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>> {
+        debug!(target = %self.target, %error, "raft append stream generation failed");
         self.finished = true;
         Some(Err(error))
     }
