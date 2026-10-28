@@ -819,11 +819,11 @@ The snapshot task of a deduplicator or window branch has the runtime as its owne
 outlives its branch task: once that task is gone, stopped or ended at its stop grace, the snapshot
 task still writes what the branch published last. The checkpoint writer of the state a scheduled
 node's placement keeps, a materialized relay's records, a Kafka ingestor's domain offsets or a
-node's branch-aggregated state, has the same owner, because it makes its last write only after
-every task that changes that state has ended. The placement keeps a handle that holds the writer's
-task and a drop guard over a cancellation token: the domain's stop drops the guard once those tasks
-have ended, a placement dropped without its stop drops it as it goes, and either tells the writer to
-make its last write, while a reassignment that replaces the placement's runtime aborts the task and
+node's branch-aggregated state, has the same owner, because it makes its last write only after every
+task that changes that state has ended. The placement keeps a handle that holds the writer's task
+and a drop guard over a cancellation token: the domain's stop drops the guard once those tasks have
+ended, a placement dropped without its stop drops it as it goes, and either tells the writer to make
+its last write, while a reassignment that replaces the placement's runtime aborts the task and
 disarms the guard. The owner also counts each task for its domain. A domain's stop, once every task
 of its execution has ended and every checkpoint writer has been told, waits for that domain's count
 to reach zero, so a write a branch ended at its grace left behind and every checkpoint writer's last
@@ -831,12 +831,13 @@ write finish before the stop completes, and it waits for no other domain's tasks
 then closes the owner, which tells every task still waiting for its branch or its placement to make
 that write, and joins every one of them before it closes the announcement owner. Nothing is
 cancelled: these waits are what keep the node's storage from being released under a write, so they
-last as long as the slowest of those writes. The owner is a task tracker, a cancellation token and a concurrent map from each domain
-with snapshot tasks to a tracker of its own, closed as it is created so that a wait returns as
-soon as it counts nothing. A branch reaches the map once, when its task starts, and a placement once
-for each checkpoint writer it starts, and each counts its task while it holds the domain's entry; a domain's stop reads the entry, releases it
-before it waits, and removes it only while it counts nothing, so it never removes a tracker a
-starting task joins. No lock is held across a wait.
+last as long as the slowest of those writes. The owner is a task tracker, a cancellation token and a
+concurrent map from each domain with snapshot tasks to a tracker of its own, closed as it is created
+so that a wait returns as soon as it counts nothing. A branch reaches the map once, when its task
+starts, and a placement once for each checkpoint writer it starts, and each counts its task while it
+holds the domain's entry; a domain's stop reads the entry, releases it before it waits, and removes
+it only while it counts nothing, so it never removes a tracker a starting task joins. No lock is
+held across a wait.
 
 The announcement, the progress and the announcer's handover change together under a short lock
 that belongs to the one placement and is never held across an await. The placement's originator,
@@ -1741,6 +1742,13 @@ checks below establish what a caller may do with them.
 
 ## Diagnostic Deadlock Detection
 
+The backup cut diagnostics scenario exercises capture-budget expiry and resumption on one and
+three nodes in the active, order and stressed-restore Deloxide selections. The coordinator's phase
+measurements are task-owned administrative state and add no synchronization. The existing capture
+and cleanup paths retain their tracked-lock coverage; phase timing itself establishes no
+interleaving or memory-ordering guarantee. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
+owns the diagnostic contract.
+
 A diagnostic node selects the `deloxide` mode. The `deloxide-order` feature adds historical order
 instrumentation to that same mode, and the `deloxide-stress` feature adds Deloxide's bounded
 scheduling disturbance to its active-only selection; neither is another execution mode, and the two
@@ -1760,6 +1768,25 @@ Runtime disabling does not recover an ordinary or active-only fast path. The pin
 Reads enter that detector in either diagnostic build. The order build also tracks actual guard
 lifetimes locally, including when runtime checking is disabled, so active self waits remain
 observable. No timing from these builds is ordinary product performance evidence.
+
+**Measured cost.** A same-host comparison on Nervix's Kafka filter-map workload measured the
+diagnostic selections against the ordinary build. These are results for that workload and host,
+not a throughput or latency guarantee for other graphs.
+
+| Selection | Observation against the ordinary build |
+| --- | --- |
+| `ActiveOnly` | Throughput and delivery latency matched ordinary execution; peak memory was 15% higher. |
+| `OrderAnalysis` | Throughput was about 41% of ordinary; its delivery latency followed the resulting backlog. |
+| `OrderInstrumentedActiveOnly` | Throughput was about 58% of ordinary even with runtime order checking disabled. |
+| `StressedActiveOnly` | Throughput was about 39% of ordinary. |
+
+Clean processes produced 124 to 156 bytes of evidence each, with no added logging; Deloxide's
+logging-and-visualization feature is not compiled. The external chaos suite runs well below this
+workload's throughput. Its measured diagnostic-image run and recovery times were within a few
+percent of the release image's, which qualifies the chaos scenarios and their evidence, not the
+diagnostic image's production throughput. An engineer comparing a different workload records the
+ordinary baseline, active-only mode, order mode with checking enabled and disabled, and stress
+mode separately on the same host.
 
 **Scheduling stress.** A `deloxide-stress` build compiles Deloxide's random preemption into its
 tracked locks. A thread that already holds a tracked lock and asks for another sleeps first with a
