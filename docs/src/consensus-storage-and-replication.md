@@ -293,12 +293,14 @@ snapshot and then the remaining log. Client proposals and management heartbeats 
 catch-up runs.
 
 A discovered node joins as a learner once the leader has read its published prerequisite record and
-found it compatible with the record of every live voter. The leader leaves any other candidate
-outside the membership and logs why once while the reason holds: at `debug` while the candidate has
-published no record the leader can read, and at `warn` with the voter and the mismatch when it
-cannot run beside a voter. [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes
-what the refused node does. Each membership reconciliation gives a blocking learner catch-up
-attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
+found it compatible with the record of every live voter whose run it accepted. The leader leaves any
+other candidate outside the membership and logs why once while the reason holds: at `debug` while
+the candidate has published no record the leader can read, and at `warn` with the voter and the
+mismatch when it cannot run beside a voter. It refuses the run of a voter that cannot run beside an
+older voter's run the same way, without changing the membership.
+[Prerequisites At Join](node-settings.md#prerequisites-at-join) describes the verdicts the leader
+publishes and what a refused node does. Each membership reconciliation gives a blocking learner
+catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
 learner caught up; the membership change has its own ten-second bound. A timeout leaves the node a
 learner, records `raft membership reconciliation failed`, and the one-second reconciliation loop
 tries again while ordinary replication continues.

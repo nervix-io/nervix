@@ -1696,7 +1696,9 @@ the stream even when a large frame spans several progress intervals.
 The interconnect owns three kinds of failure. `TransportError` is a connection, TLS, framing,
 limit, deadline or relay delivery failure of the transport itself, or a prerequisite refusal:
 `RefusedByPeer` when the dialed node refused this node and `IncompatiblePeer` when this node
-refused a peer, each with the peer and the typed `PrerequisiteMismatch`. A judged mismatch, and the
+refused a peer, each with the peer and the typed `PrerequisiteMismatch`. `StaleRoute` names an
+endpoint the stored membership recorded for a member that now leads to another cluster, above the
+cluster-identity mismatch it replaces; it refuses no one. A judged mismatch, and the
 `JoinRefusal` the transport's join progress holds, are declared outcome boundaries: they are what a
 join decided, not a failure of the node that judged it, and the server decides from their typed
 values. `RequestError` is a typed request that could not be admitted, encoded, delivered or
@@ -1911,11 +1913,13 @@ evaluated it. The proposer wraps the typed refusal in a new report as
 `ConsensusTransactionError::Mutation`, beside `Consensus` for a proposal that failed and
 `InvalidResponse` for a response of another kind.
 
-A leader that leaves a gossip-discovered node outside the membership records why as a typed
-admission refusal rather than a report: the node has published no prerequisite record the leader
-can read, or it cannot run beside a live voter, which it names with the mismatch. The refusal is an
-outcome of membership reconciliation, logged once while it holds, and never fails the
-reconciliation.
+A leader that refuses a run, or leaves a gossip-discovered node outside the membership, records why
+as a typed admission refusal rather than a report: the node has published no prerequisite record the
+leader can read, or it cannot run beside a live voter whose run the leader accepted, which it names
+with the mismatch. The refusal is an outcome of membership reconciliation, logged once while it
+holds, and never fails the reconciliation. The leader publishes a refused run's `AdmissionVerdict`
+in gossip, and the joining node turns its own into the `JoinRefusal` it stops with, the mismatch
+reversed to read from its side.
 
 The durable store's own failure is a `StorageFailure`: a write beyond its admitted byte budget, a
 record that does not encode, a failed database write, stored state of an unrecognized shape, a
