@@ -818,6 +818,18 @@ own attached share in sequence order, so a domain drain excludes a parked chain 
 The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
 source or persist an acknowledgement. Admission progress carries no parked state.
 
+Before admission the receiver reports nothing about a delivery's records: their acknowledgement
+watches start only once it has admitted them. Until then the sending node holds the records on their
+sources' behalf, so it reports them alive to their sources itself, every 100 milliseconds the
+delivery is still under way, whether it waits for the relay's dispatch gate, its channel, the
+storage of its records, a grant or the receiver's admission. This applies to a delivery to the
+relay's owner and to one from the owner to a consumer on another node. A delivery admitted within
+its first 100 milliseconds reports nothing. A source's `ACK TIMEOUT` therefore measures how long its
+records make no progress, not how long their delivery takes to reach the next node. A record still
+on its way when that timeout would have passed is not read again and emitted twice. The bounds
+above still end a delivery: five seconds without progress, or five minutes from storing its records
+to its admission, fails it, and the source's retry takes over.
+
 Progress and terminal acknowledgements share the bounded application receive queue. The application
 keeps consuming progress while terminal delivery waits for queue capacity. The one-slot transport
 capacity test explicitly queues progress, consumes it while sending the terminal acknowledgement,

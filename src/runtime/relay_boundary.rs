@@ -1316,7 +1316,26 @@ impl RelayBoundaryServices {
             .await
     }
 
+    /// Delivers `batch` to the relay's owner through `ingress_slot`.
+    ///
+    /// The owner reports the batch's records alive to their sources once it has admitted them, and
+    /// not before. Until then this node holds them on their sources' behalf, so it reports them
+    /// alive itself while the delivery waits for its gates, its channel, the storage of its
+    /// records, a grant or the owner's admission. A source's `ACK TIMEOUT` therefore measures how
+    /// long its records make no progress, not how long they take to reach their owner.
     async fn dispatch_to_owner_on(
+        &self,
+        domain: &DomainName,
+        relay: &RelayName,
+        batch: &RelayRecordBatch,
+        ingress_slot: StdArc<RelayOutboundSlot>,
+    ) -> RelayDispatchResult {
+        batch
+            .keep_alive_while_pending(self.deliver_to_owner_on(domain, relay, batch, ingress_slot))
+            .await
+    }
+
+    async fn deliver_to_owner_on(
         &self,
         domain: &DomainName,
         relay: &RelayName,
@@ -1502,6 +1521,23 @@ impl RelayBoundaryServices {
         if remote_runtime_consumers.is_empty() {
             return Ok(());
         }
+        // A consumer's node reports the batch's records alive to their sources once it has admitted
+        // them, and not before, so this node reports them alive while their deliveries wait.
+        batch
+            .keep_alive_while_pending(self.deliver_to_remote_runtime_consumers(
+                domain,
+                batch,
+                &remote_runtime_consumers,
+            ))
+            .await
+    }
+
+    async fn deliver_to_remote_runtime_consumers(
+        &self,
+        domain: &DomainName,
+        batch: &RelayRecordBatch,
+        remote_runtime_consumers: &[RemoteRuntimeConsumer],
+    ) -> RelayDispatchResult {
         let Some(dispatcher) = &self.remote_dispatcher else {
             if remote_runtime_consumers
                 .iter()
