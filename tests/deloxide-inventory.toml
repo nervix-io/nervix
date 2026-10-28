@@ -2675,21 +2675,21 @@ scenario = "A model command whose publication met a lapsed leader lease releases
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Class-local executor FIFO admission and drain fences while bulk work is occupied and a sequence of management mutations completes on one and three nodes. Callbacks execute outside the fence; async admission and network waits remain untracked."
+coverage = "Class-local executor FIFO admission and drain fences while every node's bulk workers are held and a prepared production client completes six sequential management mutations on one and three nodes. Cleanup releases the tracked holds before diagnostics and node stop. Callbacks execute outside the fence; async admission and network waits remain untracked."
 examples = 2
 feature = "tests/features/cluster/bounded_execution.feature"
 id = "scenario.execution-class-drain"
-invariant = "Occupied bulk workers do not prevent management command batches from completing or the cluster from retaining a stable leader."
+invariant = "Occupied bulk workers on every node do not prevent management command batches or a stable leader; cleanup releases retained holds before stopping the nodes."
 invocation = "scenarios"
 scenario = "Occupied bulk execution leaves management work responsive"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Under scheduling stress: class-local executor FIFO admission and drain fences during bulk saturation and repeated public management mutations."
+coverage = "Under scheduling stress: class-local executor FIFO admission and drain fences during all-node bulk saturation, prepared-client sequential management mutations and cleanup's tracked hold release."
 examples = 2
 feature = "tests/features/cluster/bounded_execution.feature"
 id = "stress.execution-class-drain"
-invariant = "Occupied bulk workers do not prevent management command batches from completing or the cluster from retaining a stable leader."
+invariant = "Occupied bulk workers on every node do not prevent management command batches or a stable leader; cleanup releases retained holds before stopping the nodes."
 invocation = "stress-scenarios"
 scenario = "Occupied bulk execution leaves management work responsive"
 selections = ["deloxide-stress"]
@@ -3138,7 +3138,9 @@ workloads = [
 [[owner]]
 path = "src/fault_injection/execution.rs"
 workloads = [
+  "scenario.execution-class-drain",
   "scenario.inferencer-inspection-admission",
+  "stress.execution-class-drain",
   "stress.inferencer-inspection-admission",
 ]
 
