@@ -153,10 +153,11 @@ captured. A live cut and a configuration-only capture take no lease.
 
 A stopped cut reads what the domain's stop left on disk. That stop completes only once every
 deduplicator and window branch it ended has written what it published last, including a branch
-ended at its stop grace whose snapshot task was still writing, as [Draining Admitted
-Work](./shutdown.md#draining-admitted-work) describes. A stopped cut that begins as soon as `STOP`
-returns therefore holds the same keyspaces and windows a quiesced cut taken just before the stop
-held.
+ended at its stop grace whose snapshot task was still writing, and every materialized relay has
+written what it held once the tasks that change it ended, however long that write outlasts their
+stop grace, as [Draining Admitted Work](./shutdown.md#draining-admitted-work) describes. A stopped
+cut that begins as soon as `STOP` returns therefore holds the same keyspaces, windows and
+materialized generations a quiesced cut taken just before the stop held.
 
 ## The Quiesced Cut
 

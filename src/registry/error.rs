@@ -33,6 +33,27 @@ pub(crate) enum ConnectorDurationSetting {
     RetryBackoff,
     #[strum(serialize = "RETRY POLICY MAX")]
     RetryMaximum,
+    #[strum(serialize = "DELIVER AFTER")]
+    DeliverAfter,
+    #[strum(serialize = "DELAY")]
+    Delay,
+}
+
+/// Where an emitter's envelope computes a value: one of its clauses, or one of its properties.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EnvelopeValueSite {
+    Clause(nervix_models::EnvelopeClauseKind),
+    Property(String),
+}
+
+/// A site is named as its statement writes it: `TIMESTAMP`, or `PROPERTIES key 'priority'`.
+impl fmt::Display for EnvelopeValueSite {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Clause(kind) => formatter.write_str(kind.keywords()),
+            Self::Property(name) => write!(formatter, "PROPERTIES key '{name}'"),
+        }
+    }
 }
 
 /// A declaration that cannot produce a valid connector execution policy.
@@ -71,6 +92,13 @@ pub(crate) enum ConnectorDeclarationIssue {
         key: String,
         expected: nervix_models::MappedValueType,
         actual: arrow_schema::DataType,
+    },
+    #[error("{0}")]
+    Envelope(nervix_models::EnvelopeDeclarationError),
+    #[error("envelope {site} requires an exact, non-null, non-sensitive {expected} value")]
+    EnvelopeValue {
+        site: EnvelopeValueSite,
+        expected: nervix_models::ParseAsType,
     },
 }
 

@@ -289,6 +289,67 @@ Feature: Materialized backup and archived lifecycle resumption
       | 1            | 0             |
       | 3            | 1             |
 
+  @stopped_checkpoint_writes @deloxide_stress_restore @long_running
+  Scenario Outline: A stopped cut taken as soon as STOP returns holds the materialized relay whose last write outlasts the stop grace
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( tenant STRING, value I64, source STRING );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer, source string );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
+      CREATE RELAY state SCHEMA event BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE VHOST edge backup-materialized-stop-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO state INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    When http payload is posted to host "backup-materialized-stop-{{test_id}}.example.com" path "/state"
+      """
+      {"tenant":"alpha","value":1,"source":"alpha-first"}
+      """
+    And http payload is posted to host "backup-materialized-stop-{{test_id}}.example.com" path "/state"
+      """
+      {"tenant":"beta","value":2,"source":"beta-state"}
+      """
+    And http payload is posted to host "backup-materialized-stop-{{test_id}}.example.com" path "/state"
+      """
+      {"tenant":"alpha","value":3,"source":"alpha-state"}
+      """
+    Then within "30s" node "node-1" eventually reports materialized state for relay "state" containing
+      """
+      key={"tenant":"alpha"} payload={"source":"alpha-state","tenant":"alpha","value":3}
+      """
+    And within "30s" node "node-1" eventually reports materialized state for relay "state" containing
+      """
+      key={"tenant":"beta"} payload={"source":"beta-state","tenant":"beta","value":2}
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "running.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given materialized relay "state" takes "15s" to write its state as its domain stops
+    When these Plexus commands are executed on the leader node
+      """
+      STOP;
+      """
+    And the CLI backs up "domain {{domain}}" from node "{{leader}}" into "stopped.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    And backup archives "running.nvxb" and "stopped.nvxb" have identical materialized generations
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
   @restore_installation @deloxide_stress
   Scenario Outline: Restarted materialized branches measure idle lifetime from activation time
     Given branched relay expiration scan interval is configured as "1ms"

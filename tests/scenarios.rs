@@ -12428,6 +12428,41 @@ async fn given_resource_installation_pause(world: &mut ScenarioWorld, node_id: S
         .pause_resource_installation_on(crate::common::cluster::node_name(&node_id));
 }
 
+#[given(expr = "resource source discovery on node {string} is deferred")]
+fn given_resource_source_discovery_is_deferred(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    world
+        .fault_injection
+        .defer_resource_source_discovery_on(crate::common::cluster::node_name(&node));
+}
+
+#[then(expr = "the deferred resource source discovery on node {string} is observed")]
+async fn then_deferred_resource_source_discovery_is_observed(
+    world: &mut ScenarioWorld,
+    node: String,
+) {
+    let node = expand_placeholders(world, &node);
+    let node_name = crate::common::cluster::node_name(&node);
+    let observed = nervix_primitives::time::timeout(
+        Duration::from_secs(120),
+        world
+            .fault_injection
+            .wait_for_deferred_resource_source_discovery(&node_name),
+    )
+    .await;
+    if let Err(error) = observed {
+        panic!("resource source discovery on '{node}' was not deferred: {error}");
+    }
+}
+
+#[when(expr = "resource source discovery on node {string} resumes")]
+fn when_resource_source_discovery_resumes(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    world
+        .fault_injection
+        .resume_resource_source_discovery_on(&crate::common::cluster::node_name(&node));
+}
+
 #[given(expr = "resource installation on node {string} fails before promotion")]
 async fn given_resource_installation_failure(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -24445,6 +24480,8 @@ async fn then_within_duration_node_eventually_reports_describe_resource_as(
     #[step] step: &Step,
 ) {
     let timeout = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let expected = expand_placeholders(world, &expected);
     let commands = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + timeout;
 

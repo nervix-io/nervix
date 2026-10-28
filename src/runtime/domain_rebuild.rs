@@ -457,7 +457,7 @@ impl Runtime {
             }
         }
 
-        let mut placement_tasks = HashMap::<NodeRef, Vec<JoinHandle<()>>>::new();
+        let mut placement_tasks = HashMap::<NodeRef, PlacementTasks>::new();
         let mut kafka_offset_states = HashMap::new();
         let mut materialized_states = HashMap::new();
         for node in revision.nodes.values() {

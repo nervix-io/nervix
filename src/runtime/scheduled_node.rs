@@ -106,9 +106,41 @@ impl PlacedNodeState {
 /// for the moved node without touching the rest of the domain.
 #[derive(Default)]
 pub(super) struct ScheduledNodePlacement {
-    pub(super) tasks: Vec<JoinHandle<()>>,
+    pub(super) tasks: PlacementTasks,
     pub(super) kafka_offset_state: Option<KafkaOffsetStateOriginator>,
     pub(super) materialized_state: Option<MaterializedRelayStateOriginator>,
+}
+
+/// The background tasks a scheduled node's assignment runs on one cluster node.
+#[derive(Default)]
+pub(super) struct PlacementTasks {
+    /// The tasks that replicate the node's state or poll its owner for it. A domain's stop ends
+    /// each of them within its stop grace.
+    pub(super) replication: Vec<JoinHandle<()>>,
+    /// The writers of the checkpoints of the node's state. The runtime owns them, so a domain's
+    /// stop tells each to make its last write once every task that changes that state has ended,
+    /// and waits for it with no grace.
+    pub(super) checkpoints: Vec<CheckpointWriter>,
+}
+
+impl PlacementTasks {
+    pub(super) fn is_empty(&self) -> bool {
+        self.replication.is_empty() && self.checkpoints.is_empty()
+    }
+
+    /// Ends every task without a last write, as a reassignment that replaces the placement's
+    /// runtime does.
+    pub(super) async fn abort(self) {
+        for task in self.replication {
+            nervix_primitives::task::consume_budget().await;
+            task.abort();
+            task.join_after_shutdown("placement").await;
+        }
+        for writer in self.checkpoints {
+            nervix_primitives::task::consume_budget().await;
+            writer.abort().await;
+        }
+    }
 }
 
 pub(super) struct ScheduledNodeTask {

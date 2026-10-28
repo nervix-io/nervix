@@ -6756,6 +6756,7 @@ dependencies = [
 name = "nervix-connector"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "arrow-array",
  "async-trait",
  "bolero",
@@ -7120,6 +7121,7 @@ version = "0.1.0-dev"
 dependencies = [
  "async-rs",
  "async-trait",
+ "bolero",
  "error-stack",
  "futures-util",
  "humantime",
@@ -7132,11 +7134,14 @@ dependencies = [
  "nervix-primitives",
  "nervix-recovery",
  "nervix-test-environment",
+ "rcgen",
+ "rustls",
  "shuttle",
  "socket2 0.6.5",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-rustls",
  "url",
 ]
 
@@ -7394,6 +7399,7 @@ dependencies = [
  "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "shuttle",
  "thiserror 2.0.21",
  "ubyte",

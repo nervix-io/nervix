@@ -1038,10 +1038,12 @@ impl ResourceStore {
         })
     }
 
+    /// Read an installed manifest, or report ordinary absence when this copy is not installed.
+    /// Other filesystem and decoding failures retain their typed causes.
     pub async fn read_manifest(
         &self,
         id: &ResourceId,
-    ) -> Result<ResourceManifest, Report<ResourceStoreError>> {
+    ) -> Result<Option<ResourceManifest>, Report<ResourceStoreError>> {
         let reservation = self
             .executor
             .reserve(
@@ -1052,7 +1054,7 @@ impl ResourceStore {
             .change_context(ResourceStoreError::BulkAdmission)?;
         let manifest_path = self.manifest_path(id);
         let chunk_bytes = usize::try_from(self.executor.limits().bulk_chunk_bytes.as_u64())
-            .map_err(|_| Report::new(ResourceStoreError::ReadFile))?;
+            .change_context(ResourceStoreError::ReadFile)?;
         self.executor
             .run_storage(
                 StorageClass::Filesystem,
@@ -1061,11 +1063,19 @@ impl ResourceStore {
                     if cancellation.is_cancelled() {
                         return Err(Report::new(ResourceStoreError::Cancelled));
                     }
-                    let file = fs::File::open(manifest_path)
-                        .change_context(ResourceStoreError::ReadFile)?;
+                    let file = match fs::File::open(manifest_path) {
+                        Ok(file) => file,
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                        Err(error) => {
+                            return Err(
+                                Report::new(error).change_context(ResourceStoreError::ReadFile)
+                            );
+                        }
+                    };
                     let reader = std::io::BufReader::with_capacity(chunk_bytes, file);
-                    serde_json::from_reader(reader)
-                        .change_context(ResourceStoreError::SerializeManifest)
+                    let manifest = serde_json::from_reader(reader)
+                        .change_context(ResourceStoreError::SerializeManifest)?;
+                    Ok(Some(manifest))
                 },
             )
             .await

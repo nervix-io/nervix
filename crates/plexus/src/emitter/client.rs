@@ -30,12 +30,16 @@ pub(super) fn consumer_body<'src>(
         .ignore_then(schema_ref())
         .then_ignore(kw(Identifier::Mode))
         .then(mode())
+        .then(entity_envelope::<ClientConsumerEmitter>())
         .then(context.construction().or_not())
-        .map(|((schema, mode), construction)| ParsedDestination {
-            destination: ClientConsumerEmitter { schema, mode },
-            body: EmitterBody::Client,
-            construction,
-            batch: None,
-        })
+        .map(
+            |(((schema, mode), envelope), construction)| ParsedDestination {
+                destination: ClientConsumerEmitter { schema, mode },
+                body: EmitterBody::Client,
+                envelope,
+                construction,
+                batch: None,
+            },
+        )
         .boxed()
 }
