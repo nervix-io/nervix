@@ -12,7 +12,7 @@ use std::num::NonZeroU64;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     BackupArchiveStart, BackupDownloadFailed, BackupDownloadFailure, BackupDownloadMessage,
-    CommandDisposition, CommandOutcome, Diagnostic, LeaderEndpoints, LeaderRedirect, OutcomeOrigin,
+    CommandDisposition, CommandOutcome, Diagnostic, LeaderRedirect, NodeEndpoints, OutcomeOrigin,
     RequestId, RestoreDisposition, RestoreReply, RestoreUploadFailure, UnknownOutcomeCause,
 };
 use nervix_models::{
@@ -439,7 +439,7 @@ fn a_download_answer_out_of_order_or_refused_ends_the_attempt() {
     assert_eq!(error.current_context(), &DownloadError::OutOfOrder);
 
     let redirect = LeaderRedirect {
-        leader: Some(LeaderEndpoints {
+        leader: Some(NodeEndpoints {
             node: ClusterNodeName::parse("node-2").assured("the test node name is valid"),
             grpc_uri: None,
             web_console_uri: Some(
@@ -456,6 +456,23 @@ fn a_download_answer_out_of_order_or_refused_ends_the_attempt() {
             .assured("a redirect answers the request"),
         FrameStep::Redirect(redirect)
     );
+    let holder = NodeEndpoints {
+        node: ClusterNodeName::parse("node-3").assured("the test node name is valid"),
+        grpc_uri: None,
+        web_console_uri: Some(
+            url::Url::parse("http://127.0.0.1:47422").assured("the test URL parses"),
+        ),
+    };
+    assert_eq!(
+        AttemptStage::AwaitingStart
+            .accept(&BackupDownloadMessage::Holder(holder.clone()), &mut receipt)
+            .assured("a holder answer answers the request"),
+        FrameStep::Holder(holder.clone())
+    );
+    let error = AttemptStage::Receiving
+        .accept(&BackupDownloadMessage::Holder(holder), &mut receipt)
+        .expect_err("a holder answer after the start breaks the order");
+    assert_eq!(error.current_context(), &DownloadError::OutOfOrder);
 
     for (failure, retryable) in [
         (BackupDownloadFailure::ReadFailed, true),
@@ -479,6 +496,7 @@ fn a_download_answer_out_of_order_or_refused_ends_the_attempt() {
     }
     assert!(DownloadError::Interrupted.is_retryable());
     assert!(!DownloadError::Mismatch.is_retryable());
+    assert!(!DownloadError::HolderUnreachable.is_retryable());
 }
 
 #[test]
@@ -952,7 +970,7 @@ fn a_restore_reply_ends_the_restore_redirects_it_or_repeats_it() {
     );
     let console = url::Url::parse("http://127.0.0.1:47421/").assured("the test URL parses");
     let redirect = outcome(CommandDisposition::NotLeader(LeaderRedirect {
-        leader: Some(LeaderEndpoints {
+        leader: Some(NodeEndpoints {
             node: ClusterNodeName::parse("node-2").assured("the test node name is valid"),
             grpc_uri: None,
             web_console_uri: Some(console.clone()),

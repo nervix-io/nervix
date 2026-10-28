@@ -2,14 +2,16 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Reading a client's `addr`, CA file and `connect_timeout_ms` into the broker it
-//!   connects to, resolving the broker host through the node resolver for every connection, the
-//!   budget and order of the address attempts, the TLS handshake against the configured host,
-//!   handing the established transport to Lapin for the AMQP handshake, the budget its owner opens
-//!   a channel within, and ending a connection that does not open within that budget.
-//! - **Depends on.** The connector contract's client configuration helpers, `nervix-dns`,
-//!   `error-stack`, Tokio, the URL grammar, Lapin's transport hook and its async runtime, and
-//!   `socket2` for the second handle on a connection's socket.
+//! - **Owns.** Reading a client's `addr`, CA file, client identity and `connect_timeout_ms` into
+//!   the broker it connects to, resolving the broker host through the node resolver for every
+//!   connection, the budget and order of the address attempts, the TLS handshake against the
+//!   configured host with the client's identity, telling a broker's refusal of the TLS session
+//!   from a failed handshake, handing the established transport to Lapin for the AMQP handshake,
+//!   the budget its owner opens a channel within, and ending a connection that does not open within
+//!   that budget.
+//! - **Depends on.** The connector contract's client configuration helpers, the crate's address
+//!   owner, `nervix-dns`, `error-stack`, Tokio, Rustls's PEM and alert types, Lapin's transport hook
+//!   and its async runtime, and `socket2` for the second handle on a connection's socket.
 //! - **Must not know.** Queues, consumers, publisher confirms, the host's retry policy, or Models.
 //!
 //! # One connection
@@ -19,7 +21,8 @@
 //! an equal share of what remains of the client's `connect_timeout_ms`, so an address that cannot
 //! connect leaves time for the next. An `amqps` connection then completes its TLS handshake within
 //! what is left, verifying the broker certificate against the host the address names, whichever of
-//! its addresses was dialled. Only then does Lapin start, and it runs the AMQP handshake over that
+//! its addresses was dialled, and presenting the client's certificate and key when it names them.
+//! Only then does Lapin start, and it runs the AMQP handshake over that
 //! transport within what is still left. The ingestor or emitter then opens the channel it reads or
 //! publishes through within the rest, so `connect_timeout_ms` bounds every step before the entity
 //! is ready, and a connection that runs out of it at any step is reported naming the key and its
@@ -42,9 +45,17 @@
 //!
 //! # Addresses
 //!
-//! The broker is the host and port of the client's `addr`, an AMQP URI. Lapin's own URI grammar
-//! silently takes `localhost` for an IPv6 literal host, so the host is read with the URL grammar
-//! instead: a literal IPv4 or IPv6 address is dialled as written, and a name is resolved.
+//! The broker is the host and port of the client's `addr`, an AMQP URI that the crate's address
+//! owner reads the same way it was checked before the client was committed: a literal IPv4 or IPv6
+//! address is dialled as written, and a name is resolved.
+//!
+//! # A broker that refuses the TLS session
+//!
+//! A broker ends a TLS session it refuses with an alert, such as one that requires a client
+//! certificate and receives none. Under TLS 1.2 the alert ends the handshake. Under TLS 1.3 the
+//! client's side of the handshake completes before the broker checks the client's certificate, so
+//! the alert arrives on the first read of the AMQP handshake instead. Either way the failure is the
+//! broker's refusal, naming the alert, rather than a failed handshake.
 
 #![cfg_attr(
     nervix_lint,
@@ -61,15 +72,15 @@
 use std::{
     io,
     net::{Shutdown, SocketAddr},
-    str::FromStr as _,
+    path::PathBuf,
 };
 
 use async_rs::{Tokio, TokioRuntime, traits::Reactor};
 use error_stack::{Context, Report, ResultExt as _};
 use lapin::{
     AsyncTcpStream, Connection, ConnectionProperties,
-    tcp::TLSConfig,
-    uri::{AMQPScheme, AMQPUri},
+    tcp::{Identity, TLSConfig},
+    uri::AMQPScheme,
 };
 use meticulous::OptionExt as _;
 use nervix_connector::{
@@ -79,9 +90,17 @@ use nervix_dns::{DnsLookupFailure, DnsResolver, LookupShare, OperationBudget};
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::{collections::ConcurrentQueue, time::timeout};
 use nervix_recovery::Discarded as _;
+use rustls::{
+    AlertDescription,
+    pki_types::{
+        CertificateDer, PrivateKeyDer,
+        pem::{self, PemObject as _},
+    },
+};
 use socket2::{SockRef, Socket};
 use thiserror::Error;
-use url::{Host, Url};
+
+use crate::address::RabbitMqAddress;
 
 /// The transport Lapin runs the AMQP protocol over, on the Tokio reactor.
 type BrokerStream = AsyncTcpStream<<Tokio as Reactor>::TcpStream>;
@@ -98,6 +117,15 @@ pub enum RabbitMqConnectError {
     /// The CA file an `amqps` client names could not be read or is not PEM text.
     #[error("invalid RabbitMQ CA certificate")]
     InvalidCaCertificate,
+    /// The client names one of `tls_cert_file` and `tls_key_file` without the other.
+    #[error("RabbitMQ client authentication requires both 'tls_cert_file' and 'tls_key_file'")]
+    IncompleteClientIdentity,
+    /// The `tls_cert_file` an `amqps` client names could not be read or holds no PEM certificate.
+    #[error("invalid RabbitMQ client certificate")]
+    InvalidClientCertificate,
+    /// The `tls_key_file` an `amqps` client names could not be read or holds no PEM private key.
+    #[error("invalid RabbitMQ client private key")]
+    InvalidClientKey,
     /// The broker host did not resolve through the node resolver.
     #[error("resolving RabbitMQ host '{host}' failed: {failure}")]
     Resolve {
@@ -116,6 +144,13 @@ pub enum RabbitMqConnectError {
     /// certificate that does not name the host.
     #[error("the TLS handshake with RabbitMQ host '{host}' failed")]
     TlsHandshake { host: String },
+    /// The broker ended the TLS session with `alert`, such as one that requires a client
+    /// certificate and received none or one it does not accept.
+    #[error("RabbitMQ host '{host}' refused the TLS session with alert {alert:?}")]
+    TlsRefused {
+        host: String,
+        alert: AlertDescription,
+    },
     #[error("the RabbitMQ client runtime is unavailable")]
     RuntimeUnavailable,
     /// The broker refused or broke off the AMQP handshake, such as for rejected credentials or an
@@ -129,15 +164,31 @@ impl RabbitMqConnectError {
     /// it.
     pub fn is_configuration(&self) -> bool {
         match self {
-            Self::InvalidAddress | Self::InvalidConnectTimeout | Self::InvalidCaCertificate => true,
+            Self::InvalidAddress
+            | Self::InvalidConnectTimeout
+            | Self::InvalidCaCertificate
+            | Self::IncompleteClientIdentity
+            | Self::InvalidClientCertificate
+            | Self::InvalidClientKey => true,
             Self::Resolve { .. }
             | Self::Unreachable { .. }
             | Self::SocketUnavailable { .. }
             | Self::TlsHandshake { .. }
+            | Self::TlsRefused { .. }
             | Self::RuntimeUnavailable
             | Self::AmqpHandshake { .. } => false,
         }
     }
+}
+
+/// What a client identity file holds no usable PEM item of, beneath the failure that names the
+/// file's role.
+#[derive(Debug, Error)]
+enum ClientIdentityFileError {
+    #[error("'tls_cert_file' holds no PEM certificate")]
+    NoCertificate,
+    #[error("'tls_key_file' holds no PEM private key")]
+    NoPrivateKey,
 }
 
 /// Why one round trip that opens a connection's channel did not complete.
@@ -150,6 +201,17 @@ pub(crate) enum OpeningStepFailure {
 }
 
 impl OpeningStepFailure {
+    /// The alert the broker ended its TLS session with, when that ended the step.
+    fn tls_alert(&self) -> Option<AlertDescription> {
+        let Self::Failed(error) = self else {
+            return None;
+        };
+        let lapin::ErrorKind::IOError(error) = error.kind() else {
+            return None;
+        };
+        received_alert(error)
+    }
+
     /// This failure beneath `context`, its owner's name for the step that failed, with its text
     /// leading the report. A deadline that ran out stays the typed cause beneath `context`, and
     /// Lapin's failure is attached as its text.
@@ -278,10 +340,20 @@ struct DialledBroker {
 
 pub(crate) type RabbitMqConnectResult<T> = Result<T, Report<RabbitMqConnectError>>;
 
+/// The alert a broker ended its TLS session with, when `error` is that ending: Rustls reports a
+/// received alert as the cause of the I/O error its stream fails with.
+fn received_alert(error: &io::Error) -> Option<AlertDescription> {
+    let cause = error.get_ref()?;
+    let Some(rustls::Error::AlertReceived(alert)) = cause.downcast_ref::<rustls::Error>() else {
+        return None;
+    };
+    Some(*alert)
+}
+
 /// The broker one RabbitMQ client connects to, and the node resolver its host resolves through.
 pub(crate) struct RabbitMqBroker {
-    /// The client's `addr`, with the host the URL grammar reads from it.
-    uri: AMQPUri,
+    /// The client's `addr`.
+    address: RabbitMqAddress,
     transport: BrokerTransport,
     dns: DnsResolver,
     /// How long one connection may take, from resolving the host until its owner's channel is
@@ -294,57 +366,103 @@ enum BrokerTransport {
     /// `amqp`: plain TCP.
     Plain,
     /// `amqps`: TLS over TCP, trusting the platform roots and the PEM CA chain of the client's
-    /// `tls_ca_file` when it names one.
-    Tls { ca_chain: Option<String> },
+    /// `tls_ca_file` when it names one, and presenting the client's identity when it names one.
+    Tls {
+        ca_chain: Option<String>,
+        identity: Option<ClientIdentity>,
+    },
+}
+
+/// The certificate chain and private key an `amqps` connection presents, as the PEM text of the
+/// client's `tls_cert_file` and `tls_key_file`.
+struct ClientIdentity {
+    certificate_chain: Vec<u8>,
+    private_key: Vec<u8>,
+}
+
+impl ClientIdentity {
+    /// The identity `entries` name, when they name one: blocking I/O on two small local files,
+    /// once for each connection.
+    fn of_config(entries: &[ClientConfigEntry]) -> RabbitMqConnectResult<Option<Self>> {
+        let tls = client_tls_paths(entries);
+        match (tls.cert_file, tls.key_file) {
+            (None, None) => Ok(None),
+            (Some(certificate_file), Some(key_file)) => {
+                let identity = Self::read(certificate_file, key_file)?;
+                Ok(Some(identity))
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                Err(Report::new(RabbitMqConnectError::IncompleteClientIdentity))
+            }
+        }
+    }
+
+    /// The identity in `certificate_file` and `key_file`, refused unless the first holds at least
+    /// one PEM certificate and the second a PEM private key, as the TLS handshake reads them.
+    fn read(certificate_file: PathBuf, key_file: PathBuf) -> RabbitMqConnectResult<Self> {
+        let certificate_chain = read_tls_file(&certificate_file, "TLS certificate")
+            .change_context(RabbitMqConnectError::InvalidClientCertificate)?;
+        let mut holds_certificate = false;
+        for certificate in CertificateDer::pem_slice_iter(&certificate_chain) {
+            certificate.change_context(RabbitMqConnectError::InvalidClientCertificate)?;
+            holds_certificate = true;
+        }
+        if !holds_certificate {
+            return Err(Report::new(ClientIdentityFileError::NoCertificate)
+                .change_context(RabbitMqConnectError::InvalidClientCertificate));
+        }
+        let private_key = read_tls_file(&key_file, "TLS private key")
+            .change_context(RabbitMqConnectError::InvalidClientKey)?;
+        match PrivateKeyDer::from_pem_slice(&private_key) {
+            Ok(_) => Ok(Self {
+                certificate_chain,
+                private_key,
+            }),
+            Err(pem::Error::NoItemsFound) => {
+                Err(Report::new(ClientIdentityFileError::NoPrivateKey)
+                    .change_context(RabbitMqConnectError::InvalidClientKey))
+            }
+            Err(malformed) => {
+                Err(Report::new(malformed).change_context(RabbitMqConnectError::InvalidClientKey))
+            }
+        }
+    }
+
+    /// The identity as the TLS handshake presents it.
+    fn presented(&self) -> Identity<'_, '_> {
+        Identity::PKCS8 {
+            pem: &self.certificate_chain,
+            key: &self.private_key,
+        }
+    }
 }
 
 impl RabbitMqBroker {
-    /// The broker `entries` name. Reads the CA file an `amqps` client names: blocking I/O on a
-    /// small local file, once for each connection.
+    /// The broker `entries` name. Reads the CA file and the client identity an `amqps` client
+    /// names: blocking I/O on small local files, once for each connection.
     pub(crate) fn from_config(
         entries: &[ClientConfigEntry],
         dns: DnsResolver,
     ) -> RabbitMqConnectResult<Self> {
         let addr = client_config_value(entries, "addr", "RabbitMQ")
             .change_context(RabbitMqConnectError::InvalidAddress)?;
-        let uri = Self::uri(&addr)?;
+        let address =
+            RabbitMqAddress::parse(&addr).change_context(RabbitMqConnectError::InvalidAddress)?;
         let connect_timeout = ConfiguredDeadline::connect(entries)
             .change_context(RabbitMqConnectError::InvalidConnectTimeout)?;
-        let transport = match uri.scheme {
+        let transport = match address.scheme() {
             AMQPScheme::AMQP => BrokerTransport::Plain,
             AMQPScheme::AMQPS => BrokerTransport::Tls {
                 ca_chain: Self::ca_chain(entries)?,
+                identity: ClientIdentity::of_config(entries)?,
             },
         };
         Ok(Self {
-            uri,
+            address,
             transport,
             dns,
             connect_timeout,
         })
-    }
-
-    /// `addr` as an AMQP URI whose host is the host the URL grammar reads from it.
-    ///
-    /// Neither grammar's failure repeats the address, which can carry credentials: an address
-    /// without an authority, the one failure Lapin reports by quoting it, is rejected first.
-    fn uri(addr: &str) -> RabbitMqConnectResult<AMQPUri> {
-        let url = Url::parse(addr).map_err(|error| {
-            Report::new(RabbitMqConnectError::InvalidAddress).attach_printable(error)
-        })?;
-        if url.cannot_be_a_base() {
-            return Err(Report::new(RabbitMqConnectError::InvalidAddress)
-                .attach_printable("the address names no host"));
-        }
-        let mut uri = AMQPUri::from_str(addr).map_err(|error| {
-            Report::new(RabbitMqConnectError::InvalidAddress).attach_printable(error)
-        })?;
-        match url.host() {
-            Some(Host::Ipv6(address)) => uri.authority.host = address.to_string(),
-            Some(Host::Ipv4(address)) => uri.authority.host = address.to_string(),
-            Some(Host::Domain(_)) | None => {}
-        }
-        Ok(uri)
     }
 
     /// The PEM CA chain of the client's `tls_ca_file`, when it names one.
@@ -364,7 +482,7 @@ impl RabbitMqBroker {
     /// The host the client's address names, as it is resolved and as the broker certificate has
     /// to name it.
     fn host(&self) -> &str {
-        &self.uri.authority.host
+        self.address.host()
     }
 
     /// Start a connection to the broker within the client's `connect_timeout_ms`, through its
@@ -404,7 +522,7 @@ impl RabbitMqBroker {
         let host = self.host();
         let resolved = self
             .dns
-            .resolve(host, self.uri.authority.port, deadline.lookup())
+            .resolve(host, self.address.port(), deadline.lookup())
             .await;
         match resolved {
             Ok(addresses) => Ok(addresses),
@@ -462,29 +580,25 @@ impl RabbitMqBroker {
     }
 
     /// `stream` itself for `amqp`; for `amqps`, `stream` once its TLS handshake has verified the
-    /// broker certificate against the configured host, within what remains of the budget.
+    /// broker certificate against the configured host and presented the client's identity, within
+    /// what remains of the budget.
     async fn secure(
         &self,
         stream: BrokerStream,
         deadline: &OperationBudget,
         connect_timeout: ConfiguredDeadline,
     ) -> RabbitMqConnectResult<BrokerStream> {
-        let BrokerTransport::Tls { ca_chain } = &self.transport else {
+        let BrokerTransport::Tls { ca_chain, identity } = &self.transport else {
             return Ok(stream);
         };
         let config = TLSConfig {
-            identity: None,
+            identity: identity.as_ref().map(ClientIdentity::presented),
             cert_chain: ca_chain.as_deref(),
         };
         let remaining = deadline.remaining();
-        let failed = || {
-            Report::new(RabbitMqConnectError::TlsHandshake {
-                host: self.host().to_string(),
-            })
-        };
         match timeout(remaining, stream.into_tls(self.host(), config)).await {
             Ok(Ok(secured)) => Ok(secured),
-            Ok(Err(error)) => Err(failed().attach_printable(error)),
+            Ok(Err(error)) => Err(self.tls_failure(error)),
             Err(_) => Err(Report::new(
                 connect_timeout.elapsed("the TLS handshake with the RabbitMQ broker"),
             )
@@ -492,6 +606,17 @@ impl RabbitMqBroker {
                 host: self.host().to_string(),
             })),
         }
+    }
+
+    /// A failed TLS handshake with the broker: the broker's refusal when it ended the session with
+    /// an alert, otherwise a handshake that failed.
+    fn tls_failure(&self, error: io::Error) -> Report<RabbitMqConnectError> {
+        let host = self.host().to_string();
+        let failure = match received_alert(&error) {
+            Some(alert) => RabbitMqConnectError::TlsRefused { host, alert },
+            None => RabbitMqConnectError::TlsHandshake { host },
+        };
+        Report::new(failure).attach_printable(error)
     }
 
     /// Run the AMQP handshake over `stream`, within what remains of the budget.
@@ -512,7 +637,7 @@ impl RabbitMqBroker {
             .ok()
             .assured("a new queue of one has room for its one transport");
         let connected = Connection::connector(
-            self.uri.clone(),
+            self.address.uri().clone(),
             runtime,
             async move |_uri, _runtime| {
                 let handed = handed_over.pop();
@@ -526,14 +651,21 @@ impl RabbitMqBroker {
             },
             ConnectionProperties::default(),
         );
-        budget
+        let handshake = budget
             .within("the AMQP handshake with the RabbitMQ broker", connected)
-            .await
-            .map_err(|failure| {
-                failure.beneath(RabbitMqConnectError::AmqpHandshake {
-                    host: self.host().to_string(),
-                })
-            })
+            .await;
+        match handshake {
+            Ok(connection) => Ok(connection),
+            Err(failure) => {
+                let host = self.host().to_string();
+                // Under TLS 1.3 a broker's refusal arrives on the handshake's first read.
+                let context = match failure.tls_alert() {
+                    Some(alert) => RabbitMqConnectError::TlsRefused { host, alert },
+                    None => RabbitMqConnectError::AmqpHandshake { host },
+                };
+                Err(failure.beneath(context))
+            }
+        }
     }
 }
 

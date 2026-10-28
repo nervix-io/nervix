@@ -2,8 +2,9 @@
 //!
 //! Layer: control plane.
 //!
-//! - **Owns.** Locating the current leader with the client endpoints discovery established for
-//!   it, and the not-leader result a request that needs the leader is refused with.
+//! - **Owns.** Locating a node, such as the current leader, with the client endpoints discovery
+//!   established for it, and the not-leader result a request that needs the leader is refused
+//!   with.
 //! - **Depends on.** Consensus for the leader and for proposal failures, and cluster gossip for
 //!   the endpoints each node advertises.
 //! - **Must not know.** How a redirect travels to a client.
@@ -25,30 +26,30 @@ use nervix_models::ClusterNodeName;
 
 use super::{
     command_result::{
-        CommandDiagnostic, CommandDisposition, CommandResult, LeaderLocation, LeaderRedirect,
+        CommandDiagnostic, CommandDisposition, CommandResult, LeaderRedirect, NodeLocation,
     },
     model_mutation::command_error,
     session_service::SessionServiceImpl,
 };
 
 impl SessionServiceImpl {
-    /// The leader's location, with the endpoints discovery has established for it.
-    pub(in crate::application) async fn leader_location(
+    /// A node's location, with the endpoints discovery has established for it.
+    pub(in crate::application) async fn node_location(
         &self,
-        leader: ClusterNodeName,
-    ) -> LeaderLocation {
-        let advertised = self.inner.cluster.live_node(&leader).await;
-        let Some(node) = advertised else {
-            return LeaderLocation {
-                node: leader,
+        node: ClusterNodeName,
+    ) -> NodeLocation {
+        let advertised = self.inner.cluster.live_node(&node).await;
+        let Some(advertised) = advertised else {
+            return NodeLocation {
+                node,
                 grpc_url: None,
                 web_console_url: None,
             };
         };
-        LeaderLocation {
-            node: leader,
-            grpc_url: node.client_url,
-            web_console_url: node.console_url,
+        NodeLocation {
+            node,
+            grpc_url: advertised.client_url,
+            web_console_url: advertised.console_url,
         }
     }
 
@@ -58,7 +59,7 @@ impl SessionServiceImpl {
         leader: Option<ClusterNodeName>,
     ) -> LeaderRedirect {
         let leader = match leader {
-            Some(leader) => Some(self.leader_location(leader).await),
+            Some(leader) => Some(self.node_location(leader).await),
             None => None,
         };
         LeaderRedirect { leader }

@@ -39,18 +39,18 @@ use crate::{
     CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, DescribeBackup, DescribeTransaction, DomainPace,
-    DomainStartPoint, EmitterBatchPolicy, EmitterBody, EmitterEntity, EmitterPublishing,
-    ExistingUserPolicy, Expression, FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping,
-    IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy, InspectionFormat,
-    JsonType, Literal, MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator,
-    MessageErrorPolicy, Model, ModelName, MongoDbConflictAction, MySqlConflictAction, NamePosition,
-    OutputBranch, ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutputs, RangeOperator, RelayBranching, RelayName, Restore,
-    RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, RetryPolicy, RouteConstruction,
-    SchemaField, SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-    Statement, SubscriptionLiteral, TransactionInspectionTarget, UnaryOperator, WindowBound,
-    WindowStateLimit, WireSchemaField,
+    DomainStartPoint, EmitterBatchPolicy, EmitterBody, EmitterEntity, EmitterEnvelope,
+    EmitterPublishing, EnvelopeClause, ExistingUserPolicy, Expression, FieldScope, Float64Literal,
+    FlushPolicy, GeneralErrorPolicy, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorMapping, IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy,
+    InspectionFormat, JsonType, Literal, MaterializedStateDependency, MaterializedStatePolicy,
+    MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
+    MySqlConflictAction, NamePosition, OutputBranch, ParseAsType, PlacementPolicy,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RangeOperator,
+    RelayBranching, RelayName, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
+    RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, Statement, SubscriptionLiteral,
+    TransactionInspectionTarget, UnaryOperator, WindowBound, WindowStateLimit, WireSchemaField,
 };
 
 /// The Plexus release canonical rendering writes.
@@ -2156,7 +2156,8 @@ impl CreateEmitter {
             processor_inputs_to_plexus(&self.from)?
         ))];
         clauses.extend(materialized_state_clauses(&self.materialized_state)?);
-        let (reference, body) = emitter_destination_parts(&self.connector, &self.body, None)?;
+        let (reference, body) =
+            emitter_destination_parts(&self.connector, &self.body, &self.envelope, None)?;
         let to = if reference.is_empty() {
             "TO".to_string()
         } else {
@@ -2670,10 +2671,11 @@ fn alter_emitter_operation_to_plexus(
         AlterEmitterOperation::SetTo {
             destination,
             body,
+            envelope,
             construction,
         } => {
             let (reference, clauses) =
-                emitter_destination_parts(destination, body, construction.as_ref())?;
+                emitter_destination_parts(destination, body, envelope, construction.as_ref())?;
             let text = clause_statement(format!("SET TO {reference}"), clauses);
             Ok(text.trim_end_matches(';').to_string())
         }
@@ -3033,10 +3035,11 @@ impl EmitterPublishing<'_> {
     }
 }
 
-/// The entity's reference and options, followed by its typed MODE and complete payload.
+/// The entity's reference and options, followed by its typed MODE, complete payload and envelope.
 fn emitter_destination_parts(
     destination: &EmitterEntity,
     body: &EmitterBody,
+    envelope: &EmitterEnvelope,
     construction: Option<&RouteConstruction>,
 ) -> error_stack::Result<(String, Vec<Clause>), CanonicalPlexusError> {
     let presentation = destination.entity_presentation()?;
@@ -3060,10 +3063,84 @@ fn emitter_destination_parts(
             clauses.extend(presentation.payload_clauses());
         }
     }
+    clauses.extend(envelope_clauses(envelope)?);
     if let Some(construction) = construction {
         clauses.extend(route_construction_clauses(construction)?);
     }
     Ok((reference, clauses))
+}
+
+/// The envelope clauses an emitter writes and the properties it sets, in the order a statement
+/// writes them: each clause on its own line, then the `PROPERTIES` block.
+fn envelope_clauses(
+    envelope: &EmitterEnvelope,
+) -> error_stack::Result<Vec<Clause>, CanonicalPlexusError> {
+    let mut clauses = Vec::new();
+    for text in envelope_clause_texts(envelope)? {
+        clauses.push(Clause::line(text));
+    }
+    if !envelope.properties.is_empty() {
+        clauses.push(Clause::braced(
+            "PROPERTIES",
+            envelope_property_items(envelope)?,
+        ));
+    }
+    Ok(clauses)
+}
+
+/// Each clause an envelope writes, as canonical Plexus, in the order a statement writes them.
+fn envelope_clause_texts(
+    envelope: &EmitterEnvelope,
+) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
+    let mut texts = Vec::new();
+    for clause in envelope.clauses() {
+        let keywords = clause.kind().keywords();
+        let text = match clause {
+            EnvelopeClause::Persistent | EnvelopeClause::Mandatory | EnvelopeClause::Retain => {
+                keywords.to_string()
+            }
+            EnvelopeClause::DeliverAfter(duration) | EnvelopeClause::Delay(duration) => {
+                format!("{keywords} {duration}")
+            }
+            EnvelopeClause::Timestamp(expression)
+            | EnvelopeClause::ReplyTo(expression)
+            | EnvelopeClause::MessageId(expression)
+            | EnvelopeClause::DeduplicationId(expression) => {
+                format!("{keywords} {}", expression_to_plexus(expression)?)
+            }
+        };
+        texts.push(text);
+    }
+    Ok(texts)
+}
+
+/// Each property an envelope sets, as `'<key>' = <expression>`, in written order.
+fn envelope_property_items(
+    envelope: &EmitterEnvelope,
+) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
+    let mut items = Vec::with_capacity(envelope.properties.len());
+    for property in &envelope.properties {
+        items.push(format!(
+            "{} = {}",
+            string_literal(&property.name),
+            expression_to_plexus(&property.expression)?
+        ));
+    }
+    Ok(items)
+}
+
+impl EmitterEnvelope {
+    /// The envelope section as one line of canonical Plexus, as `DESCRIBE EMITTER` prints it: its
+    /// clauses in the order a statement writes them, then its `PROPERTIES` block. The empty
+    /// envelope is the empty text.
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        let mut parts = envelope_clause_texts(self)?;
+        if !self.properties.is_empty() {
+            let items = envelope_property_items(self)?;
+            parts.push(format!("PROPERTIES {{{}}}", items.join(", ")));
+        }
+        Ok(parts.join(" "))
+    }
 }
 
 fn postgres_conflict_action_to_plexus(action: &PostgresConflictAction) -> String {
@@ -4393,6 +4470,7 @@ mod tests {
                 body: EmitterBody::Codec {
                     codec: named("orders_codec"),
                 },
+                envelope: Box::new(crate::EmitterEnvelope::default()),
                 connector: Box::new(connector),
                 batch: None,
                 flush_policy: FlushPolicy::Each {
@@ -4542,6 +4620,7 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
+            envelope: Box::new(crate::EmitterEnvelope::default()),
             connector: Box::new(EmitterEntity::Postgres(PostgresEmitter::Table(
                 PostgresTableEmitter {
                     mode: crate::PostgresTablePublishingMode::Ack {
@@ -4599,6 +4678,7 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
+            envelope: Box::new(crate::EmitterEnvelope::default()),
             connector: Box::new(EmitterEntity::MySql(MySqlEmitter::Table(
                 MySqlTableEmitter {
                     mode: crate::MySqlTablePublishingMode::Ack {
@@ -4654,6 +4734,7 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
+            envelope: Box::new(crate::EmitterEnvelope::default()),
             connector: Box::new(EmitterEntity::MongoDb(MongoDbEmitter::Collection(
                 MongoDbCollectionEmitter {
                     mode: crate::MongoDbCollectionPublishingMode::Ack {

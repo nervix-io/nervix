@@ -71,20 +71,20 @@ table Diagnostic {
   span: SourceSpan;
 }
 
-/// How clients reach the cluster leader.
-table LeaderEndpoints {
-  /// The leader's cluster node name.
+/// How clients reach one cluster node.
+table NodeEndpoints {
+  /// The node's cluster node name.
   node: string (required);
-  /// The leader's gRPC session URI. Absent when the leader advertises none.
+  /// The node's gRPC session URI. Absent when the node advertises none.
   grpc_uri: string;
-  /// The leader's web console URI. Absent when the leader advertises none.
+  /// The node's web console URI. Absent when the node advertises none.
   web_console_uri: string;
 }
 
 /// The request needs the cluster leader, and the serving node is not the leader.
 table LeaderRedirect {
   /// Absent while no leader is known, for example during an election.
-  leader: LeaderEndpoints;
+  leader: NodeEndpoints;
 }
 
 /// A request failed definitively. The enclosing outcome's message, and its diagnostics where it
@@ -2315,7 +2315,7 @@ table LeaderIsServingNode {
 }
 
 table LeaderIsRemote {
-  leader: LeaderEndpoints (required);
+  leader: NodeEndpoints (required);
 }
 
 table LeaderUnknown {}
@@ -2580,10 +2580,11 @@ union UploadDisposition {
 // ---------------------------------------------------------------------------------------------
 //
 // A download is one BackupDownloadRequest answered by a stream that is exactly one of:
-// BackupDownloadFailed; LeaderRedirect; or BackupArchiveStart, then BackupArchiveChunk frames whose
-// bytes add up to total_bytes, then BackupArchiveComplete. A stream may also end with
-// BackupDownloadFailed after its start, when the server cannot read the rest of the archive. A
-// stream that ends any other way was cut short; download again with the same reference.
+// BackupDownloadFailed; BackupArchiveHolder; LeaderRedirect; or BackupArchiveStart, then
+// BackupArchiveChunk frames whose bytes add up to total_bytes, then BackupArchiveComplete. A stream
+// may also end with BackupDownloadFailed after its start, when the server cannot read the rest of
+// the archive. A stream that ends any other way was cut short; download again with the same
+// reference.
 
 /// Asks for the archive a completed BACKUP retains, by that command's execution reference.
 table BackupDownloadRequest {
@@ -2611,8 +2612,9 @@ table BackupArchiveComplete {}
 enum BackupDownloadFailure : ubyte {
   /// The request is malformed.
   InvalidRequest,
-  /// The serving node retains no archive under the reference: it assembled none, a complete
-  /// download already collected it, or the command is not a completed backup.
+  /// No live node retains an archive under the reference: the backup is still assembling it or
+  /// assembled none, a complete download already collected it, the node that assembled it
+  /// restarted or left, or the command is not a completed backup.
   NotRetained,
   /// The reference's retry validity ended, and the archive with it.
   Expired,
@@ -2628,12 +2630,19 @@ table BackupDownloadFailed {
   message: string (required);
 }
 
+/// The backup's recorded outcome names another node as the one that retains the archive, and that
+/// node's process is live: download the archive from that node.
+table BackupArchiveHolder {
+  holder: NodeEndpoints (required);
+}
+
 union BackupDownloadPart {
   BackupArchiveStart,
   BackupArchiveChunk,
   BackupArchiveComplete,
   BackupDownloadFailed,
-  LeaderRedirect
+  LeaderRedirect,
+  BackupArchiveHolder
 }
 
 // ---------------------------------------------------------------------------------------------

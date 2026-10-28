@@ -3,9 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The Redis client a configuration declares, the `connect_timeout_ms` that bounds
-//!   opening a connection and checking one out, the node's shared pool of command connections,
-//!   the dedicated subscription connection a Pub/Sub ingestor reads a channel through, and
-//!   publication of each record to a channel.
+//!   opening a connection and checking one out, the node's shared pool of command connections and
+//!   the idle and maximum lifetimes it retires them at, the dedicated subscription connection a
+//!   Pub/Sub ingestor reads a channel through, and publication of each record to a channel.
 //! - **Depends on.** The connector contract, node DNS resolver, vocabulary values, `error-stack`,
 //!   Tokio, `redis` and `bb8`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -32,7 +32,7 @@ mod ingestor;
 )]
 mod test_fixture;
 
-use std::{io, net::SocketAddr};
+use std::{io, net::SocketAddr, time::Duration};
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
@@ -40,6 +40,7 @@ pub use ingestor::{
     RedisPubSubIngestor, RedisPubSubIngestorError, RedisPubSubIngestorMessage,
     RedisPubSubIngestorPlan,
 };
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle,
     EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError, PerRecordOutcome,
@@ -48,7 +49,10 @@ use nervix_connector::{
 use nervix_dns::{
     DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver, HOOK_LOOKUP_BUDGET,
 };
-use nervix_models::{ClientConfigEntry, ClientPoolBounds, RedisChannelName};
+use nervix_models::{
+    ClientConfigEntry, ClientConfigSchema, ClientDeadline, ClientPoolBounds, ConnectorKind,
+    RedisChannelName,
+};
 use nervix_primitives::{sync::Arc, time::Instant};
 use redis::{
     AsyncCommands, AsyncConnectionConfig, Client as RedisClient, ClientTlsConfig,
@@ -123,7 +127,9 @@ impl bb8::ManageConnection for RedisCommandManager {
 /// Every entry is an independent connection, so the declared maximum bounds sockets rather than
 /// handles, and a checked-out connection carries one publisher's outstanding operation alone.
 /// Checking a connection out waits at most the client's `connect_timeout_ms`, which also bounds
-/// opening each new connection.
+/// opening each new connection. The pool closes a connection idle for the client's
+/// `pool_idle_timeout_ms` or older than its `pool_max_lifetime_ms`, then opens connections again to
+/// keep the declared minimum.
 #[derive(Clone, Debug)]
 pub struct RedisCommandPool {
     connections: bb8::Pool<RedisCommandManager>,
@@ -141,6 +147,10 @@ pub enum RedisClientError {
     /// The client's `connect_timeout_ms` breaks the deadline rule, which the cause beneath names.
     #[error("invalid Redis client connect_timeout_ms")]
     InvalidConnectTimeout,
+    /// One of the command pool's lifetimes breaks its declared value rule, which the cause beneath
+    /// names.
+    #[error("invalid Redis client {key}")]
+    InvalidPoolLifetime { key: &'static str },
     #[error("invalid Redis client configuration: {reason}")]
     InvalidConfig { reason: String },
     #[error("failed to connect to Redis: {reason}")]
@@ -152,7 +162,8 @@ pub enum RedisClientError {
     },
 }
 
-/// Open the node's shared Redis command pool for one named client, sized by its declared bounds.
+/// Open the node's shared Redis command pool for one named client, sized by its declared bounds and
+/// retiring connections at its declared lifetimes.
 ///
 /// Subscription connections are not drawn from here: a Redis Pub/Sub ingestor owns its own
 /// dedicated connection, so command-pool pressure never interrupts a healthy subscription.
@@ -167,6 +178,7 @@ pub async fn open_redis_command_pool(
     let client = redis_client(addr, config)?;
     let connect_timeout = ConfiguredDeadline::connect(config)
         .change_context(RedisClientError::InvalidConnectTimeout)?;
+    let lifetimes = RedisPoolLifetimes::read(config)?;
     let manager = RedisCommandManager {
         client,
         dns,
@@ -176,6 +188,8 @@ pub async fn open_redis_command_pool(
         .max_size(bounds.maximum().get())
         .min_idle(Some(bounds.minimum()))
         .connection_timeout(connect_timeout.bound())
+        .idle_timeout(Some(lifetimes.idle))
+        .max_lifetime(Some(lifetimes.maximum))
         .build(manager)
         .await;
     match opened {
@@ -184,6 +198,52 @@ pub async fn open_redis_command_pool(
             connect_timeout,
         }),
         Err(source) => Err(redis_pool_error(source, connect_timeout)),
+    }
+}
+
+/// How long the command pool keeps a connection, as the client's effective configuration declares
+/// it: an omitted key takes the default the client schema declares for it.
+///
+/// `bb8` closes a connection idle for `idle`, the ones it keeps for the declared minimum included,
+/// and one that has lived `maximum` when it is returned or while it is idle; it checks its idle
+/// connections every 30 seconds, its own reaper interval.
+#[derive(Debug, Clone, Copy)]
+struct RedisPoolLifetimes {
+    /// `pool_idle_timeout_ms`: how long a connection may sit idle in the pool.
+    idle: Duration,
+    /// `pool_max_lifetime_ms`: how old a connection may become.
+    maximum: Duration,
+}
+
+impl RedisPoolLifetimes {
+    fn read(config: &[ClientConfigEntry]) -> Result<Self, Report<RedisClientError>> {
+        let schema = ConnectorKind::Redis
+            .client()
+            .assured("the Redis connector declares a configured client")
+            .config;
+        let effective = schema.effective_entries(config);
+        Ok(Self {
+            idle: Self::lifetime(schema, &effective, "pool_idle_timeout_ms")?,
+            maximum: Self::lifetime(schema, &effective, "pool_max_lifetime_ms")?,
+        })
+    }
+
+    /// The lifetime the declared key `name` sets in `effective`, held to its declared value rule.
+    fn lifetime(
+        schema: ClientConfigSchema,
+        effective: &[ClientConfigEntry],
+        name: &'static str,
+    ) -> Result<Duration, Report<RedisClientError>> {
+        let key = schema
+            .key(name)
+            .assured("the Redis client schema declares both command pool lifetimes");
+        let value = optional_client_config_value(effective, name)
+            .assured("the effective configuration supplies every defaulted key");
+        key.validate(value)
+            .change_context(RedisClientError::InvalidPoolLifetime { key: name })?;
+        let lifetime = ClientDeadline::parse(value)
+            .verified("the declared value rule checked above parses the same milliseconds");
+        Ok(lifetime.duration())
     }
 }
 
@@ -477,7 +537,7 @@ mod tests {
     };
 
     use nervix_connector::DeadlineElapsed;
-    use nervix_models::DeadlineKey;
+    use nervix_models::{ClientConfigSchemaError, DeadlineKey};
     use nervix_test_environment::dns_authority::DnsAnswer;
 
     use super::*;
@@ -735,6 +795,90 @@ mod tests {
                 ),
                 "{value}: {error:?}"
             );
+        }
+    }
+
+    /// The pool a client opens with `entries` beside an address nothing listens on. Its minimum is
+    /// zero, so it opens without a connection.
+    async fn open_unconnected_pool(
+        fixture: &Fixture,
+        entries: &[(&str, &str)],
+    ) -> Result<RedisCommandPool, Report<RedisClientError>> {
+        let mut config = vec![ClientConfigEntry {
+            key: "addr".to_string(),
+            value: "redis://127.0.0.1:1".to_string(),
+        }];
+        for (key, value) in entries {
+            config.push(ClientConfigEntry {
+                key: (*key).to_string(),
+                value: (*value).to_string(),
+            });
+        }
+        open_redis_command_pool(
+            &config,
+            ClientPoolBounds::new(0, std::num::NonZeroU32::MIN)
+                .expect("an empty minimum fits any maximum"),
+            fixture.dns.clone(),
+        )
+        .await
+    }
+
+    #[nervix_primitives::test]
+    async fn a_pool_without_lifetime_keys_takes_the_declared_defaults() {
+        let fixture = Fixture::start().await;
+        let pool = open_unconnected_pool(&fixture, &[])
+            .await
+            .expect("a pool with no minimum opens without a connection");
+        let config = pool.connections.config();
+        assert_eq!(config.idle_timeout, Some(Duration::from_secs(10 * 60)));
+        assert_eq!(config.max_lifetime, Some(Duration::from_secs(30 * 60)));
+        assert_eq!(config.connection_timeout, default_connect_timeout().bound());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_pool_takes_the_lifetimes_its_client_declares() {
+        let fixture = Fixture::start().await;
+        let pool = open_unconnected_pool(
+            &fixture,
+            &[
+                ("pool_idle_timeout_ms", "45000"),
+                ("pool_max_lifetime_ms", "5000"),
+            ],
+        )
+        .await
+        .expect("a pool with no minimum opens without a connection");
+        let config = pool.connections.config();
+        assert_eq!(config.idle_timeout, Some(Duration::from_secs(45)));
+        assert_eq!(config.max_lifetime, Some(Duration::from_secs(5)));
+    }
+
+    #[nervix_primitives::test]
+    async fn an_invalid_pool_lifetime_refuses_to_open_the_pool() {
+        let fixture = Fixture::start().await;
+        for key in ["pool_idle_timeout_ms", "pool_max_lifetime_ms"] {
+            for value in ["0", "soon", "-5"] {
+                let error = open_unconnected_pool(&fixture, &[(key, value)])
+                    .await
+                    .expect_err("an invalid lifetime cannot open a pool");
+                assert!(
+                    matches!(
+                        error.current_context(),
+                        RedisClientError::InvalidPoolLifetime { key: refused } if *refused == key
+                    ),
+                    "{key} = {value}: {error:?}"
+                );
+                let cause = error
+                    .frames()
+                    .find_map(|frame| frame.downcast_ref::<ClientConfigSchemaError>());
+                assert!(
+                    matches!(
+                        cause,
+                        Some(ClientConfigSchemaError::InvalidValue { key: refused, .. })
+                            if refused == key
+                    ),
+                    "{key} = {value}: {error:?}"
+                );
+            }
         }
     }
 }

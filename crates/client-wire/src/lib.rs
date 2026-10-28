@@ -70,8 +70,7 @@ pub use command::{
     ExecutionReferenceConflict, StatementDisposition, StatementOutcome, UnknownOutcomeCause,
 };
 pub use common::{
-    Diagnostic, LeaderEndpoints, LeaderRedirect, OutcomeOrigin, RequestId, SourceSpan,
-    WireValueError,
+    Diagnostic, LeaderRedirect, NodeEndpoints, OutcomeOrigin, RequestId, SourceSpan, WireValueError,
 };
 pub use consumer::{
     CloseEmitterOutcome, CloseEmitterRequest, ConsumerId, EmitterBatchDecision,

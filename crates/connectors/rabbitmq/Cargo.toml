@@ -30,6 +30,7 @@ nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
+rustls = { workspace = true }
 shuttle = { workspace = true, optional = true }
 socket2 = { workspace = true }
 thiserror = { workspace = true }
@@ -37,9 +38,11 @@ tokio = { workspace = true, features = ["macros", "rt", "time"] }
 url = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
 nervix-model-harness = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 nervix-test-environment = { workspace = true }
+rcgen = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = [
   "io-util",
@@ -47,3 +50,4 @@ tokio = { workspace = true, features = [
   "net",
   "rt-multi-thread",
 ] }
+tokio-rustls = { workspace = true }

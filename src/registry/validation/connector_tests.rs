@@ -860,6 +860,7 @@ fn emitter_header_invocations_are_rejected_for_unsupported_emitters() {
         body: nervix_models::EmitterBody::Codec {
             codec: named("events_codec"),
         },
+        envelope: Box::new(nervix_models::EmitterEnvelope::default()),
         connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
             ZeroMqPushEmitter {
                 mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
@@ -960,6 +961,7 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
         body: nervix_models::EmitterBody::Codec {
             codec: named("events_codec"),
         },
+        envelope: Box::new(nervix_models::EmitterEnvelope::default()),
         connector: Box::new(EmitterEntity::Pulsar(PulsarEmitter::Topic(
             PulsarTopicEmitter {
                 mode: nervix_models::PulsarTopicPublishingMode::NoAck {
@@ -2332,4 +2334,162 @@ fn sqs_publication(
         panic!("SQS fixture");
     };
     &mut destination.mode
+}
+
+/// The Kafka fixture emitter, which declares no envelope clause and constructs its output.
+fn kafka_emitter() -> CreateEmitter {
+    let Model::Emitter(emitter) = emitter("enveloped", "events", "events_codec", "kafka_main")
+    else {
+        panic!("the fixture builds an emitter");
+    };
+    emitter
+}
+
+fn envelope_schema() -> CreateSchema {
+    let field = |name: &str, ty: ParseAsType, optional: bool, sensitive: bool| SchemaField {
+        name: named(name),
+        ty,
+        optional,
+        sensitive,
+    };
+    CreateSchema {
+        name: named("event_schema"),
+        fields: vec![
+            field("tenant", ParseAsType::String, false, false),
+            field("at", ParseAsType::Datetime, false, false),
+            field("secret", ParseAsType::String, false, true),
+            field("maybe", ParseAsType::String, true, false),
+        ],
+    }
+}
+
+#[test]
+fn an_envelope_clause_its_entity_does_not_declare_is_refused_naming_both() {
+    let domain: DomainName = named("validation");
+    let mut emitter = kafka_emitter();
+    emitter.envelope.timestamp = Some(nervix_plexus::parse_expression("input.at").expect("parses"));
+
+    let refused = validate_emitter_publishing_contract(
+        &domain,
+        &ModelName::from(&emitter.name),
+        &ModelIndex::new(),
+        &emitter,
+    )
+    .expect_err("KAFKA TOPIC declares no TIMESTAMP clause yet");
+
+    let RegistryError::InvalidConnectorDeclaration { node, issue, .. } = refused.current_context()
+    else {
+        panic!("an undeclared clause is a declaration refusal: {refused:?}");
+    };
+    assert_eq!(node.identifier.as_str(), "enveloped");
+    let undeclared = nervix_models::EnvelopeDeclarationError::UndeclaredClause {
+        entity: EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic),
+        clause: nervix_models::EnvelopeClauseKind::Timestamp,
+    };
+    assert_eq!(issue, &ConnectorDeclarationIssue::Envelope(undeclared));
+    assert_eq!(
+        refused.current_context().to_string(),
+        "emitter 'enveloped' in domain 'validation' is invalid: KAFKA TOPIC emitters declare no \
+         TIMESTAMP clause"
+    );
+}
+
+#[test]
+fn an_envelope_duration_is_a_positive_schedulable_duration() {
+    let domain: DomainName = named("validation");
+    let node = NodeRef::new(ModelKind::Emitter, named::<ModelName>("enveloped"));
+    for setting in [
+        ConnectorDurationSetting::DeliverAfter,
+        ConnectorDurationSetting::Delay,
+    ] {
+        assert_eq!(
+            setting
+                .parse("5s", &domain, &node)
+                .expect("five seconds is a duration a transport can be given"),
+            std::time::Duration::from_secs(5)
+        );
+        let zero = setting
+            .parse("0s", &domain, &node)
+            .expect_err("a zero duration delays nothing");
+        assert!(
+            format!("{zero:#}").contains(&format!("{setting} must be greater than zero")),
+            "{zero:#}"
+        );
+        let unreadable = setting
+            .parse(TOO_LONG_DURATION_TEXT, &domain, &node)
+            .expect_err("a duration too long to read is refused");
+        assert!(
+            format!("{unreadable:#}").contains(&format!("invalid {setting} duration")),
+            "{unreadable:#}"
+        );
+    }
+}
+
+#[test]
+fn an_envelope_value_is_an_exact_non_null_non_sensitive_value_of_its_clause_type() {
+    let domain: DomainName = named("validation");
+    let schema = envelope_schema();
+    let check = |emitter: &CreateEmitter| {
+        validate_emitter_envelope_expressions(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &ModelIndex::new(),
+            emitter,
+            &schema,
+            &schema,
+        )
+    };
+    let expression =
+        |text: &str| nervix_plexus::parse_expression(text).expect("the case expression parses");
+
+    let mut emitter = kafka_emitter();
+    emitter.envelope.timestamp = Some(expression("input.at"));
+    emitter.envelope.message_id = Some(expression("leak_sensitive(input.secret)"));
+    emitter.envelope.reply_to = Some(expression("output.tenant"));
+    check(&emitter).expect("exact, non-null, non-sensitive values are accepted");
+
+    let refused_as = |emitter: &CreateEmitter| {
+        let refused = check(emitter).expect_err("the value is refused");
+        let RegistryError::InvalidConnectorDeclaration { issue, .. } = refused.current_context()
+        else {
+            panic!("a refused value is a declaration refusal: {refused:?}");
+        };
+        issue.clone()
+    };
+
+    let mut wrong_type = kafka_emitter();
+    wrong_type.envelope.timestamp = Some(expression("input.tenant"));
+    assert_eq!(
+        refused_as(&wrong_type),
+        ConnectorDeclarationIssue::EnvelopeValue {
+            site: EnvelopeValueSite::Clause(nervix_models::EnvelopeClauseKind::Timestamp),
+            expected: ParseAsType::Datetime,
+        }
+    );
+
+    let mut sensitive = kafka_emitter();
+    sensitive.envelope.message_id = Some(expression("input.secret"));
+    assert_eq!(
+        refused_as(&sensitive),
+        ConnectorDeclarationIssue::EnvelopeValue {
+            site: EnvelopeValueSite::Clause(nervix_models::EnvelopeClauseKind::MessageId),
+            expected: ParseAsType::String,
+        }
+    );
+
+    let mut nullable = kafka_emitter();
+    nullable.envelope.deduplication_id = Some(expression("input.maybe"));
+    let issue = refused_as(&nullable);
+    assert_eq!(
+        issue.to_string(),
+        "envelope DEDUPLICATION ID requires an exact, non-null, non-sensitive STRING value"
+    );
+
+    // Without a construction the emitter publishes its source records, so nothing is `output`.
+    let mut unconstructed = kafka_emitter();
+    unconstructed.construction = RouteConstruction::default();
+    unconstructed.envelope.reply_to = Some(expression("output.tenant"));
+    assert!(check(&unconstructed).is_err());
+    unconstructed.envelope.reply_to = Some(expression("message.tenant"));
+    check(&unconstructed).expect("message is the source record an emitter publishes as it is");
 }

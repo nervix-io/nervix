@@ -19,7 +19,7 @@ use futures_util::future::{Either, select};
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
     BackupArchiveStart, BackupDownloadFailure, BackupDownloadMessage, BackupDownloadRequest,
-    LeaderRedirect,
+    LeaderRedirect, NodeEndpoints,
     websocket::{CONSOLE_BACKUP_DOWNLOAD_PATH, ClientBackupDownloadWebSocketCodec, WebSocketData},
 };
 use nervix_models::{ArchiveDigest, BackupArchiveSummary, CommandExecutionReference};
@@ -53,6 +53,8 @@ pub(crate) enum DownloadError {
     Interrupted,
     #[error("the node does not retain the archive, and no leader console is known to ask instead")]
     NoLeader,
+    #[error("the node that retains the archive advertises no console to download it from")]
+    HolderUnreachable,
     #[error("the download was sent elsewhere more times than the console follows")]
     RedirectLoop,
     #[error("the server sent download frames out of order")]
@@ -75,6 +77,7 @@ impl DownloadError {
             Self::Refused { failure, .. } => *failure == BackupDownloadFailure::ReadFailed,
             Self::Transport | Self::Stalled | Self::Interrupted => true,
             Self::NoLeader
+            | Self::HolderUnreachable
             | Self::RedirectLoop
             | Self::OutOfOrder
             | Self::InvalidFrame
@@ -157,6 +160,8 @@ pub(crate) enum FrameStep {
     Complete,
     /// The node does not retain the archive and is not the leader.
     Redirect(LeaderRedirect),
+    /// Another node retains the archive.
+    Holder(NodeEndpoints),
 }
 
 impl AttemptStage {
@@ -176,6 +181,9 @@ impl AttemptStage {
             }
             (Self::AwaitingStart, BackupDownloadMessage::NotLeader(redirect)) => {
                 Ok(FrameStep::Redirect(redirect.clone()))
+            }
+            (Self::AwaitingStart, BackupDownloadMessage::Holder(holder)) => {
+                Ok(FrameStep::Holder(holder.clone()))
             }
             (Self::AwaitingStart | Self::Receiving, BackupDownloadMessage::Failed(failed)) => {
                 Err(Report::new(DownloadError::Refused {
@@ -197,7 +205,9 @@ impl AttemptStage {
             )
             | (
                 Self::Receiving,
-                BackupDownloadMessage::Start(_) | BackupDownloadMessage::NotLeader(_),
+                BackupDownloadMessage::Start(_)
+                | BackupDownloadMessage::NotLeader(_)
+                | BackupDownloadMessage::Holder(_),
             ) => Err(Report::new(DownloadError::OutOfOrder)),
         }
     }
@@ -207,7 +217,8 @@ impl AttemptStage {
 pub(crate) struct ArchiveDownload {
     pub(crate) reference: CommandExecutionReference,
     pub(crate) summary: BackupArchiveSummary,
-    /// The console of the node whose session reported the backup, which retains its archive.
+    /// The console of the node whose session reported the backup, where the download starts. That
+    /// node streams the archive when it retains it, or names the node that does.
     pub(crate) base_url: Option<String>,
     pub(crate) auth_token: String,
     /// The name the browser saves the archive under.
@@ -220,6 +231,8 @@ enum AttemptEnd<A> {
     Complete(A),
     /// The download goes on at the leader's console.
     Redirect(LeaderRedirect),
+    /// The download goes on at the console of the node that retains the archive.
+    Holder(NodeEndpoints),
 }
 
 impl ArchiveDownload {
@@ -231,6 +244,10 @@ impl ArchiveDownload {
         progress: impl Fn(u64) + Copy,
     ) -> Result<(), Report<DownloadError>> {
         let mut last_failure = Report::new(DownloadError::RedirectLoop);
+        // The console the download started from, which a download that fails at the archive's
+        // holder asks again: that node names the holder again, or answers why it cannot.
+        let reporting_console = self.base_url.clone();
+        let mut at_holder = false;
         for _ in 0..MAX_DOWNLOAD_ATTEMPTS {
             progress(0);
             let ended = self.attempt(browser, progress).await;
@@ -239,6 +256,7 @@ impl ArchiveDownload {
                 Ok(AttemptEnd::Redirect(redirect)) => match redirect_console(&redirect) {
                     Some(leader) => {
                         self.base_url = Some(leader);
+                        at_holder = false;
                         last_failure = Report::new(DownloadError::RedirectLoop);
                     }
                     // No leader is known yet: wait for an election, then ask again.
@@ -247,9 +265,25 @@ impl ArchiveDownload {
                         browser.wait(RETRY_DELAY).await;
                     }
                 },
+                Ok(AttemptEnd::Holder(holder)) => match holder.web_console_uri {
+                    Some(console) => {
+                        self.base_url = Some(console.to_string());
+                        at_holder = true;
+                        last_failure = Report::new(DownloadError::RedirectLoop);
+                    }
+                    // The holder advertises no console yet: wait for discovery, then ask again.
+                    None => {
+                        last_failure = Report::new(DownloadError::HolderUnreachable);
+                        browser.wait(RETRY_DELAY).await;
+                    }
+                },
                 Err(failure) => {
                     if !failure.current_context().is_retryable() {
                         return Err(failure);
+                    }
+                    if at_holder {
+                        self.base_url.clone_from(&reporting_console);
+                        at_holder = false;
                     }
                     last_failure = failure;
                     browser.wait(RETRY_DELAY).await;
@@ -289,6 +323,7 @@ impl ArchiveDownload {
                 FrameStep::Continue => {}
                 FrameStep::Complete => return Ok(AttemptEnd::Complete(archive)),
                 FrameStep::Redirect(redirect) => return Ok(AttemptEnd::Redirect(redirect)),
+                FrameStep::Holder(holder) => return Ok(AttemptEnd::Holder(holder)),
             }
             let BackupDownloadMessage::Chunk(chunk) = &message else {
                 continue;

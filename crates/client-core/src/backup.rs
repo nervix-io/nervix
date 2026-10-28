@@ -22,7 +22,8 @@ use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use nervix_client_wire::{
     BackupArchiveStart, BackupDownloadFailure, BackupDownloadFrame, BackupDownloadMessage,
-    BackupDownloadRequest, BackupDownloadRequestFrame, EncodedFrame, LeaderRedirect, VerifiedFrame,
+    BackupDownloadRequest, BackupDownloadRequestFrame, EncodedFrame, LeaderRedirect, NodeEndpoints,
+    VerifiedFrame,
     grpc::{ClientBackupDownloadCodec, DOWNLOAD_BACKUP_PATH},
 };
 use nervix_models::{ArchiveDigest, BackupArchiveSummary, CommandExecutionReference};
@@ -32,7 +33,8 @@ use tokio::{
     fs::File,
     io::{AsyncSeekExt as _, AsyncWriteExt as _},
 };
-use tonic::{Request, Status, Streaming, codegen::http::uri::PathAndQuery};
+use tonic::{Request, Status, Streaming, codegen::http::uri::PathAndQuery, transport::Channel};
+use url::Url;
 
 use crate::{
     client::{Client, RecoveryMode, SessionRecovery},
@@ -63,6 +65,10 @@ pub enum BackupDownloadError {
     /// The serving node does not retain the archive, and no leader is known to ask instead.
     #[error("the node does not retain the archive, and no leader is elected to ask instead")]
     NoLeader,
+    /// The node that retains the archive could not be reached: it advertises no session endpoint
+    /// yet, or the connection to it failed.
+    #[error("the node that retains the archive could not be reached")]
+    HolderUnreachable,
     /// The download was redirected more times than the client follows.
     #[error("the download was redirected more times than the client follows")]
     RedirectLoop,
@@ -100,7 +106,7 @@ impl BackupDownloadError {
                     | tonic::Code::DeadlineExceeded
                     | tonic::Code::Unavailable
             ),
-            Self::Stalled | Self::Interrupted => true,
+            Self::Stalled | Self::Interrupted | Self::HolderUnreachable => true,
             Self::Refused { .. }
             | Self::NoLeader
             | Self::RedirectLoop
@@ -125,6 +131,17 @@ enum AttemptEnd {
     Complete,
     /// The serving node does not retain the archive and is not the leader.
     NotLeader(LeaderRedirect),
+    /// Another node retains the archive.
+    Holder(NodeEndpoints),
+}
+
+/// Where a download attempt is sent.
+enum DownloadSource {
+    /// The node the session is connected to.
+    Session,
+    /// The node that retains the archive, as another node named it. The session stays where it
+    /// is: only the download goes there.
+    Holder(Url),
 }
 
 impl Client {
@@ -167,18 +184,29 @@ impl Client {
             Ok(request) => request,
             Err(report) => return Err(report.change_context(BackupDownloadError::EncodeRequest)),
         };
+        let mut source = DownloadSource::Session;
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
             nervix_primitives::task::consume_budget().await;
             file.restart().await?;
             let ended = self
-                .download_attempt(request.clone(), summary, &mut file)
+                .download_attempt(&source, request.clone(), summary, &mut file)
                 .await;
             let failure = match ended {
                 Ok(AttemptEnd::Complete) => return file.persist(&destination).await,
                 Ok(AttemptEnd::NotLeader(redirect)) => {
+                    source = DownloadSource::Session;
                     self.follow_download_redirect(&redirect, attempt).await?;
                     continue;
                 }
+                Ok(AttemptEnd::Holder(holder)) => match holder.grpc_uri {
+                    Some(server) => {
+                        source = DownloadSource::Holder(server);
+                        continue;
+                    }
+                    // The holder advertises no session endpoint yet. Asking again once discovery
+                    // may have established it names the holder again, or says why it cannot.
+                    None => Report::new(BackupDownloadError::HolderUnreachable),
+                },
                 Err(failure) => failure,
             };
             // Once the archive's retry validity ends the server refuses it as expired, which is
@@ -187,6 +215,16 @@ impl Client {
                 failure.current_context().is_retryable() && Self::await_retry(attempt).await;
             if !retry_permitted {
                 return Err(failure);
+            }
+            // A download that failed at the holder starts again from the session's node, which
+            // names the holder again or answers why it no longer can. The session itself did not
+            // fail.
+            if let DownloadSource::Holder(_) = source {
+                source = DownloadSource::Session;
+                continue;
+            }
+            if let BackupDownloadError::HolderUnreachable = failure.current_context() {
+                continue;
             }
             let recovery = self.recover_session(RecoveryMode::Replace).await;
             match recovery {
@@ -218,20 +256,23 @@ impl Client {
             .change_context(BackupDownloadError::SessionLost)
     }
 
-    /// Downloads the archive once, from the server the session is connected to, into `file`.
+    /// Downloads the archive once, from `source`, into `file`.
     async fn download_attempt(
         &self,
+        source: &DownloadSource,
         request: EncodedFrame<BackupDownloadRequestFrame>,
         summary: &BackupArchiveSummary,
         file: &mut DownloadFile,
     ) -> Result<AttemptEnd, Report<BackupDownloadError>> {
-        let mut frames = self.open_download(request).await?;
+        let channel = self.download_channel(source).await?;
+        let mut frames = self.open_download(channel, request).await?;
         let first = self.next_download_frame(&mut frames).await?;
         let start = match first {
             BackupDownloadMessage::Start(start) => start,
             BackupDownloadMessage::NotLeader(redirect) => {
                 return Ok(AttemptEnd::NotLeader(redirect));
             }
+            BackupDownloadMessage::Holder(holder) => return Ok(AttemptEnd::Holder(holder)),
             BackupDownloadMessage::Failed(failed) => {
                 return Err(Report::new(BackupDownloadError::Refused {
                     failure: failed.failure,
@@ -259,7 +300,9 @@ impl Client {
                         message: failed.message,
                     }));
                 }
-                BackupDownloadMessage::Start(_) | BackupDownloadMessage::NotLeader(_) => {
+                BackupDownloadMessage::Start(_)
+                | BackupDownloadMessage::NotLeader(_)
+                | BackupDownloadMessage::Holder(_) => {
                     return Err(Report::new(BackupDownloadError::OutOfOrder));
                 }
             }
@@ -270,12 +313,28 @@ impl Client {
         Ok(AttemptEnd::Complete)
     }
 
-    /// Opens a download call on the session's current channel.
+    /// The channel a download attempt runs on: the session's, or a connection of its own to the
+    /// node that retains the archive.
+    async fn download_channel(
+        &self,
+        source: &DownloadSource,
+    ) -> Result<Channel, Report<BackupDownloadError>> {
+        let server = match source {
+            DownloadSource::Session => return Ok(self.current_channel().await),
+            DownloadSource::Holder(server) => server,
+        };
+        match self.inner.connector.connect(server).await {
+            Ok(channel) => Ok(channel),
+            Err(report) => Err(report.change_context(BackupDownloadError::HolderUnreachable)),
+        }
+    }
+
+    /// Opens a download call on `channel`.
     async fn open_download(
         &self,
+        channel: Channel,
         request: EncodedFrame<BackupDownloadRequestFrame>,
     ) -> Result<Streaming<VerifiedFrame<BackupDownloadFrame>>, Report<BackupDownloadError>> {
-        let channel = self.current_channel().await;
         let mut client = tonic::client::Grpc::new(channel)
             .max_decoding_message_size(SESSION_LIMITS.frame_bytes())
             .max_encoding_message_size(SESSION_LIMITS.frame_bytes());

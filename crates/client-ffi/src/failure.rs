@@ -201,6 +201,7 @@ impl Failure {
             | BackupDownloadError::Stalled
             | BackupDownloadError::Interrupted
             | BackupDownloadError::NoLeader
+            | BackupDownloadError::HolderUnreachable
             | BackupDownloadError::RedirectLoop
             | BackupDownloadError::SessionLost => FailureKind::Transport,
             BackupDownloadError::OutOfOrder

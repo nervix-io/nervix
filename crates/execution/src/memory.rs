@@ -357,6 +357,50 @@ pub struct BufferLimitExceeded {
     pub required: u64,
 }
 
+/// Why a budgeted buffer did not take more bytes.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum BufferGrowthError {
+    /// The bytes would take the buffer past the limit of the operation it belongs to.
+    #[error(transparent)]
+    LimitExceeded(BufferLimitExceeded),
+    /// The buffer's length would not fit an address.
+    #[error("budgeted buffer length exceeds an addressable size")]
+    Unaddressable,
+    /// The buffer's class did not back the growth. The class's [`AdmissionError`] is the cause
+    /// beneath this context.
+    #[error("the budgeted buffer's memory class did not back its growth")]
+    NotCharged,
+}
+
+/// Why one charge for more bytes failed, kept as the cause each caller's outcome is built from.
+enum GrowthRefusal {
+    Limit(BufferLimitExceeded),
+    Unaddressable,
+    Admission(Report<AdmissionError>),
+}
+
+impl GrowthRefusal {
+    /// The refusal as the I/O error a writer through [`io::Write`] reports.
+    fn into_io_error(self) -> io::Error {
+        match self {
+            Self::Limit(limit) => io::Error::other(limit),
+            Self::Unaddressable => {
+                io::Error::other("budgeted buffer length exceeds an addressable size")
+            }
+            Self::Admission(refusal) => io::Error::other(refusal),
+        }
+    }
+
+    /// The refusal as a typed report, with the class's own refusal beneath when it made one.
+    fn into_report(self) -> Report<BufferGrowthError> {
+        match self {
+            Self::Limit(limit) => Report::new(BufferGrowthError::LimitExceeded(limit)),
+            Self::Unaddressable => Report::new(BufferGrowthError::Unaddressable),
+            Self::Admission(refusal) => refusal.change_context(BufferGrowthError::NotCharged),
+        }
+    }
+}
+
 /// A byte buffer that never grows past what its class has been charged for. Serializers that write
 /// incrementally build into it, so an output larger than its budget fails at the boundary instead
 /// of after the allocation has already happened.
@@ -422,14 +466,31 @@ impl BudgetedBuffer {
         Ok(&mut self.bytes[start..])
     }
 
+    /// Append `bytes`, charging the growth they need to room the buffer's class has free.
+    ///
+    /// Writing through [`io::Write`] reports a refusal as an I/O error. This reports it typed, so
+    /// a reader can tell a class without free room, an [`AdmissionError`] beneath
+    /// [`BufferGrowthError::NotCharged`], from a buffer at its operation's limit.
+    pub fn try_extend_from_slice(&mut self, bytes: &[u8]) -> Result<(), Report<BufferGrowthError>> {
+        self.try_charge(bytes.len())
+            .map_err(GrowthRefusal::into_report)?;
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+
     fn charge(&mut self, additional: usize) -> io::Result<()> {
-        let written = u64::try_from(self.bytes.len()).map_err(io::Error::other)?;
-        let additional = u64::try_from(additional).map_err(io::Error::other)?;
-        let target = written.checked_add(additional).ok_or_else(|| {
-            io::Error::other("budgeted buffer length exceeds an addressable size")
-        })?;
+        self.try_charge(additional)
+            .map_err(GrowthRefusal::into_io_error)
+    }
+
+    fn try_charge(&mut self, additional: usize) -> Result<(), GrowthRefusal> {
+        let written: u64 = self.bytes.len().arch_into();
+        let additional: u64 = additional.arch_into();
+        let target = written
+            .checked_add(additional)
+            .ok_or(GrowthRefusal::Unaddressable)?;
         if target > self.limit {
-            return Err(io::Error::other(BufferLimitExceeded {
+            return Err(GrowthRefusal::Limit(BufferLimitExceeded {
                 limit: self.limit,
                 required: target,
             }));
@@ -452,12 +513,12 @@ impl BudgetedBuffer {
         let charged = rounded.max(doubled).min(self.limit).max(target);
         self.reservation
             .grow_to(charged)
-            .map_err(io::Error::other)?;
+            .map_err(GrowthRefusal::Admission)?;
         let reserve: usize = self.reservation.bytes.arch_into();
         if self.bytes.capacity() < reserve {
-            let extra = reserve
-                .checked_sub(self.bytes.len())
-                .ok_or_else(|| io::Error::other("charged length is below the written length"))?;
+            let extra = reserve.checked_sub(self.bytes.len()).verified(
+                "the charge just grew to at least the target, which covers the written bytes",
+            );
             self.bytes.reserve_exact(extra);
         }
         Ok(())

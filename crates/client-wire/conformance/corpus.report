@@ -4,6 +4,8 @@ FRAME backup_download_complete.nxbd
 DOWNLOAD COMPLETE
 FRAME backup_download_failed.nxbd
 DOWNLOAD FAILED failure=NotRetained message=str:6e6f20617263686976652069732072657461696e656420756e6465722074686973207265666572656e6365
+FRAME backup_download_holder.nxbd
+DOWNLOAD HOLDER node=node-2 grpc=https://node-2.cluster.local:7443/ console=http://node-2.cluster.local:17420/console/
 FRAME backup_download_redirect.nxbd
 DOWNLOAD LEADER node=node-2 grpc=https://node-2.cluster.local:7443/ console=http://node-2.cluster.local:17420/console/
 FRAME backup_download_request.nxbq

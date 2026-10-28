@@ -75,8 +75,8 @@ pub use emitter::{
     EmitterRowRequest, EmitterStagedCommit, EmitterStagingDirectory, EmitterStartResult,
     EmitterTransientErrorStatus, EmitterWriteError, EmitterWriteResult, HttpRequestEmitter,
     MappedEmitterCarrier, MappedEmitterMember, MappedEmitterRows, PerRecordOutcome,
-    PerRecordOutcomeParts, PreparedRowRequest, RecordEmitter, RejectedEmitterMember, RowEmitter,
-    RowRequestEmitter, RowRequestPreparation,
+    PerRecordOutcomeParts, PreparedRowRequest, PropertyValue, RecordEmitter, RecordEnvelope,
+    RecordProperty, RejectedEmitterMember, RowEmitter, RowRequestEmitter, RowRequestPreparation,
 };
 pub use http_client::{HttpClientConfig, HttpClientConfigError};
 pub use ingest_metadata::{

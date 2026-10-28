@@ -136,11 +136,27 @@ pub struct CommandExecutionResult {
     pub statements: Vec<CommandExecutionStatementResult>,
     pub transaction: Option<CommandExecutionTransactionStatus>,
     pub transaction_admission: Option<TransactionOperationAdmission>,
-    /// The archive a completed backup assembled. Absent for every other command.
-    pub backup: Option<BackupArchiveSummary>,
+    /// The archive a completed backup assembled, and the node process that retains it. Absent for
+    /// every other command.
+    pub backup: Option<RecordedBackupArchive>,
     /// What a restore applied, and the step it failed at if one failed. Absent for every other
     /// command, and for a restore refused before it applied anything.
     pub restore: Option<RestoreReport>,
+}
+
+/// The archive a completed backup assembled, as its outcome records it.
+///
+/// The archive stays on the node that assembled it and is never replicated. The outcome names that
+/// node's process incarnation, so a node that does not retain the archive can send its download
+/// there, and can tell from the incarnation whether the process that retained it is still running.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct RecordedBackupArchive {
+    pub summary: BackupArchiveSummary,
+    /// The process that assembled the archive and retains it until a download collects it or the
+    /// backup's retry validity ends.
+    pub holder: ClusterNodeIdentity,
 }
 
 /// The preview a refused commit expected, beside the one that now describes the transaction.

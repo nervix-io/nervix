@@ -13,6 +13,7 @@ Feature: Web console visual client, vhost and endpoint creation
       CREATE RELAY visual_inbox SCHEMA visual_payload UNBRANCHED;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='vhost']" is clicked
@@ -61,6 +62,7 @@ Feature: Web console visual client, vhost and endpoint creation
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='client']" is clicked
@@ -114,6 +116,7 @@ Feature: Web console visual client, vhost and endpoint creation
       UPLOAD RESOURCE visual_client_bundle VERSION '{{client_mount}}';
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='client']" is clicked
@@ -152,6 +155,7 @@ Feature: Web console visual client, vhost and endpoint creation
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='client']" is clicked
@@ -187,6 +191,7 @@ Feature: Web console visual client, vhost and endpoint creation
       UPLOAD RESOURCE visual_tls_bundle VERSION '{{visual_tls}}';
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='vhost']" is clicked
@@ -219,6 +224,7 @@ Feature: Web console visual client, vhost and endpoint creation
       CREATE VHOST visual_edge ws-{{test_id}}.example.com;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='client']" is clicked
@@ -262,6 +268,7 @@ Feature: Web console visual client, vhost and endpoint creation
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -304,6 +311,7 @@ Feature: Web console visual client, vhost and endpoint creation
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     When the web console is opened on node "{{old_leader}}"
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='endpoint']" is clicked

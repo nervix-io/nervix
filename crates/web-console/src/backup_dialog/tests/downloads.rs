@@ -8,7 +8,7 @@ use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     BackupArchiveStart, BackupDownloadFailed, BackupDownloadFailure, BackupDownloadFrame,
-    BackupDownloadMessage, BackupDownloadRequest, EncodedFrame, LeaderEndpoints, LeaderRedirect,
+    BackupDownloadMessage, BackupDownloadRequest, EncodedFrame, LeaderRedirect, NodeEndpoints,
     websocket::{ServerBackupDownloadWebSocketCodec, WebSocketData},
 };
 use nervix_models::ClusterNodeName;
@@ -29,6 +29,7 @@ use crate::{
 
 const CONSOLE: &str = "http://127.0.0.1:47420";
 const LEADER_CONSOLE: &str = "http://127.0.0.1:47421";
+const HOLDER_CONSOLE: &str = "http://127.0.0.1:47422";
 
 /// The binary message that carries `frame` from the server.
 fn sent_by_server(frame: EncodedFrame<BackupDownloadFrame>) -> Received {
@@ -75,7 +76,7 @@ fn refused(failure: BackupDownloadFailure) -> Received {
 
 /// A redirect to the leader whose console is `leader_console`, or to no known leader.
 fn redirected(leader_console: Option<&str>) -> Received {
-    let leader = leader_console.map(|console| LeaderEndpoints {
+    let leader = leader_console.map(|console| NodeEndpoints {
         node: ClusterNodeName::parse("node-2").assured("the test node name is valid"),
         grpc_uri: None,
         web_console_uri: Some(url::Url::parse(console).assured("the test URL parses")),
@@ -84,6 +85,21 @@ fn redirected(leader_console: Option<&str>) -> Received {
     sent_by_server(
         BackupDownloadMessage::encode_redirect(&redirect, &SESSION_LIMITS)
             .assured("a redirect fits a frame"),
+    )
+}
+
+/// The answer that sends a download to the node retaining the archive, whose console is
+/// `holder_console`, or which advertises no console.
+fn sent_to_holder(holder_console: Option<&str>) -> Received {
+    let holder = NodeEndpoints {
+        node: ClusterNodeName::parse("node-3").assured("the test node name is valid"),
+        grpc_uri: None,
+        web_console_uri: holder_console
+            .map(|console| url::Url::parse(console).assured("the test URL parses")),
+    };
+    sent_by_server(
+        BackupDownloadMessage::encode_holder(&holder, &SESSION_LIMITS)
+            .assured("a holder answer fits a frame"),
     )
 }
 
@@ -274,4 +290,64 @@ fn a_download_gives_up_on_redirects_that_never_reach_an_archive() {
     let ended = run(download(), &browser);
     assert_eq!(*ended.failure(), DownloadError::Transport);
     assert_eq!(browser.observed().opened.len(), MAX_DOWNLOAD_ATTEMPTS);
+}
+
+#[test]
+fn a_download_goes_on_at_the_console_of_the_node_that_retains_the_archive() {
+    let holder = Script::answering([sent_to_holder(Some(HOLDER_CONSOLE))]);
+    let browser = InMemoryBrowser::with_scripts([holder, whole_archive()]);
+    let ended = run(download(), &browser);
+    ended.result.assured("the download completes at the holder");
+
+    let observed = browser.observed();
+    assert_eq!(observed.saved, Some(saved_archive()));
+    assert_eq!(
+        observed.opened,
+        vec![download_address(CONSOLE), download_address(HOLDER_CONSOLE)]
+    );
+    assert!(
+        observed.waits.is_empty(),
+        "the holder answer is followed at once"
+    );
+}
+
+#[test]
+fn a_download_that_fails_at_the_holder_asks_the_reporting_console_again() {
+    let holder = Script::answering([sent_to_holder(Some(HOLDER_CONSOLE))]);
+    let interrupted = Script::answering([start(), chunk(&ARCHIVE[..10]), Received::Ended]);
+    let holder_again = Script::answering([sent_to_holder(Some(HOLDER_CONSOLE))]);
+    let browser =
+        InMemoryBrowser::with_scripts([holder, interrupted, holder_again, whole_archive()]);
+    let ended = run(download(), &browser);
+    ended.result.assured("the download completes at the holder");
+
+    let observed = browser.observed();
+    assert_eq!(
+        observed.opened,
+        vec![
+            download_address(CONSOLE),
+            download_address(HOLDER_CONSOLE),
+            download_address(CONSOLE),
+            download_address(HOLDER_CONSOLE),
+        ],
+        "the console the download started from names the holder again"
+    );
+    assert_eq!(observed.waits, vec![RETRY_DELAY]);
+}
+
+#[test]
+fn a_holder_without_a_console_is_asked_for_again_until_the_attempts_end() {
+    let holders = (0..MAX_DOWNLOAD_ATTEMPTS).map(|_| Script::answering([sent_to_holder(None)]));
+    let browser = InMemoryBrowser::with_scripts(holders);
+    let ended = run(download(), &browser);
+    assert_eq!(*ended.failure(), DownloadError::HolderUnreachable);
+    let observed = browser.observed();
+    assert_eq!(observed.waits.len(), MAX_DOWNLOAD_ATTEMPTS);
+    assert!(
+        observed
+            .opened
+            .iter()
+            .all(|address| address == &download_address(CONSOLE)),
+        "a holder without a console leaves the download where it started"
+    );
 }

@@ -123,8 +123,20 @@ delegated configuration values through JSON/archive equality and public inspecti
 
 ## Client Configuration And Inspection
 
-`client-config-schema` includes omitted ClickHouse connection defaults and explicit typed TCP and
-pool intervals. JSON and archive equality preserve the authored entries; the effective-default
-projection preserves those entries and is idempotent, and public inspection remains idempotent.
+`client-config-schema` includes omitted ClickHouse connection defaults and Redis command-pool
+lifetimes, and explicit typed TCP and pool intervals and lifetimes. JSON and archive equality
+preserve the authored entries; the effective-default projection preserves those entries and is
+idempotent, and public inspection remains idempotent.
 `models-archived-models` includes the typed `DESCRIBE CLIENT` statement and its client identity;
 the Plexus statement targets check its canonical text through both composed statement readers.
+
+## Emitter Envelope Coverage
+
+The vocabulary domain of the emitter Model generator draws envelopes of every clause kind, with
+durations, expressions and properties of any name in written order. `models-archived-models`,
+`registry-archived-models`, `registry-stored-models`, `registry-stored-models-corruption` and the
+consensus Model targets carry them through their Model storage boundaries with the complete Model.
+`models-emitter-envelopes` compares the envelope alone through JSON and the archive, and
+`plexus-emitter-envelopes` reads its canonical section back through the shared envelope grammar.
+The Plexus domain draws only what an entity declares, so canonical statement round trips carry an
+envelope once a connector entity declares a clause.

@@ -1630,6 +1630,9 @@ A body that ends early or overruns its declaration admits nothing and leaves its
 it can be sent again. Once the complete body is admitted, installation belongs to the cluster: it
 continues when the uploading connection closes, a new leader resumes it, and `ResourceInstalled`
 arrives only after every live node incarnation has verified and installed the same digest. If
+one incarnation has no local copy and has not discovered a live source yet, its replica remains
+pending and the admitted upload keeps waiting. A real installation failure retains its diagnostic
+cause in the terminal outcome. If
 leadership moves while the upload installs, the reply is a `LeaderRedirect`, and repeating the same
 identity and archive on the new leader recovers the recorded outcome. A leader that cannot confirm
 it still leads refuses the upload's writes the same way, with a redirect that names no leader. When
@@ -1671,18 +1674,30 @@ a `BackupArchiveComplete`. Every other answer is one frame:
 | `BackupDownloadFailed` with `InvalidRequest` | The request did not decode. |
 | `BackupDownloadFailed` with `Expired` | The retry validity of the reference has ended. |
 | `BackupDownloadFailed` with `NotOwner` | Another user ran the backup. |
-| `LeaderRedirect` | The node does not retain the archive and does not lead. |
-| `BackupDownloadFailed` with `NotRetained` | The leader does not retain the archive: the backup is still assembling it, the command assembled no archive, a download already collected it, the node that assembled it restarted, or the reference names no backup. |
+| `BackupArchiveHolder` | The backup's recorded outcome names another node as the one retaining the archive, and that node's process is live. It carries the node's endpoints. |
+| `LeaderRedirect` | The node does not retain the archive, has not applied the backup's recorded outcome, and does not lead. |
+| `BackupDownloadFailed` with `NotRetained` | No live node retains the archive: the backup is still assembling it, the command assembled no archive, a download already collected it, the node that assembled it restarted or left, or the reference names no backup. |
 | `BackupDownloadFailed` with `ReadFailed` | The node could not read the archive it retains; the archive stays retained. |
 
 An archive is retained on the node that assembled it until the first download whose completion
 frame was queued collects it, or until the retry validity of the backup's reference ends. Any node
 reads that end from the reference's UUIDv7 time, so an expired reference is refused the same way
-before and after its execution record is reclaimed. A node that does not retain the archive sends
-the client to the leader, and the leader, which then does not retain it either, answers from the
-recorded outcome. If leadership moves while a backup runs, the new leader resumes the applying
-command and assembles an archive of its own, and the archive the former leader assembled is never
-offered again.
+before and after its execution record is reclaimed. The recorded outcome names the process
+incarnation of the node that retains the archive, and a node streams an archive only when the
+outcome it applied names it. Any other node that applied the outcome sends the client to the named
+node with `BackupArchiveHolder` while that process is live, and refuses with `NotRetained` once it
+restarted or left. The named node refuses with `NotRetained` itself once a download collected the
+archive, so a download is never sent back and forth. A node that has not applied the outcome sends
+the client to the leader, which answers from it. A command's outcome reaches a client only once
+every live node applied it, so the node a client hears the outcome from can always answer.
+
+If leadership moves while a backup runs, the new leader resumes the applying command and assembles
+an archive of its own, while the former leader's run may still finish. The run that records its
+outcome first is the backup's outcome, wherever it assembled its archive. A run whose outcome the
+cluster refuses to record releases the archive it assembled. A run that lost leadership while
+recording keeps its archive, because its outcome may have been recorded after all; once another
+outcome is recorded, its node releases that archive when a download asks for it. Neither archive is
+ever offered.
 
 Each running domain has its own quiesce timeout; the serial capture does not imply a total
 command timeout. Native clients bound the overall backup command wait with
@@ -1702,9 +1717,13 @@ Rust client bounds the wait for each frame instead. A download that ends early r
 hold on the archive, which stays retained for the client to download again. The protocol has no
 resume offset: a client starts a failed download again from the first byte, and accepts the archive
 only when the completion frame has arrived and every byte matches the summary's size and digest.
+The Rust client follows a `BackupArchiveHolder` over a connection of its own to the named node, and
+its session stays where it is. A download that fails there starts again at the node the session is
+on, which names the holder again or answers why it cannot.
 
 The web console sends `BACKUP` on its session and downloads the archive over a console WebSocket of
-its own, from the console of the node whose session reported the backup. It verifies the archive
+its own, starting at the console of the node whose session reported the backup and following a
+`BackupArchiveHolder` to the console of the node it names. It verifies the archive
 exactly as the Rust client does, and hands it to the browser as a download only once it is
 complete and matches the summary. The browser tab records the backup's execution reference, query
 and domain until the archive is downloaded, so a reloaded page repeats the command under the same

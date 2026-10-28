@@ -80,16 +80,16 @@ pub(in crate::application) enum OutcomeUnknownCause {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::application) struct LeaderRedirect {
     /// The current leader, or `None` while no leader is known, for example during an election.
-    pub(in crate::application) leader: Option<LeaderLocation>,
+    pub(in crate::application) leader: Option<NodeLocation>,
 }
 
-/// The cluster leader and the endpoints it advertises to clients.
+/// A cluster node and the endpoints it advertises to clients.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::application) struct LeaderLocation {
+pub(in crate::application) struct NodeLocation {
     pub(in crate::application) node: ClusterNodeName,
-    /// Absent while discovery has not established the leader's session endpoint.
+    /// Absent while discovery has not established the node's session endpoint.
     pub(in crate::application) grpc_url: Option<NodeServiceUrl>,
-    /// Absent while discovery has not established the leader's console endpoint.
+    /// Absent while discovery has not established the node's console endpoint.
     pub(in crate::application) web_console_url: Option<NodeServiceUrl>,
 }
 

@@ -23,16 +23,13 @@
 //! blocking permission lists it for the file that names it, with that owner's reason and bound. A
 //! Shuttle build does not provide it.
 //!
-//! [`spawn_cpu`] is the mechanism that runs a CPU job the bounded executor admitted. It is
-//! [`spawn_blocking`] in every mode but Turmoil's, where the job runs as one task of the simulated
-//! host's scheduler, so its synchronous body is a single scheduling step of the simulation instead
-//! of a thread outside it. `just validate-primitive-boundary` rejects it outside the executor's
-//! worker pools, so it gives no caller a way around admission either.
+//! [`spawn_cpu`] runs an admitted CPU worker. Each callback runs one bounded job and says whether
+//! another is ready. Ordinary and Shuttle workers drain on the blocking pool; Turmoil workers
+//! yield on the simulated scheduler between jobs. The executor owns admission and termination.
+//! `just validate-primitive-boundary` confines this mechanism to the executor's worker pools.
 
 #[cfg(feature = "shuttle")]
 pub use shuttle_tokio::task::coop::unconstrained;
-#[cfg(feature = "shuttle")]
-pub use shuttle_tokio::task::spawn_blocking as spawn_cpu;
 #[cfg(feature = "shuttle")]
 pub use shuttle_tokio::task::{
     AbortHandle, JoinError, JoinHandle, JoinSet, consume_budget, spawn, spawn_blocking, yield_now,
@@ -41,8 +38,6 @@ pub use shuttle_tokio::task::{
 pub use shuttle_tokio_util::task::TaskTracker;
 #[cfg(not(feature = "shuttle"))]
 pub use tokio::task::coop::unconstrained;
-#[cfg(not(any(feature = "shuttle", feature = "turmoil")))]
-pub use tokio::task::spawn_blocking as spawn_cpu;
 #[cfg(not(feature = "shuttle"))]
 pub use tokio::task::{
     AbortHandle, JoinError, JoinHandle, JoinSet, block_in_place, consume_budget, spawn,
@@ -90,16 +85,27 @@ impl<T> std::future::Future for AbortOnDropHandle<T> {
     }
 }
 
-/// Run one CPU job the bounded executor admitted as a task of the simulated host's scheduler.
+/// Run the bounded executor's CPU worker, calling `run_next` once per admitted job until it
+/// returns false. The callback owns the queue's empty-to-idle transition.
 ///
-/// The job's synchronous body is one scheduling step of the simulation: Turmoil can order the tasks
-/// around it, but nothing interleaves inside it, and it never runs on a thread outside the
-/// simulation, whose completion the simulation's clock could not order.
+/// Ordinary and Shuttle builds retain one blocking-pool dispatch for the worker's whole backlog.
+/// Turmoil keeps each callback on the simulated host and yields between callbacks, so each bounded
+/// job remains a separate simulation step. No worker thread waits for more work after it is idle.
+#[cfg(not(feature = "turmoil"))]
+pub fn spawn_cpu(mut run_next: impl FnMut() -> bool + Send + 'static) -> JoinHandle<()> {
+    spawn_blocking(move || while run_next() {})
+}
+
+/// Run an admitted CPU worker on the simulated host, yielding between its bounded jobs.
 #[cfg(all(feature = "turmoil", not(feature = "shuttle")))]
-pub fn spawn_cpu<F, R>(job: F) -> JoinHandle<R>
-where
-    F: FnOnce() -> R + Send + 'static,
-    R: Send + 'static,
-{
-    spawn(async move { job() })
+pub fn spawn_cpu(mut run_next: impl FnMut() -> bool + Send + 'static) -> JoinHandle<()> {
+    spawn(async move {
+        loop {
+            consume_budget().await;
+            if !run_next() {
+                break;
+            }
+            yield_now().await;
+        }
+    })
 }

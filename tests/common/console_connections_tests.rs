@@ -15,8 +15,8 @@ use std::num::NonZeroU64;
 
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
-    BackupDownloadMessage, CommandDisposition, CommandOutcome, LeaderEndpoints, LeaderRedirect,
-    Leadership, LeadershipObserved, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery,
+    BackupDownloadMessage, CommandDisposition, CommandOutcome, LeaderRedirect, Leadership,
+    LeadershipObserved, NodeEndpoints, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery,
     RequestId, RestoreDisposition, RestoreReply, RestoreUploadFailure, ServerNotice,
     SessionEndReason, SessionEnding, SessionLimits,
     websocket::{
@@ -68,8 +68,8 @@ fn frame(received: u64, bytes: Vec<u8>) -> Value {
 }
 
 /// The leader whose node advertises `web_console`.
-fn leader_advertising(web_console: Url) -> LeaderEndpoints {
-    LeaderEndpoints {
+fn leader_advertising(web_console: Url) -> NodeEndpoints {
+    NodeEndpoints {
         node: ClusterNodeName::parse("node-leader").assured("a literal node name"),
         grpc_uri: None,
         web_console_uri: Some(web_console),
@@ -78,7 +78,7 @@ fn leader_advertising(web_console: Url) -> LeaderEndpoints {
 
 /// The leader `console` as a node that does not lead names it: by the web console a node
 /// advertises, under the scheme it serves its pages at.
-fn leader_at(console: &str) -> LeaderEndpoints {
+fn leader_at(console: &str) -> NodeEndpoints {
     let web_console = Url::parse(&console.replace("ws://", "http://"))
         .assured("the test names consoles by literal WebSocket origins");
     leader_advertising(web_console)

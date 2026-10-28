@@ -1238,6 +1238,10 @@ fn client_errors_are_classified_and_keep_their_causes() {
             FailureKind::Rejected,
         ),
         (BackupDownloadError::Stalled, FailureKind::Transport),
+        (
+            BackupDownloadError::HolderUnreachable,
+            FailureKind::Transport,
+        ),
         (BackupDownloadError::Mismatch, FailureKind::Protocol),
         (
             BackupDownloadError::Write {

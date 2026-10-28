@@ -141,6 +141,15 @@ impl<A> RetainedBackups<A> {
         drop(replaced);
     }
 
+    /// Releases the archive retained under `reference`, which no download may take: the backup's
+    /// recorded outcome names another node's archive, or the cluster refused to record the outcome
+    /// of the run that assembled it. A download already streaming it keeps it until it ends.
+    pub(in crate::application) fn release(&self, reference: &CommandExecutionReference) {
+        let released = self.inner.archives.lock().remove(reference);
+        // The released archive is dropped here, outside the lock, unless a download holds it.
+        drop(released);
+    }
+
     /// Opens the archive retained under `reference` for a download by `user` at `now`.
     pub(in crate::application) fn open(
         &self,

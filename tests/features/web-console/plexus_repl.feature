@@ -309,6 +309,7 @@ Feature: Web console Plexus REPL
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     When the web console is opened on node "{{old_leader}}"
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"

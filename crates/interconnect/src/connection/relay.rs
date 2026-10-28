@@ -555,7 +555,10 @@ impl TransportState {
         body: RecvStream,
         respond: server::SendResponse<Bytes>,
     ) -> Result<(), Report<TransportError>> {
-        let encoded = read_body(
+        // A full relay budget is answered with the capacity refusal the sender holds its delivery
+        // back on. Reading or decoding the request must therefore not wait on that same budget:
+        // both take only the room it has free.
+        let encoded = read_body_in_free_room(
             &self.executor,
             MemoryClass::Relay,
             self.executor.limits().relay_encoded_bytes.as_u64(),
@@ -563,14 +566,26 @@ impl TransportState {
             body,
         )
         .await?;
-        let (grant, metadata_memory) = wire::decode_rkyv::<RelayGrantRequest>(
+        let wire::FreeRoom::Taken(encoded) = encoded else {
+            debug!("relay grant refused: the relay budget has no room to read its request");
+            return self
+                .refuse_relay_grant(respond, RelayGrantRefusal::Memory)
+                .await;
+        };
+        let decoded = wire::decode_rkyv_in_free_room::<RelayGrantRequest>(
             &self.executor,
             MemoryClass::Relay,
             CpuClass::Data,
             encoded,
         )
-        .await?
-        .into_parts();
+        .await?;
+        let wire::FreeRoom::Taken(decoded) = decoded else {
+            debug!("relay grant refused: the relay budget has no room to decode its request");
+            return self
+                .refuse_relay_grant(respond, RelayGrantRefusal::Memory)
+                .await;
+        };
+        let (grant, metadata_memory) = decoded.into_parts();
         if grant.sender_epoch != peer_epoch {
             return self
                 .refuse_relay_grant(respond, RelayGrantRefusal::SenderEpoch)

@@ -17,6 +17,7 @@
 )]
 
 use error_stack::ResultExt as _;
+use nervix_connector::RecordEnvelope;
 
 use super::*;
 
@@ -83,6 +84,8 @@ pub(super) struct EmitterPublishBatch {
     headers: Option<Vec<EmitterHeaders>>,
     /// The ordering group of every row, absent when the emitter declares none.
     ordering_groups: Option<OrderingGroups>,
+    /// The envelope of every row, absent when the emitter writes none.
+    envelopes: Option<RowEnvelopes>,
     /// The request every row was admitted with, present only for an emitter that publishes through
     /// an HTTP emitter.
     http_requests: Option<AdmittedHttpRequests>,
@@ -144,6 +147,7 @@ impl EmitterPublishBatch {
             execution_now,
             headers: None,
             ordering_groups: None,
+            envelopes: None,
             http_requests: None,
             rows: vec![BufferedRow::Pending; row_count],
         }
@@ -170,6 +174,7 @@ impl EmitterPublishBatch {
             execution_now,
             headers,
             ordering_groups: None,
+            envelopes: None,
             http_requests: None,
             rows: vec![BufferedRow::Pending; row_count],
         })
@@ -203,6 +208,40 @@ impl EmitterPublishBatch {
         }
         self.ordering_groups = Some(groups);
         Ok(self)
+    }
+
+    /// This batch with the envelope `envelope` evaluates for each of its rows, reading `input` as
+    /// the source records of its rows.
+    ///
+    /// Fails only when the envelope cannot be evaluated over the batch at all. A row whose own
+    /// envelope cannot be evaluated keeps its reason, and the emitter rejects it when it publishes.
+    pub(super) async fn with_evaluated_envelopes(
+        mut self,
+        envelope: &CompiledEnvelope,
+        executor: &Executor,
+        input: EnvelopeInput<'_>,
+        side_inputs: &HashMap<String, RuntimeValue>,
+        execution_now: Timestamp,
+    ) -> Result<Self, PlannedGeneralFailure> {
+        let envelopes = envelope
+            .evaluate(executor, &mut self.batch, input, side_inputs, execution_now)
+            .await?;
+        self.envelopes = Some(envelopes);
+        Ok(self)
+    }
+
+    /// This batch with `envelopes` as the envelope of each of its rows.
+    #[cfg(test)]
+    pub(super) fn with_envelopes(mut self, envelopes: RowEnvelopes) -> Self {
+        if let Some(envelope_count) = envelopes.row_count() {
+            assert_eq!(
+                envelope_count,
+                self.batch.batch.batch().num_rows(),
+                "a test gives every row of the batch one envelope"
+            );
+        }
+        self.envelopes = Some(envelopes);
+        self
     }
 
     /// This batch with the request each of its rows was admitted with.
@@ -279,6 +318,23 @@ impl EmitterPublishBatch {
         }
     }
 
+    /// The envelope row `row` is published with, absent when the emitter writes none, or why the
+    /// row has none. The row shares it with this batch rather than copying it.
+    pub(super) fn envelope(
+        &self,
+        row: usize,
+    ) -> EmitterRuntimeResult<Result<Option<Arc<RecordEnvelope>>, EnvelopeError>> {
+        let Some(envelopes) = &self.envelopes else {
+            return Ok(Ok(None));
+        };
+        match envelopes.envelope(row) {
+            Some(Ok(envelope)) => Ok(Ok(Some(Arc::clone(envelope)))),
+            Some(Err(failure)) => Ok(Err(failure.clone())),
+            None => Err(Report::new(EmitterRuntimeError::EncodeBatch)
+                .attach_printable(format!("emitter batch row {row} has no envelope entry"))),
+        }
+    }
+
     fn estimated_bytes(&self) -> u64 {
         let mut header_bytes = 0_u64;
         if let Some(headers) = &self.headers {
@@ -292,6 +348,10 @@ impl EmitterPublishBatch {
             Some(groups) => groups.estimated_bytes(),
             None => 0,
         };
+        let envelope_bytes = match &self.envelopes {
+            Some(envelopes) => envelopes.estimated_bytes(),
+            None => 0,
+        };
         let request_bytes = match &self.http_requests {
             Some(requests) => requests.estimated_bytes(),
             None => 0,
@@ -301,6 +361,8 @@ impl EmitterPublishBatch {
             .checked_add(header_bytes)
             .assured(BYTES_IN_MEMORY)
             .checked_add(group_bytes)
+            .assured(BYTES_IN_MEMORY)
+            .checked_add(envelope_bytes)
             .assured(BYTES_IN_MEMORY)
             .checked_add(request_bytes)
             .assured(BYTES_IN_MEMORY)
@@ -348,8 +410,8 @@ impl EmitterPublishBatch {
     }
 
     /// The payload bytes `delivered`, rows of this batch in row order, carry: the Arrow data of
-    /// their records with the headers and ordering groups they were published with, which is how
-    /// the buffer measures the whole batch.
+    /// their records with the headers, ordering groups and envelopes they were published with,
+    /// which is how the buffer measures the whole batch.
     ///
     /// An HTTP request's method, target and headers are request metadata rather than payload, so
     /// only the record a codec body encodes counts, and a request without a body carries none.
@@ -377,12 +439,18 @@ impl EmitterPublishBatch {
             Some(groups) => groups.estimated_bytes_of_rows(delivered),
             None => 0,
         };
+        let envelope_bytes = match &self.envelopes {
+            Some(envelopes) => envelopes.estimated_bytes_of_rows(delivered),
+            None => 0,
+        };
         self.batch
             .payload_bytes_of_rows(delivered)
             .assured(DELIVERED_ROWS)
             .checked_add(header_bytes)
             .assured(BYTES_IN_MEMORY)
             .checked_add(group_bytes)
+            .assured(BYTES_IN_MEMORY)
+            .checked_add(envelope_bytes)
             .assured(BYTES_IN_MEMORY)
     }
 

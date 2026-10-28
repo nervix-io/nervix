@@ -817,6 +817,7 @@ pub(in crate::registry) fn emitter(
         body: nervix_models::EmitterBody::Codec {
             codec: CodecName::parse(codec).expect("valid identifier"),
         },
+        envelope: Box::new(nervix_models::EmitterEnvelope::default()),
         connector: Box::new(EmitterEntity::Kafka(KafkaEmitter::Topic(
             KafkaTopicEmitter {
                 mode: nervix_models::KafkaTopicPublishingMode::NoAck {

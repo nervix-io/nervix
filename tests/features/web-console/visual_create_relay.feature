@@ -12,6 +12,7 @@ Feature: Web console visual relay and subscription creation
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='relay']" is clicked
@@ -74,6 +75,7 @@ Feature: Web console visual relay and subscription creation
       START;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='subscription']" is clicked
@@ -141,6 +143,7 @@ Feature: Web console visual relay and subscription creation
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     When the web console is opened on node "{{old_leader}}"
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='subscription']" is clicked
@@ -190,6 +193,7 @@ Feature: Web console visual relay and subscription creation
       START;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION typed_metrics TO raw_metrics WHERE input.value > 1;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -229,6 +233,7 @@ Feature: Web console visual relay and subscription creation
       START;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION typed_literal TO notifications WHERE input.tenant = 'a\nb';"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -279,6 +284,7 @@ Feature: Web console visual relay and subscription creation
       START;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='subscription']" is clicked
@@ -328,6 +334,7 @@ Feature: Web console visual relay and subscription creation
       CREATE SCHEMA notification ( user_id I64 );
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -369,6 +376,7 @@ Feature: Web console visual relay and subscription creation
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='relay']" is clicked
@@ -453,6 +461,7 @@ Feature: Web console visual relay and subscription creation
       CREATE DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='subscription']" is clicked

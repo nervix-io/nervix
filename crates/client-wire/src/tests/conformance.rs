@@ -45,7 +45,7 @@ use crate::{
     DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
     DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
     DomainPaceChoice, EmitterBatchReceived, EmitterCloseDisposition, EmitterOpened,
-    EmitterSettlement, LeaderRedirect, OpenEmitterDisposition, OpenEmitterOutcome,
+    EmitterSettlement, LeaderRedirect, NodeEndpoints, OpenEmitterDisposition, OpenEmitterOutcome,
     OpenIngestorDisposition, OpenIngestorOutcome, ProducerAdmissionChanged, ProducerEnded,
     ProducerOpened, ReadEmitterBatchOutcome, ReadEmitterDisposition, Reply, ReplyBody,
     ReplyDelivery, RequestRejected, RequestRejection, RestoreDisposition, RestoreFrame,
@@ -218,6 +218,13 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                     &limits(),
                 )
                 .assured("a corpus refusal fits the default limits"),
+            ),
+        ),
+        (
+            "backup_download_holder.nxbd",
+            download(
+                BackupDownloadMessage::encode_holder(&leader(), &limits())
+                    .assured("a corpus holder answer fits the default limits"),
             ),
         ),
         (
@@ -1552,22 +1559,28 @@ fn render_download(message: &BackupDownloadMessage, lines: &mut Vec<String>) {
         )),
         BackupDownloadMessage::NotLeader(LeaderRedirect {
             leader: Some(leader),
-        }) => {
-            let uri = |uri: &Option<url::Url>| match uri {
-                Some(uri) => uri.as_str().to_string(),
-                None => "none".to_string(),
-            };
-            lines.push(format!(
-                "DOWNLOAD LEADER node={} grpc={} console={}",
-                leader.node.as_str(),
-                uri(&leader.grpc_uri),
-                uri(&leader.web_console_uri)
-            ));
-        }
+        }) => lines.push(format!("DOWNLOAD LEADER {}", endpoints_text(leader))),
         BackupDownloadMessage::NotLeader(LeaderRedirect { leader: None }) => {
             lines.push("DOWNLOAD LEADER none".to_string());
         }
+        BackupDownloadMessage::Holder(holder) => {
+            lines.push(format!("DOWNLOAD HOLDER {}", endpoints_text(holder)));
+        }
     }
+}
+
+/// A node and the endpoints it advertises, as a download redirect or holder answer names them.
+fn endpoints_text(endpoints: &NodeEndpoints) -> String {
+    let uri = |uri: &Option<url::Url>| match uri {
+        Some(uri) => uri.as_str().to_string(),
+        None => "none".to_string(),
+    };
+    format!(
+        "node={} grpc={} console={}",
+        endpoints.node.as_str(),
+        uri(&endpoints.grpc_uri),
+        uri(&endpoints.web_console_uri)
+    )
 }
 
 /// The report of the frames as they are checked in.

@@ -527,6 +527,17 @@ func downloadLines(frame []byte) ([]string, error) {
 				orNone(leader.GrpcUri()), orNone(leader.WebConsoleUri()))}, nil
 		}
 		return []string{"DOWNLOAD LEADER none"}, nil
+	case session.BackupDownloadPartBackupArchiveHolder:
+		answer := new(session.BackupArchiveHolder)
+		if err := union(message.Part, answer); err != nil {
+			return nil, err
+		}
+		holder := answer.Holder(nil)
+		if holder == nil {
+			return nil, errors.New("a holder answer names no node")
+		}
+		return []string{fmt.Sprintf("DOWNLOAD HOLDER node=%s grpc=%s console=%s", holder.Node(),
+			orNone(holder.GrpcUri()), orNone(holder.WebConsoleUri()))}, nil
 	}
 	return nil, fmt.Errorf("undeclared download part %d", message.PartType())
 }

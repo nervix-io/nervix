@@ -38,6 +38,10 @@ impl TestPause {
         self.state.send_modify(|state| state.reached = true);
     }
 
+    pub(super) fn is_reached(&self) -> bool {
+        self.state.borrow().reached
+    }
+
     pub(super) async fn wait_until_reached(&self) {
         self.state
             .subscribe()

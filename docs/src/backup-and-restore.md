@@ -251,11 +251,15 @@ call, which the web console reaches through a console WebSocket of its own;
   that the frame arrived. A later download of the same backup is refused, and a new backup is
   needed for another copy.
 - Only the user who ran the backup may download its archive.
-- The archive stays on the node that assembled it. A download sent to another node that does not
-  hold it is redirected to the leader.
+- The archive stays on the node that assembled it, and the backup's recorded outcome names that
+  node. A download sent to another node is sent on to it, so a backup run again under its execution
+  reference after leadership moved still downloads the archive, from whichever node the client
+  reaches.
 - A node that restarts loses the archives it retained, and their downloads are refused. If
   leadership moves while a backup runs, the new leader runs the backup again under the same
-  execution reference and retains the archive it assembles.
+  execution reference and retains the archive it assembles. The run that records its outcome first
+  is the backup's outcome, and its archive is the one downloaded; an archive another run assembled
+  is released and never offered.
 
 ## Inspecting An Archive
 
@@ -518,8 +522,10 @@ uncertain applying restore is recovered by sending it again under its execution 
 Rust client's `restore_with_reference` does; `nervix-cli restore` starts every restore under a
 fresh reference. A terminal failed restore requires a fresh target domain for another restore.
 
-The public `/metrics` endpoint reports these node-local series after completed sweeps, and reads
-zero until the first sweep completes:
+A sweep runs only when the node's bulk memory has room for its 2 MiB working set; under bulk memory
+pressure it is deferred to the next second rather than waiting for that room, so reclamation never
+holds up the node's other bulk work. The public `/metrics` endpoint reports these node-local series
+after completed sweeps, and reads zero until the first sweep completes:
 
 | Series | Meaning |
 | --- | --- |
@@ -732,12 +738,13 @@ in the console's REPL runs through the same dialog. [Web Console](client-tools-w
 describes the dialog itself.
 
 - **Backup.** The console sends `BACKUP` as a command under an execution reference, then downloads
-  the archive with the `DownloadBackup` call over a console WebSocket, from the node that reported
-  the backup. It hands the archive to the browser as a download only once its size and BLAKE3
+  the archive with the `DownloadBackup` call over a console WebSocket, starting at the node that
+  reported the backup and following it to the console of the node that retains the archive when
+  that is another node. It hands the archive to the browser as a download only once its size and BLAKE3
   digest match the backup's summary, under the last component of the file the statement names.
   A download that fails in transport starts again from the first byte after a one-second pause,
   for up to eight attempts and redirects in all, while the archive is retained. A download the
-  leader refuses ends with its reason, and the backup itself completed.
+  server refuses ends with its reason, and the backup itself completed.
 - **A reload resumes a backup.** The browser tab records the backup's execution reference, query
   text, and domain until its archive is downloaded. A reloaded page sends the backup again under
   that reference, which returns the recorded outcome instead of running the backup twice, and
@@ -948,8 +955,10 @@ contents. The reasons are:
 - an owner has not applied the cut revision within five seconds, or cannot capture or stage its
   share, naming the domain
 - a quiesced domain cannot take its lease or capture its owners within its timeout, reported as
-  `timed out waiting to capture domain '<domain>'`, or does not pause and drain in time, reported
-  with what each node still held
+  `timed out waiting to capture domain '<domain>'` with the active phase, its age, total elapsed
+  time and completed phase durations; a drain timeout also retains what each node still held.
+  Inspect those phases before changing `TIMEOUT`; owner-local capture stages are retained in the
+  administrative logs described in [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
 - the backup coordinator lost its leader tenure while capturing a domain
 
 A capture that fails or is interrupted assembles no archive. The leader drops the sections it

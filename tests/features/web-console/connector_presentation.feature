@@ -9,6 +9,7 @@ Feature: Visual connector choices follow the entity declarations
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
@@ -33,6 +34,7 @@ Feature: Visual connector choices follow the entity declarations
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
@@ -53,6 +55,7 @@ Feature: Visual connector choices follow the entity declarations
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
@@ -103,6 +106,7 @@ Feature: Visual connector choices follow the entity declarations
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
@@ -131,6 +135,7 @@ Feature: Visual connector choices follow the entity declarations
       CREATE WEBSOCKETS CLIENT reader CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
@@ -190,6 +195,7 @@ Feature: Visual connector choices follow the entity declarations
       CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = 'amqp://127.0.0.1:5672' };
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked

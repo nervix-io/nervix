@@ -161,7 +161,9 @@ not bounded by the client's command wait; each frame must arrive within the requ
 client writes a private file beside the destination and moves it over the destination only once
 the archive's size and BLAKE3 digest match the backup's summary, so the file never holds a partial
 archive, and on Unix only its owner may read it. A download that fails in transport starts again
-from the first byte while the server retains the archive.
+from the first byte while the server retains the archive. When the node the session is on does not
+retain the archive and names the node that does, the client downloads it from that node over a
+connection of its own, and the session stays where it is.
 
 The outcome's `backup` field carries the summary: the archive's size and digest, the capture time,
 the instant the server stops retaining it, whether resource bytes are included, the number of

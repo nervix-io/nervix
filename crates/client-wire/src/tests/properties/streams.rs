@@ -175,6 +175,17 @@ fn check(bytes: &[u8]) {
         panic!("redirect keeps its variant");
     };
     assert_eq!(decoded, redirect);
+    let holder = values.endpoints();
+    let frame = BackupDownloadMessage::encode_holder(&holder, &limits)
+        .assured("holder answer fits")
+        .verify(&limits)
+        .assured("holder answer verifies");
+    let BackupDownloadMessage::Holder(decoded) =
+        BackupDownloadMessage::decode(&frame).assured("holder answer decodes")
+    else {
+        panic!("holder answer keeps its variant");
+    };
+    assert_eq!(decoded, holder);
     let mut dispositions = vec![
         UploadDisposition::NotLeader(redirect),
         UploadDisposition::Installed {

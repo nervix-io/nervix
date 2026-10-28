@@ -61,6 +61,7 @@ Feature: Web console visual creation
       CREATE RESOURCE retained_bundle;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is pressed with "Enter"
     And selector ".create-menu [data-create-kind='resource']" is pressed with "Enter"
@@ -96,6 +97,7 @@ Feature: Web console visual creation
       CREATE DOMAIN {{domain}}_other;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".domain-select" contains "{{domain}}"
     When selector ".create-menu-button" is pressed with "Enter"
     And selector ".create-menu [data-create-kind='resource']" is pressed with "Enter"
@@ -124,6 +126,7 @@ Feature: Web console visual creation
       CREATE DOMAIN {{domain}};
       """
     When the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -151,6 +154,7 @@ Feature: Web console visual creation
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     Given command response delivery on node "{{old_leader}}" pauses after execution
     When the web console is opened on node "{{old_leader}}"
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is pressed with "Enter"
     And selector ".create-menu [data-create-kind='resource']" is pressed with "Enter"

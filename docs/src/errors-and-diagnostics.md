@@ -22,6 +22,16 @@ Client initialization also preserves the driver cause of option installation and
 ping. Public command refusal projection renders the reviewed key/pool context rather than driver
 input.
 
+MongoDB TLS preparation retains `MongoDbTlsError` beneath the client-initialization context
+and preserves filesystem, executor and native driver causes. Its contexts name the operation and
+certificate/key role without copying PEM contents or configured paths into diagnostic text.
+Native client construction uses filesystem-worker admission before the driver reads or parses
+TLS files. Admission/cancellation stays an initialization failure; a native TLS refusal retains
+the driver's typed cause beneath its configuration context.
+Explicit files combined with `tls=false` fail offline under the value-free `addr` key context.
+The registry's `ConnectorDeclarationIssue::MongoDbFieldName` refuses a NUL byte in a mapped BSON
+key at CREATE and ALTER; its debug-formatted key escapes control characters in the diagnostic.
+
 The ClickHouse declaration checks a required positive `timeout_ms` and the address/TLS pairing
 before inspecting mounted files or opening a client. Missing timeout or HTTPS trust is a
 `ClientConfigSchemaError::MissingRequired` or `RequiresKey`; a TLS key with an HTTP address is
@@ -326,7 +336,7 @@ subsections after the boundary table follow this order.
 | Primitives | Modeled adapters keep the error types of the library they stand in for, such as the watch channel's `RecvError` and `SendError` | The library's own error shape, never a report |
 | Vocabulary | Model alteration errors, `CanonicalPlexusError`, `ArchivedCountError`, `DurationTextError` and the name and value errors of the shared types | A report that names the Model, field or value refused, with nothing above it yet |
 | Language | `ParseFromSourceError` for the lexer and parser, `FormatError` for the formatter | A report whose context holds the stage, the rejected text and every diagnostic's byte span |
-| Engines and infrastructure | The VM's `CompileError`, `RuntimeError` and row errors; `UdfError`; `JaqProgramError` and `JaqFormatError`; `CodecError`; the WASM `ProtocolError`, `GuestError` and `WasmGuestError`; the connector contract's `IngestorError`, `EmitterOpenError`, `EmitterWriteError` and `EmitterFinishError` above each connector's own errors; `ConsensusError` and `StorageFailure`; the interconnect's `TransportError`, `RequestError` and `RemoteOperationFailure`; `DnsConfigurationError` and `DnsLookupError`; `AdmissionError` and `ExecutionError`; `ArchiveWriteError` and `ArchiveReadError` | A report, a typed per-row or per-record outcome, or a typed class of a remote result. An engine decides nothing about the graph, so its errors name no node policy |
+| Engines and infrastructure | The VM's `CompileError`, `RuntimeError` and row errors; `UdfError`; `JaqProgramError` and `JaqFormatError`; `CodecError`; the WASM `ProtocolError`, `GuestError` and `WasmGuestError`; the connector contract's `IngestorError`, `EmitterOpenError`, `EmitterWriteError` and `EmitterFinishError` above each connector's own errors; `ConsensusError` and `StorageFailure`; the interconnect's `TransportError`, `RequestError` and `RemoteOperationFailure`; `DnsConfigurationError` and `DnsLookupError`; `AdmissionError`, `BufferGrowthError` and `ExecutionError`; `ArchiveWriteError` and `ArchiveReadError` | A report, a typed per-row or per-record outcome, or a typed class of a remote result. An engine decides nothing about the graph, so its errors name no node policy |
 | Decisions | `RegistryError`, `RelocationPlanError`, `RestorePlanError` and `TransactionPlanningError` | A report that names the node, route, operation and fields of the refused model or plan |
 | Data plane | `RuntimeError` above `ExecutionBuildError`; `IngestorStartError`, `EmitterStartError` and `GeneratorError`; `PlannedGeneralError`, `RouteOutputError`, `RelayProcessorError` and the other node contexts; `RuntimePersistenceError`; the domain clock's `DomainClockAccessError` and `DomainClockWaitError` | A report for the node's policy, with the acknowledgements of the work that failed, or a structured message error for a route |
 | Control plane | `AppError`, `DomainAlterError`, `BackupError`, `RestoreRefusal` and the transaction and lifecycle errors | A report the session edge turns into a command result |
@@ -339,7 +349,7 @@ subsections after the boundary table follow this order.
 | Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical Plexus cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
 | Plexus language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
-| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. The unfolding of a payload a quiesce buffer retained, or of a poll a paced ingestor handed over, is not refused at all: nothing could present it again, so it waits for a place. The job that admits one key group into a keyspace a restore is converting waits for a place too, because the keys admitted so far could be presented again only by converting the keyspace from its first group. So does a payload a source handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. An Iceberg commit's read of the staged files its emitter already accepted waits for a place as well, while the bulk memory charge it takes first, without queueing, is refused when the class has no room and the emitter retries the commit with its policy. A panic is the job's own defect. |
+| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a budgeted buffer whose growth its class did not back (`BufferGrowthError::NotCharged`, with that `AdmissionError` beneath it) or that would pass its operation's limit (`BufferGrowthError::LimitExceeded`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. The unfolding of a payload a quiesce buffer retained, or of a poll a paced ingestor handed over, is not refused at all: nothing could present it again, so it waits for a place. The job that admits one key group into a keyspace a restore is converting waits for a place too, because the keys admitted so far could be presented again only by converting the keyspace from its first group. So does a payload a source handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. An Iceberg commit's read of the staged files its emitter already accepted waits for a place as well, while the bulk memory charge it takes first, without queueing, is refused when the class has no room and the emitter retries the commit with its policy. A panic is the job's own defect. The executor catches it at that callback, reports `JobPanicked` to its caller, completes its service accounting and continues draining its admitted successors. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
 | Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures, and a processor task's restore of the branches its lifecycle checkpoint names (`ProcessorBranchTaskError`) | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. A restore that fails installs no branch and stays pending: the task retries it after a backoff, holds its input, and refuses a lifecycle checkpoint or guest-state reset with `BranchesUnrestored` until an attempt succeeds. [Shutdown And Recovery](./shutdown.md#restoring-processor-branches) owns that sequence. |
 | Connector crates and host | Integration-specific configuration, decoding, external ingestor and emitter outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from a source or emitter failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
@@ -535,6 +545,15 @@ source composition with the protocol encoder's typed cause retained beneath the 
 
 ### Stored Shapes And Archives
 
+The resource store treats a missing installed manifest as ordinary absence. Other filesystem and
+manifest decoding failures retain their typed causes. Resource reconciliation renders the complete
+report only when it records a failed replica, so an upload refusal and `DESCRIBE RESOURCE` can
+distinguish a filesystem failure from malformed JSON. An absent local copy of a published version
+is pending while it awaits a live source and supplies no failure reason. Recovery of an unpublished
+upload instead reports the admitted archive unavailable when that local copy is absent; a genuine
+read failure keeps its cause. [Resource Versions And Bindings](./resource-versions.md#publication-and-transfer)
+owns those installation states and their retry behavior.
+
 The native Kafka checkpoint decoder checks its required format signature before exposing offsets
 or the optional applied-start generation. A mismatched signature retains the typed
 `KafkaOffsetCheckpointError::FormatSignature` cause beneath `RuntimePersistenceError::DecodeState`.
@@ -674,18 +693,25 @@ is `FeatureUnsupported`. Building the storage HTTP client or an OpenDAL operatio
 emitter failure and retry path; they do not release a staged record's acknowledgement before commit.
 
 A RabbitMQ connection that fails is a `RabbitMqConnectError`, owned by the connector's connection
-module: an invalid address or CA file, a lookup failure that keeps the resolver's `DnsLookupFailure`
-as a typed field, no address that accepted a connection, a socket the node could not hold the
-second handle on that ends an unopened connection, a failed or overdue TLS handshake, a Lapin
-runtime that could not be created, or a failed or overdue AMQP handshake, each naming the broker
-host where one is involved. An overdue step keeps the elapsed `connect_timeout_ms` as its typed
-cause. A step of opening the entity's channel that fails or runs out of the same deadline is
+module: an invalid address, with the address owner's typed reason beneath it, such as an address
+that names no host or port 0; an invalid CA file; an incomplete client identity; a client
+certificate or private key file that cannot be read, keeping the connector contract's file failure
+beneath it, or that holds no PEM certificate or key, naming which; a lookup failure that keeps the
+resolver's `DnsLookupFailure` as a typed field; no address that accepted a connection; a socket the
+node could not hold the second handle on that ends an unopened connection; a failed or overdue TLS
+handshake; a broker that refused the TLS session, carrying the TLS alert it sent as a typed field
+whether that alert ended the handshake or, under TLS 1.3, the first read of the AMQP handshake; a
+Lapin runtime that could not be created; or a failed or overdue AMQP handshake, each naming the
+broker host where one is involved. An overdue step keeps the elapsed `connect_timeout_ms` as its
+typed cause. The address refusal never repeats the address, which can carry credentials, and the
+CREATE-time check of the same address keeps the same typed reason beneath the client's key error. A step of opening the entity's channel that fails or runs out of the same deadline is
 reported beneath the source's or emitter's own context for that step, with the elapsed deadline as its
 typed cause and its text leading the report. The source keeps these beneath its connect and resume
 contexts, so `DESCRIBE INGESTOR` shows the deepest cause, such as the resolver's own lookup error or
 the deadline that ran out. The emitter changes them into a configuration failure for an invalid
-address, CA file or deadline key and an initialization failure otherwise, leading with the failure's
-chain, down to a `connect_timeout_ms` it ran out of, which `DESCRIBE EMITTER` shows. Neither
+address, CA file, client identity or deadline key and an initialization failure otherwise, leading
+with the failure's chain, down to a `connect_timeout_ms` it ran out of, which `DESCRIBE EMITTER`
+shows. Neither
 attaches credentials from the address. A `NO ACK` round trip that runs out of the client's
 `timeout_ms` fails the write as a publish failure with the elapsed deadline as its typed cause and
 its text leading the report.
@@ -728,6 +754,13 @@ A missing key is `RedisPubSubIngestorError::MissingConfiguration`, naming only t
 outside the bounded channel's range is `InvalidBufferCapacity`, and an invalid idle deadline keeps
 `ClientConfigError::InvalidDeadline` beneath `InvalidIdleTimeout`. These are source configuration
 failures before a subscription opens, not record rejections.
+
+A Redis client's command-pool lifetimes, `pool_idle_timeout_ms` and `pool_max_lifetime_ms`, are
+refused at `CREATE CLIENT` unless they are positive, schedulable whole milliseconds. The pool reads
+them from the client's effective entries and checks them again: an invalid value fails opening the
+pool with `RedisClientError::InvalidPoolLifetime`, naming the key above the schema's
+`ClientConfigSchemaError::InvalidValue`, which the node reports as
+`OpenClientError::InvalidPoolLifetime`. It is a configuration failure, not a record rejection.
 
 Redis subscription protocol and read failures retain their driver causes beneath
 `RedisPubSubIngestorError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
@@ -1071,8 +1104,14 @@ typed node identity, and a `ConnectorDeclarationIssue` naming the refused clause
 Duration failures retain the duration reader's typed cause; an unschedulable duration and an
 inverted retry range are distinct issues. A mapped-value type failure reports the declared type
 and the expression's inferred Arrow type, such as `VALUES key 'severity_number' requires I32,
-found Int64`. These are command refusals before publication, including during `ALTER`, rather
-than retried source or sink initialization failures. They never include a record's values.
+found Int64`. An envelope clause or `PROPERTIES` key the entity does not declare is
+`ConnectorDeclarationIssue::Envelope`, carrying the vocabulary's typed
+`EnvelopeDeclarationError` that names the entity and the clause or key; an envelope duration
+reuses the duration issues under `DELIVER AFTER` or `DELAY`, and an envelope expression that is
+not an exact, non-null, non-sensitive value of its type is `EnvelopeValue`, naming the clause or
+key and the expected type with the VM's compile failure beneath it. These are command refusals
+before publication, including during `ALTER`, rather than retried source or sink initialization
+failures. They never include a record's values.
 
 MySQL table-name construction refuses empty path parts and more than two parts with typed
 `ExternalNameError` outcomes. Its offline client check refuses pool-sizing URL parameters through
@@ -1238,9 +1277,9 @@ recorded before it can fail, so an ingestor never shows a failure a later attemp
 
 Emitter execution planning has typed failures for missing source relays or codecs, an unresolved
 or mismatched client, unsupported publishing mode, an invalid source predicate or route, invalid
-HTTP request fields or SQS ordering group, empty or invalid row mappings, nonliteral OTEL resource
-attributes, and invalid Iceberg commit settings. Each report names the emitter and, for a source
-predicate, its relay. The decision fails before a new emitter plan or remote consumer edge is
+HTTP request fields, SQS ordering group or envelope, empty or invalid row mappings, nonliteral OTEL
+resource attributes, and invalid Iceberg commit settings. Each report names the emitter and, for a
+source predicate, its relay. The decision fails before a new emitter plan or remote consumer edge is
 published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
 opening an external emitter may fail independently and follows the emitter's retry policy.
 
@@ -1280,11 +1319,11 @@ Starting an emitter on a node returns an `EmitterStartError` report. `EmitterSta
 names the emitter and its domain, and the step that failed stays beneath it: an input relay the
 node has no schema or resolved branching for, a client whose configuration does not resolve, a
 codec the node has not instantiated or that cannot hold a batch, a route, HTTP request fields,
-ordering group or `FROM WHERE` that does not compile, with the compile failure beneath it, and an
-invalid emitter client configuration or input collection policy. Starting a generator returns a
-`GeneratorError` report the same way: `GeneratorError::Start` names the generator and its domain
-above an output relay the node has not instantiated, an output program that does not compile, a
-cadence the domain clock cannot bind, an invalid output flush policy, or a source relay without a
+ordering group, envelope or `FROM WHERE` that does not compile, with the compile failure beneath
+it, and an invalid emitter client configuration or input collection policy. Starting a generator
+returns a `GeneratorError` report the same way: `GeneratorError::Start` names the generator and its
+domain above an output relay the node has not instantiated, an output program that does not compile,
+a cadence the domain clock cannot bind, an invalid output flush policy, or a source relay without a
 dispatch gate. The domain build keeps either report whole beneath
 `RuntimeError::BuildDomainExecution`, so a failed command renders it after the domain, such as
 `failed to build domain execution for 'edge': failed to start emitter 'audit' in domain 'edge': the
@@ -1551,7 +1590,11 @@ The error names the step that failed: preparing lookup inputs or the input batch
 program, materializing an error input row or the successful rows, building the output batch, a row
 sidecar whose count differs from the batch, a row selected outside the input, an output relay whose
 schema was not prepared or does not match, an ordering group column that is missing or not
-`STRING`, or the HTTP requests of the batch. It names the program by its clause, such as
+`STRING`, the HTTP requests of the batch, or the envelopes of the batch, whose
+`EmitterEnvelopeError` names a value column that is not the clause's type or the source records
+that could not be selected. A record whose own envelope fails keeps its `EnvelopeError` instead:
+the host rejects only that record, as an `evaluation` error of the `publish` operation whose message
+begins `envelope`. It names the program by its clause, such as
 `FILTER WHERE`, `FILTER-MAP` or branch construction, and the failure the step returned, such as the
 VM's `RuntimeError` or a `RuntimeSchemaError`, stays beneath it. The node's general or internal
 error policy renders the whole chain when it reports the failure and resolves the
@@ -1670,28 +1713,30 @@ that refuses the reservation reports `BulkReceiveWindowRefused` naming the peer,
 `AdmissionError` beneath it. A transport whose budget cannot back even one window refuses to bind
 with `BulkReceiveWindowUnbacked`, which carries the window and the budget as numbers.
 
-The interconnect validates and bounds the wire request before its operation handler runs. A
-delivery correlation that has no free position reports `CorrelationCapacity`; an exhausted
-generation reports `CorrelationIdentityExhausted`. Record storage the sender's relay budget has no
-room for waits for room before the delivery's body is encoded, because that lack of room is
-temporary, and reports `CorrelationMemory`, with the budget's typed `AdmissionError` beneath it,
-only when it is larger than the whole budget or still without room when the delivery's five-minute
-bound has passed. A receiver that cannot issue a relay grant answers with a typed
-`RelayGrantRefusal`, never an HTTP status, and the sender decides from the refusal's class, a
-method of the refusal, without reading any text. The sender's transport reports the refusal as
+The interconnect validates and bounds the wire request before its operation handler runs. A delivery
+correlation that has no free position reports `CorrelationCapacity`; an exhausted generation reports
+`CorrelationIdentityExhausted`. Record storage the sender's relay budget has no room for waits for
+room before the delivery's body is encoded, because that lack of room is temporary, and reports
+`CorrelationMemory`, with the budget's typed `AdmissionError` beneath it, only when it is larger
+than the whole budget or still without room when the delivery's five-minute bound has passed. A
+receiver that cannot issue a relay grant answers with a typed `RelayGrantRefusal`, never an HTTP
+status, and the sender decides from the refusal's class, a method of the refusal, without reading
+any text. A grant request the receiver's relay budget has no free room to read or decode is answered
+with the memory refusal too, decided from the budget's typed `AdmissionError`, rather than waited on
+or failed as a decode. The sender's transport reports the refusal as
 `TransportError::RelayGrantRefused`. A capacity refusal is temporary: the delivery is held back, the
 refusal counts as the receiver's progress, and the sender asks for the grant again. A permanent
 refusal fails the delivery at once with `RemoteDispatchError::GrantRefused`, which names the target
 and the refusal and keeps the transport report beneath it. A delivery still held when its bound
 passes fails with `AdmissionTotalTimeout`, with the last capacity refusal beneath it. A receiver
-whose relay budget has no room for a batch's acknowledgement watches
-holds the batch back unadmitted rather than failing it, because that lack of room is temporary. It
-reports `RemoteAckAdmission`, with the typed `AdmissionError` beneath it rather than rendered into
-its own text, only for watches larger than the whole budget or a hold still without room when the
-five-minute admission bound has passed, before runtime admission. These refusals judge no payload
-and preserve source retry ownership. Ending a registered delivery before admission or shutting its
-owner down resolves its held shares negatively once. Stale generations and registrar runs are ordinary
-unmatched reports logged at `debug`, and never resolve current work.
+whose relay budget has no room for a batch's acknowledgement watches holds the batch back unadmitted
+rather than failing it, because that lack of room is temporary. It reports `RemoteAckAdmission`,
+with the typed `AdmissionError` beneath it rather than rendered into its own text, only for watches
+larger than the whole budget or a hold still without room when the five-minute admission bound has
+passed, before runtime admission. These refusals judge no payload and preserve source retry
+ownership. Ending a registered delivery before admission or shutting its owner down resolves its
+held shares negatively once. Stale generations and registrar runs are ordinary unmatched reports
+logged at `debug`, and never resolve current work.
 
 A transport error describes connection, admission, framing, deadline, or delivery failure. A remote
 control response instead preserves a typed failure *subject* and one of four classes: rejected by
@@ -2162,7 +2207,14 @@ themselves, a clock mapping that cannot be projected, a resource version that is
 leader or differs from its catalog entry, a record that does not encode, and an archive the
 staging area cannot hold. A quiesced capture also names its domain when the mutation lease, pause,
 drain, owner capture, or resume fails or times out, or when its coordinator loses the leader tenure
-under which it acquired the cut. A cut that cannot reach a node it needs is refused as
+under which it acquired the cut. `CaptureTimeout` carries a typed active phase, its elapsed time,
+the elapsed cut time and the ordered durations of completed phases. Lease admission and alteration
+guard waits have their own phases; a capture held after the drain names `capture` and retains the
+completed `drain` duration. These are measurements of the same cut budget, never fresh timeouts.
+An owner request remains a terminal operation: a coordinator waiting for owners names that phase,
+and owner-local administrative logs distinguish revision catch-up, cluster-state application,
+lifecycle checkpoints, storage capture and staging. No remote progress is inferred from elapsed
+time. A cut that cannot reach a node it needs is refused as
 `StateOwnerUnreachable` when the cluster does not report a placement's scheduled primary live, and
 as `ExecutorUnreachable` when, before a quiesced cut pauses, it does not report a node that runs the
 domain's work live. Each carries the domain, the entity's kind and name and the node as typed
@@ -2183,15 +2235,19 @@ wait is a domain capture failure. A leadership change during that wait refuses t
 state is read. The failed command's message is `backup failed:` followed by the complete
 domain-capture context and cause chain, including an interrupted guest or native-metadata capture.
 A download the server does not serve is answered with a typed refusal,
-`InvalidRequest`, `NotRetained`, `Expired`, `NotOwner` or `ReadFailed`, or with a redirect to the
-leader, and a call without valid credentials ends with `UNAUTHENTICATED`. The client reports a
+`InvalidRequest`, `NotRetained`, `Expired`, `NotOwner` or `ReadFailed`, with the endpoints of the
+node that retains the archive, or with a redirect to the leader, and a call without valid
+credentials ends with `UNAUTHENTICATED`. A `NotRetained` refusal names why no live node retains the
+archive: the backup is still assembling it, assembled none, a download collected it, or the node
+the recorded outcome names restarted or left the cluster. The client reports a
 `BackupDownloadError` beneath `ClientError::BackupDownload`, which carries the backup's execution
 reference: the server's refusal, a transport failure, a stalled or interrupted stream, a missing
-leader or a redirect loop, frames out of order or undecodable, an archive that differs from the
-backup's summary, or a local write failure. An undecodable frame and a request that does not
-encode keep the codec's report beneath `InvalidFrame` and `EncodeRequest`, rather than a copy of
-its error in the context. Only a transport failure, a stall, and an interrupted
-stream are retried, from the archive's first byte. The C binding classifies a refusal as
+leader or a redirect loop, a holder that could not be reached, frames out of order or undecodable,
+an archive that differs from the backup's summary, or a local write failure. An undecodable frame,
+a request that does not encode and a failed connection to the holder keep their report beneath
+`InvalidFrame`, `EncodeRequest` and `HolderUnreachable`, rather than a copy of its error in the
+context. Only a transport failure, a stall, an interrupted stream and an unreachable holder are
+retried, from the archive's first byte. The C binding classifies a refusal as
 `NX_ERROR_REJECTED`, a transport failure as `NX_ERROR_TRANSPORT`, a mismatched or malformed
 archive as `NX_ERROR_PROTOCOL`, and a write failure as `NX_ERROR_INVALID_ARGUMENT`, and names the
 execution reference so a host can run the backup again. No diagnostic of a backup includes archive

@@ -162,33 +162,33 @@ impl Diagnostic {
     }
 }
 
-/// How clients reach the cluster leader.
+/// How clients reach one cluster node.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LeaderEndpoints {
+pub struct NodeEndpoints {
     pub node: ClusterNodeName,
-    /// The leader's gRPC session URI, when it advertises one.
+    /// The node's gRPC session URI, when it advertises one.
     pub grpc_uri: Option<Url>,
-    /// The leader's web console URI, when it advertises one.
+    /// The node's web console URI, when it advertises one.
     pub web_console_uri: Option<Url>,
 }
 
-impl LeaderEndpoints {
+impl NodeEndpoints {
     pub(crate) fn encode<'fbb>(
         &self,
         encoder: &mut Encoder<'fbb>,
-    ) -> Result<WIPOffset<wire::LeaderEndpoints<'fbb>>, Report<WireEncodeError>> {
-        let node = encoder.text("LeaderEndpoints.node", self.node.as_str())?;
+    ) -> Result<WIPOffset<wire::NodeEndpoints<'fbb>>, Report<WireEncodeError>> {
+        let node = encoder.text("NodeEndpoints.node", self.node.as_str())?;
         let grpc_uri = match &self.grpc_uri {
-            Some(uri) => Some(encoder.text("LeaderEndpoints.grpc_uri", uri.as_str())?),
+            Some(uri) => Some(encoder.text("NodeEndpoints.grpc_uri", uri.as_str())?),
             None => None,
         };
         let web_console_uri = match &self.web_console_uri {
-            Some(uri) => Some(encoder.text("LeaderEndpoints.web_console_uri", uri.as_str())?),
+            Some(uri) => Some(encoder.text("NodeEndpoints.web_console_uri", uri.as_str())?),
             None => None,
         };
-        Ok(wire::LeaderEndpoints::create(
+        Ok(wire::NodeEndpoints::create(
             encoder.fbb(),
-            &wire::LeaderEndpointsArgs {
+            &wire::NodeEndpointsArgs {
                 node: Some(node),
                 grpc_uri,
                 web_console_uri,
@@ -198,13 +198,13 @@ impl LeaderEndpoints {
 
     pub(crate) fn decode(
         decoder: Decoder<'_>,
-        table: wire::LeaderEndpoints<'_>,
+        table: wire::NodeEndpoints<'_>,
     ) -> Result<Self, Report<WireDecodeError>> {
-        let node = decoder.name("LeaderEndpoints.node", table.node())?;
-        let grpc_uri = decode_uri(decoder, "LeaderEndpoints.grpc_uri", table.grpc_uri())?;
+        let node = decoder.name("NodeEndpoints.node", table.node())?;
+        let grpc_uri = decode_uri(decoder, "NodeEndpoints.grpc_uri", table.grpc_uri())?;
         let web_console_uri = decode_uri(
             decoder,
-            "LeaderEndpoints.web_console_uri",
+            "NodeEndpoints.web_console_uri",
             table.web_console_uri(),
         )?;
         Ok(Self {
@@ -237,7 +237,7 @@ fn decode_uri(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaderRedirect {
     /// The current leader, or `None` while no leader is known.
-    pub leader: Option<LeaderEndpoints>,
+    pub leader: Option<NodeEndpoints>,
 }
 
 impl LeaderRedirect {
@@ -260,7 +260,7 @@ impl LeaderRedirect {
         table: wire::LeaderRedirect<'_>,
     ) -> Result<Self, Report<WireDecodeError>> {
         let leader = match table.leader() {
-            Some(leader) => Some(LeaderEndpoints::decode(decoder, leader)?),
+            Some(leader) => Some(NodeEndpoints::decode(decoder, leader)?),
             None => None,
         };
         Ok(Self { leader })

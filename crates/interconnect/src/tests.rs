@@ -729,6 +729,7 @@ async fn rejected_tls_replacement_keeps_the_previous_identity_usable() {
 }
 
 mod coordination;
+mod relay_grant_capacity;
 mod relay_owners;
 mod resolver;
 

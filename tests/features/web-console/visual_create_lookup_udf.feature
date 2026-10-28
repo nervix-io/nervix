@@ -20,6 +20,7 @@ Feature: Web console visual hash map and Roto UDF creation
       CREATE CODEC visual_lookup_codec FROM WIRE JSON SCHEMA visual_lookup_wire TO SCHEMA visual_lookup_entry;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='hash-map']" is clicked
@@ -75,6 +76,7 @@ Feature: Web console visual hash map and Roto UDF creation
       CREATE CODEC visual_lookup_codec FROM WIRE JSON SCHEMA visual_lookup_wire TO SCHEMA visual_lookup_entry;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='hash-map']" is clicked
@@ -118,6 +120,7 @@ Feature: Web console visual hash map and Roto UDF creation
       CREATE HTTP ENDPOINT INGESTOR visual_udf_source FROM visual_udf_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_udf_codec TO visual_udf_inputs INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='udf']" is clicked
@@ -182,6 +185,7 @@ Feature: Web console visual hash map and Roto UDF creation
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='udf']" is clicked
@@ -216,6 +220,7 @@ Feature: Web console visual hash map and Roto UDF creation
       CREATE RESOURCE empty_bundle;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='hash-map']" is clicked
@@ -237,6 +242,7 @@ Feature: Web console visual hash map and Roto UDF creation
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='udf']" is clicked
@@ -275,6 +281,7 @@ Feature: Web console visual hash map and Roto UDF creation
       CREATE CODEC scoped_codec FROM WIRE JSON SCHEMA scoped_wire TO SCHEMA scoped_entry;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='hash-map']" is clicked
@@ -320,6 +327,7 @@ Feature: Web console visual hash map and Roto UDF creation
       CREATE WIRE JSON SCHEMA tx_wire MODE STRICT (id string, value integer);
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"

@@ -1637,6 +1637,7 @@ mod tests {
             name: named("orders_out"),
             from: ProcessorInputs::single(named("orders")),
             body: nervix_models::EmitterBody::Values,
+            envelope: Box::new(nervix_models::EmitterEnvelope::default()),
             connector: Box::new(connector),
             batch: None,
             flush_policy: FlushPolicy::Immediate,

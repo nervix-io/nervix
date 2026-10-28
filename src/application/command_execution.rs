@@ -27,10 +27,10 @@ use nervix_consensus::{
     CommandExecutionStatementDisposition, CommandExecutionStatementResult,
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, ConsensusConflict,
-    ConsensusError, RestoreExecution,
+    ConsensusError, RecordedBackupArchive, RestoreExecution,
 };
 use nervix_models::{
-    Backup, BackupCapture, BackupResources, BackupScope, ClusterParameters,
+    Backup, BackupCapture, BackupResources, BackupScope, ClusterNodeIdentity, ClusterParameters,
     CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus, Restore,
     RestoreArchive, Setting, SettingDefinition, Statement, Timestamp, TransactionPosition,
     TransactionStatus, UserName,
@@ -925,7 +925,8 @@ impl SessionServiceImpl {
         request_digest: [u8; 32],
         result: &CommandResult,
     ) -> Result<CommandResult, Box<CommandResult>> {
-        let durable_result = durable_command_result(result)?;
+        let holder = self.inner.cluster.local_node_identity().await;
+        let durable_result = durable_command_result(result, &holder)?;
         #[cfg(feature = "testing")]
         self.inner
             .runtime
@@ -956,6 +957,13 @@ impl SessionServiceImpl {
                              outcome"
                         ),
                     )));
+                }
+                // The cluster refused to record this run's outcome, so the archive the run
+                // assembled is never offered: the outcome recorded under the reference, now or
+                // later, names another archive. An outcome lost with leadership may have been
+                // recorded after all, so that run keeps its archive.
+                if result.backup.is_some() {
+                    self.inner.retained_backups.release(&reference);
                 }
                 let message = ConsensusError::report_message(&error);
                 let result = self
@@ -1138,9 +1146,12 @@ fn command_awaits_recovery(result: &CommandResult) -> bool {
     )
 }
 
-/// A terminal record, or the unchanged disposition that leaves the execution applying.
+/// A terminal record, or the unchanged disposition that leaves the execution applying. A backup's
+/// archive is recorded as retained by `holder`, the node process that ran the command, assembled
+/// the archive and records the outcome.
 fn durable_command_result(
     result: &CommandResult,
+    holder: &ClusterNodeIdentity,
 ) -> Result<CommandExecutionResult, Box<CommandResult>> {
     let disposition = match &result.disposition {
         CommandDisposition::Completed { already_existed } => {
@@ -1164,6 +1175,13 @@ fn durable_command_result(
         | CommandDisposition::ExecutionReferenceConflict(_)
         | CommandDisposition::ExecutionReferenceExpired => CommandExecutionDisposition::Failed,
     };
+    let backup = result
+        .backup
+        .as_deref()
+        .map(|summary| RecordedBackupArchive {
+            summary: summary.clone(),
+            holder: holder.clone(),
+        });
     Ok(CommandExecutionResult {
         disposition,
         message: result.message.clone(),
@@ -1179,7 +1197,7 @@ fn durable_command_result(
             .collect(),
         transaction: result.transaction.as_ref().map(durable_transaction_status),
         transaction_admission: result.transaction_admission.clone(),
-        backup: result.backup.as_deref().cloned(),
+        backup,
         restore: result.restore.as_deref().cloned(),
     })
 }
@@ -1237,7 +1255,7 @@ fn command_result(result: CommandExecutionResult) -> CommandResult {
             .collect(),
         transaction,
         transaction_admission: result.transaction_admission,
-        backup: result.backup.map(Box::new),
+        backup: result.backup.map(|archive| Box::new(archive.summary)),
         restore: result.restore.map(Box::new),
         ..CommandResult::new(disposition, result.message)
     }
@@ -1294,6 +1312,15 @@ mod tests {
 
     fn domain() -> DomainName {
         DomainName::parse("default").assured("the test domain is an identifier-shaped literal")
+    }
+
+    /// The node process a test's command finishes on.
+    fn holder() -> ClusterNodeIdentity {
+        ClusterNodeIdentity::new(
+            nervix_models::ClusterNodeName::parse("node-2")
+                .assured("the test node is an identifier-shaped literal"),
+            nervix_models::ClusterNodeIncarnation::new(7),
+        )
     }
 
     fn preview(position: usize, basis: u8) -> TransactionPreviewIdentity {
@@ -1525,10 +1552,45 @@ mod tests {
         };
 
         let restored = command_result(
-            durable_command_result(&result).assured("the command has a terminal outcome"),
+            durable_command_result(&result, &holder())
+                .assured("the command has a terminal outcome"),
         );
 
         assert_eq!(restored, result);
+    }
+
+    #[test]
+    fn a_completed_backup_records_the_node_process_that_retains_its_archive() {
+        let summary = nervix_models::BackupArchiveSummary {
+            total_bytes: std::num::NonZeroU64::new(4096).assured("4096 is not zero"),
+            digest: nervix_models::ArchiveDigest::from_bytes([3; 32]),
+            captured_at: Timestamp::from_unix_nanos(1_000),
+            retained_until: Timestamp::from_unix_nanos(2_000),
+            resources: BackupResources::Included,
+            users: Some(1),
+            domains: Vec::new(),
+        };
+        let result = CommandResult {
+            backup: Some(Box::new(summary.clone())),
+            ..CommandResult::new(
+                CommandDisposition::Completed {
+                    already_existed: false,
+                },
+                "backed up the cluster".to_string(),
+            )
+        };
+
+        let durable = durable_command_result(&result, &holder())
+            .assured("a completed backup has a terminal outcome");
+
+        assert_eq!(
+            durable.backup,
+            Some(RecordedBackupArchive {
+                summary,
+                holder: holder(),
+            })
+        );
+        assert_eq!(command_result(durable), result);
     }
 
     #[test]
@@ -1540,7 +1602,10 @@ mod tests {
         ] {
             let result = outcome_unknown(cause, "the admitted command needs recovery".to_string());
             assert!(command_awaits_recovery(&result));
-            assert_eq!(durable_command_result(&result), Err(Box::new(result)));
+            assert_eq!(
+                durable_command_result(&result, &holder()),
+                Err(Box::new(result))
+            );
         }
     }
 
@@ -1556,7 +1621,10 @@ mod tests {
         ] {
             let result = CommandResult::new(disposition, "not finished".to_string());
             assert!(command_awaits_recovery(&result));
-            assert_eq!(durable_command_result(&result), Err(Box::new(result)));
+            assert_eq!(
+                durable_command_result(&result, &holder()),
+                Err(Box::new(result))
+            );
         }
     }
 
@@ -1571,7 +1639,8 @@ mod tests {
         );
 
         let restored = command_result(
-            durable_command_result(&result).assured("the refused commit has a terminal outcome"),
+            durable_command_result(&result, &holder())
+                .assured("the refused commit has a terminal outcome"),
         );
 
         assert_eq!(restored, result);

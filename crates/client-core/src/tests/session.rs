@@ -54,7 +54,7 @@ use crate::{
         Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection,
         ChoiceStatus, ChoiceTarget, ChoiceValue, ClientFrame, ClientMessage, ClientRequest,
         DomainInfo, DomainList, DomainPaceChoice, DomainsObserved, EncodedFrame, InspectionOutcome,
-        LeaderEndpoints, LeaderRedirect, LeadershipObserved, NoticeLevel, Reply, ReplyBody,
+        LeaderRedirect, LeadershipObserved, NodeEndpoints, NoticeLevel, Reply, ReplyBody,
         ReplyDelivery, RequestId, RowSchema, ServerFrame, ServerNotice, SessionLimitSettings,
         SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
         SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
@@ -341,7 +341,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
                 }
                 Some(UploadReplyMode::Redirect(leader)) => {
                     reply.disposition = UploadDisposition::NotLeader(LeaderRedirect {
-                        leader: Some(LeaderEndpoints {
+                        leader: Some(NodeEndpoints {
                             node: node("leader"),
                             grpc_uri: Some(leader),
                             web_console_uri: None,
@@ -1948,7 +1948,7 @@ async fn a_command_redirect_from_a_preopened_channel_keeps_its_execution_referen
             command_outcome(
                 &first_command.execution_reference,
                 CommandDisposition::NotLeader(LeaderRedirect {
-                    leader: Some(LeaderEndpoints {
+                    leader: Some(NodeEndpoints {
                         node: node("leader"),
                         grpc_uri: Some(leader_url),
                         web_console_uri: None,

@@ -222,6 +222,34 @@ async fn a_silent_endpoint_accepts_every_connection_and_holds_it_until_reset() {
 }
 
 #[nervix_primitives::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_endpoint_records_when_it_accepted_each_connection_in_order() {
+    let endpoint = StallableTcpProxy::silent()
+        .await
+        .assured("loopback has a free ephemeral port for the endpoint");
+    let before = Instant::now();
+    let _first = connect(&endpoint).await;
+    endpoint.accepted_at_least(1).await;
+    let _second = connect(&endpoint).await;
+    endpoint.accepted_at_least(2).await;
+
+    let first = endpoint
+        .accepted_at(0)
+        .assured("the endpoint recorded the connection it accepted first");
+    let second = endpoint
+        .accepted_at(1)
+        .assured("the endpoint recorded the connection it accepted second");
+    assert!(
+        before <= first,
+        "a connection was recorded before it was opened"
+    );
+    assert!(
+        first <= second,
+        "the endpoint recorded its connections out of order"
+    );
+    assert_eq!(endpoint.accepted_at(2), None);
+}
+
+#[nervix_primitives::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_timed_pause_resumes_the_proxy_once_its_duration_passes() {
     let mut dependency = EchoDependency::start().await;
     let proxy = dependency.proxy().await;

@@ -38,7 +38,7 @@ use std::{collections::BTreeMap, fmt};
 use bytes::Bytes;
 use error_stack::Report;
 use nervix_client_wire::{
-    BackupDownloadMessage, CommandDisposition, LeaderEndpoints, LeaderRedirect, Leadership, Reply,
+    BackupDownloadMessage, CommandDisposition, LeaderRedirect, Leadership, NodeEndpoints, Reply,
     ReplyBody, RestoreDisposition, RestoreReply, ServerEvent, ServerMessage, SessionEndReason,
     SessionLimits,
     websocket::{
@@ -239,7 +239,7 @@ enum ReportedLeader {
 
 impl ReportedLeader {
     /// The leader `leader` describes, when it advertises a web console.
-    fn at_console(leader: LeaderEndpoints) -> Option<Self> {
+    fn at_console(leader: NodeEndpoints) -> Option<Self> {
         let console = leader.web_console_uri?;
         Some(Self::Redirect(console))
     }

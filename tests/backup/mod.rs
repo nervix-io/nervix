@@ -28,6 +28,7 @@ use crate::common::{
 mod branch_keys;
 mod branch_state;
 pub(crate) mod console;
+mod cut_diagnostics;
 mod delivery;
 mod fidelity;
 mod guest_saves;
@@ -958,6 +959,24 @@ fn then_download_is_redirected(world: &mut ScenarioWorld, node: String) {
         .expect("the scenario names a cluster node");
     let expected = url::Url::parse(&expected).expect("cluster gRPC URIs are URLs");
     assert_eq!(leader.grpc_uri.as_ref(), Some(&expected));
+}
+
+#[then(expr = "the download is sent to node {string}, which assembled the archive")]
+fn then_download_is_sent_to_holder(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    let TestDownloadEnd::SentToHolder(holder) = last_download(world) else {
+        panic!(
+            "the download was sent to the archive's holder: {:?}",
+            last_download(world)
+        );
+    };
+    assert_eq!(holder.node.as_str(), node);
+    let expected = world
+        .cluster()
+        .grpc_uri(&node)
+        .expect("the scenario names a cluster node");
+    let expected = url::Url::parse(&expected).expect("cluster gRPC URIs are URLs");
+    assert_eq!(holder.grpc_uri.as_ref(), Some(&expected));
 }
 
 #[then("the download is refused as unauthenticated")]

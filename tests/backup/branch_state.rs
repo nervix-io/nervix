@@ -3,7 +3,7 @@
 //! Layer: test harness.
 //! - **Owns.** The shared domain text a feature saves once, the instants a scenario measures
 //!   deduplicator expiry from, the posts that wait for a restored endpoint or a key's expiry, and
-//!   the slow storage a scenario gives a window's branches as they stop.
+//!   the slow storage a scenario gives a window's branches or a materialized relay as they stop.
 //! - **Depends on.** The scenario world's placeholders, the cluster's HTTP publishing, and the
 //!   active session's relay subscriptions.
 //! - **Must not know.** How the server archives, installs or restores branch-local state.
@@ -49,12 +49,34 @@ fn given_stopping_window_branches_write_slowly(
         .assured("the scenario domain is an identifier-shaped name");
     let processor = nervix_models::ModelName::try_from(processor.as_str())
         .assured("the window processor is an identifier-shaped name");
-    world.fault_injection.delay_stopped_branch_state_writes(
+    world.fault_injection.delay_stopped_state_writes(
         nervix_models::DomainNodeRef::node_in(
             domain,
             nervix_models::ModelKind::WindowProcessor,
             processor,
         ),
+        delay,
+    );
+}
+
+/// The materialized relay writes the records it holds last only once this long after its domain's
+/// stop told it to, on every node that keeps them, as storage slow to take a large relay would. A
+/// wait longer than the stop grace of the domain's tasks leaves the write running after each of
+/// them has ended.
+#[given(expr = "materialized relay {string} takes {string} to write its state as its domain stops")]
+fn given_stopping_materialized_relay_writes_slowly(
+    world: &mut ScenarioWorld,
+    relay: String,
+    delay: String,
+) {
+    let delay = parse_duration_text(&delay).expect("step duration must be a valid duration");
+    let relay = expand_placeholders(world, &relay);
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let relay = nervix_models::ModelName::try_from(relay.as_str())
+        .assured("the materialized relay is an identifier-shaped name");
+    world.fault_injection.delay_stopped_state_writes(
+        nervix_models::DomainNodeRef::node_in(domain, nervix_models::ModelKind::Relay, relay),
         delay,
     );
 }

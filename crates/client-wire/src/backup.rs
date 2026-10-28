@@ -13,7 +13,7 @@ use nervix_models::{
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
-    common::LeaderRedirect,
+    common::{LeaderRedirect, NodeEndpoints},
     frame::{BackupDownloadFrame, BackupDownloadRequestFrame, EncodedFrame, VerifiedFrame},
     limits::SessionLimits,
     wire,
@@ -248,8 +248,9 @@ impl BackupDownloadRequest {
 pub enum BackupDownloadFailure {
     /// The request is malformed.
     InvalidRequest,
-    /// The serving node retains no archive under the reference: it assembled none, a complete
-    /// download already collected it, or the command is not a completed backup.
+    /// No live node retains an archive under the reference: the backup is still assembling it or
+    /// assembled none, a complete download already collected it, the node that assembled it
+    /// restarted or left, or the command is not a completed backup.
     NotRetained,
     /// The reference's retry validity ended, and the archive with it.
     Expired,
@@ -313,6 +314,9 @@ pub enum BackupDownloadMessage {
     Complete,
     Failed(BackupDownloadFailed),
     NotLeader(LeaderRedirect),
+    /// Another node retains the archive the backup's recorded outcome names: the client downloads
+    /// it from that node.
+    Holder(NodeEndpoints),
 }
 
 impl BackupDownloadMessage {
@@ -404,6 +408,25 @@ impl BackupDownloadMessage {
         )
     }
 
+    /// The frame that sends a download to the node that retains the archive.
+    pub fn encode_holder(
+        holder: &NodeEndpoints,
+        limits: &SessionLimits,
+    ) -> Result<EncodedFrame<BackupDownloadFrame>, Report<WireEncodeError>> {
+        let mut encoder = Encoder::new(limits.frame_bytes(), limits);
+        let holder = holder.encode(&mut encoder)?;
+        let part = wire::BackupArchiveHolder::create(
+            encoder.fbb(),
+            &wire::BackupArchiveHolderArgs {
+                holder: Some(holder),
+            },
+        );
+        finish_download_message(
+            encoder,
+            EncodedUnion::new(wire::BackupDownloadPart::BackupArchiveHolder, part),
+        )
+    }
+
     pub fn decode(
         frame: &VerifiedFrame<BackupDownloadFrame>,
     ) -> Result<Self, Report<WireDecodeError>> {
@@ -440,6 +463,12 @@ impl BackupDownloadMessage {
         }
         if let Some(redirect) = message.part_as_leader_redirect() {
             return Ok(Self::NotLeader(LeaderRedirect::decode(decoder, redirect)?));
+        }
+        if let Some(holder) = message.part_as_backup_archive_holder() {
+            return Ok(Self::Holder(NodeEndpoints::decode(
+                decoder,
+                holder.holder(),
+            )?));
         }
         Err(decoder.unknown_union("BackupDownloadMessage.part", message.part_type().0))
     }

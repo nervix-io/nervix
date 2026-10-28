@@ -764,9 +764,9 @@ fn diagnostic_reply(span: Option<wire::SourceSpan>, grpc_uri: &str) -> bytes::By
     let mut builder = FlatBufferBuilder::new();
     let node = builder.create_string("node-2");
     let uri = builder.create_string(grpc_uri);
-    let endpoints = wire::LeaderEndpoints::create(
+    let endpoints = wire::NodeEndpoints::create(
         &mut builder,
-        &wire::LeaderEndpointsArgs {
+        &wire::NodeEndpointsArgs {
             node: Some(node),
             grpc_uri: Some(uri),
             web_console_uri: None,
@@ -864,7 +864,7 @@ fn spans_must_be_ordered_and_endpoints_must_be_uris() {
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
         WireDecodeError::InvalidValue {
-            field: "LeaderEndpoints.grpc_uri",
+            field: "NodeEndpoints.grpc_uri",
             kind: "URI",
         }
     );

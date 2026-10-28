@@ -7,9 +7,9 @@ use meticulous::OptionExt as _;
 use ubyte::ByteUnit;
 
 use crate::{
-    AdmissionError, BudgetedBuffer, ExecutionConfig, ExecutionConfigError, ExecutionError,
-    Executor, MemoryBudgets, MemoryClass, OperationLimits, QueueAdmission, StorageClass,
-    WorkerCounts,
+    AdmissionError, BudgetedBuffer, BufferGrowthError, BufferLimitExceeded, ExecutionConfig,
+    ExecutionConfigError, ExecutionError, Executor, MemoryBudgets, MemoryClass, OperationLimits,
+    QueueAdmission, StorageClass, WorkerCounts,
 };
 
 fn one() -> NonZeroUsize {
@@ -1465,6 +1465,45 @@ mod shuttle_checks {
     fn shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit() {
         check_random_and_pct(consensus_admission_order_invariant);
     }
+
+    #[test]
+    fn shuttle_submission_racing_worker_exit_never_strands_an_admitted_job() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let executor = small_executor();
+                let mut submissions = Vec::new();
+                for value in 0..3 {
+                    nervix_primitives::task::consume_budget().await;
+                    let submitted = executor.clone();
+                    let charge = executor
+                        .try_reserve(MemoryClass::Management, 1)
+                        .assured("three bytes fit in the management budget");
+                    submissions.push(nervix_primitives::task::spawn(async move {
+                        submitted
+                            .run_cpu_with(
+                                CpuClass::Control,
+                                QueueAdmission::WaitForPlace,
+                                charge,
+                                move |_, _| value,
+                            )
+                            .await
+                    }));
+                }
+                for (value, submission) in submissions.into_iter().enumerate() {
+                    nervix_primitives::task::consume_budget().await;
+                    assert_eq!(
+                        submission
+                            .await
+                            .assured("the submitter completes")
+                            .assured("an admitted job is never stranded"),
+                        value
+                    );
+                }
+                assert_eq!(executor.snapshot().control_cpu.completed, 3);
+                assert_every_permit_returned(&executor);
+            });
+        });
+    }
 }
 
 #[nervix_primitives::test]
@@ -1555,6 +1594,65 @@ async fn an_operation_limit_stops_a_writer_before_its_class_does() {
         executor.snapshot().relay_memory.reserved_bytes < 100 * 1024,
         "the writer never charged past the operation limit"
     );
+}
+
+/// A reader that must answer that its class is full, rather than wait for room, tells a class
+/// without free room from a buffer at its operation's limit, and keeps nothing it was refused.
+#[nervix_primitives::test]
+async fn a_typed_append_tells_a_full_class_from_an_operation_limit() {
+    let executor = small_executor();
+    let reservation = executor
+        .try_reserve(MemoryClass::Relay, 4096)
+        .expect("the relay class is empty");
+    let mut buffer = BudgetedBuffer::with_limit(reservation, 100 * 1024);
+    buffer
+        .try_extend_from_slice(&[5_u8; 4096])
+        .expect("the first chunk fits its charge");
+    let relay_memory = executor.snapshot().relay_memory;
+    let room = relay_memory
+        .capacity_bytes
+        .checked_sub(relay_memory.reserved_bytes)
+        .expect("a class never reserves more than its capacity");
+    let occupied = executor
+        .try_reserve(MemoryClass::Relay, room)
+        .expect("the rest of the relay class is free");
+
+    let refusal = buffer
+        .try_extend_from_slice(&[5_u8; 4096])
+        .expect_err("a full class backs no growth");
+    assert_eq!(refusal.current_context(), &BufferGrowthError::NotCharged);
+    assert!(
+        matches!(
+            refusal.downcast_ref::<AdmissionError>(),
+            Some(AdmissionError::BudgetExhausted { .. })
+        ),
+        "the class's own refusal is the cause: {refusal:?}"
+    );
+    assert_eq!(buffer.len(), 4096, "a refused append keeps nothing");
+    let error = buffer
+        .write_all(&[5_u8; 4096])
+        .expect_err("a full class backs no growth through io::Write either");
+    assert!(
+        error.to_string().contains("has no room for another"),
+        "an io::Write writer reports the class's own refusal: {error}"
+    );
+    assert_eq!(buffer.len(), 4096, "a refused write keeps nothing");
+
+    drop(occupied);
+    buffer
+        .try_extend_from_slice(&[5_u8; 4096])
+        .expect("the class backs the growth once it has room");
+    let refusal = buffer
+        .try_extend_from_slice(&[5_u8; 100 * 1024])
+        .expect_err("the operation limit stops the buffer");
+    assert_eq!(
+        refusal.current_context(),
+        &BufferGrowthError::LimitExceeded(BufferLimitExceeded {
+            limit: 100 * 1024,
+            required: 108 * 1024,
+        })
+    );
+    assert_eq!(buffer.len(), 8192, "a refused append keeps nothing");
 }
 
 /// A writer that reserves room to grow into must not keep that room once it is done. A frame the

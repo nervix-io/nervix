@@ -32,7 +32,7 @@ use crate::{
     ChoiceLookupRequest, ChoiceSelection, ChoiceTarget, ChoiceValue, ClientMessage, ClientRequest,
     CloseEmitterRequest, CloseIngestorRequest, CommandDisposition, CommandOutcome, CommandRequest,
     ConsumerId, DetachDomainClockRequest, Diagnostic, EmitterBatchDecision, EncodedFrame,
-    InspectTransactionRequest, LeaderEndpoints, LeaderRedirect, OpenEmitterRequest,
+    InspectTransactionRequest, LeaderRedirect, NodeEndpoints, OpenEmitterRequest,
     OpenIngestorRequest, OutcomeOrigin, ProducerId, ReadEmitterBatchRequest, RowBranch, RowSchema,
     SelectDomainRequest, ServerFrame, SessionLimits, SettleEmitterBatchRequest, SourceSpan,
     StatementDisposition, StatementOutcome, SubmitBatchRequest, SubscribeRequest,
@@ -40,8 +40,8 @@ use crate::{
     UnsubscribeRequest, WireEncodeError,
 };
 
-pub(crate) fn leader() -> LeaderEndpoints {
-    LeaderEndpoints {
+pub(crate) fn leader() -> NodeEndpoints {
+    NodeEndpoints {
         node: name("node-2"),
         grpc_uri: Some(Url::parse("https://node-2.cluster.local:7443").assured("a literal URI")),
         web_console_uri: Some(
@@ -379,7 +379,7 @@ pub(crate) fn command_dispositions() -> Vec<CommandDisposition> {
             leader: Some(leader()),
         }),
         CommandDisposition::NotLeader(LeaderRedirect {
-            leader: Some(LeaderEndpoints {
+            leader: Some(NodeEndpoints {
                 node: name("node-3"),
                 grpc_uri: None,
                 web_console_uri: None,

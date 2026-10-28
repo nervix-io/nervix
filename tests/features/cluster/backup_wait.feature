@@ -1,8 +1,11 @@
 @backup_wait @deloxide_stress_restore
 Feature: Bounded multi-domain backup waits and exact recovery
 
-  # A leader that cannot record the expired backup's outcome runs the backup again under its
-  # reference, and that run's second cut expires again. The CLI's wait covers both runs.
+  # The first cut's 12-second hold leaves 18 seconds of its 30-second cut budget for its lease,
+  # pause, drain and capture, so only the held second cut expires, even while a leader whose raft
+  # lease lapsed refuses the first cut's lease. A leader that cannot record the expired backup's
+  # outcome runs the backup again under its reference, and that run's second cut expires again.
+  # The CLI's wait covers both runs.
   Scenario Outline: A second-domain quiesce expiry returns its failure and resumes both domains
     Given a <cluster_size> node nervix cluster is started
     And the active domain is saved as placeholder "backup_base"
@@ -21,7 +24,7 @@ Feature: Bounded multi-domain backup waits and exact recovery
     Then the current leader node is saved as placeholder "leader"
     Given the backup cut for domain "{{backup_base}}_a" will pause before its capture
     And the backup cut for domain "{{backup_base}}_b" will pause before its capture
-    When the CLI begins backing up "cluster --timeout 20s --backup-wait-timeout 3m" from node "{{leader}}" into "cut-expired.nvxb" in the background
+    When the CLI begins backing up "cluster --timeout 30s --backup-wait-timeout 3m" from node "{{leader}}" into "cut-expired.nvxb" in the background
     And backup cut "{{backup_base}}_a" is held for 12 seconds and then released
     Then the backup cut for domain "{{backup_base}}_b" has reached its pause
     And the background CLI backup finishes
@@ -195,6 +198,11 @@ Feature: Bounded multi-domain backup waits and exact recovery
       | 1            | 12                |
       | 3            | 12                |
 
+  # Each domain's cut has a budget of its own. The two holds together outlast one 40-second cut
+  # budget, so a budget the two cuts shared would expire the second, and each hold leaves its cut
+  # at least 18 seconds of its own budget for its lease, pause, drain and capture. A leader whose
+  # raft lease lapsed refuses the cut's lease until the lease recovers, and the cut waits for it
+  # inside its budget.
   Scenario Outline: A Plexus cluster backup waits across independent domain cut budgets
     Given a <cluster_size> node nervix cluster is started
     And the active domain is saved as placeholder "backup_base"
@@ -212,8 +220,8 @@ Feature: Bounded multi-domain backup waits and exact recovery
       """
     Given the backup cut for domain "{{backup_base}}_a" will pause before its capture
     And the backup cut for domain "{{backup_base}}_b" will pause before its capture
-    When a Plexus cluster backup crosses two delayed cuts into "cluster-wait.nvxb"
-    Then backup archive "cluster-wait.nvxb" contains both delayed quiesced domain cuts
+    When a Plexus cluster backup with a 40 second cut budget crosses cuts delayed for 20 and 22 seconds into "cluster-wait.nvxb"
+    Then backup archive "cluster-wait.nvxb" contains quiesced domain cuts delayed for 20 and 22 seconds
 
     Examples:
       | cluster_size |
@@ -256,4 +264,4 @@ Feature: Bounded multi-domain backup waits and exact recovery
     When the command finalization pause on node "{{leader}}" is released
     Then the background CLI backup finishes
     And the CLI backup succeeded with a JSON report naming domain "{{backup_base}}_b"
-    And backup archive "cluster-wait-again.nvxb" contains both delayed quiesced domain cuts
+    And backup archive "cluster-wait-again.nvxb" contains quiesced domain cuts delayed for 12 and 14 seconds

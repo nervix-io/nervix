@@ -450,7 +450,7 @@ Feature: Resource lifecycle
       versions: 1
       """
 
-  @resource_upload_idempotency
+  @resource_upload_idempotency @resource_upload_publication @deloxide_stress
   Scenario Outline: A leader resumes an upload whose publication it refused from its own installed copy
     Given a <cluster_size> node nervix cluster is started
     And node "node-1" has resource directory "proto_dir" containing
