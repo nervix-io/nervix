@@ -82,9 +82,16 @@ fn source_surface(kind: IngestorEntityKind) -> IngestorSurface {
             SUSPEND,
             &[],
         ),
-        IngestorEntityKind::Http(HttpIngestorEntity::Request) => {
-            unlocated(NO_ACK, POLLING, &[("EVERY", true)])
-        }
+        IngestorEntityKind::Http(HttpIngestorEntity::Request) => unlocated(
+            NO_ACK,
+            POLLING,
+            &[
+                ("METHOD", true),
+                ("HEADERS", false),
+                ("MAX BODY SIZE", false),
+                ("EVERY", true),
+            ],
+        ),
         IngestorEntityKind::Http(HttpIngestorEntity::Endpoint)
         | IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => unlocated(
             &[
