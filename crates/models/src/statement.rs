@@ -25,11 +25,11 @@ use thiserror::Error;
 
 use crate::{
     AlterDeduplicator, AlterEmitter, AlterJunction, AlterReingestor, AlterReorderer, AlterSchema,
-    AlterWireSchema, AvroType, Backup, BranchName, CborType, ClientConfigEntry, ClusterNodeName,
-    CodecName, ConnectorKind, CorrelatorName, CreateAvroWireSchema, CreateCborWireSchema,
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    AlterWireSchema, AvroType, Backup, BranchName, CborType, ClientConfigEntry, ClientName,
+    ClusterNodeName, CodecName, ConnectorKind, CorrelatorName, CreateAvroWireSchema,
+    CreateCborWireSchema, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs,
+    CreateClientHttp, CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb,
+    CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
     CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCorrelator, CreateDeduplicator,
@@ -107,6 +107,7 @@ pub enum Statement {
     ShowTransactions(ShowTransactions),
     DescribeTransaction(DescribeTransaction),
     DescribeCluster(DescribeCluster),
+    DescribeClient(DescribeClient),
 }
 
 impl Statement {
@@ -163,6 +164,7 @@ impl Statement {
             | Self::DescribeResource(_)
             | Self::DescribeLookup(_)
             | Self::DescribeEndpoint(_)
+            | Self::DescribeClient(_)
             | Self::DescribeJunction(_)
             | Self::DescribeDeduplicator(_)
             | Self::DescribeReingestor(_)
@@ -945,6 +947,13 @@ pub struct DescribeCorrelator {
 )]
 pub struct DescribeEndpoint {
     pub name: EndpointName,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct DescribeClient {
+    pub name: ClientName,
 }
 
 #[derive(

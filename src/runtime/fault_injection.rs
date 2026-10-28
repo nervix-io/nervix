@@ -84,6 +84,14 @@ impl ConfiguredFaultInjection {
         None
     }
 
+    pub(in crate::runtime) async fn delay_materialized_dependency_read_if_armed(
+        &self,
+        _domain: &DomainName,
+        _kind: ModelKind,
+        _processor: &ModelName,
+    ) {
+    }
+
     pub(in crate::runtime) fn emitter_client_is_unavailable(&self, _emitter: &EmitterName) -> bool {
         false
     }

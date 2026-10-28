@@ -200,6 +200,9 @@ struct FaultInjectionState {
     /// and the checkpoint writer of the state the node's placement keeps, such as a materialized
     /// relay's records, once its domain's stop told it to write.
     delayed_stopped_state_writes: DashMap<DomainNodeRef, Duration, RandomState>,
+    /// Waits, keyed by a relay processor, that the processor spends before each read of its
+    /// materialized dependencies, as a read slow to reach the node that holds the state would.
+    delayed_materialized_dependency_reads: DashMap<DomainNodeRef, Duration, RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
     /// Refusals of a node's next uploaded-version publication, each keeping whether a publication
@@ -517,6 +520,7 @@ impl Default for FaultInjection {
                 delayed_shutdown_cordon_releases: DashMap::default(),
                 delayed_source_confirmations: DashMap::default(),
                 delayed_stopped_state_writes: DashMap::default(),
+                delayed_materialized_dependency_reads: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
                 refused_resource_publications: DashMap::default(),
                 failed_restore_checkpoint_stagings: DashMap::default(),
@@ -1193,6 +1197,15 @@ impl FaultInjection {
     /// that owned the state was ended.
     pub fn delay_stopped_state_writes(&self, node: DomainNodeRef, delay: Duration) {
         self.inner.delayed_stopped_state_writes.insert(node, delay);
+    }
+
+    /// Makes `processor`, a relay processor, wait `delay` before each read of its materialized
+    /// dependencies, as a read slow to reach the node that holds the state would. Every read waits,
+    /// including each re-evaluation of a message the processor parked on `REQUIRED WAIT`.
+    pub fn delay_materialized_dependency_reads(&self, processor: DomainNodeRef, delay: Duration) {
+        self.inner
+            .delayed_materialized_dependency_reads
+            .insert(processor, delay);
     }
 
     /// Fails the next resource version `node_id` installs, after the node installed and published
@@ -2254,6 +2267,33 @@ impl FaultInjection {
         let node = DomainNodeRef::node_in(domain.clone(), kind, entity.clone());
         let delay = self.inner.delayed_stopped_state_writes.get(&node)?;
         Some(*delay)
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "a scenario-owned dependency read delay is read before every materialized \
+                      dependency read of the processor it names",
+            key = "one test processor",
+            bound = "one keyed read; its guard ends before the test-controlled wait"
+        )
+    )]
+    pub(crate) async fn delay_materialized_dependency_read_if_armed(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        processor: &ModelName,
+    ) {
+        let processor = DomainNodeRef::node_in(domain.clone(), kind, processor.clone());
+        let delay = self
+            .inner
+            .delayed_materialized_dependency_reads
+            .get(&processor)
+            .map(|delay| *delay.value());
+        if let Some(delay) = delay {
+            nervix_primitives::time::sleep(delay).await;
+        }
     }
 
     pub(crate) async fn pause_transaction_commit_after_progress_if_armed(

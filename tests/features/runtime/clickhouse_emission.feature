@@ -1,4 +1,61 @@
 Feature: ClickHouse emission
+  Scenario Outline: ClickHouse writes after the server closes idle connections
+    Given MQTT is running
+    And ClickHouse is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And ClickHouse table "idle_ch_{{test_id}}" exists
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA event (user_id I64, action STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (user_id integer, action string);
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE MQTT CLIENT ingress CONFIG {
+        'addr' = '{{mqtt_addr}}', 'client_id' = 'clickhouse-idle-{{test_id}}'
+      };
+      CREATE MQTT TOPIC INGESTOR incoming FROM ingress TOPIC 'clickhouse_idle_{{test_id}}'
+        MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE CLICKHOUSE CLIENT outgoing CONFIG {
+        'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix',
+        'timeout_ms' = '5000', 'tcp_keepalive_ms' = '30000', 'pool_idle_timeout_ms' = '100'
+      };
+      CREATE CLICKHOUSE TABLE EMITTER to_ch FROM events TO outgoing TABLE 'idle_ch_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        VALUES { 'clickhouse_user_id' = input.user_id, 'clickhouse_action' = input.action,
+          'clickhouse_now' = 'connection-policy' }
+        BATCH MAX MESSAGES 10 MAX SIZE 1MiB FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And MQTT message is published to topic "clickhouse_idle_{{test_id}}"
+      """
+      {"user_id":41,"action":"first"}
+      """
+    Then the ClickHouse table eventually contains a row
+      """
+      {"clickhouse_user_id":41,"clickhouse_action":"first"}
+      """
+    When the ClickHouse server's idle connection timeout has elapsed
+    And MQTT message is published to topic "clickhouse_idle_{{test_id}}"
+      """
+      {"user_id":42,"action":"after-idle"}
+      """
+    Then the ClickHouse table eventually contains a row
+      """
+      {"clickhouse_user_id":42,"clickhouse_action":"after-idle"}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @domain_execution_time
   Scenario Outline: ClickHouse emitter inserts mapped rows from a relay
     Given MQTT is running
