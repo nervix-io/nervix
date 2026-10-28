@@ -18,6 +18,7 @@ bb8 = { workspace = true }
 combine = { workspace = true }
 error-stack = { workspace = true }
 futures-util = { workspace = true }
+meticulous = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
@@ -31,7 +32,6 @@ tokio = { workspace = true, features = ["net", "rt", "time"] }
 tokio-rustls = { workspace = true }
 
 [dev-dependencies]
-meticulous = { workspace = true }
 nervix-primitives = { workspace = true, features = ["test-util"] }
 nervix-test-environment = { workspace = true }
 tempfile = { workspace = true }

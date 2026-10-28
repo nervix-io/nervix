@@ -3502,7 +3502,9 @@ cluster-dashboard: build-all
     cli_bin_dir="${target_dir}/cli/{{ build_mode }}"
     server_bin_dir="${target_dir}/server/{{ build_mode }}"
     export PATH="${cli_bin_dir}:${server_bin_dir}:${PATH}"
-    exec zellij --layout .zellij/layouts/local-3-nodes.kdl
+    # Inside a zellij session, `--layout` adds the tabs to that session, whose panes do not see the
+    # environment exported above, so the dashboard always starts a session of its own.
+    exec zellij --new-session-with-layout .zellij/layouts/local-3-nodes.kdl
 
 dockerfmt:
     #!/usr/bin/env bash

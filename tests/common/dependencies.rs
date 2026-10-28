@@ -14,10 +14,10 @@ use nervix_primitives::sync::{Mutex, blocking::OnceLock};
 pub(crate) use nervix_test_environment::{
     CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
     KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
-    MONGODB_ADDR, MONGODB_REPLICA_SET_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR,
-    MYSQL_TLS_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR, PULSAR_ADMIN_ADDR, PULSAR_TLS_ADDR,
-    QUICKWIT_ADDR, RABBITMQ_ADDR, RABBITMQ_MANAGEMENT_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR,
-    REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
+    MONGODB_ADDR, MONGODB_MTLS_ADDR, MONGODB_REPLICA_SET_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR,
+    MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
+    PULSAR_ADMIN_ADDR, PULSAR_TLS_ADDR, QUICKWIT_ADDR, RABBITMQ_ADDR, RABBITMQ_MANAGEMENT_ADDR,
+    RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
     collector_exports::CollectorSignal,
     collector_output::{CollectorOutput, CollectorWait},
 };
@@ -185,6 +185,7 @@ impl TestDependencies {
         start_postgres => "postgres",
         start_mysql => "mysql",
         start_mongodb => "mongodb",
+        start_mongodb_mutual_tls => "mongodb-mutual-tls",
         start_mongodb_replica_set => "mongodb-replica-set",
         start_nats => "nats",
         start_nats_tls => "nats-tls",

@@ -15,6 +15,7 @@ use std::borrow::Cow;
 use ahash_compile_time::HashSet;
 use chumsky::{error::LabelError, prelude::*, util::MaybeRef};
 use delivery::{AcknowledgedPolicy, acknowledged_policy, request_policy, unconfirmed_policy};
+use envelope::entity_envelope;
 use meticulous::OptionExt as _;
 use nervix_models::*;
 
@@ -86,6 +87,7 @@ macro_rules! consumer_mode {
 mod clickhouse;
 mod client;
 mod delivery;
+mod envelope;
 mod http;
 mod iceberg;
 mod kafka;
@@ -231,6 +233,7 @@ fn encode_using_clause<'src>()
 struct ParsedDestination<S> {
     destination: S,
     body: EmitterBody,
+    envelope: EmitterEnvelope,
     construction: Option<RouteConstruction>,
     batch: Option<EmitterBatchPolicy>,
 }
@@ -267,18 +270,22 @@ fn encoded_destination<'src, S, P>(
     definition: P,
 ) -> impl Parser<'src, &'src [Token], ParsedDestination<S>, extra::Err<ParseError<'src>>> + Clone
 where
-    S: Clone + 'src,
+    S: EmitterEntityModel + Clone + 'src,
     P: Parser<'src, &'src [Token], S, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
     definition
         .then(encode_using_clause())
+        .then(entity_envelope::<S>())
         .then(context.construction().or_not())
-        .map(|((destination, codec), construction)| ParsedDestination {
-            destination,
-            body: EmitterBody::Codec { codec },
-            construction,
-            batch: None,
-        })
+        .map(
+            |(((destination, codec), envelope), construction)| ParsedDestination {
+                destination,
+                body: EmitterBody::Codec { codec },
+                envelope,
+                construction,
+                batch: None,
+            },
+        )
         .boxed()
 }
 
@@ -286,17 +293,21 @@ fn values_destination<'src, S, P>(
     definition: P,
 ) -> impl Parser<'src, &'src [Token], ParsedDestination<S>, extra::Err<ParseError<'src>>> + Clone
 where
-    S: Clone + 'src,
+    S: EmitterEntityModel + Clone + 'src,
     P: Parser<'src, &'src [Token], S, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
     definition
+        .then(entity_envelope::<S>())
         .then(where_only_route_construction().or_not())
-        .map(|(destination, construction)| ParsedDestination {
-            destination,
-            body: EmitterBody::Values,
-            construction,
-            batch: None,
-        })
+        .map(
+            |((destination, envelope), construction)| ParsedDestination {
+                destination,
+                body: EmitterBody::Values,
+                envelope,
+                construction,
+                batch: None,
+            },
+        )
         .boxed()
 }
 
@@ -373,6 +384,7 @@ where
                 destination: ParsedDestination {
                     destination: parsed.destination.into(),
                     body: parsed.body,
+                    envelope: parsed.envelope,
                     construction: parsed.construction,
                     batch: parsed.batch,
                 },
@@ -402,6 +414,7 @@ pub fn create_emitter_parser<'src>()
                         materialized_state: declared.materialized_state,
                         connector: Box::new(parsed.destination),
                         body: parsed.body,
+                        envelope: Box::new(parsed.envelope),
                         batch: parsed.batch,
                         construction: parsed.construction.unwrap_or_default(),
                         mode: mode.unwrap_or(AckMode::Attached),
@@ -493,6 +506,7 @@ where
         .map(|parsed| AlterEmitterOperation::SetTo {
             destination: Box::new(parsed.destination.into()),
             body: parsed.body,
+            envelope: Box::new(parsed.envelope),
             construction: parsed.construction,
         });
     let set_collect = kw(Identifier::Set)

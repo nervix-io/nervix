@@ -175,6 +175,16 @@ The observability listener exposes health and graph metrics:
 just cluster-dashboard
 ```
 
+The dashboard runs three nodes on loopback addresses. `node-1` bootstraps the cluster, and `node-2`
+and `node-3` join it through node-1's interconnect listener on `127.0.0.1:47395`. A node certificate
+carries exactly one node identity, so `just generate-dev-tls` issues each node its own interconnect
+certificate from the development CA: `tls/dev/node.pem` for `node-1`, and `tls/dev/node-2.pem` and
+`tls/dev/node-3.pem` for the other two. A run that finds the `node-2` or `node-3` certificate
+missing, or not issued by the current CA, issues it again without replacing the CA or `node-1`'s
+identity. Started from inside a zellij session, the dashboard opens a zellij session of its own in
+the current pane, because the panes of the outer session would not see the binaries and passwords
+it exports.
+
 The zellij dashboard seeds the `default` user once with the local password `nervix` and exports the
 same password for the interactive client pane. Override it by setting `NERVIX_PASSWORD` or
 `NERVIX_INIT_DEFAULT_USER_PASSWORD` before running the dashboard. If the local dashboard state was

@@ -36,8 +36,12 @@
 //! running there. Reserving threads per class would isolate them physically, at the cost of a pool
 //! per class; the node deliberately does not do that.
 //!
-//! In the Turmoil test build, the boundary runs admitted CPU jobs as tasks on the simulated
-//! scheduler, so each bounded synchronous job body is one scheduling step. Storage jobs still use
+//! A class worker drains its admitted FIFO directly, retaining one blocking-pool dispatch until
+//! it becomes idle. Submission and the last worker's idle transition share a bounded queue fence;
+//! callbacks and charge release run outside it. Queued cancellation removes the exact entry.
+//!
+//! In the Turmoil test build, the boundary runs a CPU worker on the simulated scheduler and yields
+//! between callbacks, so each bounded synchronous job body is one scheduling step. Storage jobs still use
 //! the blocking pool and are outside the simulated target. The same admission, cancellation and
 //! charge ownership apply in every build mode, and this executor is the only caller of the CPU-job
 //! mechanism.

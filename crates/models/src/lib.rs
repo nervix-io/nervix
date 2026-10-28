@@ -19,6 +19,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+mod admission;
 mod archived_count;
 #[cfg(feature = "arrow")]
 mod arrow_types;
@@ -34,6 +35,7 @@ mod domain_clock;
 mod duration_text;
 mod emitter;
 mod emitter_batch;
+mod emitter_envelope;
 mod expression;
 mod http_request;
 mod ingestor_input;
@@ -64,6 +66,7 @@ mod wasm_state_generation;
 mod wasm_state_inspection;
 mod window_model_digest;
 
+pub use admission::{AdmissionVerdict, AdmissionVerdicts, AdmissionVerdictsTextError};
 pub use archived_count::{ArchivedCountError, CountAsU64};
 pub use backup::{
     ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupCutKind,
@@ -116,31 +119,31 @@ pub use connector::{
     EmitterEntityBody, EmitterEntityCapabilities, EmitterEntityKind, EmitterEntityMetadata,
     EmitterEntityModel, EmitterModeChange, EmitterPublication, EmitterReference,
     EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, EndpointIngestMode,
-    EnvelopeClauseKind, ExternalName, ExternalNameDeclaration, ExternalNameError, GcsConfigEntry,
-    HeaderLayout, HeaderModel, HeaderNames, HeaderPair, HeaderPairsError, HttpConfigEntry,
-    HttpEmitter, HttpEmitterEntity, HttpEndpointIngestor, HttpIngestor, HttpIngestorEntity,
-    HttpRequestEmitter, HttpRequestEmitterMode, HttpRequestIngestMode, HttpRequestIngestor,
-    HttpRequestIngestorAlteration, HttpRequestPublishingMode, IcebergCatalog, IcebergEmitter,
-    IcebergEmitterEntity, IcebergLocationError, IcebergNamespace, IcebergRestConfigEntry,
-    IcebergStorageBackend, IcebergStorageBackendError, IcebergTableEmitter,
-    IcebergTableEmitterMode, IcebergTableName, IcebergTablePublishingMode, IcebergValueMapping,
-    IngestAcknowledgement, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestorAlteration, IngestorDeclaration, IngestorEntity,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorEntityKind, IngestorEntityMetadata,
-    IngestorEntityModel, IngestorMetadataScope, IngestorReference, IngestorReferenceKind,
-    KafkaConfigEntry, KafkaConsumerGroupName, KafkaEmitter, KafkaEmitterEntity, KafkaIngestMode,
-    KafkaIngestor, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicEmitterMode,
-    KafkaTopicIngestor, KafkaTopicIngestorAlteration, KafkaTopicName, KafkaTopicPublishingMode,
-    LiteralHeaderWrite, LocatorDeclaration, LocatorName, MONGODB_MAX_DOCUMENT_BYTES,
-    MONGODB_NAMESPACE_MAX_BYTES, MQTT_MAXIMUM_PACKET_BYTES, MQTT_SOURCE_MAXIMUM_PACKET_BYTES,
-    MYSQL_MAX_PLACEHOLDERS, MappedValueField, MappedValueSection, MappedValueType,
-    MappedValueTypes, MongoDbCollectionEmitter, MongoDbCollectionEmitterMode,
-    MongoDbCollectionName, MongoDbCollectionPublishingMode, MongoDbConfigEntry,
-    MongoDbConflictAction, MongoDbEmitter, MongoDbEmitterEntity, MongoDbValueMapping,
-    MqttConfigEntry, MqttEmitter, MqttEmitterEntity, MqttIngestMode, MqttIngestor,
-    MqttIngestorEntity, MqttQos, MqttSession, MqttTopicEmitter, MqttTopicEmitterMode,
-    MqttTopicFilter, MqttTopicIngestor, MqttTopicIngestorAlteration, MqttTopicName,
-    MqttTopicPublishingMode, MySqlConfigEntry, MySqlConflictAction, MySqlEmitter,
+    EnvelopeClauseForm, EnvelopeClauseKind, ExternalName, ExternalNameDeclaration,
+    ExternalNameError, GcsConfigEntry, HeaderLayout, HeaderModel, HeaderNames, HeaderPair,
+    HeaderPairsError, HttpConfigEntry, HttpEmitter, HttpEmitterEntity, HttpEndpointIngestor,
+    HttpIngestor, HttpIngestorEntity, HttpRequestEmitter, HttpRequestEmitterMode,
+    HttpRequestIngestMode, HttpRequestIngestor, HttpRequestIngestorAlteration,
+    HttpRequestPublishingMode, IcebergCatalog, IcebergEmitter, IcebergEmitterEntity,
+    IcebergLocationError, IcebergNamespace, IcebergRestConfigEntry, IcebergStorageBackend,
+    IcebergStorageBackendError, IcebergTableEmitter, IcebergTableEmitterMode, IcebergTableName,
+    IcebergTablePublishingMode, IcebergValueMapping, IngestAcknowledgement, IngestDeliveryKind,
+    IngestQuiesceKind, IngestQuiesceMode, IngestQuiesceOverflow, IngestorAlteration,
+    IngestorDeclaration, IngestorEntity, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorEntityKind, IngestorEntityMetadata, IngestorEntityModel, IngestorMetadataScope,
+    IngestorReference, IngestorReferenceKind, KafkaConfigEntry, KafkaConsumerGroupName,
+    KafkaEmitter, KafkaEmitterEntity, KafkaIngestMode, KafkaIngestor, KafkaIngestorEntity,
+    KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicEmitterMode, KafkaTopicIngestor,
+    KafkaTopicIngestorAlteration, KafkaTopicName, KafkaTopicPublishingMode, LiteralHeaderWrite,
+    LocatorDeclaration, LocatorName, MONGODB_MAX_DOCUMENT_BYTES, MONGODB_NAMESPACE_MAX_BYTES,
+    MQTT_MAXIMUM_PACKET_BYTES, MQTT_SOURCE_MAXIMUM_PACKET_BYTES, MYSQL_MAX_PLACEHOLDERS,
+    MappedValueField, MappedValueSection, MappedValueType, MappedValueTypes,
+    MongoDbCollectionEmitter, MongoDbCollectionEmitterMode, MongoDbCollectionName,
+    MongoDbCollectionPublishingMode, MongoDbConfigEntry, MongoDbConflictAction, MongoDbEmitter,
+    MongoDbEmitterEntity, MongoDbValueMapping, MqttConfigEntry, MqttEmitter, MqttEmitterEntity,
+    MqttIngestMode, MqttIngestor, MqttIngestorEntity, MqttQos, MqttSession, MqttTopicEmitter,
+    MqttTopicEmitterMode, MqttTopicFilter, MqttTopicIngestor, MqttTopicIngestorAlteration,
+    MqttTopicName, MqttTopicPublishingMode, MySqlConfigEntry, MySqlConflictAction, MySqlEmitter,
     MySqlEmitterEntity, MySqlTableEmitter, MySqlTableEmitterMode, MySqlTableName,
     MySqlTablePublishingMode, MySqlValueEncoding, MySqlValueMapping, NatsConfigEntry, NatsEmitter,
     NatsEmitterEntity, NatsIngestMode, NatsIngestor, NatsIngestorEntity, NatsPublishSubjectName,
@@ -161,8 +164,8 @@ pub use connector::{
     PostgresTableName, PostgresTablePublishingMode, PostgresValueMapping, PrometheusApiRoot,
     PrometheusApiRootError, PrometheusClientConfigError, PrometheusConfigEntry,
     PrometheusIngestMode, PrometheusIngestor, PrometheusIngestorEntity, PrometheusQueryIngestor,
-    PrometheusQueryIngestorAlteration, PropertyDeclaration, PulsarConfigEntry, PulsarEmitter,
-    PulsarEmitterEntity, PulsarIngestMode, PulsarIngestor, PulsarIngestorEntity,
+    PrometheusQueryIngestorAlteration, PropertyDeclaration, PropertyType, PulsarConfigEntry,
+    PulsarEmitter, PulsarEmitterEntity, PulsarIngestMode, PulsarIngestor, PulsarIngestorEntity,
     PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership, PulsarTopicEmitter,
     PulsarTopicEmitterMode, PulsarTopicIngestor, PulsarTopicIngestorAlteration, PulsarTopicName,
     PulsarTopicPublishingMode, RabbitMqConfigEntry, RabbitMqEmitter, RabbitMqEmitterEntity,
@@ -203,6 +206,9 @@ pub use emitter::{
 pub use emitter_batch::{
     BatchMessageLimit, BatchUnavailability, ByteSizeUnit, EmitterBatchLegality,
     EmitterBatchLimitError, EmitterBatchPolicy, PayloadSizeError, PayloadSizeLimit,
+};
+pub use emitter_envelope::{
+    EmitterEnvelope, EnvelopeClause, EnvelopeDeclarationError, EnvelopeProperty,
 };
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,

@@ -31,6 +31,7 @@ fn emitter_alter_applies_operations_in_order_and_is_atomic() {
         body: EmitterBody::Codec {
             codec: named("event_codec"),
         },
+        envelope: Box::new(crate::EmitterEnvelope::default()),
         connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
             ZeroMqPushEmitter {
                 mode: crate::ZeroMqPushPublishingMode::NoAck {
@@ -122,6 +123,7 @@ fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
         name: named("request_emitter"),
         from: ProcessorInputs::single(named("events")),
         body: EmitterBody::WithoutBody,
+        envelope: Box::new(crate::EmitterEnvelope::default()),
         connector: Box::new(EmitterEntity::Http(HttpEmitter::Request(
             HttpRequestEmitter {
                 mode: crate::HttpRequestPublishingMode::Ack {
@@ -152,6 +154,7 @@ fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
                 },
             ))),
             body: EmitterBody::WithoutBody,
+            envelope: Box::new(crate::EmitterEnvelope::default()),
             construction: None,
         }],
     };
@@ -233,6 +236,7 @@ fn batching_emitter(
         name: named("event_emitter"),
         from: ProcessorInputs::single(named("events")),
         body: EmitterBody::Values,
+        envelope: Box::new(crate::EmitterEnvelope::default()),
         connector: Box::new(connector),
         batch,
         flush_policy: FlushPolicy::Immediate,
@@ -328,6 +332,7 @@ fn emitter_alter_keeps_the_batch_clause_a_database_emitter_requires() {
     let replacement = AlterEmitterOperation::SetTo {
         destination: Box::new(postgres_emitter()),
         body: EmitterBody::Values,
+        envelope: Box::new(crate::EmitterEnvelope::default()),
         construction: None,
     };
     let alter = |operations| AlterEmitter {
@@ -479,6 +484,7 @@ fn emitter_alter_reports_name_and_commit_policy_errors() {
         body: EmitterBody::Codec {
             codec: named("event_codec"),
         },
+        envelope: Box::new(crate::EmitterEnvelope::default()),
         connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
             ZeroMqPushEmitter {
                 mode: crate::ZeroMqPushPublishingMode::NoAck {
@@ -626,6 +632,7 @@ fn emitter_alter_checks_the_header_and_complete_destination_kind_atomically() {
                 body: EmitterBody::Codec {
                     codec: named("wire"),
                 },
+                envelope: Box::new(crate::EmitterEnvelope::default()),
                 construction: None,
             },
         ],

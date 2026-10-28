@@ -177,7 +177,7 @@ impl Runtime {
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
                 state_replication_tasks: Default::default(),
-                branch_snapshot_tasks: Default::default(),
+                state_snapshot_tasks: Default::default(),
                 passive_runtime_state_snapshots: DashMap::default(),
                 backup_capture_fences: ArcSwap::from_pointee(HashMap::default()),
                 replicated_branch_lifecycles: DashMap::default(),
@@ -644,6 +644,13 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) fn resource_source_discovery_is_deferred(&self, node: &ClusterNodeName) -> bool {
+        self.inner
+            .fault_injection
+            .resource_source_discovery_is_deferred(node)
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_ownership_handoff_after_preparation_if_armed(
         &self,
         domain: &DomainName,
@@ -780,8 +787,13 @@ impl Runtime {
             }
         }
         Self::await_shutdown_tasks_together(reingestors, domain, "reingestor").await;
+        let mut checkpoint_writers = Vec::new();
         for (entity, tasks) in execution.placement_tasks {
-            for task in tasks {
+            let PlacementTasks {
+                replication,
+                checkpoints,
+            } = tasks;
+            for task in replication {
                 Self::await_shutdown_task(
                     task,
                     domain,
@@ -790,17 +802,23 @@ impl Runtime {
                 )
                 .await;
             }
+            checkpoint_writers.extend(checkpoints);
         }
         for task in execution.tasks {
             Self::await_shutdown_task(task, domain, None, "domain execution").await;
         }
-        // Every branch task of the execution has ended, in time or at a stop grace, so the
-        // snapshot task of each of its deduplicator and window branches is making its last write.
-        // A branch ended at its grace did not wait for that write, so the domain waits for it
-        // here: a stopped domain's checkpoints are what a stopped backup cut, a restart and the
+        // Every task of the execution has ended, in time or at a stop grace, so nothing changes
+        // the state of its placements any more: each placement's checkpoint writer is told to
+        // write what that state holds now, which is what it held last. The snapshot task of each
+        // deduplicator and window branch is already making its last write, which a branch ended
+        // at its grace did not wait for. The domain waits for all of these writes here, with no
+        // grace: a stopped domain's checkpoints are what a stopped backup cut, a restart and the
         // next start read, and they are on disk once its stop completes.
+        for writer in checkpoint_writers {
+            writer.write_last();
+        }
         self.inner
-            .branch_snapshot_tasks
+            .state_snapshot_tasks
             .wait_for_domain(domain)
             .await;
         let quiesce_keys = self
@@ -893,8 +911,8 @@ impl Runtime {
         // deduplicator and window branch is writing what its branch published last. Those tasks
         // hold this runtime and its storage, so the runtime waits for each of them here, while
         // the replication routes their checkpoints are offered through are still installed.
-        self.inner.branch_snapshot_tasks.close();
-        self.inner.branch_snapshot_tasks.wait().await;
+        self.inner.state_snapshot_tasks.close();
+        self.inner.state_snapshot_tasks.wait().await;
         // Nothing dispatches through a gate, admits through a quiesced ingestor or publishes past
         // a freeze any more, so every entity gate this node holds ends here with its runtime. A
         // lease that a handoff left held until a deadline past this node's stop would otherwise

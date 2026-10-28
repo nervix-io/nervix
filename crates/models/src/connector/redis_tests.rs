@@ -15,9 +15,9 @@ use rstest::rstest;
 
 use super::*;
 use crate::{
-    ClientConfigEntry, ClientConfigOwner, ClientConfigPresence, ClientConfigSchemaError,
-    ClientConfigValue, ClientPooling, CreateClientRedis, EmitterEntityKind, IngestDeliveryKind,
-    IngestQuiesceKind, IngestorEntityKind,
+    ClientConfigEntry, ClientConfigKey, ClientConfigOwner, ClientConfigPresence,
+    ClientConfigSchemaError, ClientConfigValue, ClientPooling, CreateClientRedis,
+    EmitterEntityKind, IngestDeliveryKind, IngestQuiesceKind, IngestorEntityKind,
 };
 
 #[test]
@@ -185,9 +185,48 @@ fn client_schema_keeps_subscription_options_optional_and_typed() {
         .assured("the shared schema admits the current Redis connection and intake settings");
 }
 
+#[test]
+fn client_schema_declares_the_command_pool_lifetimes_with_defaults() {
+    let schema = CreateClientRedis::<u64>::DECLARATION.config;
+    for (name, default) in [
+        ("pool_idle_timeout_ms", "600000"),
+        ("pool_max_lifetime_ms", "1800000"),
+    ] {
+        let declared = ClientConfigKey {
+            name,
+            presence: ClientConfigPresence::Defaulted(default),
+            value: ClientConfigValue::Milliseconds,
+            owner: ClientConfigOwner::Nervix,
+            confidential: false,
+        };
+        assert_eq!(schema.key(name), Some(&declared));
+    }
+
+    let address = config_entry("addr", "redis://localhost:6379");
+    assert_eq!(
+        schema.effective_entries(std::slice::from_ref(&address)),
+        vec![
+            address.clone(),
+            config_entry("pool_idle_timeout_ms", "600000"),
+            config_entry("pool_max_lifetime_ms", "1800000"),
+        ]
+    );
+    let authored = vec![address, config_entry("pool_max_lifetime_ms", "5000")];
+    let mut effective = authored.clone();
+    effective.push(config_entry("pool_idle_timeout_ms", "600000"));
+    assert_eq!(schema.effective_entries(&authored), effective);
+    schema
+        .validate(&effective)
+        .assured("declared lifetimes are positive, schedulable milliseconds");
+}
+
 #[rstest]
 #[case("connect_timeout_ms", "0")]
 #[case("idle_timeout_ms", "not-a-duration")]
+#[case("pool_idle_timeout_ms", "0")]
+#[case("pool_idle_timeout_ms", "1.5s")]
+#[case("pool_max_lifetime_ms", "-1")]
+#[case("pool_max_lifetime_ms", "18446744073709551616")]
 #[case("subscription_buffer_messages", "0")]
 fn client_schema_refuses_invalid_nervix_options(#[case] key: &str, #[case] value: &str) {
     let refusal = CreateClientRedis::<u64>::DECLARATION
