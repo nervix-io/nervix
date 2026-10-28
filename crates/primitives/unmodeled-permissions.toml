@@ -200,6 +200,13 @@ reason = "The process installs its default cryptography provider once, for every
 
 [[permission]]
 items = ["sync::OnceLock"]
+limit = "Creating the process's ONNX Runtime environment is outside every model."
+owner = "The ONNX inferencer's session loading and model inspection."
+path = "src/runtime/inferencer.rs"
+reason = "ONNX Runtime allows one environment per process and refuses another even after the first is dropped, so every node and every model inspection the process runs shares the one created on first use."
+
+[[permission]]
+items = ["sync::OnceLock"]
 limit = "Fixture bookkeeping that no invariant reads."
 owner = "The interconnect's test certificates."
 path = "crates/interconnect/src/tests.rs"

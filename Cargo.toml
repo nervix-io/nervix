@@ -644,7 +644,7 @@ opentelemetry-otlp = { version = "0.31", default-features = false }
 opentelemetry-proto = { version = "0.31", default-features = false }
 opentelemetry_sdk = "0.31"
 ordered-float = "4"
-ort = { version = "2.0.0-rc.13", default-features = false }
+ort = { version = "2.0.0-rc.15", default-features = false }
 otel-prost = { package = "prost", version = "0.14" }
 otel-tonic = { package = "tonic", version = "0.14", features = [
   "gzip",
@@ -702,9 +702,6 @@ reqwest_iceberg = { package = "reqwest", version = "0.12.28", default-features =
 ] }
 resolv-conf = "0.7.6"
 rkyv = { version = "0.8", features = ["indexmap-2"] }
-# The fork raises Roto's Cranelift floor from 0.127 to 0.136, which carries the x86_64 JIT fixes
-# the workspace previously supplied by patching Cranelift itself.
-# https://codeberg.org/glebpom/roto/src/branch/cranelift-upgrade-0.136
 roto = "0.13"
 rpassword = "7"
 rstest = "0.26.1"

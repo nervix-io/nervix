@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ort rc.13's highest supported C API is 28; package a current runtime providing that API.
+# The server selects ort's C API level 28; package a current runtime providing that API.
 version="1.30.0"
 root="${PWD}/.nervix-deps/onnxruntime"
 mode="download"

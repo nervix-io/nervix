@@ -17,7 +17,7 @@ cd nervix
 Nervix is developed on Linux x86_64, Linux aarch64, and macOS arm64. The `just` recipes fetch an
 ONNX Runtime build for the host and stop on any other.
 
-The server uses `ort` 2.0.0-rc.13 with its highest supported C API level, 28. The downloader pins
+The server uses `ort` 2.0.0-rc.15 with C API level 28. The downloader pins
 ONNX Runtime 1.30.0 and installs it under `.nervix-deps/onnxruntime`. Download the CPU package or,
 on Linux x86_64, the CUDA 13 package:
 
