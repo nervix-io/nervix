@@ -14,6 +14,12 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+Sentry's offline DSN check retains `sentry_types::ParseDsnError` beneath
+`OfflineClientConfigError` for `dsn`, and connector initialization retains that same report
+beneath its open context. Public command refusals render the reviewed key context, never the
+secret DSN. Its required request deadline uses the shared schema's `MissingRequired` or
+`InvalidValue` refusal for `timeout_ms` before initialization.
+
 MongoDB's explicit-seed URL and delegated options are checked by its native parser without
 network I/O. Pool query options produce the typed `PoolSizing` outcome naming `POOL SIZE`;
 other native refusals retain the driver's error beneath the value-free key context. Its resolved
@@ -749,7 +755,10 @@ and a DNS result by itself never marks a Syslog record delivered.
 Redis command connections receive the node resolver through the driver's DNS hook. A failed
 initial or later pool connection keeps the resolver's typed failure in
 `RedisClientError::Resolve`; a later failure sits beneath `EmitterWriteError::Publish` for the
-emitter host to retry.
+emitter host to retry. No caller waits on the connections a pool opens to restore its
+`POOL SIZE MIN`, so the pool itself is the only witness of a restoration that fails: it reports
+`PoolMinimumError::NotRestored`, naming the minimum, above the checkout's `DeadlineElapsed` for
+`connect_timeout_ms`, at `debug`, and tries again.
 A Pub/Sub source resolves before opening its dedicated stream and retains `DnsLookupError` beneath
 `RedisPubSubIngestorError::Resolve` and `IngestorError::Resume`. A refused address, failed TLS name
 check or failed Redis protocol setup is also a connection failure. None rejects an input message
