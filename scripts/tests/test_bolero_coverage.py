@@ -412,7 +412,7 @@ class ReportMergeTests(unittest.TestCase):
 class WorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = (bolero.ROOT / ".github/workflows/bolero.yaml").read_text()
-        section = self.workflow.split("      - name: Require ordinary properties and requested fuzzing\n")[1]
+        section = self.workflow.split("      - name: Require the requested ordinary properties and fuzzing\n")[1]
         script = re.search(r"        run: \|\n((?:          .*\n|\n)*)", section)
         self.assertIsNotNone(script)
         self.script = textwrap.dedent(script[1])
@@ -426,43 +426,55 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("if: needs.test-selection.outputs.bolero-required == 'true'", caller)
 
     def test_complete_required_execution_and_deliberate_skips_retain_the_tested_snapshot(self) -> None:
-        for event, labels, required, result in (
-            ("pull_request", ["fuzz"], "true", "success"),
-            ("pull_request", [], "false", "skipped"),
-            ("schedule", ["fuzz"], "false", "skipped"),
-            ("workflow_dispatch", [], "false", "skipped"),
+        for event, labels, random_required, random, fuzz_required, fuzz in (
+            ("pull_request", ["bolero-random", "fuzz"], "true", "success", "true", "success"),
+            ("pull_request", ["fuzz"], "false", "skipped", "true", "success"),
+            ("pull_request", ["bolero-random"], "true", "success", "false", "skipped"),
+            ("pull_request", [], "false", "skipped", "false", "skipped"),
+            ("schedule", ["fuzz"], "true", "success", "false", "skipped"),
+            ("workflow_dispatch", [], "true", "success", "false", "skipped"),
         ):
             with self.subTest(event=event, labels=labels), tempfile.TemporaryDirectory() as directory:
                 root = pathlib.Path(directory)
                 environment = {**os.environ, "BOLERO_TESTED_SHA": "tested-revision", "GITHUB_RUN_ID": "100", "GITHUB_RUN_ATTEMPT": "2",
-                               "BOLERO_EVENT_NAME": event, "BOLERO_LABELS": json.dumps(labels), "RANDOM_RESULT": "success",
-                               "FUZZ_RESULT": result, "COMBINED_RESULT": result, "FUZZ_REQUIRED": required,
-                               "GITHUB_OUTPUT": str(root / "outputs")}
+                               "BOLERO_EVENT_NAME": event, "BOLERO_LABELS": json.dumps(labels), "RANDOM_RESULT": random,
+                               "RANDOM_REQUIRED": random_required, "FUZZ_RESULT": fuzz, "COMBINED_RESULT": fuzz,
+                               "FUZZ_REQUIRED": fuzz_required, "GITHUB_OUTPUT": str(root / "outputs")}
                 executed = subprocess.run(["bash", "-e", "-c", self.script], cwd=root, env=environment, capture_output=True, text=True)
                 self.assertEqual(executed.returncode, 0, executed.stderr)
                 record = json.loads((root / "selection.json").read_text())
                 self.assertEqual(record["tested_sha"], "tested-revision")
                 self.assertEqual(record["event"], event)
                 self.assertEqual(record["labels"], labels)
-                self.assertEqual(record["sanitizer_required"], required == "true")
-                self.assertEqual(record["sanitizer"], result)
-                self.assertEqual(record["sanitizer_combined"], result)
+                self.assertEqual(record["randomized_required"], random_required == "true")
+                self.assertEqual(record["randomized"], random)
+                self.assertEqual(record["sanitizer_required"], fuzz_required == "true")
+                self.assertEqual(record["sanitizer"], fuzz)
+                self.assertEqual(record["sanitizer_combined"], fuzz)
                 self.assertEqual(record["verdict"], "complete")
-                self.assertIn(f"sanitizer-result={result}", (root / "outputs").read_text())
+                outputs = (root / "outputs").read_text()
+                self.assertIn(f"randomized-result={random}", outputs)
+                self.assertIn(f"randomized-required={random_required}", outputs)
+                self.assertIn(f"sanitizer-result={fuzz}", outputs)
 
     def test_failed_cancelled_or_missing_required_jobs_do_not_publish_complete_selection(self) -> None:
-        for random, fuzz, combined, required in (
-            ("failure", "success", "success", "true"), ("cancelled", "skipped", "skipped", "false"),
-            ("skipped", "skipped", "skipped", "false"), ("", "skipped", "skipped", "false"),
-            ("success", "failure", "skipped", "true"), ("success", "cancelled", "skipped", "true"),
-            ("success", "skipped", "skipped", "true"), ("success", "success", "success", "false"),
-            ("success", "success", "failure", "true"), ("success", "success", "skipped", "true"),
-            ("success", "skipped", "success", "false"),
-            ("success", "", "success", "true"), ("success", "success", "", "true"),
+        for random_required, random, fuzz_required, fuzz, combined in (
+            ("true", "failure", "true", "success", "success"), ("true", "cancelled", "false", "skipped", "skipped"),
+            ("true", "skipped", "false", "skipped", "skipped"), ("true", "", "false", "skipped", "skipped"),
+            ("false", "success", "false", "skipped", "skipped"), ("false", "failure", "false", "skipped", "skipped"),
+            ("false", "cancelled", "false", "skipped", "skipped"), ("false", "", "false", "skipped", "skipped"),
+            ("", "success", "false", "skipped", "skipped"),
+            ("true", "success", "true", "failure", "skipped"), ("true", "success", "true", "cancelled", "skipped"),
+            ("true", "success", "true", "skipped", "skipped"), ("true", "success", "false", "success", "success"),
+            ("true", "success", "true", "success", "failure"), ("true", "success", "true", "success", "skipped"),
+            ("true", "success", "false", "skipped", "success"),
+            ("true", "success", "true", "", "success"), ("true", "success", "true", "success", ""),
+            ("false", "skipped", "true", "failure", "skipped"), ("false", "skipped", "false", "success", "success"),
         ):
-            with self.subTest(random=random, fuzz=fuzz, combined=combined, required=required), tempfile.TemporaryDirectory() as directory:
-                environment = {**os.environ, "RANDOM_RESULT": random, "FUZZ_RESULT": fuzz, "COMBINED_RESULT": combined,
-                               "FUZZ_REQUIRED": required}
+            with self.subTest(random_required=random_required, random=random, fuzz_required=fuzz_required, fuzz=fuzz,
+                              combined=combined), tempfile.TemporaryDirectory() as directory:
+                environment = {**os.environ, "RANDOM_RESULT": random, "RANDOM_REQUIRED": random_required, "FUZZ_RESULT": fuzz,
+                               "COMBINED_RESULT": combined, "FUZZ_REQUIRED": fuzz_required}
                 result = subprocess.run(["bash", "-e", "-c", self.script], cwd=directory, env=environment, capture_output=True)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((pathlib.Path(directory) / "selection.json").exists())
@@ -482,6 +494,15 @@ class WorkflowTests(unittest.TestCase):
         found = [section for section in sections if section.startswith(f"{name}:\n")]
         self.assertEqual(len(found), 1, name)
         return found[0]
+
+    def test_a_pull_request_runs_the_randomized_job_only_when_bolero_random_requests_it(self) -> None:
+        requested = ("(inputs.event-name || github.event_name) != 'pull_request' || "
+                     "contains(fromJSON(inputs.labels-json || '[]'), 'bolero-random')")
+        self.assertIn(f"    if: {requested}\n", self.job("bolero-random"))
+        # The gate requires the job's success exactly where the job runs, and its deliberate skip elsewhere.
+        gate = self.job("bolero-gate")
+        self.assertIn(f"RANDOM_REQUIRED: ${{{{ {requested} }}}}\n", gate)
+        self.assertIn("needs: [bolero-random, bolero-fuzz, bolero-fuzz-combined]", gate)
 
     def test_sanitizer_shards_run_the_plan_and_one_job_proves_the_whole_inventory_ran(self) -> None:
         label = "if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')"

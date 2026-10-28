@@ -515,12 +515,13 @@ delivery behavior exercised by external Chaos carries `chaos`. Labels enable evi
 replace the local checks or source-owned applicability review.
 
 Registered Bolero properties use the same production path and complete assertion in ordinary
-randomized/corpus execution and sanitizer fuzzing. Ordinary execution is required when the Bolero
-workflow runs. Sanitizer CI requires a pull request carrying `fuzz`; an unlabeled, scheduled or
-manually dispatched run expects a sanitizer skip. Check may exclude the entire reusable Bolero
-call only after verifying its prose-only selection without `fuzz`. A skip contributes no fuzz
-execution or coverage. [Property Testing And Fuzzing](./property-testing-and-fuzzing.md) owns this
-policy, its inventory and failure accounting.
+randomized/corpus execution and sanitizer fuzzing. Randomized/corpus CI requires a pull request
+carrying `bolero-random`, which a task requests only when it requires that run, and sanitizer CI,
+the preferred Bolero evidence, one carrying `fuzz`; an unlabeled pull request expects both skips,
+and a scheduled or manually dispatched run a sanitizer skip. Check may exclude the entire reusable
+Bolero call only after verifying its prose-only selection without either label. A skip contributes
+no execution or coverage of its mode. [Property Testing And Fuzzing](./property-testing-and-fuzzing.md)
+owns this policy, its inventory and failure accounting.
 
 Use the toolchain files' declared `llvm-tools`: stable instrumentation and exports use the stable
 compiler's tools, and the isolated architecture analysis and sanitizer campaigns use their own

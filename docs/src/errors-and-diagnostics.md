@@ -2843,9 +2843,11 @@ refuse, and unit tests beside each owner.
 | The formatter reports rejected source with its stage and exit status | `plexus_format.feature` |
 | Input a decoder must refuse fails with the owner's typed error and never panics | The registered Bolero targets `plexus-statement-text`, `models-duration-text`, `wasm-protocol-malformed`, `runtime-arrow-bodies-malformed`, `client-producer-batches-malformed`, `relay-wire-messages-malformed`, `client-discriminators`, `backup-malformed-records` and `consensus-state-corruption` |
 
-Every registered Bolero property runs as an ordinary randomized and corpus test for each pull
-request. The sanitizer-backed fuzz campaign over the same targets runs in CI only for a pull
-request labeled `fuzz`; any other run skips it, and a skipped campaign is no fuzz evidence.
+Every registered Bolero property runs as an ordinary test in the ordinary suites. CI's randomized
+and corpus job over the registered targets runs only for a pull request labeled `bolero-random`,
+and the sanitizer-backed fuzz campaign over the same targets, the preferred Bolero evidence, only
+for one labeled `fuzz`; any other pull request skips them, and a skipped run is no evidence of its
+mode.
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md#commands-and-enforcement) owns the
 commands and the gate.
 

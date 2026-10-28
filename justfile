@@ -3205,6 +3205,16 @@ client *args: build-deps
 build-web-console:
     python3 -m scripts.build_web_console
 
+# Keep the console build's wasm-bindgen CLI selection, installation and verification counters
+# beside the other tooling reports.
+coverage-wasm-bindgen:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    mkdir -p "{{ cargo_target_dir }}/wasm-bindgen-coverage"
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/wasm-bindgen-coverage/python.coverage" --branch --source=scripts.wasm_bindgen,scripts.tests.test_wasm_bindgen -m unittest scripts.tests.test_wasm_bindgen
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/wasm-bindgen-coverage/python.coverage" -o "{{ cargo_target_dir }}/wasm-bindgen-coverage/python.lcov"
+
 build-server:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/server cargo build {{ release_flag }} --package nervix-server --bin nervix-server
 
