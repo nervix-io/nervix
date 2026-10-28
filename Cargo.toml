@@ -547,7 +547,7 @@ jaq-std = "3"
 # The VM resolves time zone names only against the IANA database `jiff-tzdb` bundles, never against
 # the host, so every node running one build computes the same local times.
 jiff = { version = "0.2.35", default-features = false, features = ["std"] }
-jiff-tzdb = "0.1.8"
+jiff-tzdb = "0.1.9"
 js-sys = "0.3"
 # The RabbitMQ connector resolves its broker through the node resolver and hands Lapin the
 # established transport through `Connection::connector`. The `hickory-dns` feature stays off: it
