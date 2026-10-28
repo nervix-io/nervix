@@ -1734,6 +1734,13 @@ checks below establish what a caller may do with them.
 
 ## Diagnostic Deadlock Detection
 
+The backup cut diagnostics scenario exercises capture-budget expiry and resumption on one and
+three nodes in the active, order and stressed-restore Deloxide selections. The coordinator's phase
+measurements are task-owned administrative state and add no synchronization. The existing capture
+and cleanup paths retain their tracked-lock coverage; phase timing itself establishes no
+interleaving or memory-ordering guarantee. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
+owns the diagnostic contract.
+
 A diagnostic node selects the `deloxide` mode. The `deloxide-order` feature adds historical order
 instrumentation to that same mode, and the `deloxide-stress` feature adds Deloxide's bounded
 scheduling disturbance to its active-only selection; neither is another execution mode, and the two

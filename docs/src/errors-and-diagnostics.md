@@ -2164,7 +2164,14 @@ themselves, a clock mapping that cannot be projected, a resource version that is
 leader or differs from its catalog entry, a record that does not encode, and an archive the
 staging area cannot hold. A quiesced capture also names its domain when the mutation lease, pause,
 drain, owner capture, or resume fails or times out, or when its coordinator loses the leader tenure
-under which it acquired the cut. A cut that cannot reach a node it needs is refused as
+under which it acquired the cut. `CaptureTimeout` carries a typed active phase, its elapsed time,
+the elapsed cut time and the ordered durations of completed phases. Lease admission and alteration
+guard waits have their own phases; a capture held after the drain names `capture` and retains the
+completed `drain` duration. These are measurements of the same cut budget, never fresh timeouts.
+An owner request remains a terminal operation: a coordinator waiting for owners names that phase,
+and owner-local administrative logs distinguish revision catch-up, cluster-state application,
+lifecycle checkpoints, storage capture and staging. No remote progress is inferred from elapsed
+time. A cut that cannot reach a node it needs is refused as
 `StateOwnerUnreachable` when the cluster does not report a placement's scheduled primary live, and
 as `ExecutorUnreachable` when, before a quiesced cut pauses, it does not report a node that runs the
 domain's work live. Each carries the domain, the entity's kind and name and the node as typed
