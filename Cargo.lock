@@ -7394,6 +7394,7 @@ dependencies = [
  "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "shuttle",
  "thiserror 2.0.21",
  "ubyte",

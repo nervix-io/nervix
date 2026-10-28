@@ -478,6 +478,17 @@ their range boundaries; see [Property Testing And Fuzzing](./property-testing-an
 
 ## Atomic States On The Data Plane
 
+The bounded executor's worker has `Selected`, `Executing` and `Idle` states. `Selected` owns its
+next admitted callback and charge; `Executing` means that ownership is with the synchronous
+callback; `Idle` has returned the class's active place. Selection and the idle transition share
+the class queue fence. If a runtime drops a worker before its next callback, its destructor returns
+the active place and closes queued submissions with `PoolClosed`, releasing their charges outside
+the fence. Ordinary completion publishes `Idle` before its result, so destruction cannot return
+that place twice. The separate queued-cancellation guard removes its exact entry only while it
+remains queued; a selected callback instead retains its charge and receives the cancellation
+signal. [Execution Primitives](./execution-primitives.md#executor-admission-and-draining) owns the
+full admission and draining contract.
+
 An ACK root's ownership handoff can be tracking a bounded number of active shares or be complete.
 `REQUIRED WAIT` can leave a tracking root temporarily idle without completing it. Attachments,
 wait releases, and final completion race, so the ACK owner stores the state in one atomic word and
