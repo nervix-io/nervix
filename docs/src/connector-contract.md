@@ -367,7 +367,14 @@ Composition gives the node resolver to the shared Redis command pool and to each
 plan. Redis 1.7.1 exposes `AsyncConnectionConfig::set_dns_resolver` for command connections. The
 connector's `bb8` manager installs that hook whenever it opens a physical pooled connection;
 pool bounds, health checks and lease ownership remain with the existing pool and host. A pooled
-socket may remain open past an answer's TTL. A replacement socket resolves the host again.
+socket may remain open past an answer's TTL until the pool retires it. The pool reads the client's
+`pool_idle_timeout_ms` and `pool_max_lifetime_ms` from the vocabulary's client schema, whose
+defaults are 10 and 30 minutes: it closes a connection idle that long, the ones it keeps for
+`POOL SIZE MIN` included, and a connection that old when a publish returns it or while it is idle,
+then opens connections again to keep the minimum. The pool checks idle connections every 30
+seconds, `bb8`'s reaper interval, so an idle connection closes up to 30 seconds after it reaches
+either lifetime. A replacement socket resolves the host again. Neither lifetime closes a Pub/Sub source's dedicated
+connection.
 
 The driver's Pub/Sub convenience connection does not accept that DNS hook. A source instead
 resolves the configured `redis://` or `rediss://` hostname through the node resolver on every

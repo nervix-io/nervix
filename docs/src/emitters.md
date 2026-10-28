@@ -1448,10 +1448,15 @@ Redis Pub/Sub has no subscriber delivery acknowledgment. The awaited `PUBLISH` r
 server acceptance only. A record-specific server rejection follows `ON MESSAGE ERROR`; connection
 failures retry the undelivered work. A `REDIS CLIENT` declares its connection-pool bounds; see
 [Database Client Connection Pools](database-client-pools.md).
+A publish checks a command connection out within the client's `connect_timeout_ms`. The client's
+`pool_idle_timeout_ms` and `pool_max_lifetime_ms`, 10 and 30 minutes by default, retire a command
+connection that sat idle or grew old; see
+[Connection lifetimes](database-client-pools.md#connection-lifetimes).
 Each physical pooled command connection resolves the `addr` hostname through the node's
 asynchronous DNS resolver when it opens. A replacement connection can use a changed DNS answer;
-an established connection stays open until Redis or the network closes it. For `rediss://`, TLS
-still verifies the configured hostname and uses its configured CA and optional client identity.
+an established connection stays open until Redis or the network closes it or the pool retires it.
+For `rediss://`, TLS still verifies the configured hostname and uses its configured CA and optional
+client identity.
 
 ### MQTT
 

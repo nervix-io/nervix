@@ -1411,16 +1411,11 @@ async fn then_the_silent_endpoint_eventually_accepts_a_connection(
     .unwrap_or_else(|_| panic!("no client connected to the endpoint '{name}'"));
 }
 
-/// A client that reconnects after a failed attempt opens another connection to the endpoint.
-#[then(expr = "the silent endpoint {string} eventually accepts {int} connections")]
-async fn then_the_silent_endpoint_eventually_accepts_connections(
-    world: &mut ScenarioWorld,
-    name: String,
-    count: u64,
-) {
+/// Wait until clients have opened `count` connections to the endpoint `name` the scenario stood.
+async fn wait_for_endpoint_connections(world: &ScenarioWorld, name: &str, count: usize) {
     let proxy = world
         .stallable_tcp_proxies
-        .get(&name)
+        .get(name)
         .unwrap_or_else(|| panic!("no endpoint '{name}' was stood"));
     nervix_primitives::time::timeout(
         STALLABLE_ENDPOINT_CONNECTION_TIMEOUT,
@@ -1430,6 +1425,75 @@ async fn then_the_silent_endpoint_eventually_accepts_connections(
     .unwrap_or_else(|_| {
         panic!("clients did not open {count} connections to the endpoint '{name}'")
     });
+}
+
+/// A client that reconnects after a failed attempt opens another connection to the endpoint.
+#[then(expr = "the silent endpoint {string} eventually accepts {int} connections")]
+async fn then_the_silent_endpoint_eventually_accepts_connections(
+    world: &mut ScenarioWorld,
+    name: String,
+    count: usize,
+) {
+    wait_for_endpoint_connections(world, &name, count).await;
+}
+
+/// A client that retires its connections opens replacements through the endpoint in front of its
+/// dependency.
+#[then(expr = "the stallable endpoint {string} eventually accepts {int} connections")]
+async fn then_the_stallable_endpoint_eventually_accepts_connections(
+    world: &mut ScenarioWorld,
+    name: String,
+    count: usize,
+) {
+    wait_for_endpoint_connections(world, &name, count).await;
+}
+
+/// When the endpoint `name` accepted its connection `ordinal`, counting from one in the order it
+/// accepted them.
+fn endpoint_connection_accepted_at(world: &ScenarioWorld, name: &str, ordinal: usize) -> Instant {
+    let proxy = world
+        .stallable_tcp_proxies
+        .get(name)
+        .unwrap_or_else(|| panic!("no endpoint '{name}' was stood"));
+    let Some(index) = ordinal.checked_sub(1) else {
+        panic!("connections to the endpoint '{name}' are counted from 1");
+    };
+    proxy
+        .accepted_at(index)
+        .unwrap_or_else(|| panic!("the endpoint '{name}' has not accepted connection {ordinal}"))
+}
+
+/// A measured delay between two connections the endpoint accepted, which load only lengthens: the
+/// endpoint records each one when it accepts it.
+#[then(
+    expr = "the stallable endpoint {string} accepted connection {int} at least {string} after \
+            connection {int}"
+)]
+async fn then_the_stallable_endpoint_accepted_connection_after(
+    world: &mut ScenarioWorld,
+    name: String,
+    later: usize,
+    minimum: String,
+    earlier: usize,
+) {
+    let minimum = parse_duration_text(&minimum)
+        .unwrap_or_else(|error| panic!("the minimum delay '{minimum}' is invalid: {error}"));
+    let earlier_at = endpoint_connection_accepted_at(world, &name, earlier);
+    let later_at = endpoint_connection_accepted_at(world, &name, later);
+    let Some(measured) = later_at.checked_duration_since(earlier_at) else {
+        panic!("the endpoint '{name}' accepted connection {later} before connection {earlier}");
+    };
+    append_cucumber_log_line(&format!(
+        "endpoint '{name}' accepted connection {later} {} after connection {earlier}",
+        humantime::format_duration(measured)
+    ));
+    assert!(
+        measured >= minimum,
+        "the endpoint '{name}' accepted connection {later} {} after connection {earlier}, \
+         expected at least {}",
+        humantime::format_duration(measured),
+        humantime::format_duration(minimum)
+    );
 }
 
 #[given("ClickHouse is running")]
