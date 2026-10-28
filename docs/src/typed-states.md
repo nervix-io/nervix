@@ -191,6 +191,15 @@ through a complete round trip. This is a display projection, never a stored shap
 
 ## Absence And Distinct States
 
+**Installed resource manifests.** The resource store returns an optional manifest: a filesystem
+`NotFound` means the local copy is absent, while other filesystem and decoding failures keep their
+typed reports. Replica reconciliation records an absent copy as pending while no live source is visible;
+an installation has not failed merely because source discovery has not converged. A real read or
+metadata failure remains distinct, and a matching local manifest proves the copy ready.
+Recovery of an unpublished upload consumes the same absence outcome: without the admitting
+node's installed copy, the admitted archive is unavailable. Its read failures retain their causes,
+while an executor refusal or cancellation leaves that upload applying for another reconciliation.
+
 **MQTT size admission.** A source packet is either an admitted publish with independently owned
 bytes or an oversized outcome with an optional prepared acknowledgement. Absence means that QoS
 requires none or the client acknowledges automatically. A discard is explicitly deferred for

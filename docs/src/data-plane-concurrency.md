@@ -1771,6 +1771,20 @@ checks below establish what a caller may do with them.
 
 ## Diagnostic Deadlock Detection
 
+The resource-source-discovery workload exercises resource publication, a pending replica and
+installation once source visibility resumes, followed by a lookup of the replicated file. Its
+active, order and stressed records name the consensus-storage and cluster lifecycle owners it
+reaches. The scenario's command-pause map, watch observation and source filter are test-only and
+outside Deloxide's tracked locks; they establish the public interleaving directly. No data-plane
+lock, memory-ordering protocol or production wait-and-notify mechanism changes.
+
+The resource-upload-publication workload reaches the recovery caller on one and three nodes: it
+refuses publication after installation, lets reconciliation read the matching local manifest and
+publish that copy, and observes the original upload complete with one version. Its active, order
+and stressed records reach the same consensus-storage and cluster owners. The scenario's refusal
+map and watch remain outside tracked-lock detection; the public assertions establish that recovery
+took up the refused upload before the client's retry could supply the archive again.
+
 The backup cut diagnostics scenario exercises capture-budget expiry and resumption on one and
 three nodes in the active, order and stressed-restore Deloxide selections. The coordinator's phase
 measurements are task-owned administrative state and add no synchronization. The existing capture

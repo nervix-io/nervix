@@ -535,6 +535,15 @@ source composition with the protocol encoder's typed cause retained beneath the 
 
 ### Stored Shapes And Archives
 
+The resource store treats a missing installed manifest as ordinary absence. Other filesystem and
+manifest decoding failures retain their typed causes. Resource reconciliation renders the complete
+report only when it records a failed replica, so an upload refusal and `DESCRIBE RESOURCE` can
+distinguish a filesystem failure from malformed JSON. An absent local copy of a published version
+is pending while it awaits a live source and supplies no failure reason. Recovery of an unpublished
+upload instead reports the admitted archive unavailable when that local copy is absent; a genuine
+read failure keeps its cause. [Resource Versions And Bindings](./resource-versions.md#publication-and-transfer)
+owns those installation states and their retry behavior.
+
 The native Kafka checkpoint decoder checks its required format signature before exposing offsets
 or the optional applied-start generation. A mismatched signature retains the typed
 `KafkaOffsetCheckpointError::FormatSignature` cause beneath `RuntimePersistenceError::DecodeState`.

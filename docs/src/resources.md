@@ -44,6 +44,11 @@ after every current live node incarnation has verified and atomically installed 
 digest. A command that references the version can run immediately through any live node after the
 upload succeeds.
 
+A node without its local copy stays `pending` while it has no discoverable live source. The upload
+keeps installing and retries source discovery; this state alone is not an installation failure.
+`DESCRIBE RESOURCE <name> VERSION <n>` shows that pending replica. Actual read, decoding and
+installation failures include their cause in the replica diagnostic and upload refusal.
+
 Clients give each administrative upload an identity and retain it across redirects and transport
 retries. Reusing an identity for the same user, domain, and resource returns its existing assigned
 version and terminal outcome. Reusing an identity with different archive bytes fails with a digest
