@@ -106,6 +106,7 @@ kind = "cucumber"
 package = "nervix-server"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@execution_class_drain",
   "@kafka_start_generation",
   "@kafka_start_generation_restore",
   "@wasm_reset_authority_recovery",
@@ -2609,6 +2610,37 @@ invariant = "A model step whose coordinator stopped after pausing its domain run
 invocation = "stress-scenarios"
 scenario = "A model command whose publication met a lapsed leader lease releases its own pause on <cluster_size> nodes"
 selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Class-local executor FIFO admission and drain fences while bulk work is occupied and a sequence of management mutations completes on one and three nodes. Callbacks execute outside the fence; async admission and network waits remain untracked."
+examples = 2
+feature = "tests/features/cluster/bounded_execution.feature"
+id = "scenario.execution-class-drain"
+invariant = "Occupied bulk workers do not prevent management command batches from completing or the cluster from retaining a stable leader."
+invocation = "scenarios"
+scenario = "Occupied bulk execution leaves management work responsive"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: class-local executor FIFO admission and drain fences during bulk saturation and repeated public management mutations."
+examples = 2
+feature = "tests/features/cluster/bounded_execution.feature"
+id = "stress.execution-class-drain"
+invariant = "Occupied bulk workers do not prevent management command batches from completing or the cluster from retaining a stable leader."
+invocation = "stress-scenarios"
+scenario = "Occupied bulk execution leaves management work responsive"
+selections = ["deloxide-stress"]
+
+
+[[owner]]
+gap = "CPU-worker interruption between simulated callbacks belongs to the mutually exclusive Turmoil mode. Native blocking-task teardown before its first callback is not deterministically reached by these public scenarios. Native workloads reach normal FIFO admission, cancellation and draining; the ordinary interrupted-worker regression covers selected and queued destructor cleanup without claiming tracked-lock interleavings."
+path = "crates/execution/src/workers.rs"
+workloads = [
+  "scenario.execution-class-drain",
+  "stress.execution-class-drain",
+  "scenario.materialized-bulk-generations",
+  "stress.materialized-bulk-generations",
+]
 
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"

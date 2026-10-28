@@ -1508,6 +1508,35 @@ held-guard entries and I/O do not acquire a recognized lock. Borrowed DashMap it
 lazily; consuming iteration owns its storage. Authored arguments remain checked through external
 macros, including operation expectation macros.
 
+### Bounded Executor Queue Fence
+
+The bounded executor retains one FIFO per worker class in `crates/execution/src/workers.rs`.
+Submission, cancellation of an exact queued job, next-job selection and the last worker's idle
+transition acquire that class's mutex. This is an execution-admission protocol keyed by one class,
+with the configured pending and worker counts as its bounds. Each acquisition inserts, removes or
+selects one entry. Callback execution, job destruction, memory and semaphore release, and result or
+start notifications run outside the fence. A callback can submit work or read its executor without
+re-entering a held queue lock.
+
+An active worker drains admitted successors directly. Submission and returning the last active
+place share the fence: either a worker sees the new job or the submitter claims a worker, with no
+unobserved interval between deciding the queue is empty and publishing idle. Queued cancellation
+removes the exact monotonic admission identity; after selection it raises the existing cancellation
+signal and leaves the charge with the running job. The queue uses an ordinary ordered map under
+this fence, registered in the concurrent-map ledger as a retained bounded admission protocol;
+there is no recurring graph lookup. Interrupted-worker cleanup takes the queue under the fence
+and destroys its entries after releasing it.
+
+Deloxide tracks the fence in every diagnostic selection, including the registered management
+responsiveness and materialized restore workloads. It does not track async semaphore waits,
+oneshot delivery, simulated scheduling or the cancellation atomic. Existing cancellation Loom
+models retain that publication claim. The execution Shuttle checks retain ordering, exact
+backpressure, immediate queued charge release and running charge ownership, and
+`shuttle_submission_racing_worker_exit_never_strands_an_admitted_job` explores the submit/drain
+boundary through the production pool. The ordinary owner regression drains a backlog while its
+submitter futures remain unpolled, and the panic regression requires a successor to finish after its
+predecessor reports `JobPanicked`.
+
 ### Source contracts
 
 Gate annotations with `cfg_attr(nervix_lint, ...)`. Only the isolated analysis driver registers the
