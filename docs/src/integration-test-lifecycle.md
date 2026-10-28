@@ -817,15 +817,26 @@ bounds and do not shorten the product's completion deadline.
 
 An injected hold is the opposite case: a product deadline races it. The scenario holds a controlled
 operation at a gate for a workload duration, and the node keeps its own deadline running while the
-operation waits. The backup wait scenarios hold one domain's quiesced cuts for 12 seconds and the
-next one's for 14 seconds, each inside its own 20-second cut budget. The scenario's margin is the
-part of the budget the hold leaves, and a runner task that another scenario's synchronous step
-stalls for longer than that margin would lengthen a hold timed on the runner task until the product
-deadline expires. The backup cut gate in `src/fault_injection/backup_cut.rs` therefore times each
-hold itself, from the cut's own arrival and on the cut's own task in the node, and the step that
-injects the holds only learns when the first one ended. A stalled runner delays when the step
-learns of a release, never the release itself. When the command is expected to outlast every hold,
-the step still watches it and reports a command that ends early with its own outcome.
+operation waits. The scenario's margin is the part of the deadline the hold leaves.
+
+The independent-budget backup outline holds one domain's quiesced cuts for 20 seconds and the next
+one's for 22 seconds, each inside its own 40-second cut budget. Together the holds outlast one
+budget, so a budget the two cuts shared would expire the second, and each hold leaves its cut at
+least 18 seconds; the step refuses to start a probe whose holds break either relation. A cut spends
+that margin on its lease, its pause, its drain and its capture. On a loaded runner the leader's
+raft lease can lapse, and the leader then refuses every proposal, the cut's lease included, until
+the lease recovers, while the cut's deadline keeps running. Loaded CI runs keep a backup's lease
+refused for seconds at a time, and the margin is several times what such a refusal and a loaded
+drain take together. The expiry outline gives its 12-second first hold a 30-second budget for the
+same reason, so that only its held second cut expires.
+
+A runner task that another scenario's synchronous step stalls for longer than the margin would
+lengthen a hold timed on the runner task until the product deadline expires. The backup cut gate
+in `src/fault_injection/backup_cut.rs` therefore times each hold itself, from the cut's own arrival
+and on the cut's own task in the node, and the step that injects the holds only learns when the
+first one ended. A stalled runner delays when the step learns of a release, never the release
+itself. When the command is expected to outlast every hold, the step still watches it and reports a
+command that ends early with its own outcome.
 
 A gate holds every cut that reaches it, not only the first. When the leader cannot record a
 backup's outcome, because leadership moved or because it could not confirm that it still leads,
@@ -838,7 +849,7 @@ holds each delayed cut again` force that later run on three nodes: they hold the
 finalization and move leadership before releasing it. They give each cut a 30-second budget. A cut
 that passed its gate unheld lasts a few seconds whatever its budget, and the wider margin leaves the
 held cuts room for the new leader's first lease. The expiry outline's CLI wait covers a second run
-of its 12-second hold and 20-second cut budget.
+of its 12-second hold and 30-second cut budget.
 
 A step waits up to 120 seconds for a backup to reach a gate, as the pause steps do. A cut arrives
 only after its lease, its pause and its drain, which a loaded runner delays, and a run that starts
