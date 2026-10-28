@@ -953,7 +953,8 @@ order and effective defaults. Canonical Plexus and `DESCRIBE` consume that proje
 text preserves omitted optional Model fields, while inspection includes their effective defaults.
 `DESCRIBE INGESTOR` and `DESCRIBE EMITTER` begin their configuration block with `from:` or `to:`,
 then `options:`, `mode:`, `quiesce:`, `envelope:`, `batch:`, `flush:` and `errors:`. Empty options,
-unavailable quiesce/envelope and absent batching print `none`. An ingestor's flush and message
+unavailable quiesce, an absent envelope and absent batching print `none`. An emitter's `envelope:`
+is the envelope section it writes, as one line of canonical Plexus. An ingestor's flush and message
 error policies name their output relays; its general error policy belongs to the node. Runtime
 health and counters follow configuration, including Kafka's observed partition assignments.
 
@@ -1496,12 +1497,12 @@ host. That revision carries placement, entrypoint and emitter plans, and the exa
 fingerprint of the committed schedule. It decides one typed emitter execution plan per scheduled
 emitter before publishing the domain execution. The plan resolves its emitter clients and codec,
 retains its ordered source relay edges and lowered source predicates, and lowers its route, HTTP
-request fields, SQS ordering group and the mappings of row and row request emitters. It also converts
-OTEL resource literals and the Iceberg commit cadence and size into connector values. Initial startup,
-reassignment and an entity swap use that same plan. A swap publishes new source and remote
-consumer edges from the new plan; it does not reconstruct the emitter from a Model in the host.
-The host resolves resource mounts and binds the lowered VM programs to installed schemas and UDFs
-when it starts the task. A retry reopens the emitter with the same typed configuration.
+request fields, SQS ordering group, envelope and the mappings of row and row request emitters. It
+also converts OTEL resource literals and the Iceberg commit cadence and size into connector values.
+Initial startup, reassignment and an entity swap use that same plan. A swap publishes new source and
+remote consumer edges from the new plan; it does not reconstruct the emitter from a Model in the
+host. The host resolves resource mounts and binds the lowered VM programs to installed schemas and
+UDFs when it starts the task. A retry reopens the emitter with the same typed configuration.
 
 A `CLIENT CONSUMER EMITTER ... TO SCHEMA` is a native emitter plan, not an external connector plan. Its typed
 plan carries the exact output schema, declared `BATCH` limit and required ACK window, timeout and
@@ -1514,8 +1515,8 @@ continues to own flush, branch routing, quiesce, source ACK propagation and mess
 connector crate reads the native output or chooses its graph semantics.
 
 The host prepares one write for one of four emitter contracts. A **record emitter** receives
-keys, prepared payloads, headers, optional ordering groups, timestamps, and the identity the
-host assigned each record of the write. For each new payload, the host calls
+keys, prepared payloads, headers, optional ordering groups, envelopes, timestamps, and the identity
+the host assigned each record of the write. For each new payload, the host calls
 `RecordEmitter::prepare_payload` with the codec's bytes and the payload's execution time.
 The connector either returns its external bytes or refuses the payload with a definitive
 structured message error. The ordinary preparation returns the codec's bytes unchanged. The host
@@ -1559,6 +1560,31 @@ through the rows the emitter's route keeps, so each record keeps the group of it
 record without a group is rejected by the host under the emitter's message error policy and never
 reaches the connector, which receives each remaining record's group already evaluated. An emitter
 whose plan declares no group carries nothing beside its batches.
+
+An envelope exists only where the emitter's statement writes
+[envelope clauses](emitters.md#envelope-clauses) or properties, and the registry refuses any its
+entity does not declare. The plan fixes the flag and duration clauses and lowers the expression
+clauses and properties into one program that writes each value into a non-null field of its exact
+type. The host compiles that program once for the task, over the source record as `input`, the
+published record as `message` and, where the route constructs the published record, that output
+as `output`, with the materialized state and lookups the emitter reaches. It evaluates the program
+once per admitted batch, after the route, and carries each row's `RecordEnvelope` beside the batch:
+the fixed clauses with the row's own values, or the reason the row has none. Where the envelope
+computes no value, every row of every batch shares the one envelope its fixed clauses form. A record
+without an envelope is rejected by the host under the emitter's message error policy, as an
+`evaluation` error of the `publish` operation, and never reaches the connector. Packing seals a
+batch payload where two members' envelopes differ. A payload shares its members' envelope with the
+batch they came from rather than copying it, and a retained payload keeps it with its bytes. An
+emitter that writes no envelope carries nothing beside its batches or in its payloads.
+
+A record emitter reads its record's envelope from `EmitterRecord::envelope`: the three flags, the
+timestamp, the two durations, the reply target, the message and deduplication identities, and the
+properties in written order, each a `RecordProperty` under the name its entity declares with a
+`PropertyValue` of exactly the declared `PropertyType`. A property is never a float, so equal
+envelopes always compare equal. A connector receives only what its entity declares, and an entity
+that declares nothing always receives the empty envelope. Only an entity whose body is a codec,
+whose records a record emitter publishes, declares envelope clauses or properties, so no envelope
+is evaluated for a row, row request, HTTP request or native client emitter.
 
 Each connector classifies definite delivery and rejection per record, and may report one
 infrastructure failure for the attempt. A record emitter answers for a record under the identity the
@@ -1863,7 +1889,7 @@ its last digit. Both classify a definite local refusal as a record rejection;
 their transport and service failures retain their existing retry boundaries.
 
 The host owns that membership. It keeps every payload it offers the emitter, with its exact bytes,
-key, headers, ordering group and member positions, in the emitter buffer beside the batches the
+key, headers, ordering group, envelope and member positions, in the buffer beside the batches the
 members came from, and marks the members prepared so that no later attempt packs them again. A
 confirmation delivers every member at the completion point `MODE` selects. A rejection routes every
 member through `ON MESSAGE ERROR` with the emitter's one error reference, each member keeping its own
@@ -1936,8 +1962,11 @@ The MongoDB client accepts paired `tls_cert_file`/`tls_key_file` entries. Its of
 owner merges explicit CA and identity paths into native URL TLS options without losing other
 options, and refuses explicit files with `tls=false`. Runtime preparation streams the identity
 parts into a private combined PEM on the bounded filesystem executor, preserving typed I/O causes.
-The shared client owns that file through its last clone because the driver may reopen the path
-for later connections; its final drop deletes the file. The generated path and combined contents
+Native client construction runs on that executor too: the driver synchronously reads TLS files
+and parses PEM there, before its asynchronous validation ping. The admitted job charges its
+prepared envelope; driver-owned TLS, client and pool allocations retain their driver contract.
+The shared client owns that file through its last clone; its final drop deletes the file.
+The generated path and combined contents
 are not added to stored client configuration. Uploaded resources keep their own storage contract.
 `sentry-prepared-envelopes` checks complete event preservation, defaults, framing and attempt
 bytes; the one- and three-node Sentry scenarios qualify those bytes through a reopened connector

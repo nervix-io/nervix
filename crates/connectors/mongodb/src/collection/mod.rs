@@ -55,7 +55,7 @@ use nervix_connector::{
     MappedEmitterMember, MappedEmitterRows, MeasuredRequest, PerRecordOutcome,
     RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits,
 };
-use nervix_execution::Executor;
+use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_models::{
     ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, FieldPath, MONGODB_MAX_DOCUMENT_BYTES,
     MongoDbCollectionName, Timestamp,
@@ -88,8 +88,8 @@ pub struct MongoDbClient(Arc<MongoDbClientInner>);
 
 struct MongoDbClientInner {
     driver: DriverClient,
-    /// The driver reopens its identity path on new connections. Every client handle keeps the
-    /// private combined file alive; its final drop removes that file.
+    /// Every client handle retains this client's private combined identity file; its final drop
+    /// removes the file together with the native client.
     _identity: Option<NamedTempFile>,
 }
 
@@ -144,7 +144,7 @@ impl MongoDbClient {
             .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
         prepared.options.min_pool_size = Some(bounds.minimum());
         prepared.options.max_pool_size = Some(bounds.maximum().get());
-        let client = Self::from_prepared(prepared)?;
+        let client = Self::from_prepared(prepared, executor).await?;
         client
             .0
             .driver
@@ -155,14 +155,41 @@ impl MongoDbClient {
         Ok(client)
     }
 
-    fn from_prepared(prepared: PreparedMongoDbClient) -> EmitterStartResult<Self> {
-        let PreparedMongoDbClient { options, identity } = prepared;
-        let driver = DriverClient::with_options(options)
-            .change_context(EmitterOpenError::InvalidConfiguration { connector: MONGODB })?;
-        Ok(Self(Arc::new(MongoDbClientInner {
-            driver,
-            _identity: identity,
-        })))
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "constructs one named client's native TLS and pool state"
+        )
+    )]
+    async fn from_prepared(
+        prepared: PreparedMongoDbClient,
+        executor: &Executor,
+    ) -> EmitterStartResult<Self> {
+        // Charge the prepared job envelope. The driver's client, TLS and pool allocations remain
+        // driver-owned; this reservation is not a claim about the driver's internal working set.
+        let bytes = u64::try_from(std::mem::size_of::<PreparedMongoDbClient>())
+            .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
+        let charge = executor
+            .try_reserve(MemoryClass::Management, bytes)
+            .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
+        executor
+            .run_storage(StorageClass::Filesystem, charge, move |_, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
+                let PreparedMongoDbClient { options, identity } = prepared;
+                // The native constructor synchronously reads CA/identity files and parses PEM.
+                let driver = DriverClient::with_options(options).change_context(
+                    EmitterOpenError::InvalidConfiguration { connector: MONGODB },
+                )?;
+                Ok(Self(Arc::new(MongoDbClientInner {
+                    driver,
+                    _identity: identity,
+                })))
+            })
+            .await
+            .change_context(EmitterOpenError::Initialize { connector: MONGODB })?
     }
 }
 

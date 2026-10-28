@@ -37,6 +37,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
 | Timed generation from materialized state | `Plexus Overview` and `Examples` |
 | Emitter transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
+| Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names, BSON field-name admission, native widths/date precision, conflict filters, client URL configuration and paired TLS identity files | `Emitters` → `MongoDB`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions and client pool options | `Emitters` → `MySQL`, and `Database Client Connection Pools` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
@@ -215,6 +216,9 @@ current connection, retry and deadline limits.
 - Every emitter declares its transport-supported `MODE` in the documented position and
   supplies the complete retry policy plus the confirmation window and timeout when that mode
   confirms asynchronously. No operational mode variable is inferred.
+- Write an envelope clause or `PROPERTIES` key only where the emitter's entity declares it, after
+  the payload and before the construction, in the documented order; see
+  [Emitters → Envelope clauses](../../../../docs/src/emitters.md#envelope-clauses).
 - For Pulsar receipt deadlines and the final wait after `NO ACK` acceptance, read
   [Emitters → Pulsar](../../../../docs/src/emitters.md#pulsar) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).

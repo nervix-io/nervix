@@ -318,10 +318,22 @@ mod ordinary {
         use meticulous::ResultExt as _;
 
         let submitter = crate::thread::current().id();
-        let job = crate::task::spawn_cpu(|| crate::thread::current().id())
-            .await
-            .assured("the job returns its thread without panicking");
-        assert_ne!(job, submitter);
+        let (result, observed) = crate::sync::oneshot::channel();
+        let mut result = Some(result);
+        crate::task::spawn_cpu(move || {
+            if let Some(result) = result.take() {
+                result
+                    .send(crate::thread::current().id())
+                    .assured("the test awaits the worker");
+            }
+            false
+        })
+        .await
+        .assured("the worker exits after its callback");
+        assert_ne!(
+            observed.await.assured("the worker reports its thread"),
+            submitter
+        );
     }
 
     #[cfg(all(feature = "native", feature = "test-util"))]

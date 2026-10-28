@@ -106,6 +106,7 @@ fn explicit_files_require_enabled_tls_and_a_complete_identity() {
 
 #[nervix_primitives::test]
 async fn combined_identity_lives_until_the_last_shared_client_is_dropped() {
+    let executor = executor();
     let directory = tempfile::tempdir().assured("test directory is available");
     let identity = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
         .assured("test identity can be generated");
@@ -125,7 +126,7 @@ async fn combined_identity_lives_until_the_last_shared_client_is_dropped() {
     native.tls = Some(Tls::Enabled(tls.clone()));
     let prepared = MongoDbClientOptions::new(native, &config)
         .assured("split identity is valid")
-        .prepare(&executor())
+        .prepare(&executor)
         .await
         .assured("split identity can be prepared");
     let path = prepared
@@ -152,13 +153,20 @@ async fn combined_identity_lives_until_the_last_shared_client_is_dropped() {
             0o600
         );
     }
-    let client =
-        MongoDbClient::from_prepared(prepared).assured("driver accepts the prepared identity");
+    let before = executor.snapshot().filesystem_storage.admitted;
+    let client = MongoDbClient::from_prepared(prepared, &executor)
+        .await
+        .assured("driver accepts the prepared identity");
+    assert_eq!(
+        executor.snapshot().filesystem_storage.admitted,
+        before + 1,
+        "the native constructor reads and parses TLS files on the filesystem executor"
+    );
     let retained = client.clone();
     drop(client);
     assert!(
         path.exists(),
-        "a retained client still needs its identity for new connections"
+        "a retained client still owns its prepared identity"
     );
     drop(retained);
     assert!(
@@ -208,4 +216,32 @@ async fn an_explicit_ca_enables_tls_when_the_url_does_not_select_a_mode() {
         .build();
     assert_eq!(prepared.options.tls, Some(Tls::Enabled(tls)));
     assert!(prepared.identity.is_none());
+}
+
+#[nervix_primitives::test]
+async fn native_tls_file_refusal_retains_its_driver_cause_after_worker_admission() {
+    let executor = executor();
+    let directory = tempfile::tempdir().assured("test directory is available");
+    let missing = directory.path().join("missing-ca.pem");
+    let config = [
+        entry("addr", "mongodb://unresolvable.invalid/events?tls=true"),
+        entry("tls_ca_file", missing.to_string_lossy()),
+    ];
+    let bounds = ClientPoolBounds::new(0, std::num::NonZeroU32::MIN)
+        .assured("the minimum does not exceed the maximum");
+    let result = MongoDbClient::open(&config, bounds, &executor).await;
+    let report = match result {
+        Ok(_) => panic!("a missing CA cannot initialize native TLS"),
+        Err(report) => report,
+    };
+    assert!(report.downcast_ref::<mongodb::error::Error>().is_some());
+    assert!(matches!(
+        report.current_context(),
+        nervix_connector::EmitterOpenError::InvalidConfiguration { .. }
+    ));
+    assert_eq!(
+        executor.snapshot().filesystem_storage.admitted,
+        1,
+        "CA-only native construction also runs on the filesystem executor"
+    );
 }
