@@ -2186,7 +2186,11 @@ it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
 
-The RabbitMQ fixture publishes its management HTTP port beside the AMQP endpoints. A scenario's
+The RabbitMQ fixture publishes its management HTTP port beside the AMQP endpoints. Its AMQP TLS
+listener requires a client certificate the scenario certificate authority issued, so an `amqps`
+client that presents none is refused by the broker. The scenario server certificate also carries
+the client-authentication usage, and the TLS scenarios mount it with its key as their client
+identity. The management listener requests no client certificate. A scenario's
 `RabbitMqQueueProbe` observes its explicitly provisioned queue with the fixture credentials:
 consumer acknowledgement mode and prefetch, unacknowledged deliveries, or total outstanding
 messages. Each observation uses the shared status budget and bounded polling. These are broker

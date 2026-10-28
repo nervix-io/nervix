@@ -1111,7 +1111,7 @@ CREATE [IF NOT EXISTS] <kind> CLIENT <name>
 Transport-specific expectations:
 
 - `KAFKA`: pass-through to librdkafka, except `allow.auto.create.topics`, which `CREATE KAFKA CLIENT` refuses. The emitter's producer keeps librdkafka's producer default, so a broker that allows auto-creation creates a missing topic on the first publish; provision topics explicitly. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and optional `'ssl.certificate.location'` plus `'ssl.key.location'`.
-- `RABBITMQ`: use `amqps://...` in `addr`; Nervix honors `tls_ca_file`.
+- `RABBITMQ`: use `amqps://...` in `addr`; Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](./ingestors.md#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
@@ -1394,7 +1394,10 @@ under `ACK` and checking the queue share the client's `connect_timeout_ms`, 30 s
 left out; the broker certificate must name the host `addr` names. A connection that fails or runs
 out of that deadline, including a name that does not resolve, leaves the emitter unavailable with
 the failure as its transient error; it confirms nothing, so its input stays unacknowledged, and it
-reopens on its `RETRY POLICY` backoff.
+reopens on its `RETRY POLICY` backoff. The emitter reads the client's `addr`, trusts its
+`tls_ca_file` and presents its `tls_cert_file` and `tls_key_file` as a RabbitMQ source does; see
+[RabbitMQ](./ingestors.md#rabbitmq). A broker that refuses the TLS session leaves the emitter
+unavailable with that refusal as its transient error.
 
 ### Redis Pub/Sub
 

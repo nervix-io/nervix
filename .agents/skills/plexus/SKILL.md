@@ -514,6 +514,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   opportunistic fallback. Mounted `tls_ca_file`, `tls_cert_file`, and `tls_key_file` are the
   TLS-file interface, certificate and key must be supplied together, and TLS files require
   `verify-full`.
+- Give a `RABBITMQ` client an `amqp://` or `amqps://` `addr` that names a host and no port 0; Nervix
+  refuses any other address before commit. Mounted `tls_ca_file`, `tls_cert_file` and
+  `tls_key_file` apply to `amqps` only, certificate and key must be supplied together, and the
+  connection presents them to a broker that requires a client certificate. Read
+  [Ingestors → RabbitMQ](../../../docs/src/ingestors.md#rabbitmq).
 - Treat every route as a newly constructed output. Add `INHERIT` only where that node permits it,
   and initialize every required output field on set-only routes.
 - Add a route-local message error policy. Add the required general/global policy for the chosen
