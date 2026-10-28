@@ -552,6 +552,7 @@ fn emitting_nodes() -> Vec<ScheduledNode> {
             body: EmitterBody::Codec {
                 codec: named("event_codec"),
             },
+            envelope: Box::new(nervix_models::EmitterEnvelope::default()),
             connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
                 ZeroMqPushEmitter {
                     mode: nervix_models::ZeroMqPushPublishingMode::NoAck {

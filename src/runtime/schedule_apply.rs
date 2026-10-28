@@ -532,10 +532,8 @@ impl Runtime {
             } else {
                 None
             };
-            for task in previous_tasks.unwrap_or_default() {
-                nervix_primitives::task::consume_budget().await;
-                task.abort();
-                task.join_after_shutdown("placement").await;
+            if let Some(previous_tasks) = previous_tasks {
+                previous_tasks.abort().await;
             }
 
             let state = PlacedNodeState::of(desired_node, revision);
@@ -912,11 +910,7 @@ impl Runtime {
                         .change_context_lazy(build)?;
                     services.remove_local_runtime_consumer(AckMode::Detached);
                 }
-                for task in previous_placement_tasks {
-                    nervix_primitives::task::consume_budget().await;
-                    task.abort();
-                    task.join_after_shutdown("placement").await;
-                }
+                previous_placement_tasks.abort().await;
 
                 if desired_materialized {
                     let Some(local_node) = local_node_id else {
@@ -1710,10 +1704,10 @@ impl Runtime {
                 replica_nodes,
                 Some(local_node_id),
             );
-            if let Some(task) =
-                self.spawn_materialized_stream_snapshot_task(shutdown_tx, assignment.persistence)
+            if let Some(writer) =
+                self.spawn_materialized_stream_snapshot_task(assignment.persistence)
             {
-                placement.tasks.push(task);
+                placement.tasks.checkpoints.push(writer);
             }
             if executes_locally {
                 let Some(originator) = assignment.originator.take() else {
@@ -1731,7 +1725,7 @@ impl Runtime {
                 if let Some(task) =
                     self.spawn_materialized_stream_replica_poll_task(shutdown_tx, installer)
                 {
-                    placement.tasks.push(task);
+                    placement.tasks.replication.push(task);
                 }
             }
         }
@@ -1764,10 +1758,8 @@ impl Runtime {
                     node: node.identity(),
                     state: RuntimeStateKind::KafkaOffset,
                 })?;
-            if let Some(task) =
-                self.spawn_kafka_offset_snapshot_task(shutdown_tx, assignment.persistence)
-            {
-                placement.tasks.push(task);
+            if let Some(writer) = self.spawn_kafka_offset_snapshot_task(assignment.persistence) {
+                placement.tasks.checkpoints.push(writer);
             }
             if node.is_primary_on(local_node_id) {
                 let Some(originator) = assignment.originator.take() else {
@@ -1785,7 +1777,7 @@ impl Runtime {
                 if let Some(task) =
                     self.spawn_kafka_offset_replica_poll_task(shutdown_tx, installer)
                 {
-                    placement.tasks.push(task);
+                    placement.tasks.replication.push(task);
                 }
             }
         }
@@ -1812,13 +1804,14 @@ impl Runtime {
                     node: node.identity(),
                     state: RuntimeStateKind::BranchAggregated,
                 })?;
-            let task = if executes_locally {
-                self.spawn_branch_aggregated_snapshot_task(shutdown_tx, state)
-            } else {
+            if executes_locally {
+                if let Some(writer) = self.spawn_branch_aggregated_snapshot_task(state) {
+                    placement.tasks.checkpoints.push(writer);
+                }
+            } else if let Some(task) =
                 self.spawn_branch_aggregated_replica_poll_task(shutdown_tx, state)
-            };
-            if let Some(task) = task {
-                placement.tasks.push(task);
+            {
+                placement.tasks.replication.push(task);
             }
         }
         if assigned_locally && !node.is_primary_on(local_node_id) {
@@ -1828,7 +1821,7 @@ impl Runtime {
                     node: node.identity(),
                 })?;
             if let Some(task) = task {
-                placement.tasks.push(task);
+                placement.tasks.replication.push(task);
             }
         }
         if node.kind() != ModelKind::Relay || executes_locally {

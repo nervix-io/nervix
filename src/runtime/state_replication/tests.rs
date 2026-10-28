@@ -1484,9 +1484,8 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
         .take()
         .expect("branch-local state should grant authoritative access");
     let persistence = assignment.persistence;
-    let (shutdown_tx, _) = watch::channel(false);
-    let task = runtime
-        .spawn_materialized_stream_snapshot_task(&shutdown_tx, persistence.clone())
+    let writer = runtime
+        .spawn_materialized_stream_snapshot_task(persistence.clone())
         .expect("persisted runtime should spawn a snapshot task");
     let record = test_runtime_row([(
         "status".to_string(),
@@ -1513,8 +1512,12 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
         "the relay-state hot path must not persist a snapshot"
     );
 
-    shutdown_tx.send_replace(true);
-    task.await.expect("snapshot task should stop cleanly");
+    writer.write_last();
+    runtime
+        .inner
+        .state_snapshot_tasks
+        .wait_for_domain(&placement.domain)
+        .await;
     assert_eq!(
         runtime
             .inner
@@ -1552,9 +1555,8 @@ async fn kafka_offset_snapshot_task_owns_persistence() {
         .take()
         .expect("local Kafka state should grant authoritative access");
     let persistence = assignment.persistence;
-    let (shutdown_tx, _) = watch::channel(false);
-    let task = runtime
-        .spawn_kafka_offset_snapshot_task(&shutdown_tx, persistence.clone())
+    let writer = runtime
+        .spawn_kafka_offset_snapshot_task(persistence.clone())
         .expect("persisted runtime should spawn a snapshot task");
     let store = runtime
         .inner
@@ -1585,8 +1587,12 @@ async fn kafka_offset_snapshot_task_owns_persistence() {
     assert_eq!(originator.read().current_lsm(), 1);
     assert_eq!(persistence.last_persisted_lsm(), 0);
 
-    shutdown_tx.send_replace(true);
-    task.await.expect("snapshot task should stop cleanly");
+    writer.write_last();
+    runtime
+        .inner
+        .state_snapshot_tasks
+        .wait_for_domain(&placement.domain)
+        .await;
     let flushed = store
         .latest_snapshot(&placement)
         .expect("snapshot lookup should succeed")

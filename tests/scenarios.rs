@@ -117,10 +117,10 @@ use crate::common::{
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
         ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
-        MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_REPLICA_SET_ADDR, MONGODB_TLS_ADDR,
-        MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, NATS_ADDR, PULSAR_ADDR,
-        RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT,
-        SQS_TLS_ENDPOINT, TestDependencies,
+        MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_MTLS_ADDR, MONGODB_REPLICA_SET_ADDR,
+        MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, NATS_ADDR,
+        PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR,
+        SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -1484,6 +1484,17 @@ async fn given_mongodb_replica_set_is_running(world: &mut ScenarioWorld) {
         .start_mongodb_replica_set(&world.test_id)
         .await
         .expect("MongoDB replica set test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("MongoDB mutual TLS is running")]
+async fn given_mongodb_mutual_tls_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_mongodb_mutual_tls(&world.test_id)
+        .await
+        .expect("MongoDB mutual TLS test container should start");
     refresh_dependency_configuration(world);
 }
 
@@ -6489,6 +6500,8 @@ enum MongoDbServer {
     Standalone,
     /// The authenticated standalone server, reached over TLS.
     StandaloneTls,
+    /// The authenticated standalone server, whose TLS listener requires a client identity.
+    MutualTls,
     /// The single-member replica set, whose one member is its primary.
     ReplicaSet,
 }
@@ -6507,20 +6520,28 @@ impl MongoDbServer {
         let addr = match self {
             Self::Standalone => dependencies.get(MONGODB_ADDR),
             Self::StandaloneTls => dependencies.get(MONGODB_TLS_ADDR),
+            Self::MutualTls => dependencies.get(MONGODB_MTLS_ADDR),
             Self::ReplicaSet => dependencies.get(MONGODB_REPLICA_SET_ADDR),
         }
         .map_err(|error| error.to_string())?;
         let mut options = MongoDbClientOptions::parse(addr)
             .await
             .map_err(|source| source.to_string())?;
-        if let Self::StandaloneTls = self {
+        if matches!(self, Self::StandaloneTls | Self::MutualTls) {
             let ca_file = dependencies
                 .tls_ca_path()
                 .map_err(|error| error.to_string())?
                 .to_path_buf();
-            options.tls = Some(MongoDbTls::Enabled(
-                MongoDbTlsOptions::builder().ca_file_path(ca_file).build(),
-            ));
+            let mut tls = MongoDbTlsOptions::builder().ca_file_path(ca_file).build();
+            if let Self::MutualTls = self {
+                tls.cert_key_file_path = Some(
+                    dependencies
+                        .tls_identity_path()
+                        .map_err(|error| error.to_string())?
+                        .to_path_buf(),
+                );
+            }
+            options.tls = Some(MongoDbTls::Enabled(tls));
         }
         MongoDbClient::with_options(options).map_err(|source| source.to_string())
     }
@@ -12371,6 +12392,41 @@ async fn given_resource_installation_pause(world: &mut ScenarioWorld, node_id: S
     world
         .fault_injection
         .pause_resource_installation_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[given(expr = "resource source discovery on node {string} is deferred")]
+fn given_resource_source_discovery_is_deferred(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    world
+        .fault_injection
+        .defer_resource_source_discovery_on(crate::common::cluster::node_name(&node));
+}
+
+#[then(expr = "the deferred resource source discovery on node {string} is observed")]
+async fn then_deferred_resource_source_discovery_is_observed(
+    world: &mut ScenarioWorld,
+    node: String,
+) {
+    let node = expand_placeholders(world, &node);
+    let node_name = crate::common::cluster::node_name(&node);
+    let observed = nervix_primitives::time::timeout(
+        Duration::from_secs(120),
+        world
+            .fault_injection
+            .wait_for_deferred_resource_source_discovery(&node_name),
+    )
+    .await;
+    if let Err(error) = observed {
+        panic!("resource source discovery on '{node}' was not deferred: {error}");
+    }
+}
+
+#[when(expr = "resource source discovery on node {string} resumes")]
+fn when_resource_source_discovery_resumes(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    world
+        .fault_injection
+        .resume_resource_source_discovery_on(&crate::common::cluster::node_name(&node));
 }
 
 #[given(expr = "resource installation on node {string} fails before promotion")]
@@ -24390,6 +24446,8 @@ async fn then_within_duration_node_eventually_reports_describe_resource_as(
     #[step] step: &Step,
 ) {
     let timeout = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let expected = expand_placeholders(world, &expected);
     let commands = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + timeout;
 
@@ -25587,6 +25645,40 @@ async fn given_mongodb_collection_recording_insert_command_sizes_exists(
 #[given(expr = "MongoDB TLS collection {string} exists")]
 async fn given_mongodb_tls_collection_exists(world: &mut ScenarioWorld, collection: String) {
     prepare_mongodb_collection(world, collection, MongoDbServer::StandaloneTls).await;
+}
+
+#[given(expr = "MongoDB mutual TLS collection {string} exists")]
+async fn given_mongodb_mutual_tls_collection_exists(world: &mut ScenarioWorld, collection: String) {
+    prepare_mongodb_collection(world, collection, MongoDbServer::MutualTls).await;
+}
+
+#[given("MongoDB mutual TLS refuses a client without an identity")]
+async fn given_mongodb_mutual_tls_requires_identity(world: &mut ScenarioWorld) {
+    let endpoints = world.dependencies.endpoints();
+    let address = endpoints
+        .get(MONGODB_MTLS_ADDR)
+        .expect("mutual TLS server is running");
+    let mut options = MongoDbClientOptions::parse(address)
+        .await
+        .expect("fixture address is valid");
+    options.tls = Some(MongoDbTls::Enabled(
+        MongoDbTlsOptions::builder()
+            .ca_file_path(
+                endpoints
+                    .tls_ca_path()
+                    .expect("fixture CA is available")
+                    .to_path_buf(),
+            )
+            .build(),
+    ));
+    options.server_selection_timeout = Some(Duration::from_secs(2));
+    let client =
+        MongoDbClient::with_options(options).expect("CA-only client configuration is valid");
+    client
+        .database("admin")
+        .run_command(mongodb_doc! { "ping": 1 })
+        .await
+        .expect_err("the mutual TLS fixture must refuse a client without an identity");
 }
 
 async fn prepare_mongodb_collection(
@@ -29568,6 +29660,11 @@ async fn given_repeated_text_placeholder(
     bytes: usize,
 ) {
     world.placeholders.insert(placeholder, "a".repeat(bytes));
+}
+
+#[given(expr = "a NUL character placeholder {string} is prepared")]
+async fn given_nul_character_placeholder(world: &mut ScenarioWorld, placeholder: String) {
+    world.placeholders.insert(placeholder, "\0".to_string());
 }
 
 #[then(expr = "timestamp placeholder {string} is not before timestamp placeholder {string}")]

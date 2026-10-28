@@ -522,8 +522,10 @@ uncertain applying restore is recovered by sending it again under its execution 
 Rust client's `restore_with_reference` does; `nervix-cli restore` starts every restore under a
 fresh reference. A terminal failed restore requires a fresh target domain for another restore.
 
-The public `/metrics` endpoint reports these node-local series after completed sweeps, and reads
-zero until the first sweep completes:
+A sweep runs only when the node's bulk memory has room for its 2 MiB working set; under bulk memory
+pressure it is deferred to the next second rather than waiting for that room, so reclamation never
+holds up the node's other bulk work. The public `/metrics` endpoint reports these node-local series
+after completed sweeps, and reads zero until the first sweep completes:
 
 | Series | Meaning |
 | --- | --- |

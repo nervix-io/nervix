@@ -260,13 +260,83 @@ impl EnvelopeClauseKind {
             Self::DeduplicationId => "DEDUPLICATION ID id",
         }
     }
+
+    /// What a statement writes after the clause's keywords.
+    pub fn form(self) -> EnvelopeClauseForm {
+        match self {
+            Self::Persistent | Self::Mandatory | Self::Retain => EnvelopeClauseForm::Flag,
+            Self::DeliverAfter | Self::Delay => EnvelopeClauseForm::Duration,
+            Self::Timestamp => EnvelopeClauseForm::Expression(ParseAsType::Datetime),
+            Self::ReplyTo | Self::MessageId | Self::DeduplicationId => {
+                EnvelopeClauseForm::Expression(ParseAsType::String)
+            }
+        }
+    }
+}
+
+/// What a statement writes after an envelope clause's keywords.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvelopeClauseForm {
+    /// Nothing: writing the clause turns on what it names for every record.
+    Flag,
+    /// A duration literal, the same for every record.
+    Duration,
+    /// An expression evaluated for every record, whose value is never null and has exactly this
+    /// type.
+    Expression(ParseAsType),
 }
 
 /// One key of an emitter's closed `PROPERTIES { … }` set, and the exact type of its value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PropertyDeclaration {
     pub name: &'static str,
-    pub ty: ParseAsType,
+    pub ty: PropertyType,
+}
+
+/// The exact type of a property's value: one of the scalars a transport carries in a property.
+///
+/// A property is never a float, whose values do not all equal themselves, so two records whose
+/// properties are equal can always share a payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
+pub enum PropertyType {
+    U8,
+    I8,
+    U16,
+    I16,
+    U32,
+    I32,
+    U64,
+    I64,
+    Bool,
+    String,
+    Datetime,
+    Bytes,
+}
+
+impl From<PropertyType> for ParseAsType {
+    fn from(ty: PropertyType) -> Self {
+        match ty {
+            PropertyType::U8 => Self::U8,
+            PropertyType::I8 => Self::I8,
+            PropertyType::U16 => Self::U16,
+            PropertyType::I16 => Self::I16,
+            PropertyType::U32 => Self::U32,
+            PropertyType::I32 => Self::I32,
+            PropertyType::U64 => Self::U64,
+            PropertyType::I64 => Self::I64,
+            PropertyType::Bool => Self::Bool,
+            PropertyType::String => Self::String,
+            PropertyType::Datetime => Self::Datetime,
+            PropertyType::Bytes => Self::Bytes,
+        }
+    }
+}
+
+/// A property's type is written as the schema type its value has.
+impl Display for PropertyType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        ParseAsType::from(*self).fmt(f)
+    }
 }
 
 /// One thing a statement can make an entity do at run time, which a scenario observes.
@@ -349,3 +419,7 @@ impl Display for RuntimeCapability {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "declaration_tests.rs"]
+mod tests;

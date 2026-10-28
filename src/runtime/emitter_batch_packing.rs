@@ -24,7 +24,7 @@ use std::num::NonZeroUsize;
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_connector::EmitterRecordPosition;
+use nervix_connector::{EmitterRecordPosition, RecordEnvelope};
 use nervix_models::{EmitterBatchPolicy, RelayName};
 use nervix_primitives::sync::Arc;
 
@@ -34,13 +34,17 @@ use crate::runtime_schema::{
     CompiledCodec, PayloadLimitExceeded, RuntimeRecordBatch,
 };
 
-/// What a batch payload carries once for every member: the message key, the written headers and
-/// the ordering group. Records that differ in any of them never share a batch.
+/// What a batch payload carries once for every member: the message key, the written headers, the
+/// ordering group and what the emitter's envelope clauses and properties set. Records that differ
+/// in any of them never share a batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BatchEnvelope {
     pub(super) key: Option<String>,
     pub(super) headers: EmitterHeaders,
     pub(super) message_group: Option<String>,
+    /// What the emitter's envelope clauses and properties set on the record, absent where the
+    /// emitter writes none. The batch the member came from holds it, and the payload shares it.
+    pub(super) clauses: Option<Arc<RecordEnvelope>>,
 }
 
 /// One row of a carrier, or a rejected row that seals the current payload.
@@ -414,6 +418,7 @@ mod tests {
                     key: None,
                     headers: Vec::new(),
                     message_group: Some(group.to_string()),
+                    clauses: None,
                 },
             }],
         }
@@ -509,6 +514,59 @@ mod tests {
                     row_index: 0
                 }],
             ]
+        );
+    }
+
+    #[test]
+    fn a_differing_envelope_value_seals_the_payload_and_each_payload_keeps_its_own() {
+        let clauses = |message_id: &str| {
+            Some(Arc::new(RecordEnvelope {
+                persistent: true,
+                message_id: Some(message_id.to_string()),
+                ..RecordEnvelope::default()
+            }))
+        };
+        let with_message_id = |value: i64, batch_index: usize, message_id: &str| {
+            let mut carrier = carrier(value, batch_index, "source_a", "one");
+            for row in &mut carrier.rows {
+                if let PackingRow::Ready { envelope, .. } = row {
+                    envelope.clauses = clauses(message_id);
+                }
+            }
+            carrier
+        };
+        let carriers = vec![
+            with_message_id(1, 0, "first"),
+            with_message_id(2, 1, "first"),
+            with_message_id(3, 2, "second"),
+            with_message_id(4, 3, "first"),
+        ];
+        let packed = pack_buffered_batches(&test_codec(), carriers, test_policy(4))
+            .assured("all selected Arrow rows match the test codec");
+        let payloads = packed
+            .outcomes
+            .into_iter()
+            .map(|outcome| match outcome {
+                PackedOutcome::Payload(payload) => (
+                    payload.rows.len(),
+                    payload.envelope.clauses,
+                    payload.payload,
+                ),
+                other => panic!("every test row should encode into a payload, found {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            payloads,
+            vec![
+                (
+                    2,
+                    clauses("first"),
+                    br#"[{"value":1},{"value":2}]"#.to_vec()
+                ),
+                (1, clauses("second"), br#"[{"value":3}]"#.to_vec()),
+                (1, clauses("first"), br#"[{"value":4}]"#.to_vec()),
+            ],
+            "a member whose envelope differs never shares its neighbours' payload"
         );
     }
 
@@ -1012,16 +1070,19 @@ mod tests {
                 key: None,
                 headers: Vec::new(),
                 message_group: None,
+                clauses: None,
             },
             BatchEnvelope {
                 key: Some("key".to_string()),
                 headers: vec![("trace".to_string(), "1".to_string())],
                 message_group: None,
+                clauses: None,
             },
             BatchEnvelope {
                 key: None,
                 headers: Vec::new(),
                 message_group: Some("group".to_string()),
+                clauses: None,
             },
         ]
     }

@@ -153,10 +153,11 @@ captured. A live cut and a configuration-only capture take no lease.
 
 A stopped cut reads what the domain's stop left on disk. That stop completes only once every
 deduplicator and window branch it ended has written what it published last, including a branch
-ended at its stop grace whose snapshot task was still writing, as [Draining Admitted
-Work](./shutdown.md#draining-admitted-work) describes. A stopped cut that begins as soon as `STOP`
-returns therefore holds the same keyspaces and windows a quiesced cut taken just before the stop
-held.
+ended at its stop grace whose snapshot task was still writing, and every materialized relay has
+written what it held once the tasks that change it ended, however long that write outlasts their
+stop grace, as [Draining Admitted Work](./shutdown.md#draining-admitted-work) describes. A stopped
+cut that begins as soon as `STOP` returns therefore holds the same keyspaces, windows and
+materialized generations a quiesced cut taken just before the stop held.
 
 ## The Quiesced Cut
 
@@ -711,22 +712,34 @@ query, for instance, can still read and cache a value maintenance only measures.
 ## Restore Staging Maintenance
 
 Every node runs restore checkpoint maintenance, independently of leadership: once at startup, then
-again one second after each sweep ends, whether it succeeded or not. A sweep reserves its 2 MiB,
-borrows one applied consensus revision under the applied-state read guard, and takes the installation
-barrier. It retains the selected publication, the exact generation of an installation that belongs
-to a restore still applying, even when leadership or its lease has changed, every generation ahead
-of the node's applied log, and, on a node without an applied log, every generation. It reclaims
-every other restored namespace: terminal, expired, missing and superseded attempts, including chunks
-written before their receipt existed. In the selected namespace it removes receipts, and checks one
-header per placement and revision to remove chunk sets the selected header does not reference,
-because the header is absent, inline or names another revision; ordinary checkpoints, replica
-installation, handoff, forced recovery and purge therefore release unreachable restored chunks
-without another restore. Its cursors seek past the initial and selected headers, indices and
-receipts and past retained generations, and in the selected chunk namespace one header check lets a
-cursor skip a whole referenced set. Deletion runs in bounded batches and synchronizes what it
-removed, and a cancelled or interrupted sweep resumes from the keys that remain. Maintenance never releases a
-gate or changes a selected publication, and never removes a domain's initial namespace, which only a
-publication's cleanup removes.
+again one second after each sweep ends, whether it succeeded, failed or was deferred. A sweep takes
+its 2 MiB only from room the bulk class has free when it begins, and otherwise is deferred: it
+reclaims and measures nothing, publishes no series, and the next sweep tries again. It never waits
+in the class's queue. A place there takes every byte the class releases until it is satisfied, so
+it would hold every other bulk charge on the node behind it, including the next charge of an
+operation that holds part of the room it waits for. Such an operation can never release what it
+holds, and the sweep never gets its room: a materialized snapshot fetch that holds its encoded
+request while it charges the request's envelope, or a received chunk while it charges the write
+that stages it, would stall for as long as the rest of the class stays occupied. Under sustained
+bulk contention, reclamation therefore waits for room instead of delaying the node's bulk work. A
+bulk class smaller than the working set refuses every sweep at once instead, counting the refusal
+and logging it as a warning, because no free room could ever admit one.
+
+An admitted sweep borrows one applied consensus revision under the applied-state read guard, and
+takes the installation barrier. It retains the selected publication, the exact generation of an
+installation that belongs to a restore still applying, even when leadership or its lease has
+changed, every generation ahead of the node's applied log, and, on a node without an applied log,
+every generation. It reclaims every other restored namespace: terminal, expired, missing and
+superseded attempts, including chunks written before their receipt existed. In the selected
+namespace it removes receipts, and checks one header per placement and revision to remove chunk sets
+the selected header does not reference, because the header is absent, inline or names another
+revision; ordinary checkpoints, replica installation, handoff, forced recovery and purge therefore
+release unreachable restored chunks without another restore. Its cursors seek past the initial and
+selected headers, indices and receipts and past retained generations, and in the selected chunk
+namespace one header check lets a cursor skip a whole referenced set. Deletion runs in bounded
+batches and synchronizes what it removed, and a cancelled or interrupted sweep resumes from the keys
+that remain. Maintenance never releases a gate or changes a selected publication, and never removes
+a domain's initial namespace, which only a publication's cleanup removes.
 
 The restore staging quota, `--restore-staging-max-bytes`, by default the smaller of 128 GiB and the
 size of the volume that holds the node database, bounds the key and value bytes of every

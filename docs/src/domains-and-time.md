@@ -123,7 +123,9 @@ Successful lifecycle commands are completion boundaries. `START` returns after e
 node has prepared the same revision and every configured listener and assigned source has completed
 startup. `STOP` returns after intake and runtime work have stopped remotely, including when it is the
 last running domain, and after every deduplicator and window branch it ended has written the state
-it published last, so a backup taken as soon as `STOP` returns holds that state. A dependent
+it published last, and the records of every materialized relay and the domain offsets of every
+Kafka source have been written as they stood once the tasks that change them ended, so a backup
+taken as soon as `STOP` returns holds that state. A dependent
 connection, observation, or publish can follow immediately through any live node.
 
 The lifecycle state, active paced-clock anchor, and one clock authority are replicated. The

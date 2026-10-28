@@ -3,9 +3,10 @@
 //! Layer: data plane.
 //! - **Owns.** Encoding every row a batch still holds with the emitter's codec — one record per row,
 //!   or, when the emitter declares `BATCH`, one batch payload per packed candidate — pairing each
-//!   record with its key, headers and ordering group, preparing its external bytes once, rejecting
-//!   the rows that cannot be encoded or do not fit, and handing one write to the record emitter: the
-//!   payloads earlier attempts retained, unchanged, followed by the ones prepared now.
+//!   record with its key, headers, ordering group and envelope, preparing its external bytes once,
+//!   rejecting the rows that cannot be encoded, published or fit, and handing one write to the
+//!   record emitter: the payloads earlier attempts retained, unchanged, followed by the ones
+//!   prepared now.
 //! - **Depends on.** The emitter's compiled codec, its buffered batches, the batch packing, the
 //!   record identities and retained payloads a write is answered through, the connector
 //!   contract's record emitter and record value type, and the node's bounded executor, whose extension
@@ -54,11 +55,54 @@ impl PendingRowPayload {
 struct EncodedBrokerRecord {
     batch_index: usize,
     row_index: usize,
-    key: Option<String>,
     payload: Vec<u8>,
-    headers: EmitterHeaders,
-    message_group: Result<Option<String>, OrderingGroupError>,
+    /// What the record is published with, or why it cannot be published.
+    envelope: Result<BatchEnvelope, UnpublishableRow>,
     execution_now: Timestamp,
+}
+
+/// Why one row cannot be published: its ordering group or its envelope could not be evaluated.
+/// The emitter rejects the row before it writes anything of it.
+#[derive(Debug)]
+enum UnpublishableRow {
+    OrderingGroup(OrderingGroupError),
+    Envelope(EnvelopeError),
+}
+
+impl UnpublishableRow {
+    /// The rejection of the row at `position`, whose batch was admitted at `execution_now`.
+    ///
+    /// A row without an ordering group is an `external` error of the `publish` operation. A row
+    /// whose envelope expression failed or produced no value is an `evaluation` error of it.
+    fn rejected(
+        self,
+        position: EmitterRecordPosition,
+        execution_now: Timestamp,
+    ) -> RejectedEmitterRecord {
+        match self {
+            Self::OrderingGroup(error) => RejectedEmitterRecord {
+                position,
+                reason: error.to_string(),
+                structured_error: None,
+            },
+            Self::Envelope(error) => {
+                let reason = error.to_string();
+                let structured_error = structured_message_error(
+                    execution_now,
+                    MessageErrorCode::Evaluation,
+                    reason.clone(),
+                    MessageErrorOperation::Publish,
+                    None,
+                    std::iter::empty(),
+                );
+                RejectedEmitterRecord {
+                    position,
+                    reason,
+                    structured_error: Some(structured_error),
+                }
+            }
+        }
+    }
 }
 
 impl EncodedBrokerRecord {
@@ -297,22 +341,7 @@ async fn encode_broker_records(
 
         for PendingRowPayload { row_index, payload } in payloads {
             nervix_primitives::task::consume_budget().await;
-            let key = batch
-                .relay_batch()
-                .keys
-                .get(row_index)
-                .ok_or_else(|| {
-                    Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                        "emitter batch row {row_index} has no branch key entry"
-                    ))
-                })?
-                .as_ref()
-                .map(|key| key.as_str().to_string());
-            let headers = batch.headers_for_row(row_index).cloned().ok_or_else(|| {
-                Report::new(EmitterRuntimeError::EncodeBatch)
-                    .attach_printable(format!("emitter batch row {row_index} has no header entry"))
-            })?;
-            let message_group = batch.ordering_group(row_index)?;
+            let envelope = batch_envelope(batch, row_index)?;
             let position = EmitterRecordPosition {
                 batch_index,
                 row_index,
@@ -334,10 +363,8 @@ async fn encode_broker_records(
             encoded.push(EncodedBrokerRecord {
                 batch_index,
                 row_index,
-                key,
                 payload,
-                headers,
-                message_group,
+                envelope,
                 execution_now: batch.execution_now(),
             });
         }
@@ -346,11 +373,12 @@ async fn encode_broker_records(
     Ok(encoded)
 }
 
-/// One payload per row, once every record whose ordering group could not be evaluated
+/// One payload per row, once every record whose ordering group or envelope could not be evaluated
 /// has been rejected here.
 ///
-/// A emitter that orders records per group receives the group already evaluated for its record, so
-/// the expression that produced it, and the reason a record has none, both stay with the host.
+/// An emitter that orders records per group receives the group already evaluated for its record,
+/// and every emitter its envelope, so the expressions that produced them, and the reason a record
+/// has none, both stay with the host.
 async fn row_payloads(
     context: &EmitterConnectorContext,
     batches: &mut [EmitterPublishBatch],
@@ -361,14 +389,10 @@ async fn row_payloads(
     for record in encoded {
         nervix_primitives::task::consume_budget().await;
         let position = record.position();
-        let message_group = match record.message_group {
-            Ok(message_group) => message_group,
-            Err(error) => {
-                rejected.push(RejectedEmitterRecord {
-                    position,
-                    reason: error.to_string(),
-                    structured_error: None,
-                });
+        let envelope = match record.envelope {
+            Ok(envelope) => envelope,
+            Err(unpublishable) => {
+                rejected.push(unpublishable.rejected(position, record.execution_now));
                 continue;
             }
         };
@@ -376,11 +400,7 @@ async fn row_payloads(
             members: vec![position],
             occurred_at: record.execution_now,
             content: EncodedPayload {
-                envelope: BatchEnvelope {
-                    key: record.key,
-                    headers: record.headers,
-                    message_group,
-                },
+                envelope,
                 payload: record.payload,
             },
         });
@@ -390,12 +410,12 @@ async fn row_payloads(
 }
 
 /// Packs the rows no payload carries yet across successive Arrow carriers, and pairs each payload
-/// with the key, headers and ordering group its members share.
+/// with the key, headers, ordering group and envelope its members share.
 ///
-/// Rows whose ordering group could not be evaluated are rejected before packing, as they are when
-/// the emitter publishes one record per row. Rows that cannot be members, rows that alone exceed
-/// `MAX SIZE`, and the rows of a candidate whose container failed are rejected here as well, so
-/// every row packing sees ends either rejected or a member of one returned payload.
+/// Rows whose ordering group or envelope could not be evaluated are rejected before packing, as
+/// they are when the emitter publishes one record per row. Rows that cannot be members, rows that
+/// alone exceed `MAX SIZE`, and the rows of a candidate whose container failed are rejected here as
+/// well, so every row packing sees ends either rejected or a member of one returned payload.
 async fn pack_batch_records(
     codec: Arc<CompiledCodec>,
     policy: EmitterBatchPolicy,
@@ -422,12 +442,8 @@ async fn pack_batch_records(
             };
             let envelope = match batch_envelope(batch, row_index)? {
                 Ok(envelope) => envelope,
-                Err(error) => {
-                    unpublishable.push(RejectedEmitterRecord {
-                        position,
-                        reason: error.to_string(),
-                        structured_error: None,
-                    });
+                Err(unpublishable_row) => {
+                    unpublishable.push(unpublishable_row.rejected(position, batch.execution_now()));
                     rows.push(PackingRow::Seal);
                     continue;
                 }
@@ -577,12 +593,12 @@ fn container_failure(
     )
 }
 
-/// The key, headers and ordering group row `row_index` would be published under, or why its
-/// ordering group could not be evaluated.
+/// The key, headers, ordering group and envelope row `row_index` would be published with, or why
+/// its ordering group or its envelope could not be evaluated.
 fn batch_envelope(
     batch: &EmitterPublishBatch,
     row_index: usize,
-) -> EmitterRuntimeResult<Result<BatchEnvelope, OrderingGroupError>> {
+) -> EmitterRuntimeResult<Result<BatchEnvelope, UnpublishableRow>> {
     let key = batch
         .relay_batch()
         .keys
@@ -600,12 +616,17 @@ fn batch_envelope(
     })?;
     let message_group = match batch.ordering_group(row_index)? {
         Ok(message_group) => message_group,
-        Err(failure) => return Ok(Err(failure)),
+        Err(failure) => return Ok(Err(UnpublishableRow::OrderingGroup(failure))),
+    };
+    let clauses = match batch.envelope(row_index)? {
+        Ok(clauses) => clauses,
+        Err(failure) => return Ok(Err(UnpublishableRow::Envelope(failure))),
     };
     Ok(Ok(BatchEnvelope {
         key,
         headers,
         message_group,
+        clauses,
     }))
 }
 
@@ -658,6 +679,7 @@ async fn pack_pending_rows(
 )]
 mod tests {
     use error_stack::{AttachmentKind, FrameKind};
+    use nervix_connector::RecordEnvelope;
     use nervix_connector_fake::{
         FakeEmitter, PayloadPreparation, PublishAnswer as Answer, Records,
     };
@@ -812,6 +834,108 @@ mod tests {
             assert_eq!(writes[1][0], writes[0][0]);
             assert!(writes[1][0].starts_with(b"prepared-1:"));
             assert!(writes[1][1].starts_with(b"prepared-2:"));
+            assert!(prepared.is_empty());
+        }
+    }
+
+    fn message_id(id: &str) -> RecordEnvelope {
+        RecordEnvelope {
+            persistent: true,
+            message_id: Some(id.to_string()),
+            ..RecordEnvelope::default()
+        }
+    }
+
+    /// Three rows: two whose envelopes differ only in their message id, and one whose envelope
+    /// could not be evaluated.
+    fn enveloped_rows() -> EmitterPublishBatch {
+        let messages = [1_i64, 2, 3]
+            .into_iter()
+            .map(|value| RelayMessage {
+                key: None,
+                record: test_runtime_row([("value".to_string(), RuntimeValue::I64(value))]),
+                acks: AckSet::empty(),
+            })
+            .collect();
+        EmitterPublishBatch::from_batch(
+            RelayRecordBatch::from_messages(input_schema(), messages)
+                .expect("the test rows match the emitter input schema"),
+            Timestamp::from_unix_nanos(100),
+        )
+        .with_envelopes(RowEnvelopes::Evaluated(vec![
+            Ok(Arc::new(message_id("first"))),
+            Ok(Arc::new(message_id("second"))),
+            Err(EnvelopeError::OmittedInputRow),
+        ]))
+    }
+
+    #[nervix_primitives::test]
+    async fn each_record_carries_its_rows_envelope_unchanged_and_a_row_without_one_is_refused() {
+        let policy = EmitterBatchPolicy {
+            max_messages: BatchMessageLimit::try_from(4_u32)
+                .assured("the fixture supplies a positive message limit"),
+            max_size: "1KiB"
+                .parse()
+                .assured("the fixture supplies a positive byte limit"),
+        };
+        for batch in [None, Some(policy)] {
+            nervix_primitives::task::consume_budget().await;
+            let context = emitter_context();
+            let publisher = FakeEmitter::<Records>::new([Answer::Fail, Answer::ConfirmAll]);
+            let writes = publisher.observations();
+            let mut connector = EncodedRecordEmitter {
+                connector: Box::new(publisher),
+                codec: json_codec(),
+                batch,
+            };
+            let mut batches = vec![enveloped_rows()];
+            let mut prepared = PreparedPayloads::default();
+            let Err(stalled) = connector
+                .publish_batches(
+                    &context,
+                    EmitterPublication {
+                        batches: &mut batches,
+                        payloads: &mut prepared,
+                        client_payloads: &mut PreparedPayloads::default(),
+                        requests: &mut PreparedPayloads::default(),
+                        row_requests: &mut PreparedPayloads::default(),
+                    },
+                )
+                .await
+            else {
+                panic!("the first scripted publish must leave its payloads unresolved");
+            };
+            assert!(emitter_publish_error_is_retryable(&stalled));
+            let batch_resolved = batches
+                .first()
+                .assured("the batch stays buffered")
+                .resolved_rows();
+            assert_eq!(
+                batch_resolved,
+                vec![false, false, true],
+                "the row without an envelope is refused before any write, the rest stay retained"
+            );
+            connector
+                .publish_batches(
+                    &context,
+                    EmitterPublication {
+                        batches: &mut batches,
+                        payloads: &mut prepared,
+                        client_payloads: &mut PreparedPayloads::default(),
+                        requests: &mut PreparedPayloads::default(),
+                        row_requests: &mut PreparedPayloads::default(),
+                    },
+                )
+                .await
+                .assured("the second scripted publish confirms both payloads");
+            let envelopes = writes.lock().envelopes();
+            let written = vec![message_id("first"), message_id("second")];
+            assert_eq!(
+                envelopes,
+                vec![written.clone(), written],
+                "rows whose envelopes differ never share a payload, and a retry writes each \
+                 envelope it first wrote"
+            );
             assert!(prepared.is_empty());
         }
     }

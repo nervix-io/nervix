@@ -18,6 +18,7 @@ shuttle = [
 ]
 
 [dependencies]
+arch-into = { workspace = true }
 arrow-array = { workspace = true }
 async-trait = { workspace = true }
 error-stack = { workspace = true }

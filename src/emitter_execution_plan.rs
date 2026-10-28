@@ -3,7 +3,8 @@
 //! Layer: decisions.
 //!
 //! - **Owns.** Resolving emitter clients and source relays, preserving their delivery modes, and
-//!   lowering emitter route, source, HTTP request, and ordering expressions before runtime binding.
+//!   lowering emitter route, source, HTTP request, ordering and envelope expressions before runtime
+//!   binding.
 //! - **Depends on.** Validated schedule Models, the activation plan's schemas, the emitter start
 //!   decision, and the expression VM frontend.
 //! - **Must not know.** Tokio, locks, connector I/O, node-local resources, or task spawning.
@@ -17,10 +18,13 @@ use std::collections::BTreeMap;
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_connector::RecordEnvelope;
 use nervix_models::{
-    AckMode, Assignment, AssignmentTarget, CodecName, CreateEmitter, EmitterName, ErrorPolicies,
-    Expression, FieldName, FlushPolicy, InputCollectPolicy, MaterializedStateDependency, Model,
-    ModelKind, ModelName, NodeRef, RelayName, RouteConstruction, ScheduledNodes, SqsFifoGroup,
+    AckMode, Assignment, AssignmentTarget, CodecName, CreateEmitter, CreateSchema, EmitterName,
+    EnvelopeClauseForm, EnvelopeClauseKind, ErrorPolicies, Expression, FieldName, FlushPolicy,
+    InputCollectPolicy, MaterializedStateDependency, Model, ModelKind, ModelName, NodeRef,
+    PropertyDeclaration, RelayName, RouteConstruction, ScheduledNodes, SchemaField, SchemaName,
+    SqsFifoGroup, parse_duration_text,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_vm::{
@@ -37,6 +41,9 @@ use crate::{
 
 const HTTP_REQUEST_NAMESPACE: &str = "http_request";
 const ORDERING_GROUP_FIELD: &str = "ordering_group";
+/// The internal namespace an envelope program writes its values into. No field reference a user
+/// writes names it: the program assigns it only through the bare targets this plan synthesizes.
+pub(crate) const ENVELOPE_NAMESPACE: &str = "envelope";
 
 #[derive(Debug, Error)]
 pub(crate) enum EmitterExecutionPlanError {
@@ -79,6 +86,8 @@ pub(crate) enum EmitterExecutionPlanError {
     HttpRequest { emitter: EmitterName },
     #[error("emitter '{emitter}' has an invalid ordering group expression")]
     OrderingGroup { emitter: EmitterName },
+    #[error("emitter '{emitter}' has an invalid envelope")]
+    Envelope { emitter: EmitterName },
 }
 
 /// One source edge, in declared input order, with its already lowered predicate.
@@ -103,6 +112,37 @@ pub(crate) enum EmitterOrderingGroupPlan {
     Expression(SpannedNode<Program>),
 }
 
+/// What the value one field of an envelope program computes sets on a record: a clause, or a
+/// property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EnvelopeTarget {
+    Clause(EnvelopeClauseKind),
+    Property(PropertyDeclaration),
+}
+
+/// The values an emitter's envelope computes from each record, and the program that computes them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ComputedEnvelopePlan {
+    /// What the value of each field the program writes sets, in the order it writes them.
+    pub(crate) targets: Vec<EnvelopeTarget>,
+    /// Whether the program reads, as `output`, the record the emitter's route constructs. Where the
+    /// emitter publishes its source records, `message` is the source record and nothing is
+    /// `output`.
+    pub(crate) reads_output: bool,
+    /// The fields the program writes, one for each target: a non-null value of its exact type.
+    pub(crate) schema: CreateSchema,
+    pub(crate) program: SpannedNode<Program>,
+}
+
+/// What the host evaluates for the envelope of every record an emitter publishes.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EmitterEnvelopePlan {
+    /// What every record carries whatever it holds: the flag and duration clauses.
+    pub(crate) fixed: RecordEnvelope,
+    /// The values each record computes, absent where the envelope computes none.
+    pub(crate) computed: Option<ComputedEnvelopePlan>,
+}
+
 /// One emitter's complete in-memory decision. The host binds resource mounts and VM programs
 /// against local resources, then executes these typed edges and policies.
 #[derive(Debug, Clone, PartialEq)]
@@ -118,6 +158,8 @@ pub(crate) struct EmitterExecutionPlan {
     pub(crate) route: Option<EmitterRoutePlan>,
     pub(crate) http_request: Option<SpannedNode<Program>>,
     pub(crate) ordering_group: Option<EmitterOrderingGroupPlan>,
+    /// The envelope every record carries, absent where the emitter writes none.
+    pub(crate) envelope: Option<EmitterEnvelopePlan>,
     pub(crate) flush_policy: FlushPolicy,
     pub(crate) error_policies: ErrorPolicies,
     pub(crate) materialized_state: Vec<MaterializedStateDependency>,
@@ -228,6 +270,7 @@ impl EmitterExecutionPlan {
         let route = Self::route(emitter, &input_schema, &output_schema.arrow_schema())?;
         let http_request = Self::http_request(emitter)?;
         let ordering_group = Self::ordering_group(emitter, &input_schema)?;
+        let envelope = EmitterEnvelopePlan::decide(emitter, Self::constructs_output(emitter))?;
         Ok(Self {
             name: emitter.name.clone(),
             mode: emitter.mode,
@@ -239,10 +282,27 @@ impl EmitterExecutionPlan {
             route,
             http_request,
             ordering_group,
+            envelope,
             flush_policy: emitter.flush_policy.clone(),
             error_policies: emitter.error_policies.clone(),
             materialized_state: emitter.materialized_state.clone(),
         })
+    }
+
+    /// Whether the emitter's route constructs the record it publishes from each source record: a
+    /// codec or native body, built by the construction the emitter writes or, for an HTTP emitter,
+    /// by the request route it always runs. Otherwise the emitter publishes its source records.
+    pub(crate) fn constructs_output(emitter: &CreateEmitter) -> bool {
+        let output_body = match emitter.body {
+            nervix_models::EmitterBody::Codec { .. } | nervix_models::EmitterBody::Client => true,
+            nervix_models::EmitterBody::WithoutBody | nervix_models::EmitterBody::Values => false,
+        };
+        let runs_route = !emitter.construction.is_empty()
+            || matches!(
+                emitter.connector.as_ref(),
+                nervix_models::EmitterEntity::Http(_)
+            );
+        output_body && runs_route
     }
 
     pub(crate) fn route(
@@ -401,6 +461,138 @@ impl EmitterOrderingGroupPlan {
     }
 }
 
+/// One value an envelope computes for every record: what it sets, the exact type it has and the
+/// expression that computes it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EnvelopeValue {
+    pub(crate) target: EnvelopeTarget,
+    pub(crate) ty: nervix_models::ParseAsType,
+    pub(crate) expression: Expression,
+}
+
+impl EmitterEnvelopePlan {
+    /// The envelope plan of `emitter`, absent where it writes no envelope clause and sets no
+    /// property.
+    ///
+    /// The registry has checked every clause and property against the emitter's entity and every
+    /// duration and expression type, so a failure here is a Model that skipped that validation.
+    fn decide(
+        emitter: &CreateEmitter,
+        reads_output: bool,
+    ) -> error_stack::Result<Option<Self>, EmitterExecutionPlanError> {
+        let envelope = &emitter.envelope;
+        if envelope.is_empty() {
+            return Ok(None);
+        }
+        let invalid = || EmitterExecutionPlanError::Envelope {
+            emitter: emitter.name.clone(),
+        };
+        let deliver_after = match &envelope.deliver_after {
+            Some(text) => Some(parse_duration_text(text).change_context_lazy(invalid)?),
+            None => None,
+        };
+        let delay = match &envelope.delay {
+            Some(text) => Some(parse_duration_text(text).change_context_lazy(invalid)?),
+            None => None,
+        };
+        let fixed = RecordEnvelope {
+            persistent: envelope.persistent,
+            mandatory: envelope.mandatory,
+            retain: envelope.retain,
+            deliver_after,
+            delay,
+            ..RecordEnvelope::default()
+        };
+
+        let declared = emitter.connector.capabilities();
+        let mut values = Vec::new();
+        for clause in envelope.clauses() {
+            let EnvelopeClauseForm::Expression(ty) = clause.kind().form() else {
+                continue;
+            };
+            let expression = clause
+                .expression()
+                .assured("a clause whose form is an expression holds the expression it evaluates");
+            values.push(EnvelopeValue {
+                target: EnvelopeTarget::Clause(clause.kind()),
+                ty,
+                expression: expression.clone(),
+            });
+        }
+        for property in &envelope.properties {
+            let Some(declaration) = declared.property(&property.name) else {
+                return Err(Report::new(invalid()).attach_printable(format!(
+                    "{} emitters declare no PROPERTIES key '{}'",
+                    emitter.connector.kind(),
+                    property.name
+                )));
+            };
+            values.push(EnvelopeValue {
+                target: EnvelopeTarget::Property(*declaration),
+                ty: declaration.ty.into(),
+                expression: property.expression.clone(),
+            });
+        }
+        let plan = Self::computing(fixed, values, reads_output).change_context_lazy(invalid)?;
+        Ok(Some(plan))
+    }
+
+    /// The plan of an envelope whose every record carries `fixed` and computes `values`, in order:
+    /// one program writing each value into a non-null field of its exact type, named by its
+    /// position.
+    pub(crate) fn computing(
+        fixed: RecordEnvelope,
+        values: Vec<EnvelopeValue>,
+        reads_output: bool,
+    ) -> nervix_vm::FrontendResult<Self> {
+        if values.is_empty() {
+            return Ok(Self {
+                fixed,
+                computed: None,
+            });
+        }
+        let mut targets = Vec::with_capacity(values.len());
+        let mut fields = Vec::with_capacity(values.len());
+        let mut assignments = Vec::with_capacity(values.len());
+        for value in values {
+            let name = FieldName::parse(&format!("value_{}", fields.len()))
+                .assured("value_ followed by a position is a valid field literal");
+            fields.push(SchemaField {
+                name: name.clone(),
+                ty: value.ty,
+                optional: false,
+                sensitive: false,
+            });
+            assignments.push(Assignment {
+                target: AssignmentTarget::bare(name),
+                value: value.expression,
+            });
+            targets.push(value.target);
+        }
+        let program = lower_route_construction(
+            &RouteConstruction {
+                assignments,
+                ..RouteConstruction::default()
+            },
+            SemanticScopePolicy::read_write("message", ENVELOPE_NAMESPACE),
+        )?;
+        let schema = CreateSchema {
+            name: SchemaName::parse(ENVELOPE_NAMESPACE)
+                .assured("the envelope namespace is a valid schema name"),
+            fields,
+        };
+        Ok(Self {
+            fixed,
+            computed: Some(ComputedEnvelopePlan {
+                targets,
+                reads_output,
+                schema,
+                program,
+            }),
+        })
+    }
+}
+
 /// All emitters of a schedule, including ones placed on other nodes, planned from the same
 /// revision as the relay and codec surfaces they bind to.
 #[derive(Debug, Clone, Default)]
@@ -469,6 +661,7 @@ mod tests {
             name: named("output"),
             from: ProcessorInputs::single(named("input_relay")),
             body,
+            envelope: Box::new(nervix_models::EmitterEnvelope::default()),
             connector: Box::new(connector),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
@@ -591,5 +784,176 @@ mod tests {
                 .expect("the branch group should plan"),
             Some(EmitterOrderingGroupPlan::FromBranch),
         );
+    }
+
+    fn zero_mq(body: EmitterBody) -> CreateEmitter {
+        emitter(
+            EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
+                mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                    retry_policy: retry_policy(),
+                },
+                client: named("emitter"),
+            })),
+            body,
+        )
+    }
+
+    fn codec_body() -> EmitterBody {
+        EmitterBody::Codec {
+            codec: named("codec"),
+        }
+    }
+
+    #[test]
+    fn an_envelope_plans_its_fixed_clauses_and_one_program_computing_its_values_in_order() {
+        let mut enveloped = zero_mq(codec_body());
+        *enveloped.envelope = nervix_models::EmitterEnvelope {
+            persistent: true,
+            deliver_after: Some("5s".to_string()),
+            timestamp: Some(expression("now()")),
+            message_id: Some(expression("'event-1'")),
+            ..nervix_models::EmitterEnvelope::default()
+        };
+
+        let plan = EmitterEnvelopePlan::decide(&enveloped, false)
+            .expect("the envelope plans")
+            .expect("the emitter writes an envelope");
+
+        assert_eq!(
+            plan.fixed,
+            RecordEnvelope {
+                persistent: true,
+                deliver_after: Some(std::time::Duration::from_secs(5)),
+                ..RecordEnvelope::default()
+            }
+        );
+        let computed = plan.computed.expect("the envelope computes two values");
+        assert_eq!(
+            computed.targets,
+            vec![
+                EnvelopeTarget::Clause(EnvelopeClauseKind::Timestamp),
+                EnvelopeTarget::Clause(EnvelopeClauseKind::MessageId),
+            ]
+        );
+        let fields = computed
+            .schema
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.ty.clone(), field.optional))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fields,
+            vec![
+                ("value_0", nervix_models::ParseAsType::Datetime, false),
+                ("value_1", nervix_models::ParseAsType::String, false),
+            ]
+        );
+        assert_eq!(computed.program.inner.set.len(), 2);
+        assert!(!computed.reads_output);
+    }
+
+    #[test]
+    fn an_emitter_without_an_envelope_plans_none_and_one_that_only_flags_computes_nothing() {
+        let plain = zero_mq(codec_body());
+        assert_eq!(
+            EmitterEnvelopePlan::decide(&plain, false).expect("an empty envelope plans"),
+            None
+        );
+
+        let mut flagged = zero_mq(codec_body());
+        flagged.envelope.retain = true;
+        let plan = EmitterEnvelopePlan::decide(&flagged, true)
+            .expect("a flag plans")
+            .expect("the emitter writes an envelope");
+        assert!(plan.fixed.retain);
+        assert_eq!(plan.computed, None);
+    }
+
+    #[test]
+    fn a_property_its_entity_does_not_declare_is_not_planned() {
+        let mut enveloped = zero_mq(codec_body());
+        enveloped
+            .envelope
+            .properties
+            .push(nervix_models::EnvelopeProperty {
+                name: "priority".to_string(),
+                expression: expression("1"),
+            });
+
+        let refused = EmitterEnvelopePlan::decide(&enveloped, false)
+            .expect_err("ZEROMQ PUSH declares no property");
+
+        assert!(matches!(
+            refused.current_context(),
+            EmitterExecutionPlanError::Envelope { .. }
+        ));
+    }
+
+    #[test]
+    fn an_envelope_reads_output_exactly_where_the_route_constructs_the_published_record() {
+        let seq = FieldName::parse("seq").expect("seq is a valid field name");
+        let constructed = RouteConstruction {
+            assignments: vec![Assignment {
+                target: AssignmentTarget::bare(seq),
+                value: expression("input.seq"),
+            }],
+            ..RouteConstruction::default()
+        };
+        let http = |body| {
+            emitter(
+                EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
+                    mode: nervix_models::HttpRequestPublishingMode::Ack {
+                        retry_policy: retry_policy(),
+                    },
+                    client: named::<ClientName>("api"),
+                    method: expression("'POST'"),
+                    path: expression("'/events'"),
+                })),
+                body,
+            )
+        };
+        let mut built = zero_mq(codec_body());
+        built.construction = constructed;
+        let mut filtered = http(EmitterBody::WithoutBody);
+        filtered.construction.where_clause = Some(expression("input.seq > 0"));
+        let cases = [
+            (
+                "a codec emitter without a construction",
+                zero_mq(codec_body()),
+                false,
+            ),
+            ("a codec emitter that constructs its output", built, true),
+            (
+                "an HTTP emitter without a body",
+                http(EmitterBody::WithoutBody),
+                false,
+            ),
+            (
+                "an HTTP emitter that encodes its body",
+                http(codec_body()),
+                true,
+            ),
+            ("an HTTP emitter that only filters", filtered, false),
+        ];
+        // The record an HTTP emitter's empty construction builds leaves its optional field unset.
+        let output = arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "seq",
+            arrow_schema::DataType::Int64,
+            true,
+        )]);
+        for (case, emitter, constructs) in cases {
+            let route = EmitterExecutionPlan::route(&emitter, &input_schema(), &output)
+                .unwrap_or_else(|error| panic!("{case} plans its route: {error:?}"));
+            let route_constructs = match route {
+                Some(route) => route.codec_route,
+                None => false,
+            };
+            assert_eq!(route_constructs, constructs, "{case}");
+            assert_eq!(
+                EmitterExecutionPlan::constructs_output(&emitter),
+                constructs,
+                "{case}"
+            );
+        }
     }
 }

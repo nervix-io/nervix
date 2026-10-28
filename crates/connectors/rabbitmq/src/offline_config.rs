@@ -18,16 +18,15 @@ use error_stack::ResultExt as _;
 use nervix_connector::{OfflineClientConfigError, client_config_value};
 use nervix_models::{ClientConfigEntry, ConnectorKind};
 
-/// Parse the current address without opening a connection or resolving its host.
+use crate::address::RabbitMqAddress;
+
+/// Read the address as every connection reads it, without opening one or resolving its host.
 pub fn validate_client_configuration(
     config: &[ClientConfigEntry],
 ) -> error_stack::Result<(), OfflineClientConfigError> {
     let address = client_config_value(config, "addr", ConnectorKind::RabbitMq.keyword())
         .change_context(OfflineClientConfigError::key("addr"))?;
-    // amq-protocol-uri exposes its refusal as String, with no typed driver error available.
-    address.parse::<lapin::uri::AMQPUri>().map_err(|reason| {
-        error_stack::Report::new(OfflineClientConfigError::key("addr")).attach_printable(reason)
-    })?;
+    RabbitMqAddress::parse(&address).change_context(OfflineClientConfigError::key("addr"))?;
     Ok(())
 }
 
@@ -51,5 +50,63 @@ mod tests {
             matches!(refusal.current_context(), OfflineClientConfigError::InvalidKey { key } if key == "addr")
         );
         assert_eq!(refusal.to_string(), "invalid client config key 'addr'");
+    }
+
+    #[test]
+    fn addresses_that_name_no_amqp_broker_are_refused_before_commit() {
+        let config = |value: &str| {
+            [ClientConfigEntry {
+                key: "addr".to_string(),
+                value: value.to_string(),
+            }]
+        };
+        for (address, case) in [
+            (
+                "amqp:/%2f",
+                "no host, which the driver would read as localhost",
+            ),
+            ("amqp:///%2f", "an empty host"),
+            ("amqp://guest:secret@127.0.0.1:0/%2f", "port zero"),
+            (
+                "amqps://guest:secret@[::1]:0/%2f",
+                "port zero on an IPv6 host",
+            ),
+            (
+                "http://guest:secret@127.0.0.1:5672/%2f",
+                "a scheme that is not AMQP",
+            ),
+            ("amqp:guest:secret@127.0.0.1:5672", "no authority"),
+            (
+                "amqp://guest:secret@127.0.0.1:5672/%2f?heartbeat=soon",
+                "a query option the driver cannot read",
+            ),
+            (
+                "amqp://guest:secret@127.0.0.1:5672/%2f?auth_mechanism=kerberos",
+                "an authentication mechanism the driver does not offer",
+            ),
+        ] {
+            let Err(refusal) = validate_client_configuration(&config(address)) else {
+                panic!("{case} must be refused before commit");
+            };
+            assert!(
+                matches!(refusal.current_context(), OfflineClientConfigError::InvalidKey { key } if key == "addr"),
+                "{case}: {refusal:?}"
+            );
+            let reported = format!("{refusal:?}");
+            assert!(
+                !reported.contains("secret"),
+                "{case} repeats its credentials: {reported}"
+            );
+        }
+        for address in [
+            "amqp://127.0.0.1",
+            "amqp://rabbitmq.nervix.test:5672/%2f",
+            "amqps://user:pass@[::1]:5671/orders?heartbeat=10&frame_max=8192&channel_max=16&\
+             connection_timeout=1000&auth_mechanism=external",
+        ] {
+            if let Err(refusal) = validate_client_configuration(&config(address)) {
+                panic!("{address} names a broker: {refusal:?}");
+            }
+        }
     }
 }

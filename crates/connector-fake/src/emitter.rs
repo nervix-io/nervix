@@ -154,6 +154,16 @@ impl EmitterObservations<Vec<EmitterRecord>> {
         }
         writes
     }
+
+    /// The envelope of every record of every write, in the order the host handed them over.
+    pub fn envelopes(&self) -> Vec<Vec<RecordEnvelope>> {
+        let mut writes = Vec::with_capacity(self.writes.len());
+        for write in &self.writes {
+            let envelopes = write.iter().map(|record| record.envelope.clone()).collect();
+            writes.push(envelopes);
+        }
+        writes
+    }
 }
 
 /// HTTP content, separate from the identity and admission time retained in `writes`.

@@ -75,7 +75,7 @@ impl ConfiguredFaultInjection {
         None
     }
 
-    pub(in crate::runtime) fn stopped_branch_state_write_delay(
+    pub(in crate::runtime) fn stopped_state_write_delay(
         &self,
         _domain: &DomainName,
         _kind: ModelKind,
@@ -89,6 +89,12 @@ impl ConfiguredFaultInjection {
         _domain: &DomainName,
         _kind: ModelKind,
         _processor: &ModelName,
+    ) {
+    }
+
+    pub(in crate::runtime) async fn hold_materialized_snapshot_fetch_if_armed(
+        &self,
+        _node_id: &ClusterNodeName,
     ) {
     }
 

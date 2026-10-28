@@ -1630,6 +1630,9 @@ A body that ends early or overruns its declaration admits nothing and leaves its
 it can be sent again. Once the complete body is admitted, installation belongs to the cluster: it
 continues when the uploading connection closes, a new leader resumes it, and `ResourceInstalled`
 arrives only after every live node incarnation has verified and installed the same digest. If
+one incarnation has no local copy and has not discovered a live source yet, its replica remains
+pending and the admitted upload keeps waiting. A real installation failure retains its diagnostic
+cause in the terminal outcome. If
 leadership moves while the upload installs, the reply is a `LeaderRedirect`, and repeating the same
 identity and archive on the new leader recovers the recorded outcome. A leader that cannot confirm
 it still leads refuses the upload's writes the same way, with a redirect that names no leader. When

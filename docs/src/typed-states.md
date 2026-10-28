@@ -24,6 +24,10 @@ carrying a second database identity. Collection names are validated vocabulary v
 their original UTF-8 spelling; the resolved database, separator and collection cross the complete
 namespace-budget check before the emitter opens. Missing database configuration and a refused
 namespace return typed errors, never an empty database or a substituted collection.
+Its BSON field-name predicate rejects NUL at admission. Its private TLS plan distinguishes native
+driver TLS options from a complete split-file identity awaiting preparation; a partial identity
+is a configuration error. Preparation returns native options together with their private combined
+PEM guard. One shared client owner retains both driver and guard until its last handle ends.
 
 Nervix represents absence and distinct semantic states in its types. A zero, empty string,
 empty collection, maximum integer, or all-zero digest is a value in its own right; it does not
@@ -190,6 +194,15 @@ shows both, while canonical Plexus emits only written options, preserving option
 through a complete round trip. This is a display projection, never a stored shape or runtime plan.
 
 ## Absence And Distinct States
+
+**Installed resource manifests.** The resource store returns an optional manifest: a filesystem
+`NotFound` means the local copy is absent, while other filesystem and decoding failures keep their
+typed reports. Replica reconciliation records an absent copy as pending while no live source is visible;
+an installation has not failed merely because source discovery has not converged. A real read or
+metadata failure remains distinct, and a matching local manifest proves the copy ready.
+Recovery of an unpublished upload consumes the same absence outcome: without the admitting
+node's installed copy, the admitted archive is unavailable. Its read failures retain their causes,
+while an executor refusal or cancellation leaves that upload applying for another reconciliation.
 
 **MQTT size admission.** A source packet is either an admitted publish with independently owned
 bytes or an oversized outcome with an optional prepared acknowledgement. Absence means that QoS
@@ -487,6 +500,17 @@ and must be recreated. Complete equality properties exercise the production repr
 their range boundaries; see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md).
 
 ## Atomic States On The Data Plane
+
+The bounded executor's worker has `Selected`, `Executing` and `Idle` states. `Selected` owns its
+next admitted callback and charge; `Executing` means that ownership is with the synchronous
+callback; `Idle` has returned the class's active place. Selection and the idle transition share
+the class queue fence. If a runtime drops a worker before its next callback, its destructor returns
+the active place and closes queued submissions with `PoolClosed`, releasing their charges outside
+the fence. Ordinary completion publishes `Idle` before its result, so destruction cannot return
+that place twice. The separate queued-cancellation guard removes its exact entry only while it
+remains queued; a selected callback instead retains its charge and receives the cancellation
+signal. [Execution Primitives](./execution-primitives.md#executor-admission-and-draining) owns the
+full admission and draining contract.
 
 An ACK root's ownership handoff can be tracking a bounded number of active shares or be complete.
 `REQUIRED WAIT` can leave a tracking root temporarily idle without completing it. Attachments,

@@ -46,12 +46,16 @@ pub(super) fn request_body<'src>(
     let encoded = encoded_destination(context, definition());
     let absent = definition()
         .then_ignore(kw_phrase2(Identifier::Without, Identifier::Body))
+        .then(entity_envelope::<HttpRequestEmitter>())
         .then(context.bodyless_construction().or_not())
-        .map(|(destination, construction)| ParsedDestination {
-            destination,
-            body: EmitterBody::WithoutBody,
-            construction,
-            batch: None,
-        });
+        .map(
+            |((destination, envelope), construction)| ParsedDestination {
+                destination,
+                body: EmitterBody::WithoutBody,
+                envelope,
+                construction,
+                batch: None,
+            },
+        );
     choice((encoded, absent)).boxed()
 }

@@ -10,7 +10,11 @@ workspace = true
 
 [features]
 default = []
-shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
+shuttle = [
+  "nervix-connector/shuttle",
+  "nervix-execution/shuttle",
+  "nervix-primitives/shuttle",
+]
 
 [dependencies]
 arrow-array = { workspace = true }
@@ -22,11 +26,14 @@ futures-util = { workspace = true }
 meticulous = { workspace = true }
 mongodb = { workspace = true }
 nervix-connector = { workspace = true }
+nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 strum = { workspace = true, features = ["derive"] }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
+rcgen = { workspace = true }
