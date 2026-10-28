@@ -431,9 +431,10 @@ more generation must also observe nothing, so work that an upstream node publish
 downstream node finished its own flush is not left behind. A domain is quiescent only when that
 confirming generation completes with nothing visible.
 Quiesced backup applies the same admitted-work view to its selected domain across all live nodes.
-It requests a separate cluster-wide confirming generation before capturing checkpoints. Parked
-`REQUIRED WAIT` messages and the rows windows retain do not hold that cut open, and a failed drain
-resumes the domain. The cut captures retained window rows as window state.
+Like the local drain, it asks a node for a draining generation only while that node holds admitted
+work, and it requests a separate cluster-wide confirming generation before capturing checkpoints.
+Parked `REQUIRED WAIT` messages and the rows windows retain do not hold that cut open, and a failed
+drain resumes the domain. The cut captures retained window rows as window state.
 When a parked message has crossed nodes, remote ACK progress carries its parked state back through
 the source's acknowledgement chain. The drain excludes that chain while the message is parked;
 resuming it reactivates the chain, and only a terminal ACK completes the source attempt.

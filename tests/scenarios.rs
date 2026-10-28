@@ -11946,6 +11946,28 @@ async fn given_junction_reads_materialized_state_slowly(
     );
 }
 
+/// The junction's first read of a message's dependency is slowed too, so a payload that reached
+/// the junction's input may still be read rather than parked. This waits until the junction, whose
+/// reads the scenario slowed, has parked a message on `REQUIRED WAIT`.
+#[then(expr = "junction {string} has parked a message on its materialized state")]
+async fn then_junction_parked_a_message(world: &mut ScenarioWorld, junction: String) {
+    let junction = expand_placeholders(world, &junction);
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let junction = nervix_models::ModelName::try_from(junction.as_str())
+        .assured("the scenario junction is an identifier-shaped name");
+    let processor =
+        nervix_models::DomainNodeRef::node_in(domain, nervix_models::ModelKind::Junction, junction);
+    // A loaded runner delays the slowed read and the delivery before it; the wait ends as soon as
+    // the junction parks the message.
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world.fault_injection.wait_for_materialized_wait(&processor),
+    )
+    .await
+    .expect("the junction parks the message on its materialized state");
+}
+
 #[then(expr = "the last shutdown of node {string} reports its drain-support phase {string}")]
 async fn then_last_shutdown_reports_drain_support_phase(
     world: &mut ScenarioWorld,

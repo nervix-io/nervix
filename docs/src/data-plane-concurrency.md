@@ -358,9 +358,11 @@ Bolero byte comparisons cover those boundaries. The capture fence's Shuttle and 
 retain ownership of its unchanged publication and ordering invariants.
 
 The backup coordinator waits for each node's admitted-work counters to reach zero, then orders one
-confirming force-flush generation across the cluster. The generation's obligations use the same
-atomic counters as shutdown; a parked `REQUIRED WAIT` batch stays visible separately and cannot
-hold the cut open. Rows a window retains park their shares too, and the cut captures them as
+confirming force-flush generation across the cluster. A polled node starts a draining generation
+only while its own counters show admitted work, as the shutdown drain's draining step does, so a
+quiet domain's participants take the confirming generation alone. The generation's obligations use
+the same atomic counters as shutdown; a parked `REQUIRED WAIT` batch stays visible separately and
+cannot hold the cut open. Rows a window retains park their shares too, and the cut captures them as
 window state.
 | Metric series handles | Each relay, node, ingestor, emitter, or concrete branch resolves its label set, internal series, and Prometheus child when its owning task or branch is created. | Recording uses the retained series directly. Counters update atomically; a histogram records through its already-resolved per-series accumulator without a registry lookup, key construction, or map guard. A node input folds a whole batch's delivery latencies in one kernel pass over the batch's high-watermark column before recording, so each latency series locks its accumulator and reads the wall clock once per batch rather than once per row, and its Prometheus child takes the batch in one flush. Whether a series was ever observed is an atomic flag set under that lock and read without it. Registration and removal stay on lifecycle paths. |
 | MQTT broker packet limit | Each MQTT emitter's event-loop task stores the Maximum Packet Size of every `CONNACK` its client receives, or the broker's silence about one, as one atomic scalar. A reconnect replaces it. | A publish loads the scalar once per record to reject a packet the broker would refuse before handing it to the client. The value stands alone, so relaxed ordering is its whole contract, and a record published before the first `CONNACK` is measured only against the protocol's largest packet. |

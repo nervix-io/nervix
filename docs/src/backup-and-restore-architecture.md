@@ -188,15 +188,21 @@ after the freeze ends. The leader's backup coordinator runs it in this order:
    and generators, outstanding source acknowledgement roots, relays that admitted a batch while the
    node read its view, relay and node buffers, and emitter buffers and publishes. That is the view
    the shutdown drain uses. A scheduled node that stops answering keeps the round open until the
-   deadline. Two kinds of held work are exempt,
-   because their acknowledgements wait for input the paused domain does not admit and the cut
-   captures them as state: messages parked by `REQUIRED WAIT`, and the rows a window retains until
-   it steps past them, whose acknowledgement shares park the same way. Each force-flush generation
-   re-evaluates the parked messages against the state present, and a message whose dependency is
-   still absent stays parked through that read, so the re-evaluation adds no admitted work and
-   cannot restart the round, however slowly the state is read. Once every node reports no
-   admitted work, the coordinator asks every node to start a confirming force-flush generation and
-   waits until every node reports it finished with no admitted work. New work restarts the round.
+   deadline. A polled node that still holds admitted work starts a force-flush generation to
+   release it, unless one is already running; a node that holds none starts none. Two kinds of held
+   work are exempt, because their acknowledgements wait for input the paused domain does not admit
+   and the cut captures them as state: messages parked by `REQUIRED WAIT`, and the rows a window
+   retains until it steps past them, whose acknowledgement shares park the same way. Each
+   force-flush generation re-evaluates the parked messages against the state present, and a
+   message whose dependency is still absent stays parked through that read, so the re-evaluation
+   adds no admitted work and cannot restart the round, however slowly the state is read. Once every
+   node reports no admitted work, the coordinator asks every node to start a confirming force-flush
+   generation and waits until every node reports it finished with no admitted work. New work
+   restarts the round. A domain that holds no admitted work therefore re-evaluates its parked
+   messages for the confirming generation alone, so a slow dependency read holds the cut for that
+   read, after any periodic re-evaluation already under way when the confirmation arrives. A
+   generation started for a node with nothing to release would be superseded by the confirmation
+   after its participant had taken it, and the participant would read the dependency for both.
 6. **Capture.** Under the remaining budget, the coordinator checks its tenure, reads the domain's
    configuration at the applied revision, which becomes the revision and Raft log entry the archive
    records, and asks every scheduled state owner to capture at that revision, as described in
@@ -321,7 +327,7 @@ sending process:
 
 | Operation | Direction and form | Pool and subquota | Deadline | What the receiver checks |
 | --- | --- | --- | --- | --- |
-| Drain status | The coordinator to every live node and every node the schedule assigns the domain's work to, unary, polled every 50 ms; the coordinator answers itself in-process | Management, Liveness | 2 seconds per request, within the cut's budget | The sender is the current leader. The node applies the current cluster state, then flushes if idle, starts a confirming force-flush generation, or only observes, and reports its admitted-work counters. |
+| Drain status | The coordinator to every live node and every node the schedule assigns the domain's work to, unary, polled every 50 ms; the coordinator answers itself in-process | Management, Liveness | 2 seconds per request, within the cut's budget | The sender is the current leader. The node applies the current cluster state, then starts a force-flush generation while it holds admitted work and none is running, starts a confirming force-flush generation, or only observes, and reports its admitted-work counters. |
 | Capture | The coordinator to every scheduled state owner, and for a live cut every other live node too, concurrently; the coordinator answers itself in-process | Management, Shared | What remains of the cut's budget | The sender is the current leader, the node has applied the cut revision within five seconds, its runtime plan is current and the sender is still the leader. |
 | Capture inventory | The coordinator to each node, unary | Management, Shared | 5 seconds | The sender is the current leader. The reply lists that capture's sections in path order within one management message of at most 64 KiB. |
 | Section fetch | The coordinator to the node that staged a section; a streamed response with its exact length | Bulk, Shared | 30 seconds to open the stream, then 5 seconds without progress | The sender is the current leader and the capture's coordinator. The stage is removed as it is served, so a section is fetched once, in 1 MiB reads. |

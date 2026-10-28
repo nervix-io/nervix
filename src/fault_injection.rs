@@ -135,6 +135,16 @@ enum NodeDatabaseFlush {
     Flushed,
 }
 
+/// A relay processor whose reads of its materialized dependencies a scenario slowed.
+#[derive(Debug)]
+struct DelayedMaterializedReads {
+    /// What the processor waits before each read, as a read slow to reach the node that holds the
+    /// state would.
+    delay: Duration,
+    /// The messages the processor has parked on `REQUIRED WAIT`, each counted when it first parks.
+    parked: watch::Sender<u64>,
+}
+
 /// The entity of one domain whose state a backup captures.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CapturedStateOwner {
@@ -202,9 +212,10 @@ struct FaultInjectionState {
     /// and the checkpoint writer of the state the node's placement keeps, such as a materialized
     /// relay's records, once its domain's stop told it to write.
     delayed_stopped_state_writes: DashMap<DomainNodeRef, Duration, RandomState>,
-    /// Waits, keyed by a relay processor, that the processor spends before each read of its
-    /// materialized dependencies, as a read slow to reach the node that holds the state would.
-    delayed_materialized_dependency_reads: DashMap<DomainNodeRef, Duration, RandomState>,
+    /// Relay processors, keyed by processor, whose reads of their materialized dependencies a
+    /// scenario slowed, with the messages each has parked on `REQUIRED WAIT` since.
+    delayed_materialized_dependency_reads:
+        DashMap<DomainNodeRef, DelayedMaterializedReads, RandomState>,
     /// Holds, keyed by node, of that node's next materialized snapshot fetch on its first received
     /// chunk until the node's restore checkpoint maintenance asks for bulk memory.
     materialized_snapshot_fetch_holds: DashMap<ClusterNodeName, Arc<TestPause>, RandomState>,
@@ -1210,9 +1221,26 @@ impl FaultInjection {
     /// dependencies, as a read slow to reach the node that holds the state would. Every read waits,
     /// including each re-evaluation of a message the processor parked on `REQUIRED WAIT`.
     pub fn delay_materialized_dependency_reads(&self, processor: DomainNodeRef, delay: Duration) {
+        let (parked, _) = watch::channel(0);
         self.inner
             .delayed_materialized_dependency_reads
-            .insert(processor, delay);
+            .insert(processor, DelayedMaterializedReads { delay, parked });
+    }
+
+    /// Waits until `processor`, whose reads the scenario slowed, has parked a message on `REQUIRED
+    /// WAIT`, so a step that follows meets the message parked rather than still being read.
+    pub async fn wait_for_materialized_wait(&self, processor: &DomainNodeRef) {
+        let mut parked = self
+            .inner
+            .delayed_materialized_dependency_reads
+            .get(processor)
+            .assured("the scenario slowed this processor's reads before waiting for its park")
+            .parked
+            .subscribe();
+        parked
+            .wait_for(|parked| *parked != 0)
+            .await
+            .assured("the seam keeps the count's sender for as long as the scenario runs");
     }
 
     /// Fails the next resource version `node_id` installs, after the node installed and published
@@ -2297,10 +2325,41 @@ impl FaultInjection {
             .inner
             .delayed_materialized_dependency_reads
             .get(&processor)
-            .map(|delay| *delay.value());
+            .map(|reads| reads.delay);
         if let Some(delay) = delay {
             nervix_primitives::time::sleep(delay).await;
         }
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "a scenario-owned park count is updated when a processor whose reads the \
+                      scenario slowed first parks a message on REQUIRED WAIT",
+            key = "one test processor",
+            bound = "one keyed read; its guard ends with the count's update"
+        )
+    )]
+    pub(crate) fn record_materialized_wait_if_armed(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        processor: &ModelName,
+    ) {
+        let processor = DomainNodeRef::node_in(domain.clone(), kind, processor.clone());
+        let Some(reads) = self
+            .inner
+            .delayed_materialized_dependency_reads
+            .get(&processor)
+        else {
+            return;
+        };
+        reads.parked.send_modify(|parked| {
+            *parked = parked
+                .checked_add(1)
+                .assured("a scenario parks far fewer than 2^64 messages");
+        });
     }
 
     pub(crate) async fn pause_transaction_commit_after_progress_if_armed(

@@ -70,10 +70,15 @@ impl BackupDrainStatus {
     }
 }
 
+/// What a node does for the backup's domain drain before it reports its view.
 #[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BackupDrainAction {
-    FlushIfIdle,
+    /// Release the admitted work the node still holds: while it holds any, the node starts a
+    /// force-flush generation unless one is already running. A node that holds none starts none.
+    FlushHeldWork,
+    /// Start the force-flush generation that confirms nothing is still moving.
     Confirm,
+    /// Report the view without starting a generation.
     Observe,
 }
 
