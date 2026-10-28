@@ -333,6 +333,11 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_http_client"
     Then selector ".create-ingestor-source-ref [data-value='visual_http_client']" exists
     When selector ".create-ingestor-source-ref [data-value='visual_http_client']" is clicked
+    And selector ".create-ingestor-method" is filled with "GET"
+    And selector ".create-ingestor-request-headers-add" is clicked
+    And selector ".create-ingestor-request-header-name" is filled with "x-nervix-poll"
+    And selector ".create-ingestor-request-header-value" is filled with "visual"
+    And selector ".create-ingestor-max-body-size" is filled with "1MiB"
     And selector ".create-ingestor-every" is filled with "1s"
     And selector ".create-ingestor-quiesce [data-quiesce='suspend']" is clicked
     And selector ".create-ingestor-codec .create-choice-search" is filled with "visual_http_codec"
@@ -348,6 +353,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-route .create-ingestor-message-error [data-error='log']" is clicked
     And selector ".create-ingestor-general-error [data-error='log']" is clicked
     Then selector ".create-preview" contains "CREATE HTTP REQUEST INGESTOR visual_http_source FROM visual_http_client METHOD 'GET'"
+    And selector ".create-preview" contains "HEADERS { 'x-nervix-poll' = 'visual' } MAX BODY SIZE 1MiB"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
