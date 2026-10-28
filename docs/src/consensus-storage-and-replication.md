@@ -100,6 +100,26 @@ and topology records. An applied command therefore reserves 16 MiB from the Comm
 and moving batch descriptors. The reservation is released after synchronization. This keeps a
 multi-mebibyte report atomic without making storage memory proportional to retained history.
 
+### Storage Working Sets
+
+Every storage operation charged to the Commands class reserves the same 16 MiB working set: an
+appended batch, an applied range, a log chunk, a full log read, a truncation and a purge. The
+default 24 MiB Commands budget holds one such working set with 8 MiB beside it. The store admits
+these operations through turns of its own, as many as the budget holds working sets while keeping
+room beside them, which is one with the default budgets. An operation takes a turn first and asks
+the Commands class for its working set only while it holds one.
+
+An operation waiting for a turn holds no place in the class's queue. A place in that queue takes
+every byte the class releases until it is satisfied, so a storage operation waiting there would
+hold the class's remaining room for itself until the store's own earlier working set ended. Storage
+operations instead wait for each other at the turn, and the rest of the class stays with its other
+work: a source's control call, a replication frame being encoded and a follower's answer find room
+beside the working set the store holds. A working set returns its bytes before its turn passes, so
+the next one is admitted without waiting in the class.
+
+The turns hold no more working sets than the budget already held at once, and they do not change
+the order in which the ordered storage worker runs admitted operations.
+
 A crash after a log write and before application does not lose an acknowledged command. If the
 entry was committed, recovery streams it from the log and applies it. If it was not committed, a
 later leader may discard it. In either case, the client had not yet received an applied response.
@@ -297,12 +317,15 @@ learner or voter role and recorded address.
 Committed-range application, startup replay, and leader-bounded replication streams read the log in
 successive admitted chunks. A chunk targets 1 MiB or 1,024 entries, whichever is reached first, and
 one oversized first entry travels alone. The reader releases the ordered storage worker between
-chunks and retains the chunk's memory charge until its entries have been handed to the consumer.
-Handing out the final entry releases the exhausted iterator allocation and its charge before that
-poll returns. A consumer that parks with its final entry therefore holds no empty chunk that could
-keep another reader or a source control call out of the Commands class. The reader retains an
-explicit exhausted boundary, without the allocation, so a subsequent chunk still yields before
-requesting the ordered storage worker.
+chunks and retains the chunk's working set, its memory charge and the store's Commands turn, until
+its entries have been handed to the consumer. Handing out the final entry releases the exhausted
+iterator allocation, its charge and its turn before that poll returns. A consumer that parks with
+its final entry therefore holds no empty chunk that could keep another reader or a source control
+call out of the Commands class. A chunk that still holds entries, such as a replication stream's
+while its follower has not answered, keeps its working set; another reader or storage operation
+then waits for the turn rather than in the Commands class, so a source control call still finds
+room. The reader retains an explicit exhausted boundary, without the allocation, so a subsequent
+chunk still yields before requesting the ordered storage worker.
 
 There is no range-size failure at 2 MiB or at any other aggregate backlog size. A committed range
 and a startup backlog may span any number of chunks. The state-machine worker applies the entries
@@ -526,6 +549,7 @@ does not expose flags for them:
 | Follower decoded resident window | 4 batches per live append stream |
 | Commands memory budget | 24 MiB per node |
 | Applied command storage | 8 MiB normalized payload in a 16 MiB working reservation |
+| Storage working sets held at once | 1, as many as the Commands budget holds with room beside them |
 | Append stream setup / progress idle bound | 5 seconds / 5 seconds |
 | Snapshot section / transport chunk | 8 MiB / 64 KiB |
 | Complete snapshot transfer | 30 seconds |
