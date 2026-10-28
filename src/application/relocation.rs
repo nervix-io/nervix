@@ -966,7 +966,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn a_commit_refused_by_a_leader_that_cannot_confirm_it_leads_answers_as_a_non_leader() {
         use crate::application::{
-            command_result::{CommandDisposition, LeaderLocation, LeaderRedirect},
+            command_result::{CommandDisposition, LeaderRedirect, NodeLocation},
             test_fixtures::{TestService, build_test_service},
         };
 
@@ -997,7 +997,7 @@ mod tests {
         assert_eq!(
             answer.disposition,
             CommandDisposition::NotLeader(LeaderRedirect {
-                leader: Some(LeaderLocation {
+                leader: Some(NodeLocation {
                     node: observed_leader,
                     grpc_url: None,
                     web_console_url: None,

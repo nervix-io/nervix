@@ -36,11 +36,11 @@ use nervix_client_wire::{
     CancelRequest, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome,
     CommandRequest, DetachDomainClockRequest, Diagnostic, DomainClockAttachmentEnded,
     DomainClockDetachDisposition, DomainClockObserved, DomainClockTicked, LeaderRedirect,
-    NoticeLevel, OutcomeOrigin, Reply, ReplyBody, RequestId, RestoreChunk, RestoreReply,
-    RestoreStart, RowSchema, ServerEvent, ServerFrame, ServerMessage, SessionEndReason,
-    SessionLimits, SubscribeDisposition, SubscribeRequest, SubscriptionEnded, SubscriptionHandle,
-    SubscriptionType, TransferAssembly, UnsubscribeDisposition, UnsubscribeRequest, UploadChunk,
-    UploadReply, UploadStart, VerifiedFrame,
+    NodeEndpoints, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, RequestId, RestoreChunk,
+    RestoreReply, RestoreStart, RowSchema, ServerEvent, ServerFrame, ServerMessage,
+    SessionEndReason, SessionLimits, SubscribeDisposition, SubscribeRequest, SubscriptionEnded,
+    SubscriptionHandle, SubscriptionType, TransferAssembly, UnsubscribeDisposition,
+    UnsubscribeRequest, UploadChunk, UploadReply, UploadStart, VerifiedFrame,
     grpc::{
         ClientBackupDownloadCodec, ClientExchangeCodec, ClientRestoreCodec, ClientUploadCodec,
         DOWNLOAD_BACKUP_PATH, EXCHANGE_PATH, FrameDecoder, RESTORE_BACKUP_PATH,
@@ -379,6 +379,8 @@ pub(crate) enum TestDownloadEnd {
     Refused(BackupDownloadFailed),
     /// The node sent the download to the leader.
     Redirected(LeaderRedirect),
+    /// The node sent the download to the node that retains the archive.
+    SentToHolder(NodeEndpoints),
     /// The call itself failed with this status.
     Status(Box<Status>),
 }
@@ -458,6 +460,9 @@ pub(crate) async fn download_backup(
             BackupDownloadMessage::Failed(failed) => return Ok(TestDownloadEnd::Refused(failed)),
             BackupDownloadMessage::NotLeader(redirect) => {
                 return Ok(TestDownloadEnd::Redirected(redirect));
+            }
+            BackupDownloadMessage::Holder(holder) => {
+                return Ok(TestDownloadEnd::SentToHolder(holder));
             }
         }
     }

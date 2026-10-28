@@ -6,7 +6,7 @@ use nervix_models::ClusterNodeName;
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
-    common::{LeaderEndpoints, LeaderRedirect},
+    common::{LeaderRedirect, NodeEndpoints},
     frame::{EncodedFrame, ServerFrame},
     limits::SessionLimits,
     server::finish_server_message,
@@ -65,7 +65,7 @@ pub enum Leadership {
     /// The node serving this session leads.
     ServingNode(ClusterNodeName),
     /// Another node leads.
-    Remote(LeaderEndpoints),
+    Remote(NodeEndpoints),
     /// No leader is known, for example during an election.
     Unknown,
 }
@@ -130,7 +130,7 @@ impl LeadershipObserved {
             });
         }
         if let Some(remote) = observed.leadership_as_leader_is_remote() {
-            let leader = LeaderEndpoints::decode(decoder, remote.leader())?;
+            let leader = NodeEndpoints::decode(decoder, remote.leader())?;
             return Ok(Self {
                 leadership: Leadership::Remote(leader),
             });

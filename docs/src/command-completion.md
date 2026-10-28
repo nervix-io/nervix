@@ -157,9 +157,10 @@ report a partially rebound set. [Resource Versions And Bindings](./resource-vers
 defines the rebinding contract.
 
 `BACKUP` uses the same durable execution reference and retained outcome. Its success means the
-archive was assembled from each domain's own applied revision, verified, and retained on the leader under that
-reference, and its outcome carries the archive's size, digest, and per-domain revisions. The
-execution reference is also the key the client downloads the archive by. Its request binding
+archive was assembled from each domain's own applied revision, verified, and retained under that
+reference on the leader that ran it, and its outcome carries the archive's size, digest, and
+per-domain revisions, and names the node process that retains it. The execution reference is also
+the key the client downloads the archive by, from whichever node it reaches. Its request binding
 includes the original selected domain, scope, resource inclusion and capture options. The client's
 local archive destination is excluded from this binding, so recovery may choose another file or
 stdout. A bounded client wait can end while the command remains applying; the original reference

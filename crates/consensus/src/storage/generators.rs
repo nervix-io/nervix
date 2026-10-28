@@ -41,16 +41,17 @@ use crate::{
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, DiagnosticSpan,
     DomainMutationOwner, DomainPlanningInputs, DomainResourcePlanningInputs, FinishedTransaction,
-    LeaderTenure, ReplicatedTransaction, RestoreExecution, RestoreStepEffect, RestoredResource,
-    ScheduleTopologyInputs, TransactionActivity, TransactionApplicationOutcome,
-    TransactionApplyingStep, TransactionCommandResult, TransactionCommitAdmissionFailure,
-    TransactionCommitAdmissionPlan, TransactionCommitPlanHeader, TransactionCommitProgress,
-    TransactionDiagnostic, TransactionOutcome, TransactionQueueLimits, TransactionReportArchive,
-    TransactionScheduleEligibility, TransactionState, TransactionStatement,
-    TransactionStatementRequest, TransactionStepEffect, TransactionStepResult, UserCredentials,
-    command_execution::CommandExecutionRecords, domain_mutation::DomainMutationLease,
-    restore::DomainRestoreInstallation, transaction::AcceptedTransactionStatement,
-    transaction_plan::TransactionCommitPlanRecords, transaction_report::TransactionReportRecords,
+    LeaderTenure, RecordedBackupArchive, ReplicatedTransaction, RestoreExecution,
+    RestoreStepEffect, RestoredResource, ScheduleTopologyInputs, TransactionActivity,
+    TransactionApplicationOutcome, TransactionApplyingStep, TransactionCommandResult,
+    TransactionCommitAdmissionFailure, TransactionCommitAdmissionPlan, TransactionCommitPlanHeader,
+    TransactionCommitProgress, TransactionDiagnostic, TransactionOutcome, TransactionQueueLimits,
+    TransactionReportArchive, TransactionScheduleEligibility, TransactionState,
+    TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
+    TransactionStepResult, UserCredentials, command_execution::CommandExecutionRecords,
+    domain_mutation::DomainMutationLease, restore::DomainRestoreInstallation,
+    transaction::AcceptedTransactionStatement, transaction_plan::TransactionCommitPlanRecords,
+    transaction_report::TransactionReportRecords,
 };
 
 /// The most records of one family a generated revision holds, and the most items of one list a
@@ -1213,6 +1214,14 @@ fn statement_result(arbitrary: &mut Arbitrary<'_>) -> CommandExecutionStatementR
     }
 }
 
+/// The archive a completed backup recorded: any summary, retained by any process incarnation of any
+/// node.
+fn recorded_backup_archive(arbitrary: &mut Arbitrary<'_>) -> RecordedBackupArchive {
+    let summary = arbitrary.backup_archive_summary();
+    let holder = arbitrary.node_identity();
+    RecordedBackupArchive { summary, holder }
+}
+
 /// The transaction a finished command was bound to, as the command reported it: any transaction of
 /// any domain, at a lifecycle the operations it accepted allow, having applied none of them while
 /// open or once withdrawn, every one once committed, and any number of them otherwise.
@@ -1307,7 +1316,7 @@ fn command_execution_result(
         }
         CommandExecutionEffect::Statement { statement, .. } => {
             if let Statement::Backup(_) = statement.as_ref() {
-                result.backup = optional(arbitrary, Arbitrary::backup_archive_summary);
+                result.backup = optional(arbitrary, recorded_backup_archive);
             }
         }
         CommandExecutionEffect::Restore(restore) => {
