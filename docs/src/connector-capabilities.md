@@ -1039,18 +1039,18 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | --- | --- | --- | --- | --- | --- |
 | `compression` | optional | gzip | Nervix; strict | no | none |
 | `endpoint` | required | URL (http or https) | Nervix; strict | no | none |
-| `headers` | optional | string | Nervix; strict | yes | none |
+| `headers` | optional | comma-separated name=percent-encoded-value pairs | Nervix; strict | yes | none |
 | `protocol` | required | grpc or http/protobuf | Nervix; strict | no | none |
 | `timeout_ms` | required | positive, schedulable whole milliseconds | Nervix; strict | no | none |
-| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
-| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
-| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+| `tls_ca_file` | optional; requires `endpoint` to use `https` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional; requires `endpoint` to use `https` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional; requires `endpoint` to use `https` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
 | Capability | Declaration |
 | --- | --- |
-| Additional declared constraints | comma-separated key=value pairs; split at the first '='; trim surrounding whitespace; lowercase keys; preserve values literally without percent-decoding; empty input means no headers<br>tls_ca_file, tls_cert_file and tls_key_file require an https endpoint for both grpc and http/protobuf; tls_cert_file and tls_key_file must occur together |
+| Additional declared constraints | comma-separated key=value pairs; split at the first '='; trim surrounding whitespace; lowercase keys; percent-decode values once as UTF-8; keep literal plus signs; empty input means no headers<br>tls_ca_file, tls_cert_file and tls_key_file require an https endpoint for both grpc and http/protobuf; tls_cert_file and tls_key_file must occur together |
 
 ### CLICKHOUSE client
 

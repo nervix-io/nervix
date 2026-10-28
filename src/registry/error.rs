@@ -98,6 +98,11 @@ pub(crate) enum OtelMappingSection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OtelMappingIssue {
+    LiteralValue {
+        signal: OtelMappingSignal,
+        key: &'static str,
+        rule: nervix_models::OtelValueRule,
+    },
     UnsupportedValue {
         signal: OtelMappingSignal,
         key: String,
@@ -124,6 +129,13 @@ pub(crate) enum OtelMappingIssue {
 impl fmt::Display for OtelMappingIssue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::LiteralValue { signal, key, rule } => {
+                write!(
+                    formatter,
+                    "OTEL {signal} VALUES key '{key}' requires {}",
+                    rule.constraint()
+                )
+            }
             Self::UnsupportedValue { signal, key } => {
                 write!(
                     formatter,

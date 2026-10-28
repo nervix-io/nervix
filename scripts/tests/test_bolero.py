@@ -353,6 +353,8 @@ class InventoryTests(unittest.TestCase):
             "websocket-acknowledgement-values",
             "websocket-signaling-protobuf-malformed",
             "otel-hex-ids",
+            "models-header-pairs",
+            "models-otel-mappings",
             "console-pending-backups",
             "console-pending-backups-malformed",
             "console-restore-drafts",

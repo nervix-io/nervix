@@ -7512,6 +7512,7 @@ dependencies = [
  "nervix-primitives",
  "nervix-simd-kernels",
  "nonzero_ext",
+ "percent-encoding",
  "rkyv",
  "rstest",
  "serde",

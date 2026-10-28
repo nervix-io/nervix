@@ -341,7 +341,10 @@ current connection, retry and deadline limits.
   tables and `Emitters` → `OTEL` before constructing mappings.
   Follow `Ingestors` → `Delivery Modes` for duration bounds and retry ordering, and `Emitters` →
   `Direct-emitter values` for exact types and literal-only OTEL resources. For example, supply an
-  I32 expression for OTEL `severity_number`; an integer literal is I64. A refused alteration
+  I32 expression for OTEL `severity_number`; an integer literal is I64. OTEL also checks literal
+  field ranges before storing the statement. Read its client header-pair format before supplying
+  credentials: values are percent-decoded once, and TLS file keys require an HTTPS endpoint for
+  either transport. A refused alteration
   preserves the accepted graph.
 - For acknowledged HTTP or WebSocket endpoint intake in Plexus, read `Ingestors` → `HTTP ENDPOINT
   And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
