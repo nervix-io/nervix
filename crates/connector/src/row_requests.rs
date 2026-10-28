@@ -21,6 +21,7 @@
 )]
 
 use std::{
+    convert::Infallible,
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
 };
@@ -180,6 +181,17 @@ impl RowRequestLimits {
         members: usize,
         mut measure: impl FnMut(Range<usize>) -> MeasuredRequest<P>,
     ) -> RowRequests<P> {
+        self.try_divide(members, |range| Ok::<_, Infallible>(measure(range)))
+            .unwrap_or_else(|never| match never {})
+    }
+
+    /// The same division when measuring a candidate can fail before any request is written.
+    /// A connector uses this for encodings such as Parquet that validate values while measuring.
+    pub fn try_divide<P, E>(
+        self,
+        members: usize,
+        mut measure: impl FnMut(Range<usize>) -> Result<MeasuredRequest<P>, E>,
+    ) -> Result<RowRequests<P>, E> {
         let max_bytes = self.max_bytes().get();
         let mut requests = Vec::new();
         let mut subdivisions = 0_u64;
@@ -190,7 +202,7 @@ impl RowRequestLimits {
                 .assured("a run starts inside the rows one write holds in memory");
             let mut end = run_end.min(members);
             loop {
-                let MeasuredRequest { size, request } = measure(start..end);
+                let MeasuredRequest { size, request } = measure(start..end)?;
                 if size <= max_bytes {
                     requests.push(RowRequest::Write {
                         members: start..end,
@@ -218,10 +230,10 @@ impl RowRequestLimits {
             }
             start = end;
         }
-        RowRequests {
+        Ok(RowRequests {
             requests,
             subdivisions,
-        }
+        })
     }
 
     /// Which limit a single member measuring `size` bytes exceeds.
@@ -290,6 +302,26 @@ mod tests {
 
         assert_eq!(written(&requests), vec![0..3, 3..6, 6..7]);
         assert_eq!(requests.subdivisions, 0);
+    }
+
+    #[test]
+    fn a_fallible_measurement_stops_before_any_later_candidate() {
+        let mut measured = Vec::new();
+        let refusal = limits(2, "100B")
+            .try_divide(5, |range| {
+                measured.push(range.clone());
+                if range.start == 2 {
+                    Err("the candidate cannot be encoded")
+                } else {
+                    Ok(MeasuredRequest {
+                        size: 10,
+                        request: (),
+                    })
+                }
+            })
+            .expect_err("an encoding refusal must end the division");
+        assert_eq!(refusal, "the candidate cannot be encoded");
+        assert_eq!(measured, vec![0..2, 2..4]);
     }
 
     #[test]

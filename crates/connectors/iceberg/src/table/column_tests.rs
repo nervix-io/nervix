@@ -9,7 +9,6 @@ use ::iceberg::{
 use arrow_array::{Int64Array, StringArray};
 use arrow_schema::Field;
 use futures_util::TryStreamExt as _;
-use meticulous::ResultExt as _;
 use serde_json::json;
 
 use super::{
@@ -79,6 +78,7 @@ fn fixture_emitter(
             interval: Duration::from_secs(60),
             max_size: 1 << 20,
         },
+        batch_policy: None,
         staging_dir: tempfile::tempdir().assured("the staging directory is created"),
         executor: Executor::default(),
         staged_sequence: 0,

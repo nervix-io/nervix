@@ -2034,8 +2034,18 @@ bytes; the one- and three-node Sentry scenarios qualify those bytes through a re
 after a mock endpoint's `503` response. See
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md#behavioral-properties).
 
-Iceberg is a row emitter that stages each carrier of the run as its own file, which its commit
-publishes.
+Iceberg is a row emitter. Without `BATCH` it stages each carrier of the run as one Arrow IPC file,
+and its commit writes the rows with the 512 MiB Parquet rollover target. With `BATCH`, the typed
+start plan hands the row and byte limits to the connector. It projects selected rows onto the
+loaded table schema, counts the complete Parquet encoding on the bounded bulk CPU workers, and
+uses the shared fallible row division to make staged Arrow IPC segments. A row whose own file is
+too large is refused alone through `ON MESSAGE ERROR`; the accepted segments become one data file
+each in the catalog commit. The connector retains a carrier's one acknowledgement handle on its
+final staged segment, so splitting files neither acknowledges at staging nor repeats a commit
+acknowledgement. If staging any segment fails, it removes the segments from that carrier's attempt
+and leaves the host's unresolved rows retryable. Commit checks the written files' physical row and
+byte counts before appending them. The property target `iceberg-staged-file-encoding` checks Arrow
+IPC readback and that the counting Parquet writer agrees with the encoded file's byte length.
 
 OTEL is a row request emitter, which the host hands one carrier per preparation. Without `BATCH` it
 prepares the successfully mapped rows of the carrier as one Export request. With `BATCH`, its typed
