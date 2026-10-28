@@ -1407,7 +1407,8 @@ the failure as its transient error; it confirms nothing, so its input stays unac
 reopens on its `RETRY POLICY` backoff. The emitter reads the client's `addr`, trusts its
 `tls_ca_file` and presents its `tls_cert_file` and `tls_key_file` as a RabbitMQ source does; see
 [RabbitMQ](./ingestors.md#rabbitmq). A broker that refuses the TLS session leaves the emitter
-unavailable with that refusal as its transient error.
+unavailable with that refusal as its transient error. The client's `tls_ca_file`, `tls_cert_file`
+and `tls_key_file` require an `amqps` address; combining them with `amqp` is refused before commit.
 
 ### Redis Pub/Sub
 
