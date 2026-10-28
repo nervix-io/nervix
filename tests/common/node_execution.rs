@@ -126,49 +126,60 @@ struct NodeExecutionStart {
     reading: io::Result<NodeExecutionReading>,
 }
 
+/// What the reading task hands to the probe's description: the client it read with and each
+/// node's reading as the probe began.
+#[derive(Debug)]
+struct ProbeExecutionStart {
+    client: reqwest::Client,
+    nodes: Vec<NodeExecutionStart>,
+}
+
 /// Readings of every node of a cluster taken around one probe window.
 #[derive(Debug)]
 pub(crate) struct ProbeExecution {
-    client: reqwest::Client,
-    starts: AbortOnDropHandle<Vec<NodeExecutionStart>>,
+    start: AbortOnDropHandle<ProbeExecutionStart>,
 }
 
 impl ProbeExecution {
     /// Start reading every node as the probe's window opens. The readings run beside the probe, so
     /// they never delay its first dispatch, and dropping the probe cancels them.
     pub(crate) fn begin(endpoints: Vec<NodeExecutionEndpoint>) -> Self {
-        let client = reqwest::Client::new();
-        let reading_client = client.clone();
-        let starts = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
-            let readings = join_all(
-                endpoints
-                    .iter()
-                    .map(|endpoint| endpoint.read(&reading_client)),
-            )
-            .await;
-            endpoints
+        let start = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+            // Building a client reads and parses the platform's trust roots: tens of milliseconds
+            // of blocking work that an oversubscribed host stretches to seconds. The reading task
+            // builds it, so the probe's window does not include it.
+            let client = reqwest::Client::new();
+            let readings = join_all(endpoints.iter().map(|endpoint| endpoint.read(&client))).await;
+            let nodes = endpoints
                 .into_iter()
                 .zip(readings)
                 .map(|(endpoint, reading)| NodeExecutionStart { endpoint, reading })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            ProbeExecutionStart { client, nodes }
         }));
-        Self { client, starts }
+        Self { start }
     }
 
     /// Read every node again and describe, one line per node, what it did since `begin`.
     pub(crate) async fn describe(self) -> Vec<String> {
-        let starts = match self.starts.await {
-            Ok(starts) => starts,
+        let start = match self.start.await {
+            Ok(start) => start,
             Err(failure) => {
                 return vec![format!(
                     "the readings taken as the probe began ended without a result: {failure}"
                 )];
             }
         };
-        let readings = join_all(starts.iter().map(|start| start.endpoint.read(&self.client))).await;
+        let readings = join_all(
+            start
+                .nodes
+                .iter()
+                .map(|node| node.endpoint.read(&start.client)),
+        )
+        .await;
         let mut lines = Vec::new();
-        for (start, finish) in starts.iter().zip(readings) {
-            lines.push(start.describe(finish));
+        for (node, finish) in start.nodes.iter().zip(readings) {
+            lines.push(node.describe(finish));
         }
         lines
     }
