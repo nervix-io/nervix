@@ -2170,7 +2170,7 @@ scenario = "An Iceberg commit the bulk memory class has no room for keeps its ro
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Under bounded scheduling disturbance: one- and three-node client batches stage four rows under the Iceberg MAX MESSAGES 2 file limit and publish both files in one catalog commit. The detector observes tracked host lifecycle locks, not Parquet encoding or external I/O."
+coverage = "Under scheduling stress: one- and three-node client batches stage four rows under the Iceberg MAX MESSAGES 2 file limit and publish both files in one catalog commit. The detector observes tracked host lifecycle locks, not Parquet encoding or external I/O."
 examples = 2
 feature = "tests/features/runtime/iceberg_emission.feature"
 id = "stress.iceberg-batch-rows"
@@ -2180,7 +2180,7 @@ scenario = "Iceberg BATCH MAX MESSAGES rolls one produced row batch into bounded
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Under bounded scheduling disturbance: one- and three-node client batches stage two fitting Iceberg rows, route a single oversized row through message error, and publish only bounded Parquet files. The detector observes tracked host error and commit lifetimes, not the external catalog or object store."
+coverage = "Under scheduling stress: one- and three-node client batches stage two fitting Iceberg rows, route a single oversized row through message error, and publish only bounded Parquet files. The detector observes tracked host error and commit lifetimes, not the external catalog or object store."
 examples = 2
 feature = "tests/features/runtime/iceberg_emission.feature"
 id = "stress.iceberg-batch-bytes"
