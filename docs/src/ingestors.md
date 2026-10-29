@@ -591,7 +591,7 @@ Transport-specific schemes and keys:
 - `HTTP`: use an `https://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
 - `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file` and `tls_key_file`, and the client requires `timeout_ms`; see [Prometheus](#prometheus) for every key it declares.
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS.
+- `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
@@ -898,7 +898,7 @@ where it has one:
 | `REDIS PUBSUB` | `CHANNEL` | 1 to 1,024 bytes of any text; a `*` is the character itself, and pattern subscriptions are not offered |
 | `NATS SUBJECT` | `SUBJECT` | At most 1,024 bytes of `.`-separated tokens, none empty, without whitespace or control characters; `*` stands for one token and `>` for the rest, each only as a whole token, and `>` only last |
 | `NATS SUBJECT` | `QUEUE GROUP` | 1 to 255 bytes without whitespace or control characters |
-| `MQTT TOPIC` | `TOPIC` | A topic filter of 1 to 65,535 bytes without NUL; `+` stands for one level and `#` for the rest, each only as a whole level, and `#` only last. Levels are joined by `/` and may be empty |
+| `MQTT TOPIC` | `TOPIC` | A topic filter of 1 to 65,535 bytes without NUL; `+` stands for one level and `#` for the rest, each only as a whole level, and `#` only last. Levels are joined by `/` and may be empty. The first level is not `$share`, since Nervix forms the shared subscription itself |
 
 A reference to a Nervix model, such as a client, endpoint, schema, codec, or relay, stays a bare
 identifier.
@@ -1477,6 +1477,11 @@ See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#m
 The topic filter is a string literal; see [External Names](#external-names) for the levels and
 wildcards it may hold.
 
+The client's `addr` names the broker by its scheme, host and port alone: `mqtt://` or `mqtts://`, a
+host, and a nonzero port, such as `mqtt://broker.example.com:1883`. A connection reads nothing else
+from it, so `CREATE MQTT CLIENT` refuses an address that leaves out its port or writes credentials,
+a path, a query or a fragment.
+
 Connections use the driver's 60-second keep-alive unless the broker supplies a Server Keep Alive
 in `CONNACK`. Plexus exposes no client setting for this interval. A broker-supplied zero disables
 the keep-alive and the acknowledgement-write deadline derived from it; it does not make a silent
@@ -1503,7 +1508,7 @@ Delivery constraints:
   acknowledgements, and a batch above 65,535 gathers at most 65,535 of them before its
   `BATCH TIMEOUT` ends it. The extra capacity lets the connection keep reading while the ingestor
   holds a batch
-- `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
+- `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages. Every instance subscribes to `$share/<domain>~<ingestor>/<filter>`, so the share group belongs to Nervix and a topic filter cannot begin with a `$share` level of its own
 
 In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for
 is written to the connection, within one keep-alive interval; the broker answers none. Its

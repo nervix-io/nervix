@@ -43,15 +43,18 @@ use crate::{
 configured_client!(Mqtt: unpooled, config CLIENT_CONFIG, CreateClientMqtt => MqttConfigEntry);
 
 /// The current keys this connector reads, shared by validation, completion and inspection.
+///
+/// A connection reads only the scheme, host and port of `addr`, and reads the TLS files only for
+/// `mqtts`, where its trust has no other root than `tls_ca_file`.
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
     use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
     ClientConfigSchema::new(
         &[
-            K::required("addr", V::Url(&["mqtt", "mqtts"])),
+            K::required("addr", V::HostPortUrl(&["mqtt", "mqtts"])),
             K::optional("client_id", V::String),
-            K::TLS_CA.required_for_scheme("addr", "mqtts"),
-            K::TLS_CERT,
-            K::TLS_KEY,
+            K::TLS_CA.exactly_for_scheme("addr", "mqtts"),
+            K::TLS_CERT.only_for_scheme("addr", "mqtts"),
+            K::TLS_KEY.only_for_scheme("addr", "mqtts"),
         ],
         &[],
         &[],
@@ -61,10 +64,17 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
 /// The longest topic filter MQTT carries, in bytes.
 const MQTT_TOPIC_FILTER_MAX: usize = 65_535;
 
+/// The first level of an MQTT shared subscription. Every topic ingestor subscribes through the
+/// shared subscription `$share/<domain>~<ingestor>/<filter>`, which Nervix forms around the filter.
+pub const MQTT_SHARED_SUBSCRIPTION_LEVEL: &str = "$share";
+
 external_names! {
     /// An MQTT topic filter: 1 to 65,535 bytes without the NUL character, whose levels are joined by
     /// `/` and may be empty. `+` stands for one level and `#` for every remaining level, each only as
-    /// a whole level, and `#` only as the last one, as MQTT itself requires.
+    /// a whole level, and `#` only as the last one, as MQTT itself requires. Its first level is not
+    /// `$share`: the source subscribes through a shared subscription Nervix forms around the filter,
+    /// within which a filter naming its own would match nothing. It is subscribed to exactly as
+    /// written, letter case included.
     pub struct MqttTopicFilter => mqtt_topic_filter_rule, label "mqtt_topic_filter",
         example "devices/+/orders";
 }
@@ -75,6 +85,11 @@ fn mqtt_topic_filter_rule(text: &str) -> Result<(), ExternalNameError> {
         return Err(ExternalNameError::InvalidChar { ch: '\0' });
     }
     let mut levels = text.split('/').peekable();
+    if levels.peek() == Some(&MQTT_SHARED_SUBSCRIPTION_LEVEL) {
+        return Err(ExternalNameError::ReservedFirstLevel {
+            level: MQTT_SHARED_SUBSCRIPTION_LEVEL,
+        });
+    }
     while let Some(level) = levels.next() {
         if level.len() > 1
             && let Some(wildcard) = level.chars().find(|ch| matches!(ch, '+' | '#'))
@@ -282,10 +297,15 @@ const MQTT_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for MqttTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        // An MQTT packet carries no transport header map, and the source reads no MQTT 5 user
+        // property as one.
         headers: None,
         metadata: IngestorMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
+        // A persistent session's broker delivers again every publish a lost connection did not
+        // acknowledge, and an acknowledgement is complete once its PUBACK is written: the broker
+        // answers none.
         position_class: PositionClass::BrokerRedelivered,
         acknowledgement_confirmation: AcknowledgementConfirmation::Written,
         delivery: &[
@@ -293,6 +313,8 @@ impl IngestorDeclaration for MqttTopicIngestor {
             DeclaredDelivery::ACK_SEQUENTIAL.requiring(BROKER_KEPT_SESSION),
             DeclaredDelivery::ACK_PARALLEL.requiring(BROKER_KEPT_SESSION),
         ],
+        // Suspending disconnects while the broker keeps the session's publishes, which only a
+        // persistent session at QoS 1 holds; buffering and dropping stay connected.
         quiesce: &[
             DeclaredQuiesce::SUSPEND.requiring(BROKER_KEPT_SESSION),
             DeclaredQuiesce::BUFFER,
@@ -542,6 +564,8 @@ impl EmitterDeclaration for MqttTopicEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Mqtt),
         body: EmitterBodyForm::Codec,
+        // Each broker declares its Maximum Packet Size when the client connects, and the emitter
+        // rejects a larger publish before handing it to the client.
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: MqttTopicPublishingMode::KINDS,
@@ -549,6 +573,8 @@ impl EmitterDeclaration for MqttTopicEmitter {
             keywords: "TOPIC",
             name: LocatorName::External(MqttTopicName::DECLARATION),
         }),
+        // A publish carries its topic and payload; the emitter sets no retain flag and no MQTT 5
+        // property of its own.
         options: &[],
         envelope: &[],
         properties: &[],
@@ -590,7 +616,9 @@ super::publishing::emitter_modes! {
 }
 
 super::external_name::external_names! {
-    /// An MQTT publication topic, without subscription wildcards.
+    /// An MQTT publication topic: 1 to 65,535 bytes without NUL or the `+` and `#` subscription
+    /// wildcards, since a publish names one literal topic. It is published to exactly as written,
+    /// letter case included.
     pub struct MqttTopicName => mqtt_publication_topic, label "mqtt_topic", example "devices/Orders";
 }
 
@@ -601,3 +629,7 @@ fn mqtt_publication_topic(text: &str) -> Result<(), ExternalNameError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "mqtt_tests.rs"]
+mod tests;

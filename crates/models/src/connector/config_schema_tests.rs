@@ -173,7 +173,7 @@ fn delegated_properties_keep_their_namespace_and_reserved_key_boundary() {
         vec![entry(&property.key, CLIENT_CONFIG_REDACTION)]
     );
     let refusal = mqtt()
-        .validate(&[entry("addr", "mqtt://broker.example.com"), property])
+        .validate(&[entry("addr", "mqtt://broker.example.com:1883"), property])
         .expect_err("MQTT declares no delegated property namespace");
     assert!(
         matches!(refusal.current_context(), ClientConfigSchemaError::UnknownKey { key } if key == "topic.metadata.refresh.interval.ms")
@@ -421,6 +421,23 @@ fn bolero_schema_checked_client_entries_round_trip() {
     use nervix_arbitrary::{Arbitrary, Domain};
     use strum::IntoEnumIterator as _;
 
+    /// The scheme a generated address key uses: the one a key bound to a scheme requires of it,
+    /// otherwise any the key declares.
+    fn address_scheme(
+        arbitrary: &mut Arbitrary<'_>,
+        address_schemes: &BTreeMap<&str, &'static str>,
+        key: &str,
+        schemes: &'static [&'static str],
+    ) -> &'static str {
+        if let Some(scheme) = address_schemes.get(key) {
+            return *scheme;
+        }
+        let index = arbitrary
+            .entropy()
+            .index(NonZeroUsize::new(schemes.len()).assured("a URL declares schemes"));
+        schemes[index]
+    }
+
     let schemas: Vec<_> = ConnectorKind::iter()
         .filter_map(|kind| kind.client())
         .map(|client| client.config)
@@ -436,7 +453,11 @@ fn bolero_schema_checked_client_entries_round_trip() {
             let schema = schemas[index];
             let mut address_schemes = BTreeMap::new();
             for key in schema.keys() {
-                if let ClientConfigPresence::OptionalForScheme { address, scheme } = key.presence {
+                // The generator writes every key, so a key bound to a scheme decides the scheme its
+                // address uses.
+                if let ClientConfigPresence::OptionalForScheme { address, scheme }
+                | ClientConfigPresence::ExactlyForScheme { address, scheme } = key.presence
+                {
                     address_schemes.insert(address, scheme);
                 }
             }
@@ -474,17 +495,20 @@ fn bolero_schema_checked_client_entries_round_trip() {
                             .to_string()
                     }
                     ClientConfigValue::Url(schemes) => {
-                        let scheme = match address_schemes.get(key.name) {
-                            Some(scheme) => *scheme,
-                            None => {
-                                let index = arbitrary.entropy().index(
-                                    NonZeroUsize::new(schemes.len())
-                                        .assured("a URL declares schemes"),
-                                );
-                                schemes[index]
-                            }
-                        };
+                        let scheme =
+                            address_scheme(&mut arbitrary, &address_schemes, key.name, schemes);
                         format!("{scheme}://user:password@example.com/api")
+                    }
+                    ClientConfigValue::HostPortUrl(schemes) => {
+                        let scheme =
+                            address_scheme(&mut arbitrary, &address_schemes, key.name, schemes);
+                        let host =
+                            arbitrary
+                                .entropy()
+                                .pick(["example.com", "127.0.0.1", "[2001:db8::1]"]);
+                        let port = arbitrary.entropy().boundary_biased(1..=u64::from(u16::MAX));
+                        let root = if arbitrary.entropy().flag() { "/" } else { "" };
+                        format!("{scheme}://{host}:{port}{root}")
                     }
                     ClientConfigValue::DriverAddress => {
                         "redis://user:password@example.com/0".to_string()

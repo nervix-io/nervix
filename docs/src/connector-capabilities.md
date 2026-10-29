@@ -6,7 +6,7 @@ The tables describe the implemented surface. A connector Epic can extend a decla
 
 Ingest and emit are separate contracts: consuming a broker position and publishing a record need different acknowledgements. Each mirror column compares every declared entity of the same connector on the other side and explains transport differences. An absent capability requires reviewed explanatory prose; stale or missing explanations fail validation.
 
-Client CONFIG keys below come from the same declaration used by validation, completion and public inspection. Keys are lowercase and case-sensitive; every key occurs at most once. Required keys, Nervix-owned value types and TLS identity pairs validate before storage. Driver property namespaces and address query options remain intentional pass-through; undeclared driver properties are confidential in public inspection. Kafka properties and Postgres, MySQL, Redis, RabbitMQ and NATS addresses also pass network-free driver checks before commit. Authentication, connectivity and checks requiring a remote service wait for initialization. Nervix-owned file values accept resource mount templates and must resolve to readable files; driver-owned file properties retain their native interpretation. HTTPS retains the driver's built-in trust roots; MQTT requires tls_ca_file for mqtts, as its key's conditional presence declares. tls_ca_file follows the connector's documented augmentation or replacement policy, and a client certificate requires its private key.
+Client CONFIG keys below come from the same declaration used by validation, completion and public inspection. Keys are lowercase and case-sensitive; every key occurs at most once. Required keys, Nervix-owned value types and TLS identity pairs validate before storage. Driver property namespaces and address query options remain intentional pass-through; undeclared driver properties are confidential in public inspection. Kafka properties and Postgres, MySQL, Redis, RabbitMQ and NATS addresses also pass network-free driver checks before commit. Authentication, connectivity and checks requiring a remote service wait for initialization. Nervix-owned file values accept resource mount templates and must resolve to readable files; driver-owned file properties retain their native interpretation. HTTPS retains the driver's built-in trust roots; MQTT requires tls_ca_file exactly for mqtts and refuses its TLS files with a plaintext address, as its keys' conditional presence declares. tls_ca_file follows the connector's documented augmentation or replacement policy, and a client certificate requires its private key.
 
 ## Ingest
 
@@ -900,11 +900,11 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `addr` | required | URL (mqtt or mqtts) | Nervix; strict | no | none |
+| `addr` | required | URL naming only a host and a port (mqtt or mqtts) | Nervix; strict | no | none |
 | `client_id` | optional | string | Nervix; strict | no | none |
-| `tls_ca_file` | required when `addr` uses `mqtts` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
-| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
-| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+| `tls_ca_file` | required when `addr` uses `mqtts`; refused otherwise | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional; requires `addr` to use `mqtts` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional; requires `addr` to use `mqtts` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 

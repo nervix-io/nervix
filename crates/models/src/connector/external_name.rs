@@ -53,6 +53,8 @@ pub enum ExternalNameError {
     WildcardInsideLevel { wildcard: char },
     #[error("holds the wildcard '{wildcard}' before its last level")]
     WildcardBeforeLastLevel { wildcard: char },
+    #[error("begins with the reserved level '{level}'")]
+    ReservedFirstLevel { level: &'static str },
     #[error("names the domain '{domain}', which is not one of {}", .known.join(", "))]
     UnknownDomain {
         domain: String,

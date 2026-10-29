@@ -50,6 +50,12 @@ pub enum ClientConfigPresence {
         address: &'static str,
         scheme: &'static str,
     },
+    /// The key is written exactly while the named address uses the declared scheme: required with
+    /// it and refused without it.
+    ExactlyForScheme {
+        address: &'static str,
+        scheme: &'static str,
+    },
 }
 
 /// A file's role, including the two halves of a TLS client identity.
@@ -72,6 +78,9 @@ pub enum ClientConfigValue {
     Milliseconds,
     TcpKeepaliveMilliseconds,
     Url(&'static [&'static str]),
+    /// A URL with one of these schemes that names a host and a nonzero port and nothing else: no
+    /// credentials, path, query or fragment.
+    HostPortUrl(&'static [&'static str]),
     DriverAddress,
     Choice(&'static [&'static str]),
     File(ClientConfigFile),
@@ -90,6 +99,7 @@ impl ClientConfigValue {
                 "whole seconds from 1000 through 32767000 milliseconds"
             }
             Self::Url(_) => "URL",
+            Self::HostPortUrl(_) => "URL naming only a host and a port",
             Self::DriverAddress => "driver address, including its delegated query options",
             Self::Choice(_) => "declared choice",
             Self::File(_) => "file path, with resource mount templates resolved before use",
@@ -137,6 +147,12 @@ impl ClientConfigValue {
                     return Err(Report::new(invalid()));
                 }
             }
+            Self::HostPortUrl(schemes) => {
+                let parsed = Url::parse(value).change_context(invalid())?;
+                if !schemes.contains(&parsed.scheme()) || !Self::names_only_host_and_port(&parsed) {
+                    return Err(Report::new(invalid()));
+                }
+            }
             Self::DriverAddress | Self::File(_) => {
                 if value.is_empty() {
                     return Err(Report::new(invalid()));
@@ -149,6 +165,17 @@ impl ClientConfigValue {
             }
         }
         Ok(())
+    }
+
+    /// Whether `address` names a host and a nonzero port and nothing else: no credentials, no path
+    /// beyond the root, no query and no fragment.
+    fn names_only_host_and_port(address: &Url) -> bool {
+        let names_host = matches!(address.host_str(), Some(host) if !host.is_empty());
+        let names_port = matches!(address.port(), Some(port) if port != 0);
+        let names_root = matches!(address.path(), "" | "/");
+        let names_credentials = !address.username().is_empty() || address.password().is_some();
+        let names_query_or_fragment = address.query().is_some() || address.fragment().is_some();
+        names_host && names_port && names_root && !names_credentials && !names_query_or_fragment
     }
 
     #[cfg_attr(
@@ -164,7 +191,10 @@ impl ClientConfigValue {
     }
 
     fn address_is_confidential(self, value: &str) -> bool {
-        if !matches!(self, Self::Url(_) | Self::DriverAddress) {
+        if !matches!(
+            self,
+            Self::Url(_) | Self::HostPortUrl(_) | Self::DriverAddress
+        ) {
             return false;
         }
         match self.inspection_address(value) {
@@ -260,6 +290,15 @@ impl ClientConfigKey {
     pub const fn only_for_scheme(self, address: &'static str, scheme: &'static str) -> Self {
         Self {
             presence: ClientConfigPresence::OptionalForScheme { address, scheme },
+            ..self
+        }
+    }
+
+    /// Require this key when the named address uses the declared scheme, and refuse it otherwise,
+    /// for a key that only a connection over that scheme reads and that it cannot do without.
+    pub const fn exactly_for_scheme(self, address: &'static str, scheme: &'static str) -> Self {
+        Self {
+            presence: ClientConfigPresence::ExactlyForScheme { address, scheme },
             ..self
         }
     }
@@ -476,7 +515,8 @@ impl ClientConfigSchema {
         for key in self.keys {
             let (address, scheme) = match key.presence {
                 ClientConfigPresence::RequiredForScheme { address, scheme }
-                | ClientConfigPresence::OptionalForScheme { address, scheme } => (address, scheme),
+                | ClientConfigPresence::OptionalForScheme { address, scheme }
+                | ClientConfigPresence::ExactlyForScheme { address, scheme } => (address, scheme),
                 _ => continue,
             };
             let present = values.contains_key(key.name);
@@ -510,6 +550,23 @@ impl ClientConfigSchema {
                         key: key.name,
                         address,
                         scheme,
+                    }));
+                }
+                ClientConfigPresence::ExactlyForScheme { .. }
+                    if present && parsed.scheme() != scheme =>
+                {
+                    return Err(Report::new(ClientConfigSchemaError::RequiresScheme {
+                        key: key.name,
+                        address,
+                        scheme,
+                    }));
+                }
+                ClientConfigPresence::ExactlyForScheme { .. }
+                    if !present && parsed.scheme() == scheme =>
+                {
+                    return Err(Report::new(ClientConfigSchemaError::RequiresKey {
+                        key: address,
+                        required: key.name,
                     }));
                 }
                 _ => {}

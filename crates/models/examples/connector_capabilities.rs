@@ -456,6 +456,9 @@ fn client_key(key: &ClientConfigKey) -> Value {
         ClientConfigPresence::OptionalForScheme { address, scheme } => {
             format!("optional; requires `{address}` to use `{scheme}`")
         }
+        ClientConfigPresence::ExactlyForScheme { address, scheme } => {
+            format!("required when `{address}` uses `{scheme}`; refused otherwise")
+        }
     };
     let owner = match key.owner {
         ClientConfigOwner::Nervix => "Nervix; strict",
@@ -463,6 +466,10 @@ fn client_key(key: &ClientConfigKey) -> Value {
     };
     let value = match key.value {
         ClientConfigValue::Url(schemes) => format!("URL ({})", schemes.join(" or ")),
+        ClientConfigValue::HostPortUrl(schemes) => format!(
+            "URL naming only a host and a port ({})",
+            schemes.join(" or ")
+        ),
         ClientConfigValue::Choice(choices) => choices.join(" or "),
         value => value.label().to_owned(),
     };
