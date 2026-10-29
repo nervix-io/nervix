@@ -186,10 +186,11 @@ impl DomainSchedule {
         self.nodes
             .iter()
             .flat_map(|(entity, scheduled)| {
-                scheduled.units.iter().filter_map(move |(unit, placement)| {
-                    (placement.primary_node.as_ref() == Some(node))
-                        .then(|| NodeUnitRef::new(entity.clone(), *unit))
-                })
+                scheduled
+                    .units
+                    .iter()
+                    .filter(move |(_, placement)| placement.primary_node.as_ref() == Some(node))
+                    .map(move |(unit, _)| NodeUnitRef::new(entity.clone(), *unit))
             })
             .collect()
     }
@@ -368,7 +369,7 @@ impl ScheduledUnit {
     pub fn execution_node(&self) -> Option<&ClusterNodeName> {
         self.primary_node
             .as_ref()
-            .or_else(|| match self.assigned_nodes.as_slice() {
+            .or(match self.assigned_nodes.as_slice() {
                 [node] => Some(node),
                 _ => None,
             })

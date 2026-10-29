@@ -62,7 +62,7 @@ impl ExecutionUnit {
     pub(crate) fn execution_node(&self) -> Option<&ClusterNodeName> {
         self.primary_node
             .as_ref()
-            .or_else(|| match self.assigned_nodes.as_slice() {
+            .or(match self.assigned_nodes.as_slice() {
                 [node] => Some(node),
                 _ => None,
             })
