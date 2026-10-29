@@ -34,7 +34,13 @@ impl HttpRequestIngestorStartPlan {
         runtime: &Runtime,
         ingestor: &IngestorSpec,
     ) -> error_stack::Result<IngestorStart, IngestorStartError> {
-        let HttpRequestIngestorStartPlan { client, every } = self;
+        let HttpRequestIngestorStartPlan {
+            client,
+            method,
+            headers,
+            max_body_size,
+            every,
+        } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
@@ -47,6 +53,9 @@ impl HttpRequestIngestorStartPlan {
             connector: HttpRequestIngestorPlan {
                 config: resolved.entries,
                 dns: dns.clone(),
+                method,
+                headers,
+                max_body_size,
             },
             every,
             cadence_start: DomainCadenceStart::Immediate,

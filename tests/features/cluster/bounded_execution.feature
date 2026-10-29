@@ -192,11 +192,10 @@ Feature: Bounded execution and transient memory
       CREATE RELAY polled_events SCHEMA polled_event UNBRANCHED;
       CREATE HTTP CLIENT polled_http CONFIG {
         'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
-        'method' = 'GET',
         'timeout_ms' = 5000
       };
       CREATE HTTP REQUEST INGESTOR polled_source
-        FROM polled_http EVERY 1s
+        FROM polled_http METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING polled_codec
         TO polled_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

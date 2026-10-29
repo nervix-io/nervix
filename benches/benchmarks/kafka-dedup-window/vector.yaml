@@ -64,7 +64,7 @@ transforms:
       record_count: sum
 {% endfor %}
 
-emitters:
+sinks:
 {% for lane in lanes %}
   kafka_out_{{ lane }}:
     type: kafka

@@ -62,6 +62,7 @@ fn option_value(value: OptionValue) -> String {
         OptionValue::Name(name) => format!("string literal checked by {}", name.label),
         OptionValue::Expression => "expression".to_owned(),
         OptionValue::Mapping => "named expressions".to_owned(),
+        OptionValue::LiteralMapping => "named string literals".to_owned(),
         OptionValue::Client(connector) => format!("{connector} client"),
         OptionValue::Clause => "composed clause".to_owned(),
         OptionValue::Size => "byte size".to_owned(),

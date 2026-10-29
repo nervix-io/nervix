@@ -592,8 +592,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - A server endpoint WebSocket keeps its route and signaling protocol for the connection. After
   its source stops or is replaced, reconnect to use the new source; after signaling, the next
   refused payload on the preceding connection closes with 1013. Configured routes without a live
-  intake reject with HTTP 503, while withdrawn routes return 404. Another domain sharing the host
-  and path retains its own intake when a domain is stopped.
+  intake reject with HTTP 503, while withdrawn routes return 404. A node that has not installed a
+  revision since it started answers 503 for every unpublished route, never 404. Another domain
+  sharing the host and path retains its own intake when a domain is stopped.
 - Declare both required WASM limits immediately after `FILE`, in order: `MAX FUEL <positive_u64>
   MAX MEMORY <positive_byte_size>`. Fuel is reset per logical guest operation; memory caps each
   branch guest's Wasmtime linear memory.

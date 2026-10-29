@@ -113,8 +113,8 @@ overrides that policy for reproduction or smoke testing.
 
 Nervix consumes the flush values directly as Plexus durations and binary sizes. The runner derives
 Vector's `batch.timeout_secs`, `batch.max_bytes`, and `end_every_period_ms` from those same
-settings. Flink uses its native Kafka producer and SQL operators; its ingestor and emitter batching
-cannot be equated to Nervix route flushes or Vector emitter batches. Reports retain each product's
+settings. Flink uses its native Kafka producer and SQL operators; its source and sink batching
+cannot be equated to Nervix route flushes or Vector sink batches. Reports retain each product's
 native settings. Vector measures its native maximum before serialization, while Nervix limits an
 Arrow batch, so byte caps do not imply byte-for-byte equivalence.
 
@@ -142,7 +142,7 @@ The `hot-path-remote-delivery` Nervix graph places the source and destination on
 The Vector and Flink graphs exercise the same Kafka input-to-output contract in one container but
 do not add a corresponding remote hop. Their rates are Kafka pipeline references; the comparison
 report omits relative deltas and rankings for this workload. The fanout graphs each produce four
-output records per input; Vector attaches four emitters, while Flink duplicates rows with a
+output records per input; Vector attaches four sinks, while Flink duplicates rows with a
 four-value cross join.
 
 ## Load shapes

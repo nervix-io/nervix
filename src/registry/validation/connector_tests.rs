@@ -2072,10 +2072,16 @@ fn sentry_emitter_rejects_http_client() {
                 Model::ClientHttp(CreateClientHttp {
                     name: named("sentry_main"),
                     mount: None,
-                    config: vec![ClientConfigEntry {
-                        key: "endpoint".to_string(),
-                        value: "https://sentry.example/42".to_string(),
-                    }],
+                    config: vec![
+                        ClientConfigEntry {
+                            key: "endpoint".to_string(),
+                            value: "https://sentry.example/42".to_string(),
+                        },
+                        ClientConfigEntry {
+                            key: "timeout_ms".to_string(),
+                            value: "5000".to_string(),
+                        },
+                    ],
                 }),
                 relay("notifications", "event_schema"),
                 Model::Emitter(sentry_emitter),

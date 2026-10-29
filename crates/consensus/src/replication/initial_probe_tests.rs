@@ -18,6 +18,7 @@ use nervix_models::{ClusterNodeName, PrerequisiteTimings};
 use nervix_primitives::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
+    mpsc,
 };
 use openraft::{
     Entry, EntryPayload, Vote,
@@ -28,15 +29,37 @@ use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, SanType};
 
 use super::AppendPath;
 use crate::{
-    CommittedLeaderIdOf, ConnectivityFault, LogIdOf, NetworkClient, NetworkFactory,
-    SnapshotTransferIds, TypeConfig, wire,
+    AppendStreamOpenRecorder, CommittedLeaderIdOf, ConnectivityFault, LogIdOf, NetworkClient,
+    NetworkFactory, SnapshotTransferIds, TypeConfig, wire,
 };
 
+#[derive(Clone, Default)]
+struct ProbeRecorder {
+    attempts: Arc<AtomicUsize>,
+    opened: Arc<AtomicUsize>,
+}
+
+impl AppendStreamOpenRecorder for ProbeRecorder {
+    fn record_append_stream_attempt(&self, _target: &ClusterNodeName) {
+        self.attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_append_stream_open(&self, _target: &ClusterNodeName) {
+        self.opened.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn connectivity_fault(&self) -> ConnectivityFault {
+        ConnectivityFault::default()
+    }
+}
+
 struct ProbePeer {
-    client: NetworkClient<()>,
+    client: NetworkClient<ProbeRecorder>,
     follower: Transport,
     management_calls: Arc<AtomicUsize>,
     append_streams: Arc<AtomicUsize>,
+    probes: mpsc::Receiver<wire::AppendEntriesRecord>,
+    batches: mpsc::Receiver<wire::AppendEntriesRecord>,
 }
 
 async fn probe_peer(probe_response: wire::AppendEntriesResponseRecord) -> ProbePeer {
@@ -121,13 +144,20 @@ async fn probe_peer(probe_response: wire::AppendEntriesResponseRecord) -> ProbeP
     leader_transport.replace_live_nodes(&live);
     follower_transport.replace_live_nodes(&live);
     let management_calls = Arc::new(AtomicUsize::new(0));
+    let (probe_tx, probes) = mpsc::channel(16);
     follower_transport
         .register_handler::<wire::HeartbeatRequest, _, _>({
             let calls = management_calls.clone();
+            let probe_tx = probe_tx.clone();
             move |_context, request| {
                 calls.fetch_add(1, Ordering::Relaxed);
                 let response = probe_response.clone();
+                let probe_tx = probe_tx.clone();
                 async move {
+                    probe_tx
+                        .send(request.0.clone())
+                        .await
+                        .assured("the fixture retains its probe observer");
                     let request = request.0.into_request().assured("valid probe");
                     assert!(
                         request.entries.is_empty(),
@@ -139,26 +169,39 @@ async fn probe_peer(probe_response: wire::AppendEntriesResponseRecord) -> ProbeP
         })
         .assured("test management handler registers");
     let append_streams = Arc::new(AtomicUsize::new(0));
+    let (batch_tx, batches) = mpsc::channel(16);
     follower_transport
         .register_duplex_handler::<wire::OpenAppendStream, _, _>({
             let opened = append_streams.clone();
+            let batch_tx = batch_tx.clone();
             move |_context, _opening, items| {
                 opened.fetch_add(1, Ordering::Relaxed);
+                let batch_tx = batch_tx.clone();
                 async move {
-                    let answers = stream::unfold(items, |mut items| async move {
-                        let charged = match items.next().await.assured("test frame decodes") {
-                            Some(charged) => charged,
-                            None => return None,
-                        };
-                        let request = charged.item.into_request().assured("valid append request");
-                        let matching = request
-                            .entries
-                            .last()
-                            .map(|entry| entry.log_id.clone())
-                            .or(request.prev_log_id);
-                        let result: openraft::raft::StreamAppendResult<TypeConfig> = Ok(matching);
-                        Some((Ok(Ok(wire::StreamAppendResultRecord::from(result))), items))
-                    });
+                    let answers =
+                        stream::unfold((items, batch_tx), |(mut items, batch_tx)| async move {
+                            let charged = match items.next().await.assured("test frame decodes") {
+                                Some(charged) => charged,
+                                None => return None,
+                            };
+                            batch_tx
+                                .send(charged.item.clone())
+                                .await
+                                .assured("the fixture retains its batch observer");
+                            let request =
+                                charged.item.into_request().assured("valid append request");
+                            let matching = request
+                                .entries
+                                .last()
+                                .map(|entry| entry.log_id.clone())
+                                .or(request.prev_log_id);
+                            let result: openraft::raft::StreamAppendResult<TypeConfig> =
+                                Ok(matching);
+                            Some((
+                                Ok(Ok(wire::StreamAppendResultRecord::from(result))),
+                                (items, batch_tx),
+                            ))
+                        });
                     Ok(DuplexResponses::new(answers))
                 }
             }
@@ -169,7 +212,7 @@ async fn probe_peer(probe_response: wire::AppendEntriesResponseRecord) -> ProbeP
         interconnect: leader_transport,
         executor,
         connectivity: ConnectivityFault::default(),
-        append_stream_open_recorder: (),
+        append_stream_open_recorder: ProbeRecorder::default(),
         snapshot_transfer_ids: Arc::new(SnapshotTransferIds::new()),
     }
     .client(follower, AppendPath::Replication);
@@ -178,6 +221,349 @@ async fn probe_peer(probe_response: wire::AppendEntriesResponseRecord) -> ProbeP
         follower: follower_transport,
         management_calls,
         append_streams,
+        probes,
+        batches,
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_first_data_batch_checks_its_unconfirmed_prefix_before_sending_entries() {
+    let leader = ClusterNodeName::parse("node-1").assured("valid fixture leader");
+    let boundary = LogIdOf::new(CommittedLeaderIdOf::<TypeConfig>::new(1, leader), 11);
+    let responses = [
+        wire::AppendEntriesResponseRecord::Success,
+        wire::AppendEntriesResponseRecord::PartialSuccess(Some(boundary.into())),
+    ];
+    for response in responses {
+        nervix_primitives::task::consume_budget().await;
+        // The probe cannot advance the original commit position or cross its checked prefix.
+        for (committed, probe_committed) in [(None, None), (Some(7), Some(7)), (Some(13), Some(11))]
+        {
+            nervix_primitives::task::consume_budget().await;
+            let mut peer = probe_peer(response.clone()).await;
+            let boundary = peer.log_id(11);
+            let mut request = peer.data_request(boundary.clone(), peer.log_id(12));
+            request.entries.push(Entry {
+                log_id: peer.log_id(13),
+                payload: EntryPayload::Blank,
+            });
+            request.leader_commit = committed.map(|index| peer.log_id(index));
+            let expected = wire::AppendEntriesRecord::from_request(request.clone());
+            let mut prefix = peer.empty_request(Some(boundary));
+            prefix.leader_commit = probe_committed.map(|index| peer.log_id(index));
+            let prefix = wire::AppendEntriesRecord::from_request(prefix);
+            let mut answers = peer
+                .client
+                .stream_append(stream::iter([request]), RPCOption::new(Duration::ZERO))
+                .await
+                .assured("the peer accepts its prefix and data");
+            let answer = answers
+                .next()
+                .await
+                .assured("the data has an answer")
+                .assured("the transport answers");
+            assert!(
+                answers.next().await.is_none(),
+                "one data request has one answer"
+            );
+            drop(answers);
+            peer.close().await;
+            assert_eq!(answer, Ok(Some(peer.log_id(13))));
+            assert_eq!(peer.management_calls.load(Ordering::Relaxed), 1);
+            assert_eq!(peer.append_streams.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                peer.probes.try_recv().assured("the prefix was observed"),
+                prefix
+            );
+            assert_eq!(
+                peer.batches
+                    .try_recv()
+                    .assured("the exact data was observed"),
+                expected
+            );
+        }
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_first_data_batch_at_the_log_beginning_transfers_its_complete_request() {
+    let mut peer = probe_peer(wire::AppendEntriesResponseRecord::Conflict).await;
+    let mut request = peer.empty_request(None);
+    request.entries = vec![Entry {
+        log_id: peer.log_id(0),
+        payload: EntryPayload::Blank,
+    }];
+    request.leader_commit = Some(peer.log_id(0));
+    let expected = wire::AppendEntriesRecord::from_request(request.clone());
+    let mut answers = peer
+        .client
+        .stream_append(stream::iter([request]), RPCOption::new(Duration::ZERO))
+        .await
+        .assured("the beginning needs no preceding-entry check");
+    let answer = answers
+        .next()
+        .await
+        .assured("the data has an answer")
+        .assured("the transport answers");
+    assert!(
+        answers.next().await.is_none(),
+        "the single request has one answer"
+    );
+    drop(answers);
+    peer.close().await;
+    assert_eq!(answer, Ok(Some(peer.log_id(0))));
+    assert_eq!(peer.management_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(peer.append_streams.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        peer.batches
+            .try_recv()
+            .assured("the exact data was observed"),
+        expected
+    );
+}
+
+#[nervix_primitives::test]
+async fn finite_root_data_and_following_input_keep_distinct_stream_lifetimes() {
+    let mut peer = probe_peer(wire::AppendEntriesResponseRecord::Success).await;
+    let mut root = peer.empty_request(None);
+    root.entries = [0, 1]
+        .into_iter()
+        .map(|index| Entry {
+            log_id: peer.log_id(index),
+            payload: EntryPayload::Blank,
+        })
+        .collect();
+    root.leader_commit = Some(peer.log_id(1));
+    let generations = [
+        vec![root],
+        vec![
+            peer.data_request(peer.log_id(1), peer.log_id(2)),
+            peer.data_request(peer.log_id(2), peer.log_id(3)),
+            peer.empty_request(Some(peer.log_id(3))),
+        ],
+    ];
+    let prefix = wire::AppendEntriesRecord::from_request(peer.empty_request(Some(peer.log_id(1))));
+    for requests in generations {
+        nervix_primitives::task::consume_budget().await;
+        let expected: Vec<_> = requests
+            .iter()
+            .cloned()
+            .map(wire::AppendEntriesRecord::from_request)
+            .collect();
+        let expected_answers: Vec<_> = requests
+            .iter()
+            .map(|request| {
+                request
+                    .entries
+                    .last()
+                    .map(|entry| entry.log_id.clone())
+                    .or(request.prev_log_id.clone())
+            })
+            .collect();
+        let mut answers = peer
+            .client
+            .stream_append(stream::iter(requests), RPCOption::new(Duration::ZERO))
+            .await
+            .assured("the next caller input opens its own data stream");
+        for matching in expected_answers {
+            nervix_primitives::task::consume_budget().await;
+            assert_eq!(
+                answers
+                    .next()
+                    .await
+                    .assured("one answer per request")
+                    .assured("the transport answers"),
+                Ok(matching)
+            );
+        }
+        assert!(
+            answers.next().await.is_none(),
+            "a completed input ends its stream"
+        );
+        drop(answers);
+        for record in expected {
+            assert_eq!(
+                peer.batches
+                    .try_recv()
+                    .assured("every complete request was observed"),
+                record
+            );
+        }
+    }
+    peer.close().await;
+    assert_eq!(
+        peer.probes
+            .try_recv()
+            .assured("the second input verifies its prefix"),
+        prefix
+    );
+    assert_eq!(peer.management_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(peer.append_streams.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        peer.client
+            .append_stream_open_recorder
+            .attempts
+            .load(Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        peer.client
+            .append_stream_open_recorder
+            .opened
+            .load(Ordering::Relaxed),
+        2
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_data_prefix_different_from_the_confirmed_probe_is_checked_before_streaming() {
+    let mut peer = probe_peer(wire::AppendEntriesResponseRecord::Success).await;
+    let confirmed = peer.log_id(11);
+    let data_prefix = peer.log_id(15);
+    let data_end = peer.log_id(16);
+    let probe = peer.empty_request(Some(confirmed.clone()));
+    let expected_confirmed = wire::AppendEntriesRecord::from_request(probe.clone());
+    let data = peer.data_request(data_prefix.clone(), data_end.clone());
+    let expected_probe =
+        wire::AppendEntriesRecord::from_request(peer.empty_request(Some(data_prefix)));
+    let expected_data = wire::AppendEntriesRecord::from_request(data.clone());
+    let mut answers = peer
+        .client
+        .stream_append(
+            stream::iter([probe, data]),
+            RPCOption::new(Duration::from_secs(5)),
+        )
+        .await
+        .assured("the peer accepts the initial probe");
+    let mut matches = Vec::new();
+    while let Some(answer) = answers.next().await {
+        nervix_primitives::task::consume_budget().await;
+        matches.push(
+            answer
+                .assured("the transport answers")
+                .assured("the peer accepts its prefix and data"),
+        );
+    }
+    drop(answers);
+    peer.close().await;
+    assert_eq!(matches, vec![Some(confirmed), Some(data_end)]);
+    assert_eq!(peer.management_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(peer.append_streams.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        peer.probes
+            .try_recv()
+            .assured("the initial probe was observed"),
+        expected_confirmed
+    );
+    assert_eq!(
+        peer.probes
+            .try_recv()
+            .assured("the data prefix was observed"),
+        expected_probe
+    );
+    assert_eq!(
+        peer.batches
+            .try_recv()
+            .assured("the exact data was observed"),
+        expected_data
+    );
+}
+
+#[nervix_primitives::test]
+async fn an_unavailable_data_prefix_ends_its_input_before_stream_admission() {
+    let mut peer = probe_peer(wire::AppendEntriesResponseRecord::Success).await;
+    let boundary = peer.log_id(11);
+    let input = stream::iter([
+        peer.empty_request(Some(boundary.clone())),
+        peer.data_request(peer.log_id(15), peer.log_id(16)),
+        peer.data_request(peer.log_id(16), peer.log_id(17)),
+    ]);
+    let mut answers = peer
+        .client
+        .stream_append(input, RPCOption::new(Duration::from_secs(5)))
+        .await
+        .assured("the peer accepts the initial probe");
+    let first = answers
+        .next()
+        .await
+        .assured("the initial probe has an answer")
+        .assured("the transport answers");
+    peer.follower.shutdown().await;
+    let failed = answers
+        .next()
+        .await
+        .assured("the unavailable prefix has an outcome");
+    assert!(
+        answers.next().await.is_none(),
+        "the failed prefix ends its input"
+    );
+    drop(answers);
+    peer.close().await;
+    assert_eq!(first, Ok(Some(boundary)));
+    let Err(openraft::error::RPCError::Unreachable(_)) = failed else {
+        panic!("the unavailable prefix must report an unreachable peer: {failed:?}");
+    };
+    assert_eq!(peer.management_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(peer.append_streams.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        peer.client
+            .append_stream_open_recorder
+            .attempts
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        peer.client
+            .append_stream_open_recorder
+            .opened
+            .load(Ordering::Relaxed),
+        0
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_rejected_data_prefix_returns_its_result_before_transferring_entries() {
+    use openraft::raft::{AppendEntriesResponse, StreamAppendError};
+    let leader = ClusterNodeName::parse("node-1").assured("valid fixture leader");
+    let boundary = LogIdOf::new(CommittedLeaderIdOf::<TypeConfig>::new(1, leader), 11);
+    let higher = Vote::new_committed(
+        2,
+        ClusterNodeName::parse("node-2").assured("valid fixture follower"),
+    );
+    let cases = [
+        (
+            AppendEntriesResponse::Conflict,
+            Err(StreamAppendError::Conflict(boundary)),
+        ),
+        (
+            AppendEntriesResponse::HigherVote(higher.clone()),
+            Err(StreamAppendError::HigherVote(higher)),
+        ),
+        (AppendEntriesResponse::PartialSuccess(None), Ok(None)),
+    ];
+    for (response, expected) in cases {
+        nervix_primitives::task::consume_budget().await;
+        let mut peer = probe_peer(response.into()).await;
+        let input = stream::iter([peer.data_request(peer.log_id(11), peer.log_id(12))]);
+        let mut answers = peer
+            .client
+            .stream_append(input, RPCOption::new(Duration::from_secs(5)))
+            .await
+            .assured("the peer answers the prefix");
+        let answer = answers
+            .next()
+            .await
+            .assured("the prefix has a result")
+            .assured("the transport answers");
+        assert!(
+            answers.next().await.is_none(),
+            "the refused prefix ends this input"
+        );
+        drop(answers);
+        peer.close().await;
+        assert_eq!(answer, expected);
+        assert_eq!(peer.management_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(peer.append_streams.load(Ordering::Relaxed), 0);
     }
 }
 
@@ -244,8 +630,8 @@ async fn initial_empty_append_probes_use_management_before_one_data_stream() {
     peer.follower.shutdown().await;
     assert_eq!(
         peer.management_calls.load(Ordering::Relaxed),
-        2,
-        "initial empty probes belong to the management pool"
+        3,
+        "finite empty probes and an unconfirmed data prefix use management"
     );
     assert_eq!(
         peer.append_streams.load(Ordering::Relaxed),

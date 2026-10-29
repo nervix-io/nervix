@@ -131,6 +131,7 @@ fn ending_a_retained_intake_resolves_its_held_response_and_preserves_replacement
         let binding = routes.bind(identity.clone(), (), std::slice::from_ref(&key));
         let retained = routes
             .resolve(&key.host, &key.path)
+            .into_route()
             .assured("a published route");
         let window = window(1);
         let held_window = window.clone();
@@ -156,6 +157,7 @@ fn ending_a_retained_intake_resolves_its_held_response_and_preserves_replacement
         assert!(replacement.intake().is_some());
         let current = routes
             .resolve(&key.host, &key.path)
+            .into_route()
             .assured("the replacement remains bound");
         assert_eq!(current.bindings().len(), 1);
     });

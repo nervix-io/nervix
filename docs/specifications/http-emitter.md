@@ -128,7 +128,7 @@ non-root path, a query, a fragment, backslashes, whitespace, and control charact
 Paths and queries belong in the emitter's `PATH` expression, so every request has one unambiguous
 destination.
 
-`timeout_ms` is required when an HTTP client is bound to an emitter. It is a positive integer
+`timeout_ms` is required when an HTTP client is declared. It is a positive integer
 number of milliseconds; a value the node cannot schedule rejects activation. It bounds one attempt
 from connection acquisition through DNS, connection and TLS establishment, sending, and receipt
 of complete final response headers. Queueing behind earlier records and retry backoff do not
@@ -139,7 +139,7 @@ HTTPS verifies the server certificate and hostname. The existing optional `tls_c
 Mounted files use the existing explicit resource-version binding contract. Authentication such
 as a bearer token is supplied through a declared `Authorization` header.
 
-The polling client's `method` CONFIG key remains an ingestion setting; it does not supply or
+Polling declares its method in the ingestor statement; it does not supply or
 override an emitter's required `METHOD` expression. A client used by several nodes must satisfy
 each use's contract. Emission does not maintain cookies, answer authentication challenges with
 additional requests, or follow redirects. Each application-level resend belongs to the declared

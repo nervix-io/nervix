@@ -4,7 +4,8 @@
 //!
 //! - **Owns.** Building an HTTP client from a client's entries: the node DNS resolver, the
 //!   request deadline its `timeout_ms` sets, optional CA file and optional client identity, and
-//!   whether the client follows the redirects an endpoint answers with.
+//!   whether the client follows redirects or uses a declared proxy, and refusing proxy environment
+//!   settings for HTTP REQUEST polling.
 //! - **Depends on.** The client configuration's entries, TLS paths and PEM files, `nervix-dns`,
 //!   and `reqwest`.
 //! - **Must not know.** Which connector sends requests through the client, or what it sends.
@@ -20,7 +21,7 @@
 use error_stack::{Report, ResultExt as _};
 use nervix_dns::DnsResolver;
 use reqwest::{
-    Certificate as HttpCertificate, Client as HttpClient, Identity as HttpIdentity, redirect,
+    Certificate as HttpCertificate, Client as HttpClient, Identity as HttpIdentity, Proxy, redirect,
 };
 use thiserror::Error;
 
@@ -72,13 +73,42 @@ impl<'a> HttpClientConfig<'a> {
         self.finish(self.builder()?.redirect(redirect::Policy::none()))
     }
 
+    /// Apply the HTTP client's explicit redirect and proxy settings. The environment cannot
+    /// silently change where a request goes.
+    pub fn build_http_request(&self) -> Result<HttpClient, Report<HttpClientConfigError>> {
+        let contract = nervix_models::CreateClientHttp::TRANSPORT;
+        let follow_redirects = self.entries.iter().any(|entry| {
+            entry.key == "follow_redirects" && entry.value.eq_ignore_ascii_case("true")
+        });
+        let redirects = if follow_redirects {
+            redirect::Policy::limited(contract.redirect_limit_with_opt_in)
+        } else {
+            redirect::Policy::none()
+        };
+        let builder = self.builder()?;
+        let mut builder = if contract.reads_environment_proxy {
+            builder
+        } else {
+            builder.no_proxy()
+        }
+        .redirect(redirects);
+        if let Some(proxy) = self.entries.iter().find(|entry| entry.key == "proxy") {
+            let proxy = Proxy::all(&proxy.value).map_err(|source| {
+                Report::new(source.without_url())
+                    .change_context(HttpClientConfigError::Build { label: self.label })
+            })?;
+            builder = builder.proxy(proxy);
+        }
+        self.finish(builder)
+    }
+
     fn finish(
         &self,
         builder: reqwest::ClientBuilder,
     ) -> Result<HttpClient, Report<HttpClientConfigError>> {
         builder.build().map_err(|source| {
-            Report::new(HttpClientConfigError::Build { label: self.label })
-                .attach_printable(source.to_string())
+            Report::new(source.without_url())
+                .change_context(HttpClientConfigError::Build { label: self.label })
         })
     }
 
