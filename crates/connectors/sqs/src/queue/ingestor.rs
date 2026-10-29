@@ -420,12 +420,10 @@ struct FailedEntries {
 
 impl FailedEntries {
     /// The entries of `failed`, or `None` where there are none.
-    fn of<'a>(failed: impl IntoIterator<Item = &'a BatchResultErrorEntry>) -> Option<Self> {
-        let mut failed = failed.into_iter();
-        let first = failed.next()?;
-        let rest = failed.count();
+    fn of(failed: &[&BatchResultErrorEntry]) -> Option<Self> {
+        let (first, rest) = failed.split_first()?;
         let count = NonZeroUsize::MIN
-            .checked_add(rest)
+            .checked_add(rest.len())
             .assured("a batch request holds at most ten entries");
         Some(Self {
             count,
@@ -755,7 +753,8 @@ impl BrokerIngestorConnector for SqsQueueIngestor {
                     );
                 }
             };
-            if let Some(failed) = FailedEntries::of(answer.failed()) {
+            let undeleted: Vec<&BatchResultErrorEntry> = answer.failed().iter().collect();
+            if let Some(failed) = FailedEntries::of(&undeleted) {
                 let refused = Report::new(SqsQueueIngestorError::DeleteRefused {
                     refused: failed.count,
                     requested: batch.len(),
@@ -814,7 +813,7 @@ impl BrokerIngestorConnector for SqsQueueIngestor {
                     service_failures.push(failed);
                 }
             }
-            if let Some(failed) = FailedEntries::of(service_failures) {
+            if let Some(failed) = FailedEntries::of(&service_failures) {
                 let failure = Report::new(SqsQueueIngestorError::VisibilityFailed {
                     failed: failed.count,
                     requested: batch.len(),
