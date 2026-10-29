@@ -14,9 +14,10 @@ adds it only when the authored key is absent; an invalid explicit value still fa
 `DESCRIBE CLIENT` distinguishes these effective defaults from authored values, with the same
 confidential projection, while canonical configuration preserves omission.
 Scheme-dependent presence distinguishes a key required by an address scheme from an optional key
-permitted only with that scheme. OTEL TLS file keys use the latter state for HTTPS. The same
-vocabulary validation runs on authored and rendered entries, deferring an unresolved address
-template until rendering. Percent-encoded header pairs retain their encoded client configuration;
+permitted only with that scheme. OTEL TLS file keys use the latter state for HTTPS, and RabbitMQ
+TLS file keys use it for `amqps`. The same vocabulary validation runs on authored and rendered
+entries, deferring an unresolved address template until rendering. Percent-encoded header pairs
+retain their encoded client configuration;
 validation and the connector use one decoder into ordered named pairs, without feeding a decoded
 value back through that decoder. OTEL's field rules own exact types and literal value constraints;
 the registry establishes them before planning, and the connector verifies the prepared schema.
