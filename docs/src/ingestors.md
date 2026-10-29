@@ -1360,8 +1360,10 @@ PKCS #1 or SEC1, to a broker that asks for a client certificate. A file that can
 holds no PEM certificate or no private key, fails the connection as a configuration error. A broker
 that requires a client certificate and receives none, or one it does not accept, ends the TLS
 session with an alert: `DESCRIBE INGESTOR` shows that the broker refused the TLS session, naming the
-alert, as the transient error, and the instance tries again on its `RETRY POLICY` cadence. An `amqp`
-address carries no TLS, so the client's TLS keys do not apply to it.
+alert, as the transient error, and the instance tries again on its `RETRY POLICY` cadence.
+`tls_ca_file`, `tls_cert_file` and `tls_key_file` require an `amqps` address, and certificate and
+key must be supplied together. A client that violates either rule is refused before commit,
+naming the key and its required constraint without repeating the address or file path.
 
 ### Redis Pub/Sub
 

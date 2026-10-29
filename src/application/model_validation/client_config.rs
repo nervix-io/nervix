@@ -14,7 +14,7 @@ use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_connector::OfflineClientConfigError;
-use nervix_execution::{MemoryClass, StorageClass};
+use nervix_execution::{MemoryClass, QueueAdmission, StorageClass};
 use nervix_models::{
     ClientConfigEntry, ClientConfigOwner, ClientConfigSchemaError, ClientConfigValue,
     ConfiguredClientRef, ConnectorKind, DomainName, PrometheusApiRoot, PrometheusClientConfigError,
@@ -46,6 +46,7 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         client: ConfiguredClientRef<'_, u64>,
+        admission: QueueAdmission,
     ) -> error_stack::Result<(), ModelBindingValidationError> {
         let context = || ModelBindingValidationError::Client {
             domain: domain.clone(),
@@ -77,73 +78,83 @@ impl SessionServiceImpl {
             .ok_or_else(overflow)
             .change_context_lazy(context)?;
         let runtime = self.inner.runtime.clone();
-        let reservation = runtime
-            .executor()
-            .try_reserve(MemoryClass::Commands, bytes)
-            .change_context(ClientValidationError::Admission)
-            .change_context_lazy(context)?;
+        let reservation = match admission {
+            QueueAdmission::RefuseWhenFull => {
+                runtime.executor().try_reserve(MemoryClass::Commands, bytes)
+            }
+            QueueAdmission::WaitForPlace => {
+                runtime
+                    .executor()
+                    .reserve(MemoryClass::Commands, bytes)
+                    .await
+            }
+        }
+        .change_context(ClientValidationError::Admission)
+        .change_context_lazy(context)?;
         let connector = client.connector;
-        let domain = domain.clone();
+        let worker_domain = domain.clone();
         let mount = client.mount.cloned();
         let config = client.config.to_vec();
         let execution_runtime = runtime.clone();
-        let result = runtime
-            .executor()
-            .run_storage(
-                StorageClass::Filesystem,
-                reservation,
-                move |_charge, cancellation| {
+        let inspection = runtime.executor().run_storage_with(
+            StorageClass::Filesystem,
+            admission,
+            reservation,
+            move |_charge, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(ClientValidationError::Cancelled)?;
+                // MQTT alone renders a branch instance into its client ID. Validate the first
+                // instance using the same renderer, leaving each actual instance to its host.
+                let resolved = if connector == ConnectorKind::Mqtt {
+                    execution_runtime.resolve_client_config_with_instance(
+                        &worker_domain,
+                        mount.as_ref(),
+                        &config,
+                        0,
+                    )
+                } else {
+                    execution_runtime.resolve_client_config(&worker_domain, mount.as_ref(), &config)
+                }
+                .change_context(ClientValidationError::Resolve)?;
+                let declaration = connector
+                    .client()
+                    .assured("a configured client has a client declaration");
+                let validation = if connector == ConnectorKind::ClickHouse {
+                    validate_clickhouse_client_config(&resolved.entries)
+                } else {
+                    declaration.config.validate_rendered(&resolved.entries)
+                };
+                validation.change_context(ClientValidationError::Schema)?;
+                Self::validate_rendered_client_values(connector, &resolved.entries)?;
+                for entry in &resolved.entries {
                     cancellation
                         .check()
                         .change_context(ClientValidationError::Cancelled)?;
-                    // MQTT alone renders a branch instance into its client ID. Validate the first
-                    // instance using the same renderer, leaving each actual instance to its host.
-                    let resolved = if connector == ConnectorKind::Mqtt {
-                        execution_runtime.resolve_client_config_with_instance(
-                            &domain,
-                            mount.as_ref(),
-                            &config,
-                            0,
-                        )
-                    } else {
-                        execution_runtime.resolve_client_config(&domain, mount.as_ref(), &config)
-                    }
-                    .change_context(ClientValidationError::Resolve)?;
-                    let declaration = connector
-                        .client()
-                        .assured("a configured client has a client declaration");
-                    let validation = if connector == ConnectorKind::ClickHouse {
-                        validate_clickhouse_client_config(&resolved.entries)
-                    } else {
-                        declaration.config.validate_rendered(&resolved.entries)
-                    };
-                    validation.change_context(ClientValidationError::Schema)?;
-                    Self::validate_rendered_client_values(connector, &resolved.entries)?;
-                    for entry in &resolved.entries {
-                        cancellation
-                            .check()
-                            .change_context(ClientValidationError::Cancelled)?;
-                        if let Some(key) = declaration.config.key(&entry.key)
-                            && key.owner == ClientConfigOwner::Nervix
-                            && matches!(key.value, ClientConfigValue::File(_))
-                        {
-                            let context = || ClientValidationError::File { key: key.name };
-                            let metadata =
-                                std::fs::metadata(&entry.value).change_context_lazy(context)?;
-                            if !metadata.is_file() {
-                                return Err(Report::new(context()));
-                            }
-                            let file =
-                                std::fs::File::open(&entry.value).change_context_lazy(context)?;
-                            if !file.metadata().change_context_lazy(context)?.is_file() {
-                                return Err(Report::new(context()));
-                            }
+                    if let Some(key) = declaration.config.key(&entry.key)
+                        && key.owner == ClientConfigOwner::Nervix
+                        && matches!(key.value, ClientConfigValue::File(_))
+                    {
+                        let context = || ClientValidationError::File { key: key.name };
+                        let metadata =
+                            std::fs::metadata(&entry.value).change_context_lazy(context)?;
+                        if !metadata.is_file() {
+                            return Err(Report::new(context()));
+                        }
+                        let file =
+                            std::fs::File::open(&entry.value).change_context_lazy(context)?;
+                        if !file.metadata().change_context_lazy(context)?.is_file() {
+                            return Err(Report::new(context()));
                         }
                     }
-                    validate_driver(connector, &resolved.entries)
-                        .change_context(ClientValidationError::Driver)
-                },
-            )
+                }
+                validate_driver(connector, &resolved.entries)
+                    .change_context(ClientValidationError::Driver)
+            },
+        );
+        #[cfg(feature = "testing")]
+        let inspection = runtime.observe_client_inspection_admission(domain, inspection);
+        let result = inspection
             .await
             .change_context(ClientValidationError::Admission)
             .change_context_lazy(context)?;
@@ -236,6 +247,9 @@ pub(in crate::application) fn client_validation_message<C: error_stack::Context>
     };
     Some(format!("{client}: {reason}"))
 }
+
+#[cfg(all(test, feature = "testing"))]
+mod admission_tests;
 
 #[cfg(test)]
 mod tests {

@@ -1,6 +1,7 @@
 //! Outside the layer order: MySQL insert isolation under contention for one shared connection.
 //!
-//! - **Owns.** Scenario table locks, server-observed insert waits, and complete emitted-row checks.
+//! - **Owns.** Scenario table locks, server-observed insert waits, complete emitted-row checks,
+//!   certificate-required fixture users, TLS identity files and public pool-deadline observations.
 //! - **Depends on.** The scenario's MySQL endpoints, driver and public emitter observations.
 //! - **Must not know.** Product connection handles, insert implementation or retry decisions.
 
@@ -35,6 +36,96 @@ impl ScenarioWorld {
             nervix_primitives::task::consume_budget().await;
             lock.release().await;
         }
+    }
+}
+
+#[given("a MySQL user requiring a client certificate exists")]
+async fn certificate_user(world: &mut ScenarioWorld) {
+    let user = format!(
+        "cert_{}",
+        world.test_id.chars().take(20).collect::<String>()
+    );
+    let pool = mysql_root_pool(world.dependencies.endpoints()).expect("the root endpoint is valid");
+    let mut connection = pool.get_conn().await.expect("MySQL is running");
+    connection
+        .query_drop(format!(
+            "CREATE USER '{user}'@'%' IDENTIFIED BY 'nervix' REQUIRE X509"
+        ))
+        .await
+        .expect("the fixture can provision an account requiring a client certificate");
+    connection
+        .query_drop(format!("GRANT ALL ON nervix.* TO '{user}'@'%'"))
+        .await
+        .expect("the certificate account can write its provisioned database");
+    drop(connection);
+    pool.disconnect().await.expect("the setup pool disconnects");
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(MYSQL_TLS_ADDR)
+        .expect("MySQL is running");
+    let mut endpoint = url::Url::parse(endpoint).expect("the fixture endpoint is a URL");
+    endpoint
+        .set_username(&user)
+        .expect("a MySQL URL accepts a user");
+    world
+        .placeholders
+        .insert("mysql_mtls_addr".to_string(), endpoint.to_string());
+}
+
+#[given(expr = "node {string} has MySQL TLS identity directory {string}")]
+async fn certificate_directory(world: &mut ScenarioWorld, node: String, placeholder: String) {
+    given_node_has_dev_tls_resource_directory(world, node, placeholder.clone()).await;
+    let directory = PathBuf::from(
+        world
+            .placeholders
+            .get(&placeholder)
+            .expect("the directory was registered"),
+    );
+    // mysql_async's Rustls identity loader reads PEM RSA keys in PKCS#1 form.
+    let output = tokio::process::Command::new("openssl")
+        .args(["rsa", "-traditional", "-in"])
+        .arg(directory.join("node-key.pem"))
+        .arg("-out")
+        .arg(directory.join("client-key.pem"))
+        .output()
+        .await
+        .expect("OpenSSL converts the fixture key");
+    assert!(
+        output.status.success(),
+        "fixture key conversion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[then(expr = "within {string} one of MySQL emitters {string} reports an exhausted pool deadline")]
+async fn pool_deadline(world: &mut ScenarioWorld, duration: String, emitters: String) {
+    let duration = parse_duration_text(&duration).expect("the observation bound is a duration");
+    let deadline = Instant::now() + duration;
+    let mut outputs = BTreeMap::new();
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        for emitter in emitters.split(',') {
+            nervix_primitives::task::consume_budget().await;
+            let emitter = emitter.trim();
+            let output = run_plexus_commands_on_node(
+                world,
+                &leader,
+                &format!("DESCRIBE EMITTER {emitter};"),
+            )
+            .await
+            .expect("the public emitter inspection succeeds");
+            if output.contains("checking out a MySQL connection did not finish within timeout_ms") {
+                return;
+            }
+            outputs.insert(emitter.to_string(), output);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no MySQL pool deadline was reported: {outputs:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

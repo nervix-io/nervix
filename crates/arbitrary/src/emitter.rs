@@ -319,7 +319,7 @@ impl Arbitrary<'_> {
             }
             EmitterEntityKind::Postgres(PostgresEmitterEntity::Table) => {
                 let client = self.name();
-                let table = self.emitter_table_name();
+                let table = self.postgres_table_name();
                 let values = self.value_mappings(1);
                 let conflict_action = self.postgres_conflict_action(&values);
                 EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
@@ -521,17 +521,22 @@ impl Arbitrary<'_> {
     /// A Postgres conflict action. `DO NOTHING` may name no conflict target; `DO UPDATE` needs the
     /// one it updates.
     ///
-    /// Plexus reads a `DO UPDATE` only while a mapped column stays outside its target to be updated,
-    /// so there the target leaves the first mapped column out. The vocabulary holds any target.
+    /// Plexus names every target column and reads a `DO UPDATE` only while a mapped column stays
+    /// outside its target to be updated, so there the target leaves the first mapped column out.
+    /// The vocabulary holds any target.
     fn postgres_conflict_action(
         &mut self,
         values: &[ClickHouseValueMapping],
     ) -> PostgresConflictAction {
         match self.entropy.byte() % 3 {
             0 => PostgresConflictAction::None,
-            1 => PostgresConflictAction::DoNothing {
-                target: self.conflict_target(0),
-            },
+            1 => {
+                let mut target = self.conflict_target(0);
+                if self.domain == Domain::Plexus {
+                    target.retain(|column| !column.is_empty());
+                }
+                PostgresConflictAction::DoNothing { target }
+            }
             _ => {
                 let mut target = self.conflict_target(1);
                 if self.domain == Domain::Plexus {
@@ -539,7 +544,7 @@ impl Arbitrary<'_> {
                         .first()
                         .assured("the VALUES map declares at least one column")
                         .column;
-                    target.retain(|column| column != updated);
+                    target.retain(|column| !column.is_empty() && column != updated);
                     if target.is_empty() {
                         target.push(format!("{updated}_key"));
                     }
