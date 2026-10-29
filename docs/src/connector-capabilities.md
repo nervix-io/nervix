@@ -839,10 +839,10 @@ Delegated property namespaces: all driver property names. Reserved keys: `allow.
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
 | `addr` | required | URL (pulsar or pulsar+ssl) | Nervix; strict | no | none |
-| `namespace` | optional | string | Nervix; strict | no | none |
-| `tls_allow_insecure_connection` | optional | boolean | Nervix; strict | no | none |
-| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
-| `tls_hostname_verification_enabled` | optional | boolean | Nervix; strict | no | none |
+| `namespace` | optional; default `public/default` | tenant/namespace | Nervix; strict | no | none |
+| `tls_allow_insecure_connection` | optional; requires `addr` to use `pulsar+ssl` | boolean | Nervix; strict | no | none |
+| `tls_ca_file` | optional; requires `addr` to use `pulsar+ssl` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_hostname_verification_enabled` | optional; requires `addr` to use `pulsar+ssl` | boolean | Nervix; strict | no | none |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
