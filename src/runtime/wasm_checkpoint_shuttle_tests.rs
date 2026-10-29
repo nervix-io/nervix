@@ -49,6 +49,7 @@ fn placement() -> RuntimeStatePlacement {
         },
         kind: ModelKind::WasmProcessor,
         identifier: ModelName::parse("guest").assured("a literal processor name is valid"),
+        unit: nervix_models::Unit::Single,
         branch_key: BranchKey::from_fields([(
             FieldName::parse("tenant").assured("a literal field name is valid"),
             RuntimeValue::String("alpha".to_string()),

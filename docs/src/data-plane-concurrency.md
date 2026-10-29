@@ -476,7 +476,7 @@ with the primitive publication boundary's reference update. Domain removal drops
 Domain-clock publication contains lifecycle pause, generation and start-point observations alongside
 its installation. Ingestion reads admission and time from that one publication; Kafka offset polls
 read its generation; generators, processors, materialized relay tasks and subscriptions use the
-clock or lifecycle handle bound at startup. Each WASM state retains its entity assignment slot,
+clock or lifecycle handle bound at startup. Each WASM state retains its unit assignment slot,
 which publishes state identity and checkpoint execution/replica owners together. A generation
 replacement or removal therefore fences a callback without a runtime registry lookup.
 
@@ -790,7 +790,9 @@ yet. On a replica, it carries the owner's announcements to the task that keeps t
 current. It lives and ends with the state it replicates, so a WASM checkpoint or a Kafka offset
 commit offers its revision through the state it already holds, and no checkpoint, commit,
 offer enters a node-wide announcement or progress map. State installation publishes a resolved
-route containing the actual state handle and the entity's existing assignment slot. Frames select
+route containing the actual state handle and the unit's existing assignment slot. Assignment,
+replica polls, materialized publication and freeze state use domain, node and unit keys; an owner
+swap retires only the moved unit's route and retained state. Frames select
 that route from one immutable publication, never from the state, execution or identity registries.
 An announcer retains its selected route for its whole lifetime and reads the current primary and
 replica set from the assignment slot.

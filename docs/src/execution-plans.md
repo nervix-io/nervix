@@ -39,11 +39,17 @@ in the desired schedule, it builds a complete `ExecutionRevision` before asking 
 apply anything. The revision holds:
 
 - the domain and one source digest derived from the complete scheduled domain;
-- typed nodes with identity, schema fingerprint, resolved branch contract, placement, ownership
-  transition, gate relays, and applicable state generations;
+- typed nodes with identity, schema fingerprint, resolved branch contract, gate relays, and
+  unit-keyed placement, ownership transitions, and applicable state generations;
 - activation, resource, entrypoint, emitter, processor, and message-error plans from that same
   schedule; and
-- the ownership-handoff fingerprint computed from the committed schedule's established bytes.
+- the ownership-handoff fingerprint computed from the committed schedule's unit placements.
+
+Each scheduled node owns a map of `Unit::Single`, `Unit::Partition(p)`, or `Unit::Instance(i)`
+placements. The unit carries its primary, assigned nodes, ownership transition, and WASM guest
+generations. The revision and planned resource assignments preserve those unit keys, and schedule
+reassignments name the node and unit together. Current graphs emit one `Single` unit for each node;
+the branch Model records one direct partition while the language has no partition syntax.
 
 The source digest identifies which schedule produced the installed revision. A planned change
 also carries its predecessor digest, so an incremental application is attempted only when the
@@ -336,10 +342,11 @@ error taxonomy and public reporting contract.
 
 ## Placement, Resources, And Recovery
 
-Each typed node carries the scheduled primary, assigned nodes, branch and schema fingerprint,
-ownership transition, and the state components it may own. State placement and restoration use
-that identity, including a WASM processor's branch generations. Relays have one owner; only
-their optional materialized state has scheduler-selected replicas. A configured listener is
+Each typed node carries its branch and schema fingerprint and the state components it may own.
+Each unit carries its scheduled primary, assigned nodes, ownership transition, and guest-state
+generations. State placement and restoration use the node and unit together. Relays currently have
+one `Single` owner; only their optional materialized state has scheduler-selected replicas. A
+configured listener is
 different: it runs on every live server node even when its graph node is not the local primary.
 Remote relay-consumer edges are derived from the same planned nodes and inputs as local tasks.
 
@@ -434,8 +441,10 @@ registration, teardown and observers; recurring operations use the retained capa
 
 ## Replication Routing
 
-State construction publishes resolved replication routes to the installed state and that existing
-assignment slot. Schedule replacement, branch eviction and entity or domain teardown retire those
+State construction publishes resolved replication routes to the installed state and that unit's
+assignment slot. A unit's assignment and materialized publication are keyed by its domain, node,
+and unit; two units of one node never share an owner slot or checkpoint route. Schedule replacement,
+branch eviction and unit, entity or domain teardown retire those
 routes before removing registry entries. Frame handlers read the immutable route publication;
 announcers and entity catch-up tasks retain their route or lifecycle and never revisit execution
 or identity registries. See [Data-Plane Concurrency](./data-plane-concurrency.md#checkpoint-replication).

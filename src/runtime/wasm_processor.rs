@@ -960,6 +960,7 @@ mod tests {
             },
             kind: ModelKind::WasmProcessor,
             identifier: ModelName::parse("sessionizer").expect("valid identifier"),
+            unit: nervix_models::Unit::Single,
             branch_key: tenant_branch("alpha"),
         }
     }
@@ -1401,8 +1402,8 @@ mod tests {
             }),
             SchemaFingerprint::from_digest([7; 32]),
         );
-        scheduled.primary_node = Some(local_node.clone());
-        scheduled.assigned_nodes = vec![local_node.clone()];
+        scheduled.single_unit_mut().primary_node = Some(local_node.clone());
+        scheduled.single_unit_mut().assigned_nodes = vec![local_node.clone()];
         let schema = nervix_models::SchemaName::parse("session_event").expect("valid schema name");
         let schema_node =
             scheduled_model(nervix_models::Model::Schema(nervix_models::CreateSchema {

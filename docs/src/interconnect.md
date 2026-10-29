@@ -1478,7 +1478,8 @@ Staging and publication run on the admitted filesystem worker class. Authority i
 the storage job after admission, so waiting for a worker cannot preserve an expired installation
 right. Durable synchronization does not run on the async reactor.
 
-A runtime-state placement names exactly the state it addresses: the domain, entity, state kind, and
+A runtime-state placement names exactly the state it addresses: the domain, entity, execution unit,
+state kind, and
 concrete branch; for every kind of state except branch-aggregated metrics and Kafka domain offsets,
 the fingerprint of the schemas the state is laid out by; and for WASM processor guest state the
 generation the committed schedule names for that branch. Branch-aggregated metrics and Kafka domain
@@ -1495,6 +1496,10 @@ fingerprint to place its schema-bound state under, and refuses to place it rathe
 state under an assumed identity. A replication acknowledgement counts only toward the placement it
 names, so an acknowledgement for a replaced generation never satisfies the replica quorum of the
 current one.
+Checkpoint descriptions, replication requests and acknowledgements carry that unit in their typed
+placement envelope. Ownership-handoff and forced-recovery requests carry the unit separately as
+part of their transition identity; a destination may prepare and activate one unit without
+replacing a sibling unit's checkpoints.
 The schedule fingerprint an ownership handoff or forced recovery is bound to covers those schema
 fingerprints and generations, so a preparation staged against an earlier schema or generation cannot
 activate after a later one is committed. The control plane computes the exact fingerprint of the
@@ -1576,7 +1581,7 @@ restarts from the catalog's beginning when the replica has no cursor, when its c
 another catalog, such as one a replaced or restarted owner kept, and when it is older than the
 oldest removal the catalog kept. An owner that holds no branch state of the entity answers that it
 holds none. Both requests are answered only while the answering node is assigned the placement. Admission
-reads the retained entity assignment from the immutable routing publication; state and catalog
+reads the retained unit assignment from the immutable routing publication; state and catalog
 selection never reads the execution, identity or replicated-state registries. Route withdrawal
 ends the exact state handle before replacement, while an already admitted request may finish on
 the state it borrowed. A

@@ -2,9 +2,8 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The cluster and domain schedules, one scheduled node with its placement, replicas
-//!   and Kafka partition assignment, and the ownership transitions and state resets a schedule
-//!   records.
+//! - **Owns.** The cluster and domain schedules, the placement and state lifetime of each unit of
+//!   a scheduled node, Kafka partition assignments, and recorded ownership transitions and resets.
 //! - **Depends on.** The Models a scheduled node configures, node and cluster names, and the WASM
 //!   state generations a transition carries.
 //! - **Must not know.** How a placement is decided, how a schedule is applied to a node, or how
@@ -28,11 +27,11 @@ use strum::AsRefStr;
 
 use crate::{
     BranchKeyFingerprint, ClusterNodeName, CommandExecutionReference, CreateWasmProcessor,
-    DomainName, IngestorEntity, KafkaIngestor, KafkaOffsetMode, Model, ModelKind, ModelName,
-    NodeRef, ResolvedBranching, SchemaFingerprint, UniquelyKindedModel, WasmSavedStateRejection,
-    WasmStateGeneration, WasmStateGenerations, WasmStateRecoveries, WasmStateRecoveryAdmission,
-    WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase, WasmStateResetReason,
-    WasmStateResetScope,
+    DomainName, DomainNodeRef, IngestorEntity, KafkaIngestor, KafkaOffsetMode, Model, ModelKind,
+    ModelName, NodeRef, ResolvedBranching, SchemaFingerprint, UniquelyKindedModel,
+    WasmSavedStateRejection, WasmStateGeneration, WasmStateGenerations, WasmStateRecoveries,
+    WasmStateRecoveryAdmission, WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase,
+    WasmStateResetReason, WasmStateResetScope,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -60,6 +59,73 @@ impl FromIterator<DomainSchedule> for ClusterSchedule {
 /// A domain's scheduled nodes, in the order the registry emitted them and keyed by runtime node
 /// identity so callers resolve a node by kind and identifier without scanning the sequence.
 pub type ScheduledNodes = IndexMap<NodeRef, ScheduledNode>;
+
+/// One independently placed execution of a logical node. Partition and instance numbers are
+/// zero-based within that node. A graph without declared partitions or external instances has
+/// exactly one `Single` unit.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum Unit {
+    Single,
+    Partition(u32),
+    Instance(u32),
+}
+
+/// The identity of one unit of a scheduled node, shared by planning and state ownership.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct NodeUnitRef {
+    pub node: NodeRef,
+    pub unit: Unit,
+}
+
+impl NodeUnitRef {
+    pub fn new(node: NodeRef, unit: Unit) -> Self {
+        Self { node, unit }
+    }
+}
+
+/// A scheduled unit in its owning domain. Shared by state assignment and ownership records.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct DomainNodeUnitRef {
+    pub entity: DomainNodeRef,
+    pub unit: Unit,
+}
+
+impl DomainNodeUnitRef {
+    pub fn new(entity: DomainNodeRef, unit: Unit) -> Self {
+        Self { entity, unit }
+    }
+
+    pub fn single(entity: DomainNodeRef) -> Self {
+        Self::new(entity, Unit::Single)
+    }
+}
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -115,15 +181,17 @@ impl DomainSchedule {
         })
     }
 
-    /// The entities this schedule names `node` the primary of, in the order it places them.
-    pub fn primary_entities_on(&self, node: &ClusterNodeName) -> Vec<NodeRef> {
-        let mut entities = Vec::new();
-        for (entity, scheduled) in &self.nodes {
-            if scheduled.primary_node() == Some(node) {
-                entities.push(entity.clone());
-            }
-        }
-        entities
+    /// The units whose state this cluster node is responsible for archiving.
+    pub fn primary_units_on(&self, node: &ClusterNodeName) -> Vec<NodeUnitRef> {
+        self.nodes
+            .iter()
+            .flat_map(|(entity, scheduled)| {
+                scheduled.units.iter().filter_map(move |(unit, placement)| {
+                    (placement.primary_node.as_ref() == Some(node))
+                        .then(|| NodeUnitRef::new(entity.clone(), *unit))
+                })
+            })
+            .collect()
     }
 }
 
@@ -139,6 +207,7 @@ pub struct ScheduledModel<'a, M> {
 )]
 pub struct PlacementGroupSchedule {
     pub members: Vec<NodeRef>,
+    pub unit: Unit,
     pub primary_node: Option<ClusterNodeName>,
 }
 
@@ -274,7 +343,64 @@ impl KafkaPartitionSchedule {
     }
 }
 
-/// One runtime node of a domain schedule: the configuration it runs and where it is placed.
+/// Placement, ownership transition and guest-state lifetime of one execution unit.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ScheduledUnit {
+    pub primary_node: Option<ClusterNodeName>,
+    pub assigned_nodes: Vec<ClusterNodeName>,
+    pub ownership_transition: Option<OwnershipTransition>,
+    /// Present only for a WASM processor. Every unit owns its own branch generations.
+    pub wasm_state_generations: Option<WasmStateGenerations>,
+    pub wasm_state_reset: Option<WasmStateReset>,
+    pub wasm_state_recoveries: Option<WasmStateRecoveries>,
+}
+
+impl ScheduledUnit {
+    pub fn is_primary_on(&self, node: &ClusterNodeName) -> bool {
+        self.primary_node
+            .as_ref()
+            .is_some_and(|primary| primary == node)
+            || (self.primary_node.is_none() && self.assigned_nodes.contains(node))
+    }
+
+    pub fn execution_node(&self) -> Option<&ClusterNodeName> {
+        self.primary_node
+            .as_ref()
+            .or_else(|| match self.assigned_nodes.as_slice() {
+                [node] => Some(node),
+                _ => None,
+            })
+    }
+
+    pub fn replica_nodes(&self) -> Vec<&ClusterNodeName> {
+        self.assigned_nodes
+            .iter()
+            .filter(|node| Some(*node) != self.primary_node.as_ref())
+            .collect()
+    }
+
+    fn for_model(config: &Model) -> Self {
+        let (wasm_state_generations, wasm_state_recoveries) = match config {
+            Model::WasmProcessor(_) => (
+                Some(WasmStateGenerations::first()),
+                Some(WasmStateRecoveries::empty()),
+            ),
+            _ => (None, None),
+        };
+        Self {
+            primary_node: None,
+            assigned_nodes: Vec::new(),
+            ownership_transition: None,
+            wasm_state_generations,
+            wasm_state_reset: None,
+            wasm_state_recoveries,
+        }
+    }
+}
+
+/// One logical runtime node of a domain schedule: its configuration and execution units.
 ///
 /// The kind and the identifier are read from the configuration when the entry is built, so an
 /// entry can never describe itself as a node its configuration is not. That is why every reader
@@ -293,44 +419,21 @@ pub struct ScheduledNode {
     pub schema_fingerprint: SchemaFingerprint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kafka_partition_schedule: Option<KafkaPartitionSchedule>,
-    #[serde(default)]
-    pub primary_node: Option<ClusterNodeName>,
-    #[serde(default)]
-    pub assigned_nodes: Vec<ClusterNodeName>,
-    pub ownership_transition: Option<OwnershipTransition>,
-    /// The guest-state generation of every branch when this node is a WASM processor, and nothing
-    /// for every other kind. Only [`Self::new`] decides which, from the configuration it places.
-    wasm_state_generations: Option<WasmStateGenerations>,
-    /// The latest coordinated reset of this WASM processor, including an incomplete publication
-    /// whose selected scope must remain fenced. Every other kind of node carries nothing.
-    wasm_state_reset: Option<WasmStateReset>,
-    /// The recovery attempts this WASM processor's refused guest-state lifetimes have spent. Every
-    /// other kind of node carries nothing, because no other kind restores guest state.
-    wasm_state_recoveries: Option<WasmStateRecoveries>,
+    pub units: IndexMap<Unit, ScheduledUnit>,
 }
 
 impl ScheduledNode {
     /// An unplaced entry for `config`, whose records are laid out by the schemas `schema_fingerprint`
     /// covers, before a scheduler decides which cluster nodes run it.
     pub fn new(config: Model, schema_fingerprint: SchemaFingerprint) -> Self {
-        let mut wasm_state_generations = None;
-        let mut wasm_state_recoveries = None;
-        if let Model::WasmProcessor(_) = &config {
-            wasm_state_generations = Some(WasmStateGenerations::first());
-            wasm_state_recoveries = Some(WasmStateRecoveries::empty());
-        }
+        let unit = ScheduledUnit::for_model(&config);
         Self {
             identifier: config.name(),
             config: Box::new(config),
             resolved_branching: None,
             schema_fingerprint,
             kafka_partition_schedule: None,
-            primary_node: None,
-            assigned_nodes: Vec::new(),
-            ownership_transition: None,
-            wasm_state_generations,
-            wasm_state_reset: None,
-            wasm_state_recoveries,
+            units: IndexMap::from([(Unit::Single, unit)]),
         }
     }
 
@@ -355,9 +458,24 @@ impl ScheduledNode {
         primary: Option<ClusterNodeName>,
         assigned: Vec<ClusterNodeName>,
     ) -> Self {
-        self.primary_node = primary;
-        self.assigned_nodes = assigned;
+        let unit = self.single_unit_mut();
+        unit.primary_node = primary;
+        unit.assigned_nodes = assigned;
         self
+    }
+
+    /// The sole unit of a graph that has not declared partitions or external instances.
+    pub fn single_unit(&self) -> &ScheduledUnit {
+        self.units
+            .get(&Unit::Single)
+            .assured("current graphs construct exactly one Single unit per node")
+    }
+
+    /// The sole unit of a graph that has not declared partitions or external instances.
+    pub fn single_unit_mut(&mut self) -> &mut ScheduledUnit {
+        self.units
+            .get_mut(&Unit::Single)
+            .assured("current graphs construct exactly one Single unit per node")
     }
 
     /// The kind of runtime node this entry configures.
@@ -374,17 +492,17 @@ impl ScheduledNode {
 
     /// The guest-state generation of every branch, when this node is a WASM processor.
     pub fn wasm_state_generations(&self) -> Option<&WasmStateGenerations> {
-        self.wasm_state_generations.as_ref()
+        self.single_unit().wasm_state_generations.as_ref()
     }
 
     /// The latest coordinated guest-state reset this WASM processor published.
     pub fn wasm_state_reset(&self) -> Option<&WasmStateReset> {
-        self.wasm_state_reset.as_ref()
+        self.single_unit().wasm_state_reset.as_ref()
     }
 
     /// The recovery attempts this WASM processor's refused guest-state lifetimes have spent.
     pub fn wasm_state_recoveries(&self) -> Option<&WasmStateRecoveries> {
-        self.wasm_state_recoveries.as_ref()
+        self.single_unit().wasm_state_recoveries.as_ref()
     }
 
     /// Decide what the refused `generation` of `scope` is entitled to, recording an admitted
@@ -398,7 +516,7 @@ impl ScheduledNode {
         generation: WasmStateGeneration,
         rejection: WasmSavedStateRejection,
     ) -> Option<WasmStateRecoveryAdmission> {
-        let recoveries = self.wasm_state_recoveries.as_mut()?;
+        let recoveries = self.single_unit_mut().wasm_state_recoveries.as_mut()?;
         let request = scope.recovery_request(generation);
         Some(recoveries.admit(scope, generation, rejection, request))
     }
@@ -412,7 +530,7 @@ impl ScheduledNode {
         request: &CommandExecutionReference,
         outcome: WasmStateRecoveryOutcome,
     ) -> bool {
-        let Some(recoveries) = self.wasm_state_recoveries.as_mut() else {
+        let Some(recoveries) = self.single_unit_mut().wasm_state_recoveries.as_mut() else {
             return false;
         };
         recoveries.settle(scope, request, outcome)
@@ -433,32 +551,34 @@ impl ScheduledNode {
         let binding_changed = processor.resource != existing_processor.resource
             || processor.resource_version != existing_processor.resource_version
             || processor.file != existing_processor.file;
-        let Some(existing_generations) = existing.wasm_state_generations.as_ref() else {
+        let existing_unit = existing.single_unit();
+        let Some(existing_generations) = existing_unit.wasm_state_generations.as_ref() else {
             return;
         };
         let mut generations = existing_generations.clone();
         if binding_changed {
             generations.begin_every_branch();
         }
-        self.wasm_state_generations = Some(generations);
-        self.wasm_state_reset = if binding_changed {
+        let unit = self.single_unit_mut();
+        unit.wasm_state_generations = Some(generations);
+        unit.wasm_state_reset = if binding_changed {
             None
         } else {
-            existing.wasm_state_reset.clone()
+            existing_unit.wasm_state_reset.clone()
         };
         // A recovery attempt is spent on the lifetime it was admitted for. A changed binding
         // restarts every lifetime, so the attempts recorded against the previous ones no longer
         // name anything this entry can refuse.
-        self.wasm_state_recoveries = match binding_changed {
+        unit.wasm_state_recoveries = match binding_changed {
             true => Some(WasmStateRecoveries::empty()),
-            false => existing.wasm_state_recoveries.clone(),
+            false => existing_unit.wasm_state_recoveries.clone(),
         };
     }
 
     /// Start a new guest-state lifetime for every branch of this WASM processor, including branches
     /// that exist only as persisted snapshots. Every other kind of node has no guest state.
     pub fn begin_wasm_state_generation(&mut self) {
-        if let Some(generations) = self.wasm_state_generations.as_mut() {
+        if let Some(generations) = self.single_unit_mut().wasm_state_generations.as_mut() {
             generations.begin_every_branch();
         }
     }
@@ -466,7 +586,7 @@ impl ScheduledNode {
     /// Start a new guest-state lifetime for one concrete branch of this WASM processor, leaving every
     /// other branch in the lifetime it has.
     pub fn begin_wasm_branch_state_generation(&mut self, branch: BranchKeyFingerprint) {
-        if let Some(generations) = self.wasm_state_generations.as_mut() {
+        if let Some(generations) = self.single_unit_mut().wasm_state_generations.as_mut() {
             generations.begin_branch(branch);
         }
     }
@@ -482,10 +602,11 @@ impl ScheduledNode {
         scope: WasmStateResetScope,
         reason: WasmStateResetReason,
     ) -> bool {
-        let Some(generations) = self.wasm_state_generations.as_mut() else {
+        let unit = self.single_unit_mut();
+        let Some(generations) = unit.wasm_state_generations.as_mut() else {
             return false;
         };
-        if self
+        if unit
             .wasm_state_reset
             .as_ref()
             .is_some_and(|reset| reset.request() == &request && reset.scope() == &scope)
@@ -493,13 +614,13 @@ impl ScheduledNode {
             return false;
         }
         generations.begin_reset(&scope);
-        self.wasm_state_reset = Some(WasmStateReset::publishing(request, scope, reason));
+        unit.wasm_state_reset = Some(WasmStateReset::publishing(request, scope, reason));
         true
     }
 
     /// Mark the initial checkpoint of this exact reset durable and ready for runtime admission.
     pub fn complete_wasm_state_reset(&mut self, request: &CommandExecutionReference) -> bool {
-        let Some(reset) = self.wasm_state_reset.as_mut() else {
+        let Some(reset) = self.single_unit_mut().wasm_state_reset.as_mut() else {
             return false;
         };
         if reset.request() != request || reset.phase() == WasmStateResetPhase::Ready {
@@ -558,25 +679,27 @@ impl ScheduledNode {
     }
 
     pub fn is_assigned_to(&self, node_id: &ClusterNodeName) -> bool {
-        self.assigned_nodes
+        self.single_unit()
+            .assigned_nodes
             .iter()
             .any(|assigned| assigned == node_id)
     }
 
     pub fn assigned_single_node(&self) -> Option<&ClusterNodeName> {
-        match self.assigned_nodes.as_slice() {
+        match self.single_unit().assigned_nodes.as_slice() {
             [node_id] => Some(node_id),
             _ => None,
         }
     }
 
     pub fn primary_node(&self) -> Option<&ClusterNodeName> {
-        self.primary_node.as_ref()
+        self.single_unit().primary_node.as_ref()
     }
 
     pub fn replica_nodes(&self) -> Vec<&ClusterNodeName> {
         let primary = self.primary_node();
-        self.assigned_nodes
+        self.single_unit()
+            .assigned_nodes
             .iter()
             .filter(|node_id| Some(*node_id) != primary)
             .collect()
@@ -610,11 +733,11 @@ impl ScheduledNode {
     /// cluster node, and otherwise the primary, or each assigned node when there is no primary.
     pub fn execution_nodes(&self) -> &[ClusterNodeName] {
         if self.executes_on_every_cluster_node() {
-            return &self.assigned_nodes;
+            return &self.single_unit().assigned_nodes;
         }
-        match &self.primary_node {
+        match &self.single_unit().primary_node {
             Some(primary) => std::slice::from_ref(primary),
-            None => &self.assigned_nodes,
+            None => &self.single_unit().assigned_nodes,
         }
     }
 
@@ -622,7 +745,13 @@ impl ScheduledNode {
     /// A schedule difference that fails this check is an assignment change, which activates
     /// narrowly instead of rebuilding the domain.
     pub fn has_same_assignment_as(&self, other: &Self) -> bool {
-        self.primary_node == other.primary_node && self.assigned_nodes == other.assigned_nodes
+        self.units
+            .iter()
+            .map(|(key, unit)| (key, &unit.primary_node, &unit.assigned_nodes))
+            .eq(other
+                .units
+                .iter()
+                .map(|(key, unit)| (key, &unit.primary_node, &unit.assigned_nodes)))
     }
 }
 

@@ -442,7 +442,7 @@ impl Runtime {
             self.inner.in_flight_by_domain.remove(&domain);
             self.inner
                 .frozen_ownership_handoff_entities
-                .retain(|key, _| key.domain != domain);
+                .retain(|key, _| key.entity.domain != domain);
             self.inner
                 .in_flight_by_ingestor
                 .retain(|key, _| key.domain != domain);
@@ -1700,6 +1700,7 @@ mod tests {
                     name: named("by_tenant"),
                     schema: named("tenant_key"),
                     ttl: "5m".to_string(),
+                    partitions: nervix_models::BranchPartitions::ONE,
                     eviction: None,
                 })),
                 scheduled_model(tenant_relay("incoming", RelayBranching::unbranched())),

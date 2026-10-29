@@ -230,7 +230,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    RestoredLifecycle = 8,
+    RestoredLifecycle = 9,
 }
 
 #[derive(Debug)]

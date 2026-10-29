@@ -547,7 +547,7 @@ fn stopped_schedule_move_keeps_the_execution_gate_without_reporting_a_pause() {
     let transition = schedule
         .nodes
         .get(&expected_moved)
-        .and_then(|node| node.ownership_transition.as_ref())
+        .and_then(|node| node.single_unit().ownership_transition.as_ref())
         .verified("the admitted target schedule freezes its ownership transition");
     assert_eq!(transition.source.as_str(), "node-a");
     assert_eq!(transition.destination.as_str(), "node-b");

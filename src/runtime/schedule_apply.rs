@@ -741,6 +741,9 @@ impl Runtime {
             gate_relays,
             forced_recovery_relays,
         } = change;
+        let reassignments =
+            SortedSet::from_unsorted(reassignments.iter().map(|unit| unit.node.clone()).collect())
+                .into_vec();
         let activation_plan = &revision.activation;
         let resource_plans = &revision.resources;
         let entrypoints = &revision.entrypoints;
@@ -750,7 +753,7 @@ impl Runtime {
         // A reassignment only replaces this cluster node's runtime when the node stopped or
         // started executing here. A node that keeps executing here, such as a server-side ingestor
         // that merely lost one of its other placements, is left running.
-        let relocated = self.locally_relocated_nodes(domain, &revision, reassignments);
+        let relocated = self.locally_relocated_nodes(domain, &revision, &reassignments);
         let entities = SortedSet::from_unsorted(
             entities
                 .iter()
@@ -825,7 +828,7 @@ impl Runtime {
         // not discard the newly attached state instance.
         self.install_state_identities(&revision);
         let mut materialized_routing_changed = self
-            .rebind_reassigned_nodes(domain, &revision, reassignments, local_node_id)
+            .rebind_reassigned_nodes(domain, &revision, &reassignments, local_node_id)
             .await?;
 
         for entity in entities {
@@ -1747,9 +1750,10 @@ impl Runtime {
                         state: RuntimeState::KafkaOffset,
                         kind: node.kind(),
                         identifier: node.identifier.clone(),
+                        unit: nervix_models::Unit::Single,
                         branch_key: None,
                     },
-                    node.primary_node.clone(),
+                    node.single_unit().primary_node.clone(),
                     replica_nodes,
                     required_replica_acks,
                     Some(local_node_id),
@@ -1795,6 +1799,7 @@ impl Runtime {
                         state: RuntimeState::BranchAggregated,
                         kind: node.kind(),
                         identifier: node.identifier.clone(),
+                        unit: nervix_models::Unit::Single,
                         branch_key: None,
                     },
                     aggregate_primary_node.clone(),
@@ -1853,7 +1858,7 @@ impl Runtime {
         if let Some(local_node_id) = local_node_id {
             return node.executes_on(local_node_id);
         }
-        node.primary_node.is_none() && node.assigned_nodes.is_empty()
+        node.single_unit().primary_node.is_none() && node.single_unit().assigned_nodes.is_empty()
     }
 }
 
@@ -2666,11 +2671,11 @@ mod tests {
         let installed = runtime
             .inner
             .state_identities
-            .get(&DomainNodeRef::node_in(
+            .get(&DomainNodeUnitRef::single(DomainNodeRef::node_in(
                 domain,
                 ModelKind::Deduplicator,
                 ModelName::from(&processor),
-            ))
+            )))
             .and_then(|slot| {
                 slot.load_full()
                     .map(|assignment| assignment.identity.schema_fingerprint)

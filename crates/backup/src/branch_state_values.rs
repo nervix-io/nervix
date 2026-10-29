@@ -50,7 +50,12 @@ impl Deduplicator {
         let descriptor = &self.descriptor;
         let branch = descriptor.branch_fingerprint.as_ref();
         sections.push(Section::record(
-            SectionPath::deduplicator_descriptor(&descriptor.domain, &descriptor.entity, branch),
+            SectionPath::deduplicator_descriptor(
+                &descriptor.domain,
+                &descriptor.entity,
+                descriptor.unit,
+                branch,
+            ),
             descriptor,
         ));
         for (index, keys) in self.groups.iter().enumerate() {
@@ -59,6 +64,7 @@ impl Deduplicator {
                 SectionPath::deduplicator_keys(
                     &descriptor.domain,
                     &descriptor.entity,
+                    descriptor.unit,
                     branch,
                     group,
                 ),
@@ -74,7 +80,12 @@ impl Window {
         let descriptor = &self.descriptor;
         let branch = descriptor.branch_fingerprint.as_ref();
         sections.push(Section::record(
-            SectionPath::window_descriptor(&descriptor.domain, &descriptor.entity, branch),
+            SectionPath::window_descriptor(
+                &descriptor.domain,
+                &descriptor.entity,
+                descriptor.unit,
+                branch,
+            ),
             descriptor,
         ));
         for (index, group) in self.groups.iter().enumerate() {
@@ -84,6 +95,7 @@ impl Window {
                 SectionPath::window_argument_columns(
                     &descriptor.domain,
                     &descriptor.entity,
+                    descriptor.unit,
                     branch,
                     number,
                 ),
@@ -94,6 +106,7 @@ impl Window {
                 SectionPath::window_input_rows(
                     &descriptor.domain,
                     &descriptor.entity,
+                    descriptor.unit,
                     branch,
                     number,
                 ),
@@ -206,6 +219,7 @@ impl Values<'_> {
             descriptor: DeduplicatorStateDescriptor {
                 domain: domain.clone(),
                 entity,
+                unit: self.unit(),
                 schema: SchemaFingerprint::from_digest(self.digest()),
                 branch_fingerprint,
                 branch,
@@ -305,6 +319,7 @@ impl Values<'_> {
             descriptor: WindowStateDescriptor {
                 domain: domain.clone(),
                 entity,
+                unit: self.unit(),
                 schema: SchemaFingerprint::from_digest(self.digest()),
                 model: WindowModelDigest::from_digest(self.digest()),
                 branch_fingerprint,

@@ -96,7 +96,10 @@ impl Runtime {
                     checkpoints.push((placement, snapshot));
                 }
                 prepared_runtime_state_handoffs.insert(
-                    DomainNodeRef::node_in(persisted.domain, persisted.kind, persisted.identifier),
+                    DomainNodeUnitRef::new(
+                        DomainNodeRef::node_in(persisted.domain, persisted.kind, persisted.identifier),
+                        persisted.unit,
+                    ),
                     PreparedRuntimeStateHandoff {
                         coordination: persisted.coordination,
                         operation_id: persisted.operation_id,
@@ -104,6 +107,7 @@ impl Runtime {
                         destination: persisted.destination,
                         source_incarnation: persisted.source_incarnation,
                         destination_incarnation: persisted.destination_incarnation,
+                        unit: persisted.unit,
                         base_schedule_fingerprint: persisted.base_schedule_fingerprint,
                         target_schedule_fingerprint: persisted.target_schedule_fingerprint,
                         activation_authorization: super::state_replication::
