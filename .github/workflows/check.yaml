@@ -102,10 +102,13 @@ jobs:
         with:
           components: rustfmt
 
+      # GitHub's runner image, which Ubicloud runs, has no ripgrep, and `just validate-dns-dependencies`
+      # needs it. install-action has no package of its own for ripgrep, so cargo-binstall installs it.
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just@latest,cargo-autoinherit,trunk,wild-linker
+          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just@latest,cargo-autoinherit,trunk,wild-linker,ripgrep
+          fallback: cargo-binstall
 
       - name: Install Latest LLVM
         run: |
