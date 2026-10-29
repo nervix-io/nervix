@@ -163,6 +163,7 @@ tags = [
   "@forced_failover_delivery",
   "@mqtt_parallel_gather_at_quiesce",
   "@sqs_receive_at_quiesce",
+  "@sqs_ingestor_receive_deadline",
   "@kept_ingestor_offsets",
   "@redis_subscription_backpressure",
   "@redis_idle_subscription",
@@ -3572,6 +3573,26 @@ id = "stress.sqs-receive-at-quiesce"
 invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message reaches the relay without waiting for its visibility timeout, on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "An SQS QUEUE ingestor on one and three nodes whose receive runs out of timeout_ms after its long poll against a paused endpoint, the failure DESCRIBE INGESTOR reports, the ingestor's resumes on its retry policy while the endpoint stays paused, and the resume that delivers the next message once the endpoint answers again, beside the tracked locks of the Plexus commands, the relay subscription and the cluster's teardown. The SQS client, its request deadlines, the paused endpoint and the retry wait are untracked."
+examples = 2
+feature = "tests/features/runtime/stalled_peers.feature"
+id = "scenario.sqs-ingestor-receive-deadline"
+invariant = "An SQS QUEUE ingestor whose service stops answering fails its receive within its long poll and timeout_ms and reports it, and a resume on its retry policy delivers the next message once the service answers again, on one and three nodes."
+invocation = "scenarios"
+scenario = "An SQS QUEUE ingestor whose service stops answering is reported within timeout_ms"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an SQS QUEUE ingestor on one and three nodes whose receive runs out of timeout_ms after its long poll against a paused endpoint, the failure DESCRIBE INGESTOR reports, the ingestor's resumes on its retry policy while the endpoint stays paused, and the resume that delivers the next message once the endpoint answers again, beside the tracked locks of the Plexus commands, the relay subscription and the cluster's teardown. The SQS client, its request deadlines, the paused endpoint and the retry wait are untracked."
+examples = 2
+feature = "tests/features/runtime/stalled_peers.feature"
+id = "stress.sqs-ingestor-receive-deadline"
+invariant = "An SQS QUEUE ingestor whose service stops answering fails its receive within its long poll and timeout_ms and reports it, and a resume on its retry policy delivers the next message once the service answers again, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "An SQS QUEUE ingestor whose service stops answering is reported within timeout_ms"
 selections = ["deloxide-stress"]
 
 [[workload]]
