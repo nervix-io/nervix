@@ -49,7 +49,7 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
     ClientConfigSchema::new(
         &[
             K::optional("auto.offset.reset", V::String).driver(),
-            K::optional("bootstrap.servers", V::String).driver(),
+            K::required("bootstrap.servers", V::String).driver(),
             K::optional("client.id", V::String).driver(),
             K::optional("fetch.wait.max.ms", V::UnsignedInteger).driver(),
             K::optional("heartbeat.interval.ms", V::PositiveInteger).driver(),
@@ -455,3 +455,7 @@ super::publishing::emitter_modes! {
         Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck,
     }
 }
+
+#[cfg(test)]
+#[path = "kafka_tests.rs"]
+mod tests;

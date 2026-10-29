@@ -803,7 +803,7 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
 | `auto.offset.reset` | optional | string | driver; best effort | no | none |
-| `bootstrap.servers` | optional | string | driver; best effort | no | none |
+| `bootstrap.servers` | required | string | driver; best effort | no | none |
 | `client.id` | optional | string | driver; best effort | no | none |
 | `fetch.wait.max.ms` | optional | unsigned integer | driver; best effort | no | none |
 | `heartbeat.interval.ms` | optional | positive integer | driver; best effort | no | none |
