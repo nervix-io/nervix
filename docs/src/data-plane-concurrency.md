@@ -1829,7 +1829,7 @@ and cleanup paths retain their tracked-lock coverage; phase timing itself establ
 interleaving or memory-ordering guarantee. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
 owns the diagnostic contract.
 
-The test-only backup cut registry releases its watch-held lease and capture gates before clearing
+The test-only backup cut registry releases its watch-held lease, drain and capture gates before clearing
 the map during scenario cleanup. Existing borrowers observe release; later cuts encounter no
 gate. Gate-owner tests with a paused clock cover waiting cuts, timed holds and later arrivals.
 The supervised failed-body Cucumber fixture reaches both public boundaries on one and three nodes

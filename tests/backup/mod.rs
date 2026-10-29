@@ -311,6 +311,24 @@ fn when_backup_lease_pause_released(world: &mut ScenarioWorld, raw_domain: Strin
         .release_backup_cut_pause(&domain, BackupCutBoundary::Lease);
 }
 
+/// Every cut of the domain whose pause every live node applied waits `seconds` from its own
+/// arrival before its drain begins, as a slow application of the pause across the cluster would.
+#[given(
+    expr = "the backup cut for domain {string} will be held for {int} seconds once its pause is \
+            applied"
+)]
+fn given_backup_cut_held_once_paused(world: &mut ScenarioWorld, raw_domain: String, seconds: u64) {
+    let domain = scenario_domain(world, &raw_domain);
+    world
+        .fault_injection
+        .pause_backup_cut_on(domain.clone(), BackupCutBoundary::Drain);
+    world.fault_injection.hold_backup_cuts_for(
+        &domain,
+        BackupCutBoundary::Drain,
+        Duration::from_secs(seconds),
+    );
+}
+
 #[then("the background CLI backup finishes")]
 async fn then_background_backup_finishes(world: &mut ScenarioWorld) {
     let task = world
