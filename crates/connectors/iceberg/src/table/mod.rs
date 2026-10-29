@@ -40,14 +40,6 @@ use std::{fs::File, ops::Range, path::PathBuf, time::Duration};
 use ::iceberg::{
     Catalog, CatalogBuilder, Error as IcebergError, ErrorKind as IcebergErrorKind, NamespaceIdent,
     Result as IcebergResult, TableIdent,
-    io::{
-        ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID,
-        ADLS_CLIENT_SECRET, ADLS_SAS_TOKEN, ADLS_TENANT_ID, CLIENT_REGION, GCS_ALLOW_ANONYMOUS,
-        GCS_CREDENTIALS_JSON, GCS_DISABLE_CONFIG_LOAD, GCS_DISABLE_VM_METADATA, GCS_NO_AUTH,
-        GCS_SERVICE_PATH, GCS_TOKEN, S3_ACCESS_KEY_ID, S3_ALLOW_ANONYMOUS, S3_DISABLE_CONFIG_LOAD,
-        S3_DISABLE_EC2_METADATA, S3_ENDPOINT, S3_PATH_STYLE_ACCESS, S3_REGION,
-        S3_SECRET_ACCESS_KEY, S3_SESSION_TOKEN,
-    },
     spec::{DataFile, DataFileFormat, Snapshot, TableProperties},
     table::Table,
     transaction::{ApplyTransactionAction, Transaction},
@@ -61,7 +53,7 @@ use ::iceberg::{
         },
     },
 };
-use ahash::{HashMap, HashSet};
+use ahash::HashSet;
 use arch_into::ArchInto as _;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, FixedSizeListArray, LargeListArray, ListArray, MapArray,
@@ -80,14 +72,15 @@ use nervix_connector::{
     EmitterRecordAcknowledgements, EmitterRecordPosition, EmitterStagedCommit, EmitterStartResult,
     EmitterWriteError, EmitterWriteResult, MappedEmitterCarrier, MappedEmitterRows,
     MeasuredRequest, PerRecordOutcome, RowEmitter, RowRequest, RowRequestLimits,
-    physical_time::actual_utc_now,
+    RustlsClientConfigProvider, physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
 use nervix_execution::{
     AdmissionError, CpuClass, Executor, MemoryClass, QueueAdmission, Reservation, StorageClass,
 };
 use nervix_models::{
-    ClientConfigEntry, EmitterBatchPolicy, IcebergStorageBackend, IcebergTableName, Timestamp,
+    ClientConfigEntry, EmitterBatchPolicy, IcebergCatalogProperties, IcebergStorageBackend,
+    IcebergTableName, Timestamp,
 };
 use nervix_primitives::{sync::StdArc, time::Instant};
 pub use offline_config::{validate_catalog_configuration, validate_client_configuration};
@@ -445,11 +438,40 @@ struct IcebergLoadedGroup {
     charge: Reservation,
 }
 
-/// The object-store properties one backend's client configuration is translated into.
-#[derive(Debug, Clone)]
-struct IcebergObjectStoreProperties {
-    backend: IcebergStorageBackend,
-    props: HashMap<String, String>,
+/// Which of an Iceberg emitter's two HTTP clients could not be configured from its TLS files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum IcebergClientTlsError {
+    /// The REST catalog client, configured from the `ICEBERG_REST` client's files.
+    #[error("failed to configure the Iceberg catalog client's TLS")]
+    Catalog,
+    /// The object-store client, configured from the storage client's files.
+    #[error("failed to configure the Iceberg object-store client's TLS")]
+    ObjectStore,
+}
+
+impl IcebergClientTlsError {
+    /// The rustls configuration this client verifies servers with and presents its identity from:
+    /// the bundled WebPKI and platform roots with the client's `tls_ca_file` added, and the identity
+    /// of its `tls_cert_file` and `tls_key_file`.
+    fn client_config(
+        self,
+        config: &[ClientConfigEntry],
+    ) -> EmitterStartResult<StdArc<rustls::ClientConfig>> {
+        RustlsClientConfigProvider::new(config)
+            .build_with_default_roots()
+            .change_context(self)
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: ICEBERG })
+    }
+}
+
+/// What an emitter opens its REST catalog with: the properties the pairing of its two clients
+/// yields, the catalog client's TLS configuration, and the storage factory its tables' file I/O
+/// uses.
+struct IcebergCatalogConnection<'a> {
+    name: &'a str,
+    properties: IcebergCatalogProperties<'a>,
+    tls: &'a rustls::ClientConfig,
+    storage: DnsStorageFactory,
 }
 
 impl IcebergTableEmitter {
@@ -480,23 +502,28 @@ impl IcebergTableEmitter {
         let storage_root = Self::validate_blob_location(backend, "table", &location)?;
         let storage_deadline = ConfiguredDeadline::timeout(&storage_config)
             .change_context(EmitterOpenError::InvalidConfiguration { connector: ICEBERG })?;
-        let properties = IcebergObjectStoreProperties::from_entries(backend, &storage_config);
+        let properties = IcebergCatalogProperties::pair(backend, &storage_config, &catalog_config)
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: ICEBERG })?;
+        let catalog_tls = IcebergClientTlsError::Catalog.client_config(&catalog_config)?;
+        let storage_tls = IcebergClientTlsError::ObjectStore.client_config(&storage_config)?;
+        let initialize_catalog = |error: IcebergError| {
+            Report::new(EmitterOpenError::Initialize { connector: ICEBERG }).attach_printable(
+                format!("failed to initialize Iceberg catalog '{catalog_name}': {error}"),
+            )
+        };
+        let storage =
+            DnsStorageFactory::new(backend, &dns, &storage_root, storage_deadline, &storage_tls)
+                .map_err(initialize_catalog)?;
         let catalog: StdArc<dyn Catalog> = StdArc::new(
-            properties
-                .rest_catalog(
-                    &catalog_name,
-                    &catalog_config,
-                    &dns,
-                    &storage_root,
-                    storage_deadline,
-                )
-                .await
-                .map_err(|error| {
-                    Report::new(EmitterOpenError::Initialize { connector: ICEBERG })
-                        .attach_printable(format!(
-                            "failed to initialize Iceberg catalog '{catalog_name}': {error}"
-                        ))
-                })?,
+            IcebergCatalogConnection {
+                name: &catalog_name,
+                properties,
+                tls: &catalog_tls,
+                storage,
+            }
+            .open(&dns)
+            .await
+            .map_err(initialize_catalog)?,
         );
         let namespace = NamespaceIdent::from_strs(namespace.levels())
             .assured("a validated Iceberg namespace has at least one nonempty level");
@@ -1576,110 +1603,13 @@ impl IcebergTableEmitterClient {
     }
 }
 
-impl IcebergObjectStoreProperties {
-    fn from_entries(backend: IcebergStorageBackend, config: &[ClientConfigEntry]) -> Self {
-        let mut props = HashMap::default();
-        for entry in config {
-            props.insert(
-                Self::property_key(backend, &entry.key).to_string(),
-                entry.value.clone(),
-            );
-        }
-        Self { backend, props }
-    }
-
-    fn property_key(backend: IcebergStorageBackend, key: &str) -> &str {
-        match backend {
-            IcebergStorageBackend::S3 => Self::s3_property_key(key),
-            IcebergStorageBackend::Gcs => Self::gcs_property_key(key),
-            IcebergStorageBackend::AzureBlob => Self::azure_blob_property_key(key),
-        }
-    }
-
-    fn s3_property_key(key: &str) -> &str {
-        match key {
-            "endpoint" => S3_ENDPOINT,
-            "region" => S3_REGION,
-            "client_region" => CLIENT_REGION,
-            "access_key_id" => S3_ACCESS_KEY_ID,
-            "secret_access_key" => S3_SECRET_ACCESS_KEY,
-            "session_token" => S3_SESSION_TOKEN,
-            "path_style_access" => S3_PATH_STYLE_ACCESS,
-            "allow_anonymous" => S3_ALLOW_ANONYMOUS,
-            "disable_ec2_metadata" => S3_DISABLE_EC2_METADATA,
-            "disable_config_load" => S3_DISABLE_CONFIG_LOAD,
-            _ => key,
-        }
-    }
-
-    fn gcs_property_key(key: &str) -> &str {
-        match key {
-            "service_path" => GCS_SERVICE_PATH,
-            "credentials_json" => GCS_CREDENTIALS_JSON,
-            "token" => GCS_TOKEN,
-            "no_auth" => GCS_NO_AUTH,
-            "allow_anonymous" => GCS_ALLOW_ANONYMOUS,
-            "disable_vm_metadata" => GCS_DISABLE_VM_METADATA,
-            "disable_config_load" => GCS_DISABLE_CONFIG_LOAD,
-            _ => key,
-        }
-    }
-
-    fn azure_blob_property_key(key: &str) -> &str {
-        match key {
-            "account_name" => ADLS_ACCOUNT_NAME,
-            "account_key" => ADLS_ACCOUNT_KEY,
-            "sas_token" => ADLS_SAS_TOKEN,
-            "tenant_id" => ADLS_TENANT_ID,
-            "client_id" => ADLS_CLIENT_ID,
-            "client_secret" => ADLS_CLIENT_SECRET,
-            "authority_host" => ADLS_AUTHORITY_HOST,
-            _ => key,
-        }
-    }
-
-    /// Catalog configuration supplies the final value of a duplicate effective property.
-    fn catalog_properties<'a>(
-        &'a self,
-        config: &'a [ClientConfigEntry],
-    ) -> impl Iterator<Item = (String, String)> + 'a {
-        self.props
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .chain(
-                config
-                    .iter()
-                    .map(|entry| (entry.key.clone(), entry.value.clone())),
-            )
-    }
-
-    async fn rest_catalog(
-        &self,
-        name: &str,
-        catalog_config: &[ClientConfigEntry],
-        dns: &DnsResolver,
-        storage_root: &Url,
-        storage_deadline: Option<ConfiguredDeadline>,
-    ) -> IcebergResult<RestCatalog> {
-        let props = self.catalog_properties(catalog_config);
-        let tls = rustls::ClientConfig::builder_with_provider(StdArc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .map_err(|error| {
-            IcebergError::new(
-                IcebergErrorKind::Unexpected,
-                "failed to configure Iceberg REST TLS",
-            )
-            .with_source(error)
-        })?
-        .with_root_certificates(rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        })
-        .with_no_client_auth();
+impl IcebergCatalogConnection<'_> {
+    /// Builds the catalog's HTTP client over the node resolver and its TLS configuration, and
+    /// loads the catalog with the paired properties and the storage factory.
+    async fn open(self, dns: &DnsResolver) -> IcebergResult<RestCatalog> {
         let client = reqwest_iceberg::Client::builder()
             .dns_resolver(StdArc::new(dns.clone()))
-            .use_preconfigured_tls(tls)
+            .use_preconfigured_tls(self.tls.clone())
             .build()
             .map_err(|error| {
                 IcebergError::new(
@@ -1687,12 +1617,14 @@ impl IcebergObjectStoreProperties {
                     format!("failed to build the Iceberg REST client: {error}"),
                 )
             })?;
-        let storage_factory =
-            DnsStorageFactory::new(self.backend, dns, storage_root, storage_deadline)?;
+        let properties = self
+            .properties
+            .iter()
+            .map(|(property, value)| (property.to_string(), value.to_string()));
         RestCatalogBuilder::default()
             .with_client(client)
-            .with_storage_factory(StdArc::new(storage_factory))
-            .load(name, props.collect())
+            .with_storage_factory(StdArc::new(self.storage))
+            .load(self.name, properties.collect())
             .await
     }
 }
@@ -1705,7 +1637,14 @@ impl IcebergObjectStoreProperties {
 mod tests {
     use ::iceberg::{
         arrow::arrow_schema_to_schema_auto_assign_ids,
-        io::FileIO,
+        io::{
+            ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID,
+            ADLS_CLIENT_SECRET, ADLS_SAS_TOKEN, ADLS_TENANT_ID, CLIENT_REGION, FileIO,
+            GCS_ALLOW_ANONYMOUS, GCS_CREDENTIALS_JSON, GCS_DISABLE_CONFIG_LOAD,
+            GCS_DISABLE_VM_METADATA, GCS_NO_AUTH, GCS_SERVICE_PATH, GCS_TOKEN, S3_ACCESS_KEY_ID,
+            S3_ALLOW_ANONYMOUS, S3_DISABLE_CONFIG_LOAD, S3_DISABLE_EC2_METADATA, S3_ENDPOINT,
+            S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY, S3_SESSION_TOKEN,
+        },
         spec::{
             DataContentType, DataFileBuilder, FormatVersion, Operation, PartitionSpec, Schema,
             SortOrder, Struct, Summary, TableMetadataBuilder,
@@ -1724,34 +1663,135 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_properties_preserve_the_declared_collision_precedence() {
-        let entry = |key: &str, value: &str| ClientConfigEntry {
-            key: key.to_string(),
-            value: value.to_string(),
-        };
-        let storage = IcebergObjectStoreProperties::from_entries(
-            IcebergStorageBackend::S3,
-            &[
-                entry("endpoint", "http://first-storage.example.com"),
-                entry(S3_ENDPOINT, "http://last-storage.example.com"),
-                entry("region", "storage-region"),
-                entry("s3.driver_extension", "Case-Preserved"),
-            ],
-        );
-        assert_eq!(
-            storage.props[S3_ENDPOINT],
-            "http://last-storage.example.com"
-        );
-        let effective: HashMap<_, _> = storage
-            .catalog_properties(&[
-                entry(S3_ENDPOINT, "http://catalog-storage.example.com"),
-                entry("uri", "http://catalog.example.com"),
-            ])
-            .collect();
-        assert_eq!(effective[S3_ENDPOINT], "http://catalog-storage.example.com");
-        assert_eq!(effective[S3_REGION], "storage-region");
-        assert_eq!(effective["s3.driver_extension"], "Case-Preserved");
-        assert_eq!(effective["uri"], "http://catalog.example.com");
+    fn the_vocabulary_names_the_storage_properties_the_iceberg_crate_reads() {
+        for (backend, key, property) in [
+            (IcebergStorageBackend::S3, "access_key_id", S3_ACCESS_KEY_ID),
+            (
+                IcebergStorageBackend::S3,
+                "allow_anonymous",
+                S3_ALLOW_ANONYMOUS,
+            ),
+            (IcebergStorageBackend::S3, "client_region", CLIENT_REGION),
+            (
+                IcebergStorageBackend::S3,
+                "disable_config_load",
+                S3_DISABLE_CONFIG_LOAD,
+            ),
+            (
+                IcebergStorageBackend::S3,
+                "disable_ec2_metadata",
+                S3_DISABLE_EC2_METADATA,
+            ),
+            (IcebergStorageBackend::S3, "endpoint", S3_ENDPOINT),
+            (
+                IcebergStorageBackend::S3,
+                "path_style_access",
+                S3_PATH_STYLE_ACCESS,
+            ),
+            (IcebergStorageBackend::S3, "region", S3_REGION),
+            (
+                IcebergStorageBackend::S3,
+                "secret_access_key",
+                S3_SECRET_ACCESS_KEY,
+            ),
+            (IcebergStorageBackend::S3, "session_token", S3_SESSION_TOKEN),
+            (
+                IcebergStorageBackend::Gcs,
+                "allow_anonymous",
+                GCS_ALLOW_ANONYMOUS,
+            ),
+            (
+                IcebergStorageBackend::Gcs,
+                "credentials_json",
+                GCS_CREDENTIALS_JSON,
+            ),
+            (
+                IcebergStorageBackend::Gcs,
+                "disable_config_load",
+                GCS_DISABLE_CONFIG_LOAD,
+            ),
+            (
+                IcebergStorageBackend::Gcs,
+                "disable_vm_metadata",
+                GCS_DISABLE_VM_METADATA,
+            ),
+            (IcebergStorageBackend::Gcs, "no_auth", GCS_NO_AUTH),
+            (IcebergStorageBackend::Gcs, "service_path", GCS_SERVICE_PATH),
+            (IcebergStorageBackend::Gcs, "token", GCS_TOKEN),
+            (
+                IcebergStorageBackend::AzureBlob,
+                "account_key",
+                ADLS_ACCOUNT_KEY,
+            ),
+            (
+                IcebergStorageBackend::AzureBlob,
+                "account_name",
+                ADLS_ACCOUNT_NAME,
+            ),
+            (
+                IcebergStorageBackend::AzureBlob,
+                "authority_host",
+                ADLS_AUTHORITY_HOST,
+            ),
+            (
+                IcebergStorageBackend::AzureBlob,
+                "client_id",
+                ADLS_CLIENT_ID,
+            ),
+            (
+                IcebergStorageBackend::AzureBlob,
+                "client_secret",
+                ADLS_CLIENT_SECRET,
+            ),
+            (
+                IcebergStorageBackend::AzureBlob,
+                "sas_token",
+                ADLS_SAS_TOKEN,
+            ),
+            (
+                IcebergStorageBackend::AzureBlob,
+                "tenant_id",
+                ADLS_TENANT_ID,
+            ),
+        ] {
+            assert_eq!(backend.file_io_property(key), Some(property), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_client_tls_file_that_cannot_be_read_stops_the_emitter_naming_its_client() {
+        let missing = tempfile::tempdir()
+            .assured("the fixture can create a directory")
+            .path()
+            .join("missing-ca.pem");
+        let config = [ClientConfigEntry {
+            key: "tls_ca_file".to_string(),
+            value: missing.display().to_string(),
+        }];
+        for client in [
+            IcebergClientTlsError::Catalog,
+            IcebergClientTlsError::ObjectStore,
+        ] {
+            let refusal = client
+                .client_config(&config)
+                .expect_err("an unreadable CA file cannot configure a client");
+            assert!(matches!(
+                refusal.current_context(),
+                EmitterOpenError::InvalidConfiguration { connector: ICEBERG }
+            ));
+            assert_eq!(
+                refusal.downcast_ref::<IcebergClientTlsError>(),
+                Some(&client)
+            );
+            assert!(matches!(
+                refusal.downcast_ref::<nervix_connector::TlsClientConfigError>(),
+                Some(nervix_connector::TlsClientConfigError::ReadCaCertificate { path })
+                    if *path == missing
+            ));
+        }
+        IcebergClientTlsError::Catalog
+            .client_config(&[])
+            .assured("a client without TLS files trusts the bundled and platform roots");
     }
 
     #[test]
@@ -1881,10 +1921,6 @@ mod tests {
                 .assured("the catalog response can be written");
         });
 
-        let properties = IcebergObjectStoreProperties {
-            backend: IcebergStorageBackend::S3,
-            props: HashMap::default(),
-        };
         let catalog_config = [
             ClientConfigEntry {
                 key: "uri".to_string(),
@@ -1899,16 +1935,28 @@ mod tests {
                 value: format!("http://{AUTH}:{auth_port}/token"),
             },
         ];
-        let catalog = properties
-            .rest_catalog(
-                "fixture",
+        let tls = IcebergClientTlsError::Catalog
+            .client_config(&catalog_config)
+            .assured("a catalog client without TLS files trusts the default roots");
+        let storage_root =
+            Url::parse("s3://bucket/table").assured("the fixture storage root is a URL");
+        let storage =
+            DnsStorageFactory::new(IcebergStorageBackend::S3, &dns, &storage_root, None, &tls)
+                .assured("the object-store client can be built without a request");
+        let catalog = IcebergCatalogConnection {
+            name: "fixture",
+            properties: IcebergCatalogProperties::pair(
+                IcebergStorageBackend::S3,
+                &[],
                 &catalog_config,
-                &dns,
-                &Url::parse("s3://bucket/table").assured("the fixture storage root is a URL"),
-                None,
             )
-            .await
-            .assured("the REST catalog can be configured");
+            .assured("a catalog paired with an empty storage client sets no shared property"),
+            tls: &tls,
+            storage,
+        }
+        .open(&dns)
+        .await
+        .assured("the REST catalog can be configured");
         nervix_primitives::time::timeout(Duration::from_secs(10), catalog.invalidate_token())
             .await
             .assured("the catalog initialization completes")

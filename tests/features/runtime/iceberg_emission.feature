@@ -115,6 +115,64 @@ Feature: Iceberg emission
       | 1            | 0             |
       | 3            | 0             |
 
+  Scenario Outline: An Iceberg GCS client whose no_auth is false signs its object requests
+    Given HTTP receiver "gcs_catalog" is running
+    And HTTP receiver "gcs_objects" is running
+    And HTTP receiver "gcs_catalog" answers requests for "/v1/config" with 'respond 200; header Content-Type: application/json; body {"defaults":{},"overrides":{}}'
+    And HTTP receiver "gcs_catalog" answers requests for "/v1/namespaces/{{domain}}/tables/events" with 'respond 200; header Content-Type: application/json; body {"metadata-location":"gs://nervix-gcs/tables/events/metadata/00000-6f0a3c0e-0d5b-4f0e-9a43-3a1c2b4d5e6f.metadata.json","metadata":{"format-version":2,"table-uuid":"6f0a3c0e-0d5b-4f0e-9a43-3a1c2b4d5e6f","location":"gs://nervix-gcs/tables/events","last-sequence-number":0,"last-updated-ms":1767225600000,"last-column-id":1,"current-schema-id":0,"schemas":[{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"user_id","required":false,"type":"long"}]}],"default-spec-id":0,"partition-specs":[{"spec-id":0,"fields":[]}],"last-partition-id":999,"default-sort-order-id":0,"sort-orders":[{"order-id":0,"fields":[]}],"properties":{},"current-snapshot-id":-1,"refs":{},"snapshots":[],"snapshot-log":[],"metadata-log":[]},"config":{}}'
+    And HTTP receiver "gcs_catalog" answers unscripted requests with "respond 503"
+    And HTTP receiver "gcs_objects" answers unscripted requests with 'respond 200; header Content-Type: application/json; body {"name":"object","bucket":"nervix-gcs","size":"0"}'
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge iceberg-gcs-{{test_id}}.example.com;
+      CREATE ENDPOINT notification_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR notification_input
+        FROM notification_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE GCS CLIENT gcs_main CONFIG {
+        'service_path' = '{{http_receiver.gcs_objects}}',
+        'token' = 'fixture-token',
+        'no_auth' = false
+      };
+      CREATE ICEBERG_REST CLIENT iceberg_catalog CONFIG {
+        'uri' = '{{http_receiver.gcs_catalog}}'
+      };
+      CREATE ICEBERG TABLE EMITTER iceberg_output FROM notifications
+        TO gcs_main TABLE 'events' NAMESPACE '{{domain}}'
+        LOCATION 'gs://nervix-gcs/tables/events'
+        CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 5s
+        VALUES { 'user_id' = input.user_id }
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then within "30s" DESCRIBE EMITTER "iceberg_output" on the leader node contains
+      """
+      status: OK
+      """
+    When http payload is posted to host "iceberg-gcs-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":43}
+      """
+    Then HTTP receiver "gcs_objects" eventually receives at least 1 request
+    And HTTP receiver "gcs_objects" request 1 has header "authorization" with value "Bearer fixture-token"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @domain_execution_time
   Scenario Outline: Iceberg VALUES errors reject only the poison record before staging
     Given MQTT is running
