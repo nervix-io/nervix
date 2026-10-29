@@ -208,7 +208,9 @@ print_shards() {
 }
 
 # The suite record is rewritten whole through a temporary file, so a reader never sees half of it.
-update_record() {
+update_record() (
+    # Finish one record publication before the controller handles a group signal.
+    trap '' INT TERM HUP
     local filter="$1"
     shift
     local tmp_path
@@ -219,7 +221,7 @@ update_record() {
         rm -f "${tmp_path}"
         return 1
     fi
-}
+)
 
 render_summary() {
     jq -r -f "${report_program}" --slurp "${suite_dir}/suite.json" >"${suite_dir}/summary.md"

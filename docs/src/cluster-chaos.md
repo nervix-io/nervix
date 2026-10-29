@@ -122,6 +122,12 @@ resolves the reference to its immutable local image ID. A reference that is not 
 bounded to 180 seconds. A reference that still cannot be resolved fails the run in preflight with a
 setup error.
 
+Both local overlays replace the base image's revision label with the checkout supplying their
+binaries. A tracked modification adds `-dirty` to that revision, so a suite requiring the clean
+commit refuses the image. A failed Git identity lookup stops the build before Docker runs. The
+overlay identity controls exercise both build recipes with inert tools; they run through
+`just test-chaos-local-image` and the full self-test.
+
 The Compose file has no build directive and no fallback tag. Every node and every disposable
 container of the image runs the resolved ID: the CLI containers, the clock observers and the
 deadlock report. The manifest records:
@@ -720,6 +726,11 @@ product deadlines do not change with the sample size. `just test-chaos-degraded-
 `just test-chaos-rate-probe` pin the counts, intervals and launch and sample bounds, and exercise
 both sides of the inclusive thresholds.
 
+The rate-probe self-test keeps its sender and receiver namespace owners alive until its cleanup
+removes them. Their lifetime follows the whole control sequence, so a slow worker cannot expire a
+namespace before a later control reaches it. Probe, sample and controller deadlines retain their
+own bounds.
+
 ### Network Preflight
 
 Before a network run creates its first node, the preflight proves the faults on this worker, within
@@ -732,6 +743,11 @@ Before a network run creates its first node, the preflight proves the faults on 
 The pinned Pumba, nettools and probe images are already local from preflight, and Pumba's own helper
 runs keep automatic pulling disabled. The rules inspection has a 30-second bound that includes the
 Docker client and the helper's launch.
+
+Netem installation is ready only after the inspection sees Pumba's `504d:` prio root, its
+`5050:` leaf with 100% loss, and the destination classifier directing traffic to `504d:3`.
+Pumba installs those parts separately. The existing 30-observation readiness loop waits for all
+three before the blocked-traffic probe; a partial ruleset alone does not establish installation.
 
 `diagnostics/network-preflight/` keeps the evidence:
 
@@ -771,6 +787,8 @@ in this order:
    - an injector that cannot start its nettools image
    - a sidecar that disappeared, as against one whose inspection failed while still present
    - a refused Docker execution of the blocked-traffic probe
+   - a partial netem installation before its classifier, followed by the real injector's
+     installation, blocked traffic and healing before the deliberate iptables inspection refusal
 
 A control name, such as `probe-refusal`, runs that control with the live installation, effect and
 healing check. `just chaos self-test` runs every control after the verifier checks, and CI runs them
@@ -2674,9 +2692,14 @@ no cause. Its reproducer is the run's own when it recorded one, and otherwise th
 
 ### Signals And Suite Cleanup
 
-Each run executes in the background and leads a session of its own. An interrupt, termination or
-hangup therefore reaches the suite at once, and reaches the run only through the suite, even when a
-terminal signals the suite's whole process group. The suite passes one TERM to the run. The run's
+Each run executes in the background and leads a session of its own. The suite owns an interrupt,
+termination or hangup, which reaches the run only through the suite, even when a terminal signals
+the suite's whole process group. Each atomic record publication runs in a subprocess that ignores
+INT, TERM and HUP through temporary-file creation, JSON rendering and rename. The controller handles
+the pending signal after that publication finishes, preserving the child's identity before it
+passes one TERM to the run. The verifier controls hold both JSON rendering and the completed rename
+while sending a group hangup, then verify the interrupted record, one TERM and complete log output.
+The run's
 own exit trap then heals, captures and cleans up as on any exit, and records the run as interrupted.
 The suite starts no later entry. The verifier self-check executes the same way: a signal while it
 executes reaches it as the suite's one TERM, the suite records the check as interrupted, and no

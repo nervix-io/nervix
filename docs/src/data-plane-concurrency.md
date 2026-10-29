@@ -2129,6 +2129,14 @@ These async observations introduce no tracked blocking-lock owner. Deloxide cont
 the registered product locks, while the public scenarios and model checks exercise pause ordering
 at their applicable boundaries.
 
+The `@restore_client_inspection` one- and three-node examples fill the real filesystem execution
+class before an accepted restore applies its client configuration, then release capacity and require
+every restore step and the configured client to survive. Their active, order and restore-stress
+registrations reach the class-local FIFO admission and drain fence in `crates/execution/src/workers.rs`.
+That owner record names both workload identities. The asynchronous memory and queue-capacity waits,
+inspection observation and parked test workers remain outside the detector; the owner unit tests
+and public scenarios retain their admission, cancellation and completion assertions.
+
 The `@client_wire_standalone_preparation` scenario holds a coordinator after its standalone
 transaction lookup and after preflight, while two leadership transfers let another coordinator
 apply the same command and engage its domain pause. Its active, order-analysis and stressed
