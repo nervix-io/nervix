@@ -58,6 +58,10 @@ Feature: Iceberg emission
       """
       {"user_id":42}
       """
+    And within "5s" DESCRIBE EMITTER "iceberg_notifications" on the leader node contains
+      """
+      data file target: 512MiB
+      """
     And the DNS fixture eventually receives Iceberg catalog and object-store questions
 
     Examples:
@@ -447,6 +451,133 @@ Feature: Iceberg emission
     And the Iceberg table "batched_{{test_id}}" eventually contains a row
       """
       {"user_id":43,"action":"CLOSE"}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @iceberg_batch_bounds @deloxide_stress
+  Scenario Outline: Iceberg BATCH MAX MESSAGES rolls one produced row batch into bounded data files
+    Given Iceberg dependencies are running
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "row_bounded_{{test_id}}" exists at "s3://nervix-iceberg/tables/row_bounded_{{test_id}}" with columns
+      """
+      user_id I64
+      action STRING
+      """
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA notification (user_id I64, action STRING);
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT PRODUCER INGESTOR notifications_in
+        FROM SCHEMA notification
+          MODE ACK SEQUENTIAL ACK TIMEOUT 1m RETRY POLICY BACKOFF 100ms MAX 1s
+          ON QUIESCE SUSPEND
+        TIMESTAMP NOW
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE S3 CLIENT s3_main CONFIG {
+        'endpoint' = '{{rustfs_addr}}',
+        'region' = 'us-east-1',
+        'access_key_id' = 'rustfsadmin',
+        'secret_access_key' = 'rustfsadmin',
+        'path_style_access' = true
+      };
+      CREATE ICEBERG_REST CLIENT iceberg_catalog CONFIG {
+        'uri' = '{{iceberg_rest_addr}}',
+        'warehouse' = 's3://nervix-iceberg/warehouse'
+      };
+      CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications
+        TO s3_main TABLE 'row_bounded_{{test_id}}' NAMESPACE '{{domain}}'
+        LOCATION 's3://nervix-iceberg/tables/row_bounded_{{test_id}}'
+        CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        VALUES { 'user_id' = input.user_id, 'action' = input.action }
+        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And client "app" is connected to node "node-1"
+    When client "app" opens producer "input" on ingestor "notifications_in" expecting fields "user_id I64, action STRING"
+    And producer "input" submits batch "rows" with rows
+      | user_id | action |
+      | 41      | open   |
+      | 42      | update |
+      | 43      | close  |
+      | 44      | done   |
+    Then within "30s" the Iceberg table "row_bounded_{{test_id}}" has 2 data files holding 4 rows, each with at most 2 rows and 1048576 bytes
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @iceberg_batch_bounds @deloxide_stress
+  Scenario Outline: Iceberg BATCH MAX SIZE rolls Parquet files and rejects an oversized row
+    Given Iceberg dependencies are running
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "byte_bounded_{{test_id}}" exists at "s3://nervix-iceberg/tables/byte_bounded_{{test_id}}" with columns
+      """
+      user_id I64
+      action STRING
+      """
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA notification (user_id I64, action STRING);
+      CREATE SCHEMA emitter_error (error_code STRING, error_operation STRING, source_user_id I64);
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
+      CREATE CLIENT PRODUCER INGESTOR notifications_in
+        FROM SCHEMA notification
+          MODE ACK SEQUENTIAL ACK TIMEOUT 1m RETRY POLICY BACKOFF 100ms MAX 1s
+          ON QUIESCE SUSPEND
+        TIMESTAMP NOW
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE S3 CLIENT s3_main CONFIG {
+        'endpoint' = '{{rustfs_addr}}',
+        'region' = 'us-east-1',
+        'access_key_id' = 'rustfsadmin',
+        'secret_access_key' = 'rustfsadmin',
+        'path_style_access' = true
+      };
+      CREATE ICEBERG_REST CLIENT iceberg_catalog CONFIG {
+        'uri' = '{{iceberg_rest_addr}}',
+        'warehouse' = 's3://nervix-iceberg/warehouse'
+      };
+      CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications
+        TO s3_main TABLE 'byte_bounded_{{test_id}}' NAMESPACE '{{domain}}'
+        LOCATION 's3://nervix-iceberg/tables/byte_bounded_{{test_id}}'
+        CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        VALUES { 'user_id' = input.user_id, 'action' = input.action }
+        BATCH MAX MESSAGES 10 MAX SIZE 3KiB
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR SEND TO emitter_errors
+          SET error_code = error.code,
+              error_operation = error.operation,
+              source_user_id = input.user_id
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION emitter_errors_subscription TO emitter_errors;
+      START;
+      """
+    And client "app" is connected to node "node-1"
+    When client "app" opens producer "input" on ingestor "notifications_in" expecting fields "user_id I64, action STRING"
+    # One source batch has two incompressible 1800-byte values and one 8192-byte value.
+    # Each of the first two fits a 3 KiB Parquet file, while both together and the last alone do not.
+    And producer "input" submits Iceberg file-bound batch "rows"
+    Then within "30s" the Iceberg table "byte_bounded_{{test_id}}" has 2 data files holding 2 rows, each with at most 10 rows and 3072 bytes
+    And within "30s" the relay subscription receives a payload
+      """
+      "error_code":"validation","error_operation":"encode","source_user_id":43
       """
 
     Examples:

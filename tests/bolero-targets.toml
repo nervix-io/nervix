@@ -3026,6 +3026,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/iceberg/src/table/__fuzz__/table__parquet_bounds__tests__bolero_staged_iceberg_file_encoding_round_trips_and_measures_exactly/corpus"
+domain_version = 1
+features = []
+id = "iceberg-staged-file-encoding"
+invariant = "Generated mapped rows survive Arrow IPC staging and readback, and counting their projected Parquet encoding, including its footer, equals the actual file bytes."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-connector-iceberg"
+random_iterations = 256
+source = "crates/connectors/iceberg/src/table/parquet_bounds.rs"
+test = "table::parquet_bounds::tests::bolero_staged_iceberg_file_encoding_round_trips_and_measures_exactly"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/iceberg/src/table/table_projection/__fuzz__/table__table_projection__tests__bolero_staged_columns_land_in_the_table_columns_of_their_names/corpus"
 domain_version = 1
 features = []
