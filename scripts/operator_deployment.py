@@ -18,18 +18,47 @@ import time
 import uuid
 
 
+INDEX_MEDIA_TYPES = frozenset({
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+})
+
+
+def repository_name(requested: str) -> str:
+    repository = requested.partition("@")[0]
+    if ":" in repository.rsplit("/", 1)[-1]:
+        repository = repository.rsplit(":", 1)[0]
+    return repository
+
+
+def platform_manifest(document: dict, architecture: str) -> str:
+    # A per-architecture tag names an index of the platform's manifest and its provenance
+    # attestation. Its own manifest's digest makes every pull select the tested architecture, also
+    # on a node of another architecture, where the index would resolve to the node's platform.
+    if document["mediaType"] not in INDEX_MEDIA_TYPES:
+        # A single manifest names its platform only in its configuration, which the inspected
+        # image's architecture check reads after the pull.
+        return document["digest"]
+    selected = []
+    for manifest in document["manifests"]:
+        platform = manifest.get("platform", {})
+        if platform.get("os") == "linux" and platform.get("architecture") == architecture:
+            selected.append(manifest["digest"])
+    if len(selected) != 1:
+        raise ValueError(f"image index must hold exactly one linux/{architecture} manifest")
+    return selected[0]
+
+
 def image_reference(metadata: dict, requested: str, pull_output: str) -> str:
     # Cached tags can leave several registry digests on one image. The pull identifies which
     # digest the requested reference selected; its position in RepoDigests has no meaning.
     digests = re.findall(r"^Digest: (sha256:[0-9a-f]{64})$", pull_output, re.M)
     if len(digests) != 1:
         raise ValueError("image pull must report exactly one registry digest")
-    repository, marker, specified = requested.partition("@")
+    _, marker, specified = requested.partition("@")
     if marker and specified != digests[0]:
         raise ValueError("pulled registry digest does not match the requested image digest")
-    if ":" in repository.rsplit("/", 1)[-1]:
-        repository = repository.rsplit(":", 1)[0]
-    reference = f"{repository}@{digests[0]}"
+    reference = f"{repository_name(requested)}@{digests[0]}"
     if reference not in metadata["RepoDigests"]:
         raise ValueError("pulled registry digest is missing from the inspected image")
     return reference
@@ -142,6 +171,7 @@ class DeploymentCheck:
     def public_status(self, image: str, endpoint: str) -> bool:
         status = self.command(
             "docker", "run", "--rm", "--name", self.cli_container, "--network", "host",
+            "--platform", f"linux/{self.architecture}",
             "--entrypoint", "/usr/local/bin/nervix-cli", image, "--server", endpoint,
             "--password", "nervix", "--command", "SHOW CLUSTER STATUS;", timeout=45, required=False,
         )
@@ -149,9 +179,14 @@ class DeploymentCheck:
         return status.returncode == 0 and cluster_ready(status.stdout)
 
     def deploy(self) -> None:
-        server_pull = self.command("docker", "pull", self.image, timeout=600)
-        server = json.loads(self.command("docker", "image", "inspect", self.image).stdout)
-        image = server_identity(server, self.revision, self.architecture, self.image, server_pull.stdout)
+        index = self.command("docker", "buildx", "imagetools", "inspect", self.image,
+                             "--format", "{{json .Manifest}}", timeout=120)
+        digest = platform_manifest(json.loads(index.stdout), self.architecture)
+        manifest = f"{repository_name(self.image)}@{digest}"
+        server_pull = self.command("docker", "pull", "--platform", f"linux/{self.architecture}", manifest,
+                                   timeout=600)
+        server = json.loads(self.command("docker", "image", "inspect", manifest).stdout)
+        image = server_identity(server, self.revision, self.architecture, manifest, server_pull.stdout)
         operator = "ghcr.io/nervix-io/nervix-k8s-operator:latest"
         operator_pull = self.command("docker", "pull", operator, timeout=600)
         operator_metadata = json.loads(self.command("docker", "image", "inspect", operator).stdout)
@@ -166,7 +201,10 @@ class DeploymentCheck:
         # The profile has a random name and is owned from the first start attempt, including a
         # partially failed start. Every Kubernetes command explicitly names this context.
         self.started = True
-        self.command("minikube", "start", "-p", self.profile, "--driver=docker",
+        # The node's Docker runtime pulls a manifest of another architecture, which containerd,
+        # minikube's default, refuses; the host's QEMU registration then runs an arm64 image on an
+        # amd64 node.
+        self.command("minikube", "start", "-p", self.profile, "--driver=docker", "--container-runtime=docker",
                      "--keep-context", "--kubernetes-version=v1.34.0", "--cpus=4", "--memory=10240", timeout=600)
         self.command("helm", "upgrade", "--install", "nervix-k8s-operator",
                      str(self.source / "charts/nervix-k8s-operator"), "--kube-context", self.profile,

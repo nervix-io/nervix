@@ -568,15 +568,17 @@ jobs:
       revision: ${{ github.sha }}
       suite: soak
 
-  # Every revision eligible for debian-latest must start through the deployment we ship. Native
-  # runners exercise both images, with the same image's CLI observing the public bootstrap port.
+  # Every revision eligible for debian-latest must start through the deployment we ship. An amd64
+  # runner exercises both images, the arm64 one under QEMU because Boat has no arm64 machine, with
+  # the same image's CLI observing the public bootstrap port. 16 GB leave host headroom around
+  # minikube's 10 GiB.
   operator-deployment:
     name: operator-deployment-${{ matrix.arch }}
     needs: [meta, build-arch]
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ matrix.runner }}
+    runs-on: boat-large
     timeout-minutes: 30
     permissions:
       contents: read
@@ -586,11 +588,7 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: boat-large
           - arch: arm64
-            # Boat has no arm64 machine. GitHub's hosted arm64 runner gives a public repository
-            # 4 vCPUs and 16 GB, host headroom around minikube's 10 GiB.
-            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout tested server
         uses: actions/checkout@v4
@@ -638,6 +636,13 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The kernel's QEMU registration runs an image of another architecture in the CLI's container
+      # and in minikube's pods alike. The recipe registers nothing for the runner's own.
+      - name: Register QEMU for the image's architecture
+        env:
+          NERVIX_OPERATOR_ARCHITECTURE: ${{ matrix.arch }}
+        run: just docker-prepare-qemu "linux/${NERVIX_OPERATOR_ARCHITECTURE}"
 
       - name: Deploy and observe the built server image
         env:
