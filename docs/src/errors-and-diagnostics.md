@@ -1344,6 +1344,17 @@ while it retries. An Arrow schema that Iceberg cannot represent keeps the typed 
 error beneath `IcebergColumnError::MappedSchema`. The plan compares names and nested types after
 narrowing UTC datetimes to microseconds.
 
+An Iceberg emitter with `BATCH` also lays out the selected rows against the table schema before
+staging, so a projection failure there remains an `IcebergColumnError` beneath
+`EmitterWriteError::Publish`. Its Parquet size measurement retains the Parquet cause beneath that
+publish error if encoding fails. A successfully measured row whose complete Parquet file exceeds
+the declared `MAX SIZE` is instead a definitive per-row `validation` message error of the `encode`
+operation; `ON MESSAGE ERROR` routes it before the other rows are staged. A data file whose
+physical count or byte length violates a bound after a table schema change is a commit failure:
+the emitter does not append it and keeps the staged rows and acknowledgements for retry.
+Cleanup failures for incomplete staged files or a rejected data file are logged with their paths
+without replacing the original publish or commit failure.
+
 An Iceberg commit charges the bulk memory class for the staged files it reads back with
 `Executor::try_reserve`, so a charge the class has no room for is refused rather than queued. The
 refusal keeps the typed `AdmissionError` beneath `EmitterWriteError::Commit` and attaches the

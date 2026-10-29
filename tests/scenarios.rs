@@ -105,7 +105,7 @@ use crate::common::{
         SUBSCRIBED_LINE, corpus_report,
     },
     cluster::{
-        AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster,
+        AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster, CommandHold,
         DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
         InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
         TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
@@ -12407,14 +12407,36 @@ async fn given_leadership_moves_under_next_durable_admission(
 ) {
     let from_node_id = expand_placeholders(world, &from_node_id);
     let to_node_id = expand_placeholders(world, &to_node_id);
-    let moved = world
-        .cluster()
-        .move_leadership_after_next_durable_admission(&from_node_id, &to_node_id);
+    let moved = world.cluster().move_leadership_under_next_command(
+        CommandHold::AfterDurableAdmission,
+        &from_node_id,
+        &to_node_id,
+    );
+    world.leadership_move = Some(moved);
+}
+
+#[given(
+    expr = "leadership moves from node {string} to node {string} before its next admission \
+            proposal"
+)]
+async fn given_leadership_moves_before_next_admission_proposal(
+    world: &mut ScenarioWorld,
+    from_node_id: String,
+    to_node_id: String,
+) {
+    let from_node_id = expand_placeholders(world, &from_node_id);
+    let to_node_id = expand_placeholders(world, &to_node_id);
+    let moved = world.cluster().move_leadership_under_next_command(
+        CommandHold::BeforeAdmissionProposal,
+        &from_node_id,
+        &to_node_id,
+    );
     world.leadership_move = Some(moved);
 }
 
 #[then("the leadership move under the durably admitted command completed")]
-async fn then_leadership_move_under_durable_admission_completed(world: &mut ScenarioWorld) {
+#[then("the leadership move before the admission proposal completed")]
+async fn then_leadership_move_completed(world: &mut ScenarioWorld) {
     let moved = world
         .leadership_move
         .take()
@@ -12424,7 +12446,7 @@ async fn then_leadership_move_under_durable_admission_completed(world: &mut Scen
         .expect("the leadership move ends once its command was released");
     ended
         .expect("the leadership move task runs to its end")
-        .expect("the successor reported itself the leader before the command was released");
+        .expect("both nodes reported the successor as the leader before the command was released");
 }
 
 #[given("the leader node forgets its transaction session bindings")]
