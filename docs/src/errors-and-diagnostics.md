@@ -270,7 +270,7 @@ attempt, so reporting an immediate local refusal does not create an unpaced retr
 | Boundary | Fixed shape | What crosses | Where a report resumes |
 | --- | --- | --- | --- |
 | Replicated transaction mutation | The Raft response's `TransactionMutationError` | The state machine's typed refusal, cloned from the report's current context when the response is built | The proposer creates a new report from the typed refusal |
-| Consensus append stream | The stream's wire records | A matching, conflicting or higher-vote answer, or the request error | The leader hands Raft an unreachable-peer error that names the target and the reason |
+| Consensus append stream and its initial prefix check | The stream's wire records and the management append answer | A matching, conflicting or higher-vote answer, or the request error | A rejected or incomplete prefix is returned as the typed Raft outcome before data admission; a failed management request crosses the foreign-error hook with its complete report before becoming an unreachable-peer error |
 | Interconnect remote operation | The failure's class and subject, with the answering node's description for an executed failure only | The classified result; the local chain is not serialized | The requester keeps the class beside its own target and placement context |
 | Interconnect connection handshake | The answer's refusal | The `PrerequisiteMismatch` the accepting node judged, seen from that node | The dialing node creates `TransportError::RefusedByPeer` from the mismatch, reversed to its own side |
 | Remote relay payload refused before admission | The refusal's reason text | The rendered chain | The forwarding node receives the reason as text |
