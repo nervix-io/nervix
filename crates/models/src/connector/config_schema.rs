@@ -244,15 +244,9 @@ impl ClientConfigValue {
                     return Err(Report::new(invalid()));
                 }
             }
-            Self::Url(schemes) => {
+            Self::Url(_) | Self::HostPortUrl(_) => {
                 let parsed = Url::parse(value).change_context(invalid())?;
-                if !schemes.contains(&parsed.scheme()) || parsed.host_str().is_none() {
-                    return Err(Report::new(invalid()));
-                }
-            }
-            Self::HostPortUrl(schemes) => {
-                let parsed = Url::parse(value).change_context(invalid())?;
-                if !schemes.contains(&parsed.scheme()) || !Self::names_only_host_and_port(&parsed) {
+                if !self.admits_url(&parsed) {
                     return Err(Report::new(invalid()));
                 }
             }
@@ -272,6 +266,31 @@ impl ClientConfigValue {
             }
         }
         Ok(())
+    }
+
+    /// Whether a parsed `address` has one of this kind's schemes and the parts the kind requires: a
+    /// host for a URL, and only a host and a nonzero port for a host-and-port URL. No other kind
+    /// admits a URL.
+    fn admits_url(self, address: &Url) -> bool {
+        match self {
+            Self::Url(schemes) => {
+                schemes.contains(&address.scheme()) && address.host_str().is_some()
+            }
+            Self::HostPortUrl(schemes) => {
+                schemes.contains(&address.scheme()) && Self::names_only_host_and_port(address)
+            }
+            Self::String
+            | Self::PercentEncodedHeaders
+            | Self::Boolean
+            | Self::UnsignedInteger
+            | Self::PositiveInteger
+            | Self::Milliseconds
+            | Self::TcpKeepaliveMilliseconds
+            | Self::DriverUrl(_)
+            | Self::DriverAddress
+            | Self::Choice(_)
+            | Self::File(_) => false,
+        }
     }
 
     /// Whether `address` names a host and a nonzero port and nothing else: no credentials, no path
