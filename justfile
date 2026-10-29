@@ -293,6 +293,7 @@ test-backup-cut-cleanup: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
     evidence="$(mktemp -d {{ quote(cargo_target_dir + "/backup-cut-cleanup.XXXXXXXX") }})"
     # Reuse the ordinary scenario build in CI without mixing qualification profiles into it.
     instrumentation="$(CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} cargo llvm-cov show-env --sh)"

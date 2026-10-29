@@ -414,6 +414,8 @@ struct ScenarioWorld {
     last_backup: Option<backup::TestBackup>,
     /// A CLI backup paused at its quiesced cut while the scenario exercises other operations.
     background_backup: Option<AbortOnDropHandle<std::process::Output>>,
+    /// The exact CLI child started by the background-backup step, for cancellation assertions.
+    background_backup_pid: Option<nix::unistd::Pid>,
     /// How the last backup download a scenario shaped itself ended.
     last_backup_download: Option<crate::common::raw_session::TestDownloadEnd>,
     /// The `SHOW CREATE` output of models a scenario saved, by the name it saved them as and then
@@ -4682,6 +4684,7 @@ impl ScenarioWorld {
             None
         };
         let mut process = tokio::process::Command::new(scenario_cli_binary());
+        process.kill_on_drop(true);
         process.args([
             "--server",
             &grpc_uri,
@@ -4800,6 +4803,7 @@ async fn when_cli_suggests_for(world: &mut ScenarioWorld, input: String, node: S
     let output = nervix_primitives::time::timeout(
         Duration::from_secs(60),
         tokio::process::Command::new(scenario_cli_binary())
+            .kill_on_drop(true)
             .args([
                 "--server",
                 &grpc_uri,
@@ -5289,6 +5293,7 @@ async fn when_cli_follows_missing_domain(world: &mut ScenarioWorld, domain: Stri
     let output = nervix_primitives::time::timeout(
         Duration::from_secs(10),
         tokio::process::Command::new(scenario_cli_binary())
+            .kill_on_drop(true)
             .args([
                 "--server",
                 &grpc_uri,
@@ -17218,7 +17223,8 @@ async fn run_cli_inspection(
         .arg("--password")
         .arg(TEST_AUTH_PASSWORD)
         .arg("--command")
-        .arg(query);
+        .arg(query)
+        .kill_on_drop(true);
     if let CliConnectionCase::MissingCa = connection {
         command
             .arg("--tls-ca-cert")
@@ -33602,6 +33608,13 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 let cleanup_deadline = PhaseDeadline::after(CLUSTER_TEARDOWN_BUDGET);
                 if backup_gates_released > 0 {
                     world.finish_background_backups(cleanup_deadline).await;
+                }
+                if let Some(Err(error)) = world.cancel_background_backup().await
+                    && !error.is_cancelled()
+                {
+                    append_cucumber_log_line(&format!(
+                        "scenario teardown failed: background CLI backup task: {error}"
+                    ));
                 }
                 let cluster_cleanup = match world.cluster.take() {
                     Some(mut cluster) => {

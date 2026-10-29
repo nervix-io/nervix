@@ -100,7 +100,8 @@ def scenario_executable(manifest: Path) -> Path:
 def qualify(evidence: Path) -> None:
     executable = scenario_executable(evidence / "build.jsonl")
     sources = ("src/fault_injection/backup_cut.rs", "src/fault_injection/backup_cut_tests.rs",
-               "tests/scenarios.rs", "tests/backup/cleanup.rs", "tests/common/cluster.rs",
+               "tests/scenarios.rs", "tests/backup/cleanup.rs", "tests/backup/cli_lifecycle.rs",
+               "tests/backup/mod.rs", "tests/common/cluster.rs",
                "tests/common/cluster_teardown.rs", "tests/harness_liveness.rs",
                "tests/fixtures/backup_cut_cleanup.feature", "scripts/backup_cut_cleanup.py", "justfile")
     for name in sources:

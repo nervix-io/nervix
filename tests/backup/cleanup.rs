@@ -105,18 +105,23 @@ impl ScenarioWorld {
                 )),
             }
         }
-        if let Some(task) = self.background_backup.take() {
+        // Keep a timed-out CLI owned so teardown can abort and join it before stopping nodes.
+        if let Some(task) = self.background_backup.as_mut() {
             match deadline.bound(task).await {
                 BeforeDeadline::Finished(Ok(output)) => {
+                    self.background_backup = None;
                     let succeeded = output.status.success();
                     self.last_cli_output = Some(output);
                     append_cucumber_log_line(&format!(
                         "backup cleanup finished: {identity} kind=cli succeeded={succeeded}"
                     ));
                 }
-                BeforeDeadline::Finished(Err(error)) => append_cucumber_log_line(&format!(
-                    "backup cleanup failed: {identity} kind=cli task={error}"
-                )),
+                BeforeDeadline::Finished(Err(error)) => {
+                    self.background_backup = None;
+                    append_cucumber_log_line(&format!(
+                        "backup cleanup failed: {identity} kind=cli task={error}"
+                    ));
+                }
                 BeforeDeadline::Passed => append_cucumber_log_line(&format!(
                     "backup cleanup unfinished: {identity} kind=cli deadline passed"
                 )),

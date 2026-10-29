@@ -1872,8 +1872,9 @@ stopping              abort CLI output readers and kill their child processes;
      |                and observers;
      |                stop HTTP and gRPC receivers within 6 s; close the browser and the
      |                session;
-     |                finish retained background backups after releasing cut gates and stop
-     |                the cluster, sharing one absolute 60 s deadline;
+     |                finish retained background backups after releasing cut gates;
+     |                cancel and join any remaining background CLI before stopping the cluster,
+     |                sharing one absolute 60 s deadline;
      |                release proxies, silent peers, permits, and fixture ports
 finished
 ```
@@ -1957,6 +1958,11 @@ waiters before clearing its registry, so a cut that already borrowed a gate cont
 later cut finds no hold. Cleanup applies after failed steps as well as successful bodies and is
 idempotent. It does not cancel an admitted backup or claim that releasing its gate completes it.
 
+After releasing gates, cleanup lets retained public backup work finish while its peers remain
+available. It then cancels and joins any remaining CLI task before stopping nodes or returning
+listener ports. The bounded CLI wait borrows its handle, keeping it owned for cancellation and join
+if the deadline passes. The explicit scenario cancellation step still kills and joins its own child.
+
 `just test-backup-cut-cleanup` qualifies that failed-step path through the real Cucumber after
 hook. Its fixture, outside the ordinary feature tree at `tests/fixtures/backup_cut_cleanup.feature`,
 starts a public backup, observes the armed boundary and deliberately fails the body. Both lease
@@ -1996,6 +2002,18 @@ Harness state goes back only after the tasks that used it have ended, so the nex
 finds a port, a fault, or a proxy taken. What a node left stopping still uses stays with its keeper
 until that node has ended.
 
+- Every asynchronous CLI command, including one-shot inspection, completion, clock, backup and
+  restore commands, starts with `kill_on_drop(true)`. Cancelling its step or expiring its timeout
+  therefore kills the child rather than leaving its redirects and reconnects running. The
+  background-backup step records its child's process id. Teardown aborts and joins its output
+  task before releasing command pauses or stopping the cluster, so the child is dropped before
+  the cluster's listener ports can return to the pool. The public one- and three-node outline
+  `Cancelling a paused background backup ends its CLI process` holds the cut, cancels that same
+  task and requires its exact process to disappear within a 30-second observation budget. A
+  surviving child fails the assertion and is killed to contain the failed regression. After
+  releasing the cut, the outline recovers that same durable backup by its caller-chosen execution
+  reference and collects its archive before stopping the cluster: ending the client does not
+  cancel the server's admitted backup.
 - CLI output readers, the terminal task of an interactive CLI among them, are aborted and their
   `kill_on_drop` child processes are dropped before node teardown, which also removes the REPL's
   working directory. Background HTTP load, held uploads, server processes and real-process
