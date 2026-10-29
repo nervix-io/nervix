@@ -2559,7 +2559,18 @@ and Arrow type retained beneath the publish context. It is not a per-record reje
 that keeps a MySQL pool at `POOL SIZE MIN` reports a pass that ends below it as
 `PoolMinimumError::NotRestored`, naming the minimum, above the failed checkout's `CheckOut` and the
 driver's error, before its next pass retries; a later writer's failure remains a separate
-diagnostic.
+diagnostic. MySQL's configured `timeout_ms` is read once through `ConfiguredDeadline` and retained
+with the node's shared driver pool. It bounds every checkout, including the minimum keeper's,
+initial connection validation, and each insert as separate operations. An elapsed operation keeps
+the typed `DeadlineElapsed` beneath its MySQL and host contexts and attaches its safe operation,
+key and duration for public emitter diagnostics. MySQL composition preserves the shared-client
+report through initialization. An elapsed operation is infrastructure failure, never a row
+rejection. Cancelling a driver command marks its connection disconnected, and the
+recycler discards it before handing out capacity again. Omitting the key retains the declared
+unbounded waits. TLS files extend the URL's existing `SslOpts`, retaining verification and trust
+choices, and paired identity files install the driver's RSA PKCS#1 identity. The silent-handshake,
+locked-insert/retry and shared-pool-contention scenarios own the public deadline observations;
+the mounted-certificate scenario uses an account that requires a client certificate.
 
 The host's source start keeps every connector report it composes an ingestor from. A client
 configuration that does not resolve, a connector plan that fails, such as a Syslog, Redis,

@@ -685,7 +685,15 @@ A MySQL pool is kept at its `POOL SIZE MIN` by a task no caller waits on, so tha
 witness of a pass that ends below the minimum. It reports `PoolMinimumError::NotRestored`, naming
 the minimum, above the failed checkout's `PoolMinimumError::CheckOut` and the driver's error, at
 `debug`, returns the connections the pass held, and passes again a second later. An emitter that
-needs a connection meanwhile reports its own failed checkout.
+needs a connection meanwhile reports its own failed checkout. The shared MySQL pool retains
+`ConfiguredDeadline` for `timeout_ms`, when present, and every checkout, validation and insert
+keeps a typed `DeadlineElapsed` on expiry. Driver checkout and validation errors retain their
+typed causes through the open/write contexts. The emitter's pool-borrow context adds no rendered
+copy of the report. Its deadline report also attaches the safe operation, key and duration for
+the host's public emitter diagnostic. MySQL initialization changes context on the shared-client
+report rather than reducing it to Display text, so that projection and the typed cause survive.
+Deadline failures are infrastructure outcomes and leave pending rows on the host's retry policy;
+they do not become definite record rejections.
 
 An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP emitter: a timeout, a
 DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
