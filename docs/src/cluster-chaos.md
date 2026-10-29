@@ -2682,7 +2682,10 @@ The suite starts no later entry. The verifier self-check executes the same way: 
 executes reaches it as the suite's one TERM, the suite records the check as interrupted, and no
 entry starts. Its console reaches its caller through a tee that ignores a terminal's interrupts and
 hangups and keeps writing `suite.log` when the caller stops reading, so the suite outlives its
-console and still records every verdict.
+console and still records every verdict. A terminal's signal also reaches the short commands the
+suite runs to update its own record. One that arrives while such a command executes can end it, and
+the suite then stops on the failed update instead of recording the run's verdict; cleanup records
+that run as it records any run whose controller ended early.
 
 `just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY` ends what a suite left behind. The suite
 records the process of its controller, of its verifier self-check and of every run it starts, and

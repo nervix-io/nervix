@@ -726,6 +726,10 @@ setsid env PATH="${bundle}/bin:${PATH}" "${bundle}/suite.sh" slow --image nervix
 suite_pid=$!
 background_pids+=("${suite_pid}")
 wait_for_file "${tmp_dir}/runs/group-1/group-1-slow.pid"
+# The hangup reaches the suite's own helpers too. Sent while the suite still records the run's
+# process, it can end that jq, and the suite stops on the failed update before it handles the
+# hangup. This case observes a suite that waits on its run, so it waits for that record first.
+wait_for_record "${tmp_dir}/runs/group-1/suite.json" '.entries[0].process.pid != null'
 kill -HUP -- "-${suite_pid}"
 status=0
 wait "${suite_pid}" || status=$?
