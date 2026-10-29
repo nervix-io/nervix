@@ -848,6 +848,21 @@ own bulk-length refusal stays a record outcome; the emitter declares optional ba
 a learned size ceiling. The Redis-specific declaration tests, generated grammar conformance and
 one-/three-node public declaration scenarios qualify these facts together.
 
+`NATS SUBJECT` holds both directions to one subject rule: at most 1,024 UTF-8 bytes of
+`.`-separated tokens, none empty, without whitespace or control characters, kept exactly as
+written. A subscription may write `*` for one token and `>` for every remaining token, each only
+as a whole token and `>` only last; a publication subject admits neither, since a message is
+published to one literal subject. The ingestor declares `NO ACK` with a required `QUEUE GROUP` and
+`INSTANCES`, and `BUFFER`/`DROP` for intake, because Core NATS keeps no backlog, position or
+acknowledgement for a subscriber. Both directions carry headers by name, and the ingestor projects
+no typed metadata field. The emitter declares Core `NO ACK` and `JETSTREAM ACK` publication, codec
+payloads, no envelope clause, and optional batching without a protocol maximum: each server
+announces its `max_payload`, and the client refuses a message above it before writing it. The
+unpooled client's Nervix-owned keys are the address, `timeout_ms` and the TLS files, while the
+address's userinfo and query options belong to the driver and are masked in inspection. The
+NATS-specific declaration tests, generated grammar conformance and one-/three-node public
+declaration scenarios qualify these facts together.
+
 Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
 endpoint ingestors reference endpoints, while a Syslog listener references a client; all three
 declare every-node execution. Scheduling and placement-reference completion read that capability,

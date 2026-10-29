@@ -1597,6 +1597,12 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-ingest).
 <!-- connector-matrix:ingest-nats-subject:end -->
 
+`SUBJECT` and `QUEUE GROUP` are string literals Nervix subscribes with exactly as written, letter
+case included, within the [external name rules](#external-names). A subscription subject may use
+the NATS wildcards as whole tokens: `SUBJECT 'orders.*.EU'` matches one token in the middle, and
+`SUBJECT 'orders.>'` every remaining token, so `>` comes last. A message's subject and reply
+subject are not exposed as typed metadata; programs read its payload and headers.
+
 NATS ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
 are mandatory; use `INSTANCES 1` for a single queue member.
 
