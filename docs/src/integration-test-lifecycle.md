@@ -2404,6 +2404,15 @@ replay assertion within eight seconds.
 
 The Pulsar broker announces a `maxMessageSize` of 1 MiB rather than Pulsar's 5 MiB default, the
 same limit the MQTT and NATS brokers keep, so one scenario message can exceed each broker's limit.
+Dependency startup waits for HTTP `200 OK` from `/admin/v2/namespaces/public/default` on its
+admin listener before publishing either the plaintext or TLS broker endpoint. The standalone
+starts those listeners before it creates the default namespace, so its early broker-ready log
+line or an accepting TCP port does not establish namespace readiness. The HTTP condition shares
+the existing 120-second fresh-container startup budget. Every attachment, including a running
+or restarted reusable container whose namespace already exists, checks the same HTTP condition
+within the existing 30-second readiness-probe budget. A pending connection or response cannot
+extend that probe, and its failure names the namespace URL and last completed response or request
+failure. The probe follows no redirects and uses no environment proxy.
 Its admin API serves the topic-level `maxMessageSize` policy a scenario sets on its own topic; the
 step waits up to 60 seconds for the broker to read the policy back, which shows that the policy
 applies to the next message.

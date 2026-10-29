@@ -516,6 +516,10 @@ test-web-console *args:
 test-harness-liveness *args: tests-deps
     cargo test --features testing --test harness_liveness -- {{ args }}
 
+# Check external dependency startup and observation, including fresh Pulsar namespace readiness.
+test-environment *args:
+    cargo test --package nervix-test-environment {{ args }}
+
 # Measure native consensus transport regressions through the configured compiler cache.
 coverage-consensus output *args:
     cargo llvm-cov --no-clean --package nervix-consensus --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
