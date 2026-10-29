@@ -415,6 +415,14 @@ configuration has one reserved-key declaration, shared by offline MySQL URL insp
 host's resolved-configuration refusal. Pool capacity remains the client's typed `POOL SIZE`
 bounds, with no competing URL setting.
 
+Postgres table names validate the same one- or two-part path at construction and decoding, and the
+connector quotes the parts it borrows from the validated name in both its insert and its catalog
+lookup. A Postgres address's TLS policy is the typed `PostgresSslMode`, read through the declared
+`sslmode` option that schema validation applies too; a spelling the option does not declare, or the
+option written twice, is refused rather than defaulted to a policy. A Postgres conflict clause's
+rules belong to `PostgresConflictAction`, whose typed refusal names a missing `DO UPDATE` target, an
+empty target column or an update without a mapped column outside its target.
+
 RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
 and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch
 timeout; both acknowledged variants own an ACK timeout and retry policy. Zero cannot accidentally

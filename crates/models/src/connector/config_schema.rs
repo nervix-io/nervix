@@ -16,6 +16,7 @@ use std::{
 };
 
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use thiserror::Error;
 use url::Url;
 
@@ -50,6 +51,104 @@ pub enum ClientConfigPresence {
         address: &'static str,
         scheme: &'static str,
     },
+    /// The key may be written only while the named driver URL sets one of its Nervix-owned query
+    /// options to the declared choice.
+    OptionalForQuery {
+        address: &'static str,
+        option: &'static str,
+        value: &'static str,
+    },
+}
+
+/// A query option of a driver URL whose value Nervix owns rather than the driver.
+///
+/// An address sets it exactly once, under its name or one of the driver's aliases for it, to one
+/// of its choices. The driver reads every other query option as written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnedQueryOption {
+    pub name: &'static str,
+    /// Other spellings the driver reads as this same option.
+    pub aliases: &'static [&'static str],
+    pub choices: &'static [&'static str],
+}
+
+impl OwnedQueryOption {
+    /// The choice `address` sets this option to, which is how both validation and the connector
+    /// read it.
+    pub fn value_in(
+        self,
+        key: &str,
+        address: &Url,
+    ) -> Result<&'static str, Report<ClientConfigSchemaError>> {
+        let refused = || {
+            Report::new(ClientConfigSchemaError::QueryOption {
+                key: key.to_string(),
+                option: self.name,
+                choices: self.choices,
+            })
+        };
+        let mut written = None;
+        // The query is bounded by the address the statement writes, and the declared spellings
+        // are a fixed list of at most a few entries.
+        for (name, value) in address.query_pairs() {
+            let spells_this_option =
+                name == self.name || self.aliases.iter().any(|alias| *alias == name);
+            if !spells_this_option {
+                continue;
+            }
+            if written.is_some() {
+                return Err(refused());
+            }
+            written = Some(value);
+        }
+        let Some(written) = written else {
+            return Err(refused());
+        };
+        // The declared choices are a fixed list of a few spellings.
+        let choice = self
+            .choices
+            .iter()
+            .copied()
+            .find(|choice| *choice == written);
+        match choice {
+            Some(choice) => Ok(choice),
+            None => Err(refused()),
+        }
+    }
+}
+
+/// A driver URL whose scheme and listed query options Nervix owns; the driver reads every other
+/// part of it, including its other query options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriverUrl {
+    pub schemes: &'static [&'static str],
+    pub owned: &'static [OwnedQueryOption],
+}
+
+impl DriverUrl {
+    /// Holds a parsed `key` value to a declared scheme and each owned option to one of its
+    /// choices.
+    fn validate(self, key: &str, address: &Url) -> Result<(), Report<ClientConfigSchemaError>> {
+        if !self.schemes.contains(&address.scheme()) {
+            return Err(Report::new(ClientConfigSchemaError::Scheme {
+                key: key.to_string(),
+                schemes: self.schemes,
+            }));
+        }
+        for option in self.owned {
+            option.value_in(key, address)?;
+        }
+        Ok(())
+    }
+
+    /// The owned query option named `option`, if this URL declares one.
+    fn owned_option(self, option: &str) -> Option<OwnedQueryOption> {
+        // A driver URL owns a fixed declared list of at most a few options.
+        self.owned
+            .iter()
+            .copied()
+            .find(|candidate| candidate.name == option)
+    }
 }
 
 /// A file's role, including the two halves of a TLS client identity.
@@ -73,6 +172,7 @@ pub enum ClientConfigValue {
     TcpKeepaliveMilliseconds,
     Url(&'static [&'static str]),
     DriverAddress,
+    DriverUrl(DriverUrl),
     Choice(&'static [&'static str]),
     File(ClientConfigFile),
 }
@@ -91,6 +191,9 @@ impl ClientConfigValue {
             }
             Self::Url(_) => "URL",
             Self::DriverAddress => "driver address, including its delegated query options",
+            Self::DriverUrl(_) => {
+                "driver URL with Nervix-owned query options, including its delegated query options"
+            }
             Self::Choice(_) => "declared choice",
             Self::File(_) => "file path, with resource mount templates resolved before use",
         }
@@ -137,6 +240,10 @@ impl ClientConfigValue {
                     return Err(Report::new(invalid()));
                 }
             }
+            Self::DriverUrl(url) => {
+                let parsed = Url::parse(value).change_context(invalid())?;
+                url.validate(key, &parsed)?;
+            }
             Self::DriverAddress | Self::File(_) => {
                 if value.is_empty() {
                     return Err(Report::new(invalid()));
@@ -164,7 +271,10 @@ impl ClientConfigValue {
     }
 
     fn address_is_confidential(self, value: &str) -> bool {
-        if !matches!(self, Self::Url(_) | Self::DriverAddress) {
+        if !matches!(
+            self,
+            Self::Url(_) | Self::DriverAddress | Self::DriverUrl(_)
+        ) {
             return false;
         }
         match self.inspection_address(value) {
@@ -264,6 +374,23 @@ impl ClientConfigKey {
         }
     }
 
+    /// Permit this key only while the named driver URL sets its Nervix-owned `option` to `value`.
+    pub const fn only_for_query(
+        self,
+        address: &'static str,
+        option: &'static str,
+        value: &'static str,
+    ) -> Self {
+        Self {
+            presence: ClientConfigPresence::OptionalForQuery {
+                address,
+                option,
+                value,
+            },
+            ..self
+        }
+    }
+
     pub const fn driver(self) -> Self {
         Self {
             owner: ClientConfigOwner::Driver,
@@ -325,6 +452,27 @@ pub enum ClientConfigSchemaError {
         address: &'static str,
         scheme: &'static str,
     },
+    #[error("client config key '{key}' must be a {} URL", .schemes.join(" or "))]
+    Scheme {
+        key: String,
+        schemes: &'static [&'static str],
+    },
+    #[error(
+        "client config key '{key}' must set the {option} query option once, to {}",
+        .choices.join(" or ")
+    )]
+    QueryOption {
+        key: String,
+        option: &'static str,
+        choices: &'static [&'static str],
+    },
+    #[error("client config key '{key}' requires '{address}' to set {option}={value}")]
+    RequiresQuery {
+        key: &'static str,
+        address: &'static str,
+        option: &'static str,
+        value: &'static str,
+    },
     #[error("client config key '{key}' is reserved for Nervix")]
     Reserved { key: String },
 }
@@ -341,11 +489,67 @@ impl ClientConfigSchema {
             assert!(Self::name_precedes(keys[index - 1].name, keys[index].name));
             index += 1;
         }
+        let mut index = 0;
+        while index < keys.len() {
+            if let ClientConfigPresence::OptionalForQuery {
+                address,
+                option,
+                value,
+            } = keys[index].presence
+            {
+                assert!(Self::owns_choice(keys, address, option, value));
+            }
+            index += 1;
+        }
         Self {
             keys,
             namespaces,
             reserved,
         }
+    }
+
+    /// Whether `address` is a driver URL whose Nervix-owned `option` offers `value`, which a key
+    /// conditioned on that choice requires of its declaration.
+    const fn owns_choice(
+        keys: &'static [ClientConfigKey],
+        address: &str,
+        option: &str,
+        value: &str,
+    ) -> bool {
+        let mut key = 0;
+        while key < keys.len() {
+            if let ClientConfigValue::DriverUrl(url) = keys[key].value
+                && Self::same_name(keys[key].name, address)
+                && Self::offers_choice(url.owned, option, value)
+            {
+                return true;
+            }
+            key += 1;
+        }
+        false
+    }
+
+    /// Whether one of `owned` is `option` with `value` among its choices.
+    const fn offers_choice(owned: &[OwnedQueryOption], option: &str, value: &str) -> bool {
+        let mut index = 0;
+        while index < owned.len() {
+            if Self::same_name(owned[index].name, option) {
+                let choices = owned[index].choices;
+                let mut choice = 0;
+                while choice < choices.len() {
+                    if Self::same_name(choices[choice], value) {
+                        return true;
+                    }
+                    choice += 1;
+                }
+            }
+            index += 1;
+        }
+        false
+    }
+
+    const fn same_name(left: &str, right: &str) -> bool {
+        !Self::name_precedes(left, right) && !Self::name_precedes(right, left)
     }
 
     const fn name_precedes(left: &str, right: &str) -> bool {
@@ -377,11 +581,12 @@ impl ClientConfigSchema {
     pub fn ownership_label(self) -> &'static str {
         if !self.namespaces.is_empty() {
             "declared keys and driver-delegated property namespaces"
-        } else if self
-            .keys
-            .iter()
-            .any(|key| key.value == ClientConfigValue::DriverAddress)
-        {
+        } else if self.keys.iter().any(|key| {
+            matches!(
+                key.value,
+                ClientConfigValue::DriverAddress | ClientConfigValue::DriverUrl(_)
+            )
+        }) {
             "Nervix; address query delegated to driver"
         } else {
             "Nervix"
@@ -465,7 +670,64 @@ impl ClientConfigSchema {
             }
         }
         self.validate_identity_pair(&values)?;
-        self.validate_conditional_presence(&values, stage)
+        self.validate_conditional_presence(&values, stage)?;
+        self.validate_query_presence(&values, stage)
+    }
+
+    /// Holds each key conditioned on a Nervix-owned query option to the choice its address sets.
+    fn validate_query_presence(
+        self,
+        values: &BTreeMap<&str, &str>,
+        stage: ConfigValueStage,
+    ) -> Result<(), Report<ClientConfigSchemaError>> {
+        for key in self.keys {
+            let ClientConfigPresence::OptionalForQuery {
+                address,
+                option,
+                value,
+            } = key.presence
+            else {
+                continue;
+            };
+            if !values.contains_key(key.name) {
+                continue;
+            }
+            let refused = || {
+                Report::new(ClientConfigSchemaError::RequiresQuery {
+                    key: key.name,
+                    address,
+                    option,
+                    value,
+                })
+            };
+            let Some(written) = values.get(address) else {
+                return Err(refused());
+            };
+            if matches!(stage, ConfigValueStage::Declared) && written.contains("{{") {
+                continue;
+            }
+            let owned = self
+                .owned_option(address, option)
+                .assured("the schema constructor checked that the address owns this option");
+            let parsed = Url::parse(written).change_context_lazy(|| {
+                ClientConfigSchemaError::InvalidValue {
+                    key: address.to_string(),
+                    expected: "URL",
+                }
+            })?;
+            if owned.value_in(address, &parsed)? != value {
+                return Err(refused());
+            }
+        }
+        Ok(())
+    }
+
+    /// The Nervix-owned query option `option` of the driver URL key `address`, if it declares one.
+    fn owned_option(self, address: &str, option: &str) -> Option<OwnedQueryOption> {
+        let ClientConfigValue::DriverUrl(url) = self.key(address)?.value else {
+            return None;
+        };
+        url.owned_option(option)
     }
 
     fn validate_conditional_presence(
