@@ -2091,6 +2091,19 @@ mod tests {
                 ..
             } if message == "node.initialization=initializing"
         ));
+        assert!(matches!(
+            ReadinessProbeOutcome::probe_observation(&initializing.endpoint(), phase).await,
+            ReadinessProbeOutcome::Ready {
+                response_kind: ResponseKind::Completed
+            }
+        ));
+        assert!(matches!(
+            ReadinessProbeOutcome::probe_observation(&unavailable.endpoint(), phase).await,
+            ReadinessProbeOutcome::UnsuccessfulResponse {
+                response_kind: ResponseKind::Failed,
+                ..
+            }
+        ));
         let unsuccessful = ReadinessProbeOutcome::probe(&unavailable.endpoint(), phase).await;
         assert!(matches!(
             unsuccessful,

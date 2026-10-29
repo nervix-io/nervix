@@ -1187,6 +1187,24 @@ impl Cluster {
         .map_err(io::Error::other)
     }
 
+    /// Starts a node only as far as its public status service, even when no peer is running.
+    /// Initialization and route installation remain the scenario's explicit observations.
+    pub(crate) async fn start_node_until_observable(&mut self, node_id: &str) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get_mut(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let node = node_name(&handle.spec.node_id);
+        NodeStartup::start(
+            &node,
+            &mut ObservableNode(handle),
+            PhaseDeadline::after(ATTEMPT_READINESS_BUDGET),
+            StartupRetryPolicy::BindBeforeRuntime,
+        )
+        .await
+        .map_err(io::Error::other)
+    }
+
     /// Starts one owned node with live-policy discovery held. Readiness must remain false,
     /// so this fixture waits for the explicit startup boundary instead of the ready probe.
     pub(crate) async fn start_node_waiting_for_parameters(
@@ -4162,6 +4180,39 @@ impl NodeHandle {
                 self.spec.node_id
             ))),
         }
+    }
+}
+
+/// A startup whose completion boundary is public observation, before runtime initialization.
+/// It shares the ordinary node's launch, failed-attempt cleanup and listener reallocation.
+struct ObservableNode<'node>(&'node mut NodeHandle);
+
+impl StartableNode for ObservableNode<'_> {
+    fn launch(&mut self) -> io::Result<()> {
+        self.0.launch()
+    }
+
+    async fn readiness(
+        &mut self,
+        attempt: u32,
+        readiness: PhaseDeadline,
+    ) -> error_stack::Result<(), NodeStartupError> {
+        let endpoint = self.0.status_endpoint();
+        let node = node_name(&self.0.spec.node_id);
+        self.0
+            .task
+            .wait_until_ready(&node, attempt, readiness, POLL_INTERVAL, |phase| {
+                ReadinessProbeOutcome::probe_observation(&endpoint, phase)
+            })
+            .await
+    }
+
+    async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
+        self.0.clean_up(cleanup).await
+    }
+
+    fn move_to_fresh_ports(&mut self, ports: StartupPorts) -> io::Result<()> {
+        self.0.move_to_fresh_ports(ports)
     }
 }
 

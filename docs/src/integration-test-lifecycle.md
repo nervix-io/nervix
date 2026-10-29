@@ -1766,6 +1766,14 @@ applies, and the harness never restarts a node after it becomes ready. The inter
 installation scenario also occupies the first launch's observability port and then observes the
 armed interruption on the successful launch.
 
+A scenario that must inspect an initializing node instead starts it until public observation is
+available. This uses the same constrained 36-second startup controller, occupied-listener retry,
+owned-task observation and failed-attempt cleanup, but its completion witness is a completed public
+cluster-status response. It does not require `node.initialization=ready`. An isolated returning
+node can therefore answer observation while it waits for a live peer's policy; the endpoint-route
+restart scenario asserts HTTP 503 during that interval, then starts a peer and observes successful
+route installation. Ordinary readiness and catch-up startups still require completed initialization.
+
 ## Scenario Phases
 
 A scenario publishes the phase it is entering, so a reader sees the work in flight rather than the

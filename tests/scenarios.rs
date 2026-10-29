@@ -7618,6 +7618,16 @@ async fn when_node_is_started_without_catching_up(world: &mut ScenarioWorld, nod
         .expect("failed to start node");
 }
 
+#[when(expr = "node {string} is started until public observation is available")]
+async fn when_node_is_started_until_observable(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .start_node_until_observable(&node_id)
+        .await
+        .expect("failed to start observable node");
+}
+
 #[then(expr = "within {string} node {string} has interrupted a raft snapshot installation")]
 async fn then_node_interrupted_a_snapshot_installation(
     world: &mut ScenarioWorld,
