@@ -57,6 +57,7 @@ pub enum ChoiceTarget {
     IngestPulsarSource,
     IngestMqttSource,
     IngestNatsSource,
+    IngestNatsStreamSource,
     IngestRabbitMqSource,
     IngestRedisPubSubSource,
     IngestPrometheusSource,
@@ -96,6 +97,7 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     IngestPulsarSource,
     IngestMqttSource,
     IngestNatsSource,
+    IngestNatsStreamSource,
     IngestRabbitMqSource,
     IngestRedisPubSubSource,
     IngestPrometheusSource,
@@ -127,6 +129,7 @@ impl ChoiceTarget {
             IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => Self::IngestPulsarSource,
             IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => Self::IngestMqttSource,
             IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => Self::IngestNatsSource,
+            IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => Self::IngestNatsStreamSource,
             IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => {
                 Self::IngestRabbitMqSource
             }
@@ -160,6 +163,9 @@ impl ChoiceTarget {
             }
             Self::IngestMqttSource => Some(IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic)),
             Self::IngestNatsSource => Some(IngestorEntityKind::Nats(NatsIngestorEntity::Subject)),
+            Self::IngestNatsStreamSource => {
+                Some(IngestorEntityKind::Nats(NatsIngestorEntity::Stream))
+            }
             Self::IngestRabbitMqSource => {
                 Some(IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue))
             }

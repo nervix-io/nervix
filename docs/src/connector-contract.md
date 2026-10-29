@@ -881,6 +881,27 @@ address's userinfo and query options belong to the driver and are masked in insp
 NATS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 
+`NATS STREAM` is JetStream's side of the same client: an ingestor names a stream and one durable
+pull consumer of it, both an operator's, each held to the server's own name rule of 1 to 255 bytes
+without whitespace, control characters, `.`, `*`, `>` or a path separator. It declares
+`ACK SEQUENTIAL` and `ACK PARALLEL`, `SUSPEND`, `BUFFER` and `DROP`, the `broker_redelivered`
+position class and the `answered` acknowledgement confirmation, headers by name, and no typed
+metadata field. Its connector looks the consumer up when an instance resumes, never creates it,
+and refuses a push consumer and one whose acknowledgement policy is not explicit. One pull request
+at a time asks for at most the host's window, and at most the consumer's `MaxRequestBatch`, and
+waits without expiry or for the consumer's `MaxRequestExpires`, so the deliveries it holds ahead of
+the host stay within one window. Each delivery is settled individually: acknowledging sends `+ACK`
+and rejecting sends `-NAK` to the delivery's own subject as a request, and each returns once the
+server answered, within the client's request timeout. Suspending or closing an instance drains its
+inbox: the unsubscription ends the consumer's deliveries to it, and every delivery the client had
+already received is returned with `-NAK`, so the consumer delivers it again at once rather than
+once its `AckWait` passes. The driver ends the subscription as soon as it has written the
+unsubscription, so a delivery still travelling then, and one an instance held when its connection
+was lost, is delivered again once that `AckWait` passes. The
+stream's unit tests drive these paths through a scripted server, and one-/three-node public
+scenarios through a JetStream server qualify delivery, redelivery, suspension, missing entities
+and failover.
+
 Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
 endpoint ingestors reference endpoints, while a Syslog listener references a client; all three
 declare every-node execution. Scheduling and placement-reference completion read that capability,
@@ -997,7 +1018,7 @@ the `write_header` calls of one record become on the published message.
 | --- | --- | --- | --- |
 | `last_wins`, exact names | `SQS QUEUE` | `PULSAR TOPIC`, `SQS QUEUE` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC` | `KAFKA TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
-| `repeats_by_name`, exact names | `NATS SUBJECT` | `NATS SUBJECT` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| `repeats_by_name`, exact names | `NATS SUBJECT`, `NATS STREAM` | `NATS SUBJECT` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, lowercase names | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT` | None | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `sorted_by_name`, exact names | `RABBITMQ QUEUE` | `RABBITMQ QUEUE` | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `sorted_by_name`, lowercase names | None | `HTTP REQUEST` | one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
@@ -1201,7 +1222,7 @@ entity declares, which states what its positions still mean once their connectio
 <!-- connector-matrix:position:start -->
 | Position class | Entities | Meaning |
 | --- | --- | --- |
-| `broker_redelivered` | `MQTT TOPIC`, `RABBITMQ QUEUE`, `SQS QUEUE` | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
+| `broker_redelivered` | `MQTT TOPIC`, `NATS STREAM`, `RABBITMQ QUEUE`, `SQS QUEUE` | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
 | `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | Nothing is pending. The host keeps no position and reads again after its retry delay. |
 | `replayable` | `KAFKA TOPIC`, `PULSAR TOPIC` | The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore seeks each rejected partition it is assigned at once, and starts every other one at its earliest rejected record when its consumer group assigns it again, until a commit passes that record. |
 <!-- connector-matrix:position:end -->
@@ -1307,6 +1328,7 @@ in one of these ways:
 | `KAFKA TOPIC`, `PULSAR TOPIC` | Ends at once, while it waits for a batch's first record or between the records of an `ACK PARALLEL` batch, with every record it gathered. |
 | `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the connection had already read when the read stopped waiting stays in the connection's read-ahead, which hands it to the next read first. |
 | `RABBITMQ QUEUE` | Ends at once while waiting for the first delivery or between deliveries of a parallel batch, returning every gathered delivery. A transport failure found after gathering is retained and reported on the next read, after the gathered deliveries reach the host. |
+| `NATS STREAM` | Ends at once while waiting for the first delivery or between deliveries of a parallel batch, returning every gathered delivery. Its pull request stays outstanding, so a delivery that reaches the instance's inbox afterwards waits there for the next read, which sends no new pull request until that one has brought what it asked for or ended. A transport failure found after gathering is retained and reported on the next read. |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
 | `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
 
@@ -1496,7 +1518,7 @@ it did not get:
 <!-- connector-matrix:confirmation:start -->
 | Acknowledgement confirmation | Entities | Meaning |
 | --- | --- | --- |
-| `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `SQS QUEUE` | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
+| `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `NATS STREAM`, `SQS QUEUE` | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. A NATS STREAM source acknowledges each delivery with a request to its acknowledgement subject, and acknowledging returns once the server answered it, within the client's request timeout. |
 | `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | The source acknowledges nothing on its transport. |
 | `written` | `MQTT TOPIC`, `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT does not answer a `PUBACK`, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` the batch asks for to the connection. |
 <!-- connector-matrix:confirmation:end -->

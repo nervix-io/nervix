@@ -1018,7 +1018,16 @@ A NATS source whose client loses its connection to the server reports
 received, and each reconnect that fails reports `NatsSubjectIngestorError::Connect` beneath
 `IngestorError::Resume`; the source host shows the deepest cause as the ingestor's transient error.
 The driver's `ConnectError` remains beneath `Connect`, so a peer that closes before its initial
-INFO message is reported as `expected INFO, got nothing`. A
+INFO message is reported as `expected INFO, got nothing`. A NATS STREAM source reports the
+server's answer that its stream or consumer does not exist as
+`NatsStreamIngestorError::MissingStream` or `MissingConsumer` beneath `IngestorError::Resume`,
+naming the stream and the consumer, and a consumer it cannot read as declared as `PushConsumer` or
+`AcknowledgementPolicy`; a lookup that learned nothing keeps the driver's `ConsumerInfoError`
+beneath `VerifyConsumer`. A pull request the server refuses is `PullRefused` with a `NatsPullRefusal`
+holding the server's status and the description it gave, if any, beneath `IngestorError::Read`, and a lost connection is `ConnectionLost`.
+An acknowledgement or a negative acknowledgement the server does not answer keeps the client's
+`RequestError` beneath `Acknowledge` or `NegativelyAcknowledge`, and one without a connection to
+send it on is `Disconnected`. A
 NATS JetStream publish keeps the driver's `PublishError` beneath `EmitterWriteError::Publish` when the
 client does not take a record within `ACK TIMEOUT` and when a record's `PubAck` fails, each with the
 connector's description of the failure for the emitter's transient error. A message above the

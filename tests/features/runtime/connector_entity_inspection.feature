@@ -79,6 +79,12 @@ Feature: Every connector entity uses the shared inspection rows
         MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
+      CREATE NATS STREAM INGESTOR nats_stream_source
+        FROM nats_main STREAM 'Orders' CONSUMER 'Readers'
+        MODE ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       CREATE SQS QUEUE INGESTOR sqs_source
         FROM sqs_main QUEUE 'Orders.fifo'
         MODE ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m
@@ -159,6 +165,8 @@ Feature: Every connector entity uses the shared inspection rows
       | 3            | mqtt_source          | MQTT TOPIC            | mqtt_main TOPIC 'devices/+/Orders'                     | INSTANCES 1 SESSION PERSISTENT QOS 1                 | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s       | SUSPEND               |
       | 1            | nats_source          | NATS SUBJECT          | nats_main SUBJECT 'orders.*'                           | QUEUE GROUP 'Readers' INSTANCES 1                    | NO ACK                                                                | DROP                  |
       | 3            | nats_source          | NATS SUBJECT          | nats_main SUBJECT 'orders.*'                           | QUEUE GROUP 'Readers' INSTANCES 1                    | NO ACK                                                                | DROP                  |
+      | 1            | nats_stream_source   | NATS STREAM           | nats_main STREAM 'Orders'                              | CONSUMER 'Readers'                                   | ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 1s      | SUSPEND               |
+      | 3            | nats_stream_source   | NATS STREAM           | nats_main STREAM 'Orders'                              | CONSUMER 'Readers'                                   | ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 1s      | SUSPEND               |
       | 1            | sqs_source           | SQS QUEUE             | sqs_main QUEUE 'Orders.fifo'                           | INSTANCES 1                                          | ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m         | SUSPEND               |
       | 3            | sqs_source           | SQS QUEUE             | sqs_main QUEUE 'Orders.fifo'                           | INSTANCES 1                                          | ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m         | SUSPEND               |
       | 1            | zeromq_source        | ZEROMQ PULL           | zmq_main                                               | none                                                 | NO ACK                                                                | SUSPEND               |

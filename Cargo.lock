@@ -7079,6 +7079,7 @@ dependencies = [
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",

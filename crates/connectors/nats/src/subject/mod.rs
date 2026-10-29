@@ -30,7 +30,7 @@ mod ingestor;
     nervix_lint,
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
-mod scripted_server;
+pub(crate) mod scripted_server;
 
 use std::{future::Future, num::NonZeroU64, pin::Pin, time::Duration};
 
@@ -47,6 +47,7 @@ use async_nats::{
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use futures_util::SinkExt;
+pub(crate) use ingestor::PENDING_LOSS_SIGNALS;
 pub use ingestor::{
     NatsMessageHeaders, NatsSubjectIngestor, NatsSubjectIngestorError, NatsSubjectIngestorMessage,
     NatsSubjectIngestorPlan,

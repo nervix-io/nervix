@@ -10,8 +10,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClickHouseTableName, ExternalName, KafkaConsumerGroupName, KafkaTopicName,
     MONGODB_NAMESPACE_MAX_BYTES, MongoDbCollectionName, MqttTopicFilter, MqttTopicName,
-    MySqlTableName, NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName,
-    PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName, SqsQueueName,
+    MySqlTableName, NatsConsumerName, NatsPublishSubjectName, NatsQueueGroupName, NatsStreamName,
+    NatsSubjectName, PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName,
+    SqsQueueName,
 };
 
 use crate::Arbitrary;
@@ -56,6 +57,10 @@ const ANY_PIECES: [&str; 26] = [
 const SOLID_PIECES: [&str; 13] = [
     "a", "Z", "0", "9", "-", "_", "/", ":", "$", "\\", "'", "é", "中文",
 ];
+/// What a JetStream stream or consumer name is spelled from: anything but whitespace, control
+/// characters, the subject separator and wildcards, and the path separators.
+const JETSTREAM_NAME_PIECES: [&str; 11] =
+    ["a", "Z", "0", "9", "-", "_", ":", "$", "'", "é", "中文"];
 /// What one level of an MQTT topic filter is spelled from apart from its wildcards: anything but
 /// the level separator, the wildcards and NUL.
 const MQTT_LEVEL_PIECES: [&str; 13] = [
@@ -163,6 +168,20 @@ impl Arbitrary<'_> {
         let text = self.pieces_text(SOLID_PIECES, SHORT_NAME_BYTES);
         NatsQueueGroupName::parse(&text)
             .assured("a generated queue group holds no whitespace or control character")
+    }
+
+    /// A JetStream stream name up to the bytes the server admits.
+    pub fn nats_stream_name(&mut self) -> NatsStreamName {
+        let text = self.pieces_text(JETSTREAM_NAME_PIECES, SHORT_NAME_BYTES);
+        NatsStreamName::parse(&text)
+            .assured("a generated stream name holds no separator, wildcard or whitespace")
+    }
+
+    /// A durable JetStream consumer name up to the bytes the server admits.
+    pub fn nats_consumer_name(&mut self) -> NatsConsumerName {
+        let text = self.pieces_text(JETSTREAM_NAME_PIECES, SHORT_NAME_BYTES);
+        NatsConsumerName::parse(&text)
+            .assured("a generated consumer name holds no separator, wildcard or whitespace")
     }
 
     /// An MQTT topic filter: one level up to the filter's bound, or several short ones, where a

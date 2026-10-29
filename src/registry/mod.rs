@@ -76,12 +76,12 @@ pub(crate) use ingestor_plan::{
     IngestorConnectorPlan, IngestorInputPlan, IngestorSpec, IngestorStartPlan,
     KafkaDomainOffsetPlacement, KafkaIngestorStartPlan, KafkaOffsetPlan,
     KafkaTopicIngestorStartPlan, MqttIngestorStartPlan, MqttTopicIngestorStartPlan,
-    NatsIngestorStartPlan, NatsSubjectIngestorStartPlan, PrometheusIngestorStartPlan,
-    PrometheusQueryIngestorStartPlan, PulsarIngestorStartPlan, PulsarTopicIngestorStartPlan,
-    RabbitMqIngestorStartPlan, RabbitMqQueueIngestorStartPlan, RedisIngestorStartPlan,
-    RedisPubSubIngestorStartPlan, SqsIngestorStartPlan, SqsQueueIngestorStartPlan,
-    SyslogIngestorStartPlan, SyslogListenerIngestorStartPlan, TransportInputPlan,
-    WebsocketsConnectionIngestorStartPlan, WebsocketsEndpointIngestorStartPlan,
+    NatsIngestorStartPlan, NatsStreamIngestorStartPlan, NatsSubjectIngestorStartPlan,
+    PrometheusIngestorStartPlan, PrometheusQueryIngestorStartPlan, PulsarIngestorStartPlan,
+    PulsarTopicIngestorStartPlan, RabbitMqIngestorStartPlan, RabbitMqQueueIngestorStartPlan,
+    RedisIngestorStartPlan, RedisPubSubIngestorStartPlan, SqsIngestorStartPlan,
+    SqsQueueIngestorStartPlan, SyslogIngestorStartPlan, SyslogListenerIngestorStartPlan,
+    TransportInputPlan, WebsocketsConnectionIngestorStartPlan, WebsocketsEndpointIngestorStartPlan,
     WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan, ZeroMqPullIngestorStartPlan,
 };
 #[cfg(test)]
