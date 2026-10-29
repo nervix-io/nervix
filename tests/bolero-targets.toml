@@ -11,6 +11,21 @@ sanitizer = "address"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/models/src/connector/__fuzz__/connector__clickhouse__tests__bolero_clickhouse_tls_pairing_matches_the_transport_contract/corpus"
+domain_version = 1
+features = []
+id = "clickhouse-client-tls-pairing"
+invariant = "HTTP accepts no TLS files; HTTPS requires CA trust and either both client identity files or neither, independent of configuration entry order, with exact typed refusal keys."
+manifest = "Cargo.toml"
+max_input_bytes = 32
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/connector/clickhouse.rs"
+test = "connector::clickhouse::tests::bolero_clickhouse_tls_pairing_matches_the_transport_contract"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/models/src/connector/sentry/__fuzz__/connector__sentry__tests__bolero_event_models_preserve_the_authored_platform/corpus"
 domain_version = 1
 features = []

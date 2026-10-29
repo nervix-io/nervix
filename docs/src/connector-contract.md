@@ -96,7 +96,10 @@ guarantee. An impossible mapped type is not a retryable connector initialization
 
 The registry checks these declarations against the candidate graph before accepting `CREATE` or
 `ALTER`. It rejects duplicate `VALUES` keys, unsupported or wrongly typed mappings, and invalid
-transport-ingestor delivery durations before any ingestor or emitter opens. ACK timeouts and retry
+transport-ingestor delivery durations before any ingestor or emitter opens. Expression inference
+precedes the mapped-type check. An expression that cannot infer a type, including a null-only
+mapping, is refused with its declared section and destination key and retains the typed VM cause.
+ACK timeouts and retry
 durations must be positive; a zero batch timeout gathers without waiting. Every duration must fit
 the shared schedulable deadline bound, and retry maximum must be at least its initial backoff.
 OTEL `RESOURCE` mappings remain literal-only. Required batching is established by validation, so
