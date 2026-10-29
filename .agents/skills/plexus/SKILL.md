@@ -528,8 +528,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `verify-full`.
 - Give a `RABBITMQ` client an `amqp://` or `amqps://` `addr` that names a host and no port 0; Nervix
   refuses any other address before commit. Mounted `tls_ca_file`, `tls_cert_file` and
-  `tls_key_file` apply to `amqps` only, certificate and key must be supplied together, and the
-  connection presents them to a broker that requires a client certificate. Read
+  `tls_key_file` require `amqps`; `CREATE` refuses these keys with `amqp`. Certificate and key must
+  be supplied together, and the connection presents them to a broker that requires a client
+  certificate. Read
   [Ingestors → RabbitMQ](../../../docs/src/ingestors.md#rabbitmq).
 - Treat every route as a newly constructed output. Add `INHERIT` only where that node permits it,
   and initialize every required output field on set-only routes.

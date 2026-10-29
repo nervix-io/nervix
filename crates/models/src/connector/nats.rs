@@ -66,9 +66,11 @@ external_names! {
     /// A NATS subject a queue subscription listens on: at most 1,024 bytes of tokens joined by `.`,
     /// none of them empty, without whitespace or control characters. `*` stands for one token and
     /// `>` for every remaining token, each only as a whole token, and `>` only as the last one.
+    /// The subject is subscribed to exactly as written, letter case included.
     pub struct NatsSubjectName => nats_subject_rule, label "nats_subject",
         example "orders.created";
-    /// A NATS queue group: 1 to 255 bytes without whitespace or control characters.
+    /// A NATS queue group: 1 to 255 bytes without whitespace or control characters, joined
+    /// exactly as written.
     pub struct NatsQueueGroupName => nats_queue_group_rule, label "nats_queue_group",
         example "workers";
 }
@@ -193,12 +195,18 @@ impl IngestorDeclaration for NatsSubjectIngestor {
         // A NATS message's header map keeps every value of a name together under it, and its names
         // in no order.
         headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
+        // A message also carries the subject it was published to and its reply subject, but the
+        // declaration projects neither as a typed field, so programs read its payload and headers.
         metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Nats),
+        // Core NATS hands each message to one member of the queue group and retains nothing for it,
+        // so a subscriber has no position to resume from and nothing to acknowledge.
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK],
+        // Core NATS keeps no backlog for a subscriber, so intake cannot suspend: a quiesced member
+        // keeps reading its share and buffers or drops it.
         quiesce: &[DeclaredQuiesce::BUFFER, DeclaredQuiesce::DROP],
         locator: Some(LocatorDeclaration {
             keywords: "SUBJECT",
@@ -281,6 +289,8 @@ impl EmitterDeclaration for NatsSubjectEmitter {
         headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Nats),
         body: EmitterBodyForm::Codec,
+        // The NATS protocol sets no message size of its own: each server announces its
+        // max_payload, and the client refuses a message above it before writing.
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: NatsSubjectPublishingMode::KINDS,
@@ -288,6 +298,8 @@ impl EmitterDeclaration for NatsSubjectEmitter {
             keywords: "SUBJECT",
             name: LocatorName::External(NatsPublishSubjectName::DECLARATION),
         }),
+        // A publication carries the subject, the written headers and the payload; the emitter sets
+        // no reply subject or JetStream message id of its own.
         options: &[],
         envelope: &[],
         properties: &[],
@@ -328,7 +340,9 @@ super::publishing::emitter_modes! {
 }
 
 super::external_name::external_names! {
-    /// A NATS publication subject, without subscription wildcards.
+    /// A NATS publication subject: a subject a subscription could name, without the `*` and `>`
+    /// wildcards, since a message is published to one literal subject. It is published to exactly
+    /// as written, letter case included.
     pub struct NatsPublishSubjectName => nats_publication_subject,
         label "nats_publish_subject", example "orders.Created";
 }
@@ -340,3 +354,7 @@ fn nats_publication_subject(text: &str) -> Result<(), ExternalNameError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "nats_tests.rs"]
+mod tests;
