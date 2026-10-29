@@ -324,8 +324,12 @@ of what remains of the client's `connect_timeout_ms`, 30 seconds by default, and
 completes the TLS handshake within what is left. The handshake verifies the broker certificate against the host `addr` names, whichever of its
 addresses was dialled, trusting the platform roots and the client's `tls_ca_file`, and presents the
 client certificate chain and private key of `tls_cert_file` and `tls_key_file` when the client names
-them. The connector reads those files for every connection before it dials, and refuses a file that
-holds no PEM certificate or private key there rather than in the handshake. The connector
+them. The RabbitMQ client declaration permits each TLS file key only when `addr` uses `amqps`;
+authored and rendered configuration cross this shared schema check before file inspection and
+commit. Its typed refusal names the key and required scheme without the address or path. The
+certificate/key pairing rule also applies. The connector reads those files for every TLS connection
+before it dials, and refuses a file that holds no PEM certificate or private key there rather than
+in the handshake. The connector
 then hands the established transport to Lapin through `Connection::connector`. Lapin's own
 reconnection stays off, so it asks that hook for a transport exactly once and runs the AMQP
 handshake over it, within what remains of the same budget. The source then opens its channel, sets
