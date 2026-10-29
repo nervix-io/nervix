@@ -1559,7 +1559,13 @@ whose broker, identity, filter, session mode and QoS still match are retained, i
 an instance-count change. Changing a filter discards the retired filter's broker queue.
 Ordinary `STOP`, reconnect and ownership transfer retain persistent broker sessions.
 
-`SUSPEND` is valid only with `SESSION PERSISTENT QOS 1`. It disconnects while asking the broker to
+`SUSPEND` is valid only with `SESSION PERSISTENT QOS 1`. CREATE refuses any other pairing with
+`MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1`, underlining `SUSPEND`.
+An unsupported QoS number is refused with the supplied value and the accepted ingestor levels,
+such as `MQTT ingestor QOS must be 0 or 1, found 2`. Completion offers only the session's valid
+quiesce choices.
+
+`SUSPEND` disconnects while asking the broker to
 retain the session; broker offline-queue bounds and session expiry limit what can return. If the
 session expires, resume establishes a fresh session and the interim is lost. `BUFFER` and `DROP`
 remain connected under any valid session declaration. In ACK modes, Nervix acknowledges a payload
