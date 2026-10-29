@@ -324,8 +324,12 @@ of what remains of the client's `connect_timeout_ms`, 30 seconds by default, and
 completes the TLS handshake within what is left. The handshake verifies the broker certificate against the host `addr` names, whichever of its
 addresses was dialled, trusting the platform roots and the client's `tls_ca_file`, and presents the
 client certificate chain and private key of `tls_cert_file` and `tls_key_file` when the client names
-them. The connector reads those files for every connection before it dials, and refuses a file that
-holds no PEM certificate or private key there rather than in the handshake. The connector
+them. The RabbitMQ client declaration permits each TLS file key only when `addr` uses `amqps`;
+authored and rendered configuration cross this shared schema check before file inspection and
+commit. Its typed refusal names the key and required scheme without the address or path. The
+certificate/key pairing rule also applies. The connector reads those files for every TLS connection
+before it dials, and refuses a file that holds no PEM certificate or private key there rather than
+in the handshake. The connector
 then hands the established transport to Lapin through `Connection::connector`. Lapin's own
 reconnection stays off, so it asks that hook for a transport exactly once and runs the AMQP
 handshake over it, within what remains of the same budget. The source then opens its channel, sets
@@ -864,6 +868,21 @@ in both directions, and `timeout_ms`, which bounds an emitter's send. An SQS con
 `tls_ca_file`, or the platform's roots without it, and presents no client certificate, so the
 client declares neither client-identity key.
 The SQS-specific declaration tests, generated grammar conformance and one-/three-node public
+declaration scenarios qualify these facts together.
+
+`NATS SUBJECT` holds both directions to one subject rule: at most 1,024 UTF-8 bytes of
+`.`-separated tokens, none empty, without whitespace or control characters, kept exactly as
+written. A subscription may write `*` for one token and `>` for every remaining token, each only
+as a whole token and `>` only last; a publication subject admits neither, since a message is
+published to one literal subject. The ingestor declares `NO ACK` with a required `QUEUE GROUP` and
+`INSTANCES`, and `BUFFER`/`DROP` for intake, because Core NATS keeps no backlog, position or
+acknowledgement for a subscriber. Both directions carry headers by name, and the ingestor projects
+no typed metadata field. The emitter declares Core `NO ACK` and `JETSTREAM ACK` publication, codec
+payloads, no envelope clause, and optional batching without a protocol maximum: each server
+announces its `max_payload`, and the client refuses a message above it before writing it. The
+unpooled client's Nervix-owned keys are the address, `timeout_ms` and the TLS files, while the
+address's userinfo and query options belong to the driver and are masked in inspection. The
+NATS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 
 Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket

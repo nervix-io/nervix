@@ -1410,7 +1410,8 @@ the failure as its transient error; it confirms nothing, so its input stays unac
 reopens on its `RETRY POLICY` backoff. The emitter reads the client's `addr`, trusts its
 `tls_ca_file` and presents its `tls_cert_file` and `tls_key_file` as a RabbitMQ source does; see
 [RabbitMQ](./ingestors.md#rabbitmq). A broker that refuses the TLS session leaves the emitter
-unavailable with that refusal as its transient error.
+unavailable with that refusal as its transient error. The client's `tls_ca_file`, `tls_cert_file`
+and `tls_key_file` require an `amqps` address; combining them with `amqp` is refused before commit.
 
 ### Redis Pub/Sub
 
@@ -1585,6 +1586,14 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-emit).
 <!-- connector-matrix:emit-nats-subject:end -->
+
+`SUBJECT` names one literal subject, published to exactly as written, letter case included. It
+follows the [ingestion subject rule](ingestors.md#external-names) without the `*` and `>`
+wildcards, so `SUBJECT 'orders.*'` is refused when the emitter is created. A message carries its
+subject, the written headers and the payload; the emitter sets no reply subject or JetStream
+message id of its own. `BATCH` is optional. The NATS protocol sets no message size of its own:
+each server announces its `max_payload`, and the client refuses a batch message above it before
+writing it, as [Broker and message emitters](#broker-and-message-emitters) describes.
 
 `NO ACK` publishes through Core NATS. A write delivers its records only after the client's queued
 bytes have drained and their connection has flushed. The flush is local: the server answers
