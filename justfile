@@ -3051,6 +3051,10 @@ test-chaos-verifier-self-check:
 test-chaos-image-package:
     exec bash scripts/chaos/tests/image-package-self-test.sh
 
+# Publish the checkout's identity on both local image overlays, with dirty source distinguished.
+test-chaos-local-image:
+    exec bash scripts/chaos/tests/local-image-self-test.sh
+
 # Bound startup artifact publication by the controller's actual remaining budget.
 test-chaos-startup-status:
     exec bash scripts/chaos/tests/startup-status-self-test.sh
@@ -3270,6 +3274,11 @@ build-chaos-local-image tag="nervix:backup-local" base="nervix:chaos-current":
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build --package nervix-server --bin nervix-server --package nervix-cli --bin nervix-cli
+    revision="$(git rev-parse HEAD)"
+    checkout_status="$(git status --porcelain --untracked-files=no)"
+    if [[ -n "${checkout_status}" ]]; then
+        revision="${revision}-dirty"
+    fi
     stage="$(mktemp -d {{ quote(cargo_target_dir + "/backup-chaos-image.XXXXXX") }})"
     trap 'rm -rf "${stage}"' EXIT
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-server") }} "${stage}/nervix-server"
@@ -3281,7 +3290,9 @@ build-chaos-local-image tag="nervix:backup-local" base="nervix:chaos-current":
     COPY nervix-server /usr/local/bin/nervix-server
     COPY nervix-cli /usr/local/bin/nervix-cli
     EOF
-    docker build --build-arg BASE={{ quote(base) }} --tag {{ quote(tag) }} "${stage}"
+    docker build --build-arg BASE={{ quote(base) }} \
+        --label "org.opencontainers.image.revision=${revision}" \
+        --tag {{ quote(tag) }} "${stage}"
 
 # Overlay a diagnostic server of one Deloxide selection, built in release mode from this checkout,
 # with this checkout's CLI and the evidence report tool, on an already available packaged image, for
@@ -3299,7 +3310,8 @@ build-chaos-diagnostic-image tag="nervix:diagnostic-local" base="ghcr.io/nervix-
     cargo build --release --package nervix-cli --bin nervix-cli
     cargo build --release --package nervix-deadlock --features report-tool --bin nervix-deadlock-report
     revision="$(git rev-parse HEAD)"
-    if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+    checkout_status="$(git status --porcelain --untracked-files=no)"
+    if [[ -n "${checkout_status}" ]]; then
         revision="${revision}-dirty"
     fi
     stage="$(mktemp -d {{ quote(cargo_target_dir + "/diagnostic-chaos-image.XXXXXX") }})"

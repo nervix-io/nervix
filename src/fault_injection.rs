@@ -49,6 +49,7 @@ use crate::registry::SchedulerMode;
 mod backup_cut;
 #[cfg(test)]
 mod backup_cut_tests;
+mod client_inspection;
 mod consensus;
 mod domain_clock;
 mod domain_resume;
@@ -77,6 +78,7 @@ mod restore_publication_tests;
 mod restore_staging;
 #[cfg(test)]
 mod restore_staging_tests;
+mod runtime_installation;
 mod shutdown_handoff;
 mod standalone_transaction;
 #[cfg(test)]
@@ -104,6 +106,7 @@ use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
 use restore_publication::RestorePublicationFailure;
 pub use restore_staging::RestoreStagingKind;
 use restore_staging::{RestoreStagingFailure, RestoreStagingTarget};
+use runtime_installation::RuntimeInstallationRefusals;
 pub use standalone_transaction::StandaloneTransactionBoundary;
 use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublicationFailure};
 
@@ -162,6 +165,10 @@ struct FaultInjectionState {
     /// for this many of its records, and the answers for the rest are lost.
     stalled_emitter_connectors: DashMap<String, usize, RandomState>,
     failed_schedule_publications: DashMap<String, (), RandomState>,
+    /// Bounded, node-local refusals of committed runtime installation, with delivery retained
+    /// so the public regression verifies that its construction failures actually happened.
+    refused_runtime_installations:
+        DashMap<ClusterNodeName, RuntimeInstallationRefusals, RandomState>,
     wasm_reset_publication_authority_losses:
         DashMap<DomainName, WasmResetPublicationAuthorityLoss, RandomState>,
     failed_wasm_reset_publications: DashMap<DomainName, WasmResetPublicationFailure, RandomState>,
@@ -437,6 +444,7 @@ enum CommandPausePoint {
         boundary: DomainResumeBoundary,
     },
     Admission(ClusterNodeName),
+    ClientInspectionAdmission(DomainName),
     RuntimeInstallation(ClusterNodeName),
     ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
@@ -514,6 +522,7 @@ impl Default for FaultInjection {
                 unavailable_emitter_clients: DashMap::default(),
                 stalled_emitter_connectors: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
+                refused_runtime_installations: DashMap::default(),
                 wasm_reset_publication_authority_losses: DashMap::default(),
                 failed_wasm_reset_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
@@ -1360,62 +1369,6 @@ impl FaultInjection {
 
     pub fn pause_command_admission_on(&self, node_id: ClusterNodeName) {
         self.arm_command_pause(CommandPausePoint::Admission(node_id));
-    }
-
-    /// Holds the next runtime installation the node begins, inside its installation sequence and
-    /// before it synchronizes any domain lifecycle or schedule of the admitted revision.
-    pub fn pause_runtime_installation_on(&self, node_id: ClusterNodeName) {
-        self.arm_command_pause(CommandPausePoint::RuntimeInstallation(node_id));
-    }
-
-    pub async fn wait_for_runtime_installation_pause(&self, node_id: &ClusterNodeName) {
-        self.wait_for_command_pause(&CommandPausePoint::RuntimeInstallation(node_id.clone()))
-            .await;
-    }
-
-    pub fn release_runtime_installation_pause(&self, node_id: &ClusterNodeName) {
-        self.release_command_pause(&CommandPausePoint::RuntimeInstallation(node_id.clone()));
-    }
-
-    /// Resume a held initial installation only after forced recovery observes its missing
-    /// schedule. The observation precedes release, so the fixture never races two scenario steps
-    /// against the recovery budget.
-    pub fn resume_installation_after_missing_recovery_schedule(&self, node_id: ClusterNodeName) {
-        self.arm_command_pause(CommandPausePoint::ForcedRecoveryMissingSchedule(node_id));
-    }
-
-    pub async fn wait_for_missing_recovery_schedule(&self, node_id: &ClusterNodeName) {
-        self.wait_for_command_pause(&CommandPausePoint::ForcedRecoveryMissingSchedule(
-            node_id.clone(),
-        ))
-        .await;
-    }
-
-    pub(crate) fn missing_recovery_schedule_if_armed(&self, node_id: &ClusterNodeName) {
-        let point = CommandPausePoint::ForcedRecoveryMissingSchedule(node_id.clone());
-        let pause = match self.inner.command_pauses.get(&point) {
-            Some(pause) => pause.value().clone(),
-            None => return,
-        };
-        if pause.claimed.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        pause.reach();
-        self.release_runtime_installation_pause(node_id);
-        // Keep the one-shot observation until the scenario observes it or finishes cleanup.
-    }
-
-    pub fn pause_runtime_preparation_on(&self, node_id: ClusterNodeName) {
-        self.arm_command_pause(CommandPausePoint::RuntimePreparation(node_id));
-    }
-
-    pub async fn wait_for_runtime_preparation_pause(&self, node_id: &ClusterNodeName) {
-        self.wait_for_command_pause(&CommandPausePoint::RuntimePreparation(node_id.clone()))
-            .await;
-    }
-
-    pub fn release_runtime_preparation_pause(&self, node_id: &ClusterNodeName) {
-        self.release_command_pause(&CommandPausePoint::RuntimePreparation(node_id.clone()));
     }
 
     pub async fn wait_for_command_admission_pause(&self, node_id: &ClusterNodeName) {

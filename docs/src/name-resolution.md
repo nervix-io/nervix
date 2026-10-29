@@ -597,6 +597,10 @@ files for RabbitMQ, Redis, MQTT, Syslog, WebSocket, ClickHouse and SQS, the fixt
 in the HTTP polling, Prometheus, Sentry, OTEL, Iceberg, HTTP emitter and WebSocket client features,
 `tools/cli_session.feature`, and `runtime/client_wire_qualification.feature`.
 
+The RabbitMQ fixture-name delivery examples configure an address for AMQP and add mounted trust
+and a complete client identity for AMQPS. Both transports therefore cross the client's declared
+TLS-key scheme validation before exercising name resolution and broker delivery.
+
 The consensus append-admission unit fixtures construct the ordinary resolver from temporary
 resolver and hosts files with an explicit loopback name-server address. Their transport rejects a
 departed target before lookup; these tests qualify the caller's retry and ended-input boundaries,

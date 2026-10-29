@@ -51,7 +51,8 @@ use url::Url;
 
 /// The pinned Iceberg OpenDAL factory does not expose its operator's HTTP client. This factory
 /// constructs the same three backends with OpenDAL's client layer, so data requests and the
-/// credential provider's `AccessorInfoHttpSend` use the resolver installed by the node.
+/// credential provider's `AccessorInfoHttpSend` use the resolver installed by the node and the
+/// TLS configuration of the emitter's storage client.
 #[derive(Clone, Debug)]
 pub(super) struct DnsStorageFactory {
     backend: IcebergStorageBackend,
@@ -66,10 +67,12 @@ impl DnsStorageFactory {
         dns: &DnsResolver,
         root: &Url,
         deadline: Option<ConfiguredDeadline>,
+        tls: &rustls::ClientConfig,
     ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .dns_resolver(StdArc::new(dns.clone()))
             .retry(reqwest::retry::never())
+            .tls_backend_preconfigured(tls.clone())
             .build()
             .map_err(|error| {
                 Error::new(
@@ -500,7 +503,9 @@ fn gcs_config(props: &HashMap<String, String>) -> GcsConfig {
     config.credential = props.get(GCS_CREDENTIALS_JSON).cloned();
     config.token = props.get(GCS_TOKEN).cloned();
     config.endpoint = props.get(GCS_SERVICE_PATH).cloned();
-    if props.contains_key(GCS_NO_AUTH) {
+    if let Some(value) = props.get(GCS_NO_AUTH)
+        && truthy(value)
+    {
         config.skip_signature = true;
         config.disable_vm_metadata = true;
         config.disable_config_load = true;
@@ -839,16 +844,31 @@ mod tests {
     }
 
     #[test]
-    fn gcs_properties_preserve_token_and_anonymous_policy() {
-        let props = HashMap::from_iter([
-            (
-                GCS_SERVICE_PATH.to_string(),
-                "http://gcs.nervix.test".to_string(),
-            ),
-            (GCS_TOKEN.to_string(), "token".to_string()),
-            (GCS_NO_AUTH.to_string(), "false".to_string()),
-        ]);
-        let config = gcs_config(&props);
+    fn gcs_no_auth_disables_authentication_only_when_it_is_true() {
+        let props = |no_auth: &str| {
+            HashMap::from_iter([
+                (
+                    GCS_SERVICE_PATH.to_string(),
+                    "http://gcs.nervix.test".to_string(),
+                ),
+                (GCS_TOKEN.to_string(), "token".to_string()),
+                (GCS_NO_AUTH.to_string(), no_auth.to_string()),
+            ])
+        };
+        for authenticated in ["false", "FALSE"] {
+            let config = gcs_config(&props(authenticated));
+            assert_eq!(config.token.as_deref(), Some("token"));
+            assert!(!config.skip_signature, "{authenticated} keeps signing");
+            assert!(
+                !config.disable_vm_metadata,
+                "{authenticated} keeps VM metadata"
+            );
+            assert!(
+                !config.disable_config_load,
+                "{authenticated} keeps configuration"
+            );
+        }
+        let config = gcs_config(&props("true"));
         assert_eq!(config.endpoint.as_deref(), Some("http://gcs.nervix.test"));
         assert_eq!(config.token.as_deref(), Some("token"));
         assert!(config.skip_signature);
@@ -965,7 +985,10 @@ mod tests {
                 .expect("the token response is writable");
         });
         let root = Url::parse("s3://bucket/").assured("the fixture root is a URL");
-        let factory = DnsStorageFactory::new(IcebergStorageBackend::S3, &dns, &root, None)
+        let tls = nervix_connector::RustlsClientConfigProvider::new(&[])
+            .build_with_default_roots()
+            .assured("a client without TLS files trusts the default roots");
+        let factory = DnsStorageFactory::new(IcebergStorageBackend::S3, &dns, &root, None, &tls)
             .expect("the object client uses the fixture resolver");
         let mut config = S3Config::default();
         config.region = Some("us-east-1".to_string());

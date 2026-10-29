@@ -283,9 +283,16 @@ OpenDAL's credential providers through its accessor info. The object-store clien
 `timeout_ms`, read through `ConfiguredDeadline`, sets both the operation and I/O timeout of the
 OpenDAL operator, including credential HTTP calls, name resolution, connection and TLS. Without
 the key, metadata and delete operations allow 60 seconds and reads and writes allow 10 seconds.
-That HTTP client takes no CA file or client identity from the client's configuration. The
-Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled
-trust roots, including in an isolated Iceberg connector build. The three Iceberg backends keep their
+Each of the two Iceberg HTTP clients receives the rustls configuration that the shared
+`RustlsClientConfigProvider` builds from its own client's entries. It holds the bundled WebPKI roots and the
+platform's native roots with the client's `tls_ca_file` added, and the identity of its
+`tls_cert_file` and `tls_key_file`. The Reqwest 0.13 object-store client takes its configuration
+from the S3, GCS or Azure Blob client, and it serves both OpenDAL's object requests and its
+credential providers' HTTP calls. The Reqwest 0.12 catalog client takes its configuration from the
+ICEBERG_REST client. The emitter builds both configurations when it opens, under the rustls
+provider the host installed or AWS-LC when the host installed none. An unreadable or invalid file is
+therefore an open-time configuration failure, with the client it belongs to and the provider's
+typed TLS cause beneath it. The three Iceberg backends keep their
 S3, GCS, and Azure property mappings and commit boundary. One operator is initialized from the
 emitter's location and the initial table's effective storage properties. Table metadata refreshes
 retain that table's `FileIO` and its initialized storage, so later object calls reuse the operator;
@@ -324,8 +331,12 @@ of what remains of the client's `connect_timeout_ms`, 30 seconds by default, and
 completes the TLS handshake within what is left. The handshake verifies the broker certificate against the host `addr` names, whichever of its
 addresses was dialled, trusting the platform roots and the client's `tls_ca_file`, and presents the
 client certificate chain and private key of `tls_cert_file` and `tls_key_file` when the client names
-them. The connector reads those files for every connection before it dials, and refuses a file that
-holds no PEM certificate or private key there rather than in the handshake. The connector
+them. The RabbitMQ client declaration permits each TLS file key only when `addr` uses `amqps`;
+authored and rendered configuration cross this shared schema check before file inspection and
+commit. Its typed refusal names the key and required scheme without the address or path. The
+certificate/key pairing rule also applies. The connector reads those files for every TLS connection
+before it dials, and refuses a file that holds no PEM certificate or private key there rather than
+in the handshake. The connector
 then hands the established transport to Lapin through `Connection::connector`. Lapin's own
 reconnection stays off, so it asks that hook for a transport exactly once and runs the AMQP
 handshake over it, within what remains of the same budget. The source then opens its channel, sets
@@ -662,6 +673,13 @@ retirement and nothing cancels it, since a destruction cannot stop part way. It 
 client alone, never the ingestor's or emitter's host or its intake, and Nervix never hands a client to
 another ingestor or emitter, so a replacement opens a client of its own.
 
+An ingestor-open failure during graph construction propagates through the runtime installation
+report, before an ingestor host loop exists. The control-plane installation supervisor retries that
+failed application on the admission loop's half-second cadence, or on a committed schedule or domain
+update, using the current admitted state. An emitter initialization failure inside an already
+running host remains owned by that host's declared retry policy. Neither path requires a fresh
+configuration command.
+
 A joined consumer whose coordinator does not answer holds a connector worker for those five
 seconds, and a producer holds one for its polling thread's last poll and up to half a second of
 flushing. A broker that stops answering while its clients retire therefore delays the node's other
@@ -794,6 +812,11 @@ not disable verification or silently fall back when unavailable.
 The server composition root extends the existing changed-model binding boundary before standalone
 mutation or transaction commit. It renders mount templates using the resource resolver and checks
 the rendered schema and Nervix-owned file paths on an admitted filesystem worker, charged to command memory.
+Request preflight refuses inspection when command memory or the filesystem wait queue is full.
+Applying a model step under an accepted transaction or restore instead waits for those existing
+capacities with `QueueAdmission::WaitForPlace`; lack of room has not judged the configuration.
+The service task's existing shutdown cancellation ends the wait. A charge larger than the whole
+class or a closed executor still fails inspection, and no uncharged config copy is made while waiting.
 Rendered values also pass the existing WebSockets configuration and Prometheus API-root owners;
 an optional Redis subscription capacity passes the same range parser its ingestor plan uses.
 Ingestor-only presence requirements stay with that plan.
@@ -926,19 +949,26 @@ namespace. Location validation compares the URL scheme with the resolved storage
 before activation. Commit size and batch size share the vocabulary's positive whole-byte value,
 so planning consumes the decided count instead of parsing a second size string.
 
-The storage clients declare their Nervix-owned addresses, credentials, booleans and deadlines
-separately from `s3.*`/`client.*`, `gcs.*` and `adls.*` driver properties. The REST client owns its
+The storage clients declare their Nervix-owned addresses, credentials, booleans, deadlines and TLS
+files separately from `s3.*`/`client.*`, `gcs.*` and `adls.*` driver properties. The REST client owns its
 catalog locator and warehouse and delegates its catalog headers and storage-property namespaces.
 Registry validation, completion, inspection and the generated key reference consume these shared
 schemas; they do not keep another Iceberg key table. The network-free composition hook checks
 the storage properties the connector can interpret before a table location exists. Building an
 OpenDAL operator, credentials and connectivity remain initialization checks.
 
-The REST catalog's file I/O property map starts with the normalized storage properties and then
-applies catalog properties. A catalog entry for the same Iceberg property key takes precedence
-in that map, which the table's file I/O supplies to the configured storage factory for object
-operations. The factory retains the selected backend, resolver, location and storage deadline; it
-does not replace the effective catalog properties with a second client map.
+The REST catalog's property map holds two sets of entries. The first is the storage client's file
+I/O properties: each Nervix-owned key under the Iceberg property the vocabulary declares for it,
+and each delegated property as written. The second is the catalog client's configuration without
+its TLS files. The vocabulary's `IcebergCatalogProperties` pairs the two clients under one rule.
+Registry validation refuses an emitter whose catalog client sets a property that its storage client
+supplies, and the connector builds the catalog's map through the same pairing, so neither client
+silently replaces the other's value. Deadline and TLS-file keys configure the clients' own
+transports and stay out of the map. The table's file I/O supplies that map to the configured
+storage factory for object operations. The factory retains the selected backend, resolver,
+location, storage deadline and object-store TLS configuration; it does not replace the effective
+catalog properties with a second client map. The storage reader holds each Boolean property to the
+value it states, so `gcs.no-auth` set to `false` keeps the GCS credential loader and signing.
 
 ### Capability inventory
 
