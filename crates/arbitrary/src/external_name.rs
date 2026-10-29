@@ -11,8 +11,8 @@ use nervix_models::{
     ClickHouseTableName, ExternalName, KafkaConsumerGroupName, KafkaTopicName,
     MONGODB_NAMESPACE_MAX_BYTES, MongoDbCollectionName, MqttTopicFilter, MqttTopicName,
     MySqlTableName, NatsConsumerName, NatsPublishSubjectName, NatsQueueGroupName, NatsStreamName,
-    NatsSubjectName, PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName,
-    SqsQueueName,
+    NatsSubjectName, PostgresTableName, PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName,
+    RedisChannelName, SqsQueueName,
 };
 
 use crate::Arbitrary;
@@ -285,6 +285,17 @@ impl Arbitrary<'_> {
 
     /// A MySQL table or database/table path, reaching the complete 128-byte lexical bound.
     pub fn mysql_table_name(&mut self) -> MySqlTableName {
+        self.table_path()
+    }
+
+    /// A Postgres table or schema/table path, reaching the complete 128-byte lexical bound.
+    pub fn postgres_table_name(&mut self) -> PostgresTableName {
+        self.table_path()
+    }
+
+    /// A table or qualified table path of one or two nonempty parts, reaching the complete
+    /// 128-byte lexical bound.
+    fn table_path<N: ExternalName>(&mut self) -> N {
         const PIECES: [&str; 7] = ["a", "Z", "0", "9", "_", "-", "~"];
         let text = if self.entropy.flag() {
             // At most 126 bytes leave a dot and one nonempty table part inside 128 bytes.
@@ -297,7 +308,7 @@ impl Arbitrary<'_> {
         } else {
             self.pieces_text(PIECES, 128)
         };
-        MySqlTableName::parse(&text)
+        N::parse(&text)
             .assured("one or two nonempty identifier parts fit the table path's lexical bound")
     }
 

@@ -33,6 +33,43 @@ Feature: Iceberg declarations
       | 1            | abfss://warehouse/events |
       | 3            | abfss://warehouse/events |
 
+  Scenario Outline: An Iceberg emitter refuses a catalog client that sets a file I/O property its storage client sets
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (id I64);
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE <connector> CLIENT storage CONFIG { <storage> };
+      CREATE ICEBERG_REST CLIENT catalog CONFIG {
+        'uri' = 'http://127.0.0.1:8181',
+        <catalog>
+      };
+      """
+    When these Plexus commands fail with "Iceberg property '<property>' is set by the storage client as '<storage_key>' and by the catalog client"
+      """
+      CREATE ICEBERG TABLE EMITTER output FROM events
+      TO storage TABLE 'Events' NAMESPACE '{{domain}}' LOCATION '<location>' CATALOG catalog
+      COMMIT EACH 1s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      VALUES { 'id' = input.id } FLUSH IMMEDIATE
+      ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    Then the last command error contains
+      """
+      emitter 'output' in domain '{{domain}}' cannot pair storage client 'storage' with catalog client 'catalog'
+      """
+
+    Examples:
+      | cluster_size | connector  | storage                                                      | catalog                                 | property            | storage_key         | location                                              |
+      | 1            | S3         | 'region' = 'us-east-1', 'endpoint' = 'http://127.0.0.1:9000' | 's3.endpoint' = 'http://127.0.0.1:9001' | s3.endpoint         | endpoint            | s3://warehouse/events                                 |
+      | 3            | S3         | 'region' = 'us-east-1', 'endpoint' = 'http://127.0.0.1:9000' | 's3.endpoint' = 'http://127.0.0.1:9001' | s3.endpoint         | endpoint            | s3://warehouse/events                                 |
+      | 1            | S3         | 'region' = 'us-east-1', 's3.driver_extension' = 'storage'    | 's3.driver_extension' = 'catalog'       | s3.driver_extension | s3.driver_extension | s3://warehouse/events                                 |
+      | 3            | S3         | 'region' = 'us-east-1', 's3.driver_extension' = 'storage'    | 's3.driver_extension' = 'catalog'       | s3.driver_extension | s3.driver_extension | s3://warehouse/events                                 |
+      | 1            | GCS        | 'no_auth' = true                                             | 'gcs.no-auth' = 'false'                 | gcs.no-auth         | no_auth             | gs://warehouse/events                                 |
+      | 3            | GCS        | 'no_auth' = true                                             | 'gcs.no-auth' = 'false'                 | gcs.no-auth         | no_auth             | gs://warehouse/events                                 |
+      | 1            | AZURE_BLOB | 'account_name' = 'fixture', 'account_key' = 'ZmFrZQ=='       | 'adls.account-name' = 'other'           | adls.account-name   | account_name        | abfss://container@fixture.dfs.core.windows.net/events |
+      | 3            | AZURE_BLOB | 'account_name' = 'fixture', 'account_key' = 'ZmFrZQ=='       | 'adls.account-name' = 'other'           | adls.account-name   | account_name        | abfss://container@fixture.dfs.core.windows.net/events |
+
   Scenario Outline: An Iceberg emitter preserves its explicit catalog namespace independently of the Nervix domain
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -167,8 +204,7 @@ Feature: Iceberg declarations
       ON GENERAL ERROR LOG;
       CREATE S3 CLIENT s3_main
       CONFIG {
-        'endpoint' = '<storage_endpoint>',
-        'region' = 'us-east-1',
+        <storage_endpoint>'region' = 'us-east-1',
         'access_key_id' = 'rustfsadmin',
         'secret_access_key' = 'rustfsadmin',
         'path_style_access' = true
@@ -210,11 +246,11 @@ Feature: Iceberg declarations
       """
 
     Examples:
-      | cluster_size | storage_endpoint   | catalog_properties                  |
-      | 1            | {{rustfs_addr}}    |                                     |
-      | 3            | {{rustfs_addr}}    |                                     |
-      | 1            | http://127.0.0.1:1 | , 's3.endpoint' = '{{rustfs_addr}}' |
-      | 3            | http://127.0.0.1:1 | , 's3.endpoint' = '{{rustfs_addr}}' |
+      | cluster_size | storage_endpoint                | catalog_properties                  |
+      | 1            | 'endpoint' = '{{rustfs_addr}}', |                                     |
+      | 3            | 'endpoint' = '{{rustfs_addr}}', |                                     |
+      | 1            |                                 | , 's3.endpoint' = '{{rustfs_addr}}' |
+      | 3            |                                 | , 's3.endpoint' = '{{rustfs_addr}}' |
 
 
   Scenario Outline: An Iceberg emitter refuses unsupported publishing and construction clauses

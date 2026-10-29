@@ -686,13 +686,13 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | --- | --- | --- |
 | Entity | POSTGRES TABLE | No ingest entity is declared. The Postgres connector inserts mapped rows and handles declared conflicts; it declares no replication-slot or query ingestor. |
 | Reference | POSTGRES client |  |
-| Locator and validation rule | TABLE 'Orders' (postgres_table) |  |
+| Locator and validation rule | TABLE 'sales.Orders' (postgres_table) |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `ON CONFLICT DO NOTHING` (keyword choice); `ON CONFLICT ('id') DO UPDATE` (keyword choice); optional; omitted when unset |  |
+| Options in statement order | `ON CONFLICT DO NOTHING` (keyword choice); `ON CONFLICT ('id') DO UPDATE` (composed clause); optional; omitted when unset |  |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |  |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |  |
 | BATCH | required |  |
-| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
+| Protocol batch maximum | 1073741822B |  |
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
@@ -718,9 +718,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |  |
-| Network waits | connection, its handshake and an insert: unbounded |  |
-| Driver limits | The driver has no connect, read or write timeout.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |  |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
+| Network waits | pool checkout (including connection and handshake), initial validation, and each insert: `timeout_ms`; unbounded when omitted |  |
+| Driver limits | Without timeout_ms, pool checkout, connection validation and inserts have no deadline.<br>TLS identity keys use the driver's RSA PKCS#1 private-key format.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### MONGODB COLLECTION emit
 
@@ -880,9 +880,9 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `addr` | required | driver address, including its delegated query options | Nervix; strict | no | none |
 | `connect_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
-| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
-| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
-| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+| `tls_ca_file` | optional; requires `addr` to use `amqps` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional; requires `addr` to use `amqps` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional; requires `addr` to use `amqps` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
@@ -1108,10 +1108,10 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `addr` | required | driver address, including its delegated query options | Nervix; strict | no | none |
-| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
-| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
-| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+| `addr` | required | driver URL (postgres or postgresql); Nervix owns `sslmode` set once to disable or verify-full; the driver reads its other query options | Nervix; strict | no | none |
+| `tls_ca_file` | optional; requires `addr` to set `sslmode=verify-full` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional; requires `addr` to set `sslmode=verify-full` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional; requires `addr` to set `sslmode=verify-full` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
@@ -1127,7 +1127,10 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
 | `addr` | required | driver address, including its delegated query options | Nervix; strict | no | none |
+| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 | `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
@@ -1172,6 +1175,9 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `secret_access_key` | optional | string | Nervix; strict | yes | none |
 | `session_token` | optional | string | Nervix; strict | yes | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: s3.*, client.*. Reserved keys: none.
 
@@ -1193,6 +1199,9 @@ Delegated property namespaces: s3.*, client.*. Reserved keys: none.
 | `no_auth` | optional | boolean | Nervix; strict | no | none |
 | `service_path` | optional | URL (http or https) | Nervix; strict | no | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 | `token` | optional | string | Nervix; strict | yes | none |
 
 Delegated property namespaces: gcs.*. Reserved keys: none.
@@ -1216,6 +1225,9 @@ Delegated property namespaces: gcs.*. Reserved keys: none.
 | `sas_token` | optional | string | Nervix; strict | yes | none |
 | `tenant_id` | optional | string | Nervix; strict | no | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: adls.*. Reserved keys: none.
 

@@ -55,7 +55,6 @@ tracing = { workspace = true }
 typetag = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
-webpki-roots = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
