@@ -447,6 +447,19 @@ pub(crate) enum RegistryError {
         identifier: ModelName,
         kind: EmitterEntityKind,
     },
+    /// An emitter whose two clients would both set one property of the table it writes. The
+    /// vocabulary's refusal beneath names the property and the storage key that supplies it.
+    #[error(
+        "{kind} emitter '{identifier}' in domain '{domain}' cannot pair storage client \
+         '{storage_client}' with catalog client '{catalog_client}'"
+    )]
+    EmitterClientPairing {
+        domain: DomainName,
+        identifier: ModelName,
+        kind: EmitterEntityKind,
+        storage_client: ClientName,
+        catalog_client: ClientName,
+    },
     #[error("codec '{codec}' in domain '{domain}' has an invalid {direction} jaq transformation")]
     InvalidCodecJaq {
         domain: DomainName,

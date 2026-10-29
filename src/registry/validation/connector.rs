@@ -18,15 +18,16 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_jaq::StatefulJaqProgram;
 use nervix_models::{
-    Assignment, AssignmentTarget, ClientDeadline, ClientIngestMode, CodecBatchContainer,
-    CreateClientHttp, CreateCodec, CreateEmitter, CreateIngestor, CreateSchema,
-    CreateSignalingProtocol, DomainName, EmitterEntity, EndpointName, EnvelopeClauseForm,
-    Expression, FieldName, HttpBodyMode, HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod,
-    HttpOrigin, HttpRequestEmitter, IngestTimestampSource, IngestorInput, LiteralHeaderWrite,
-    Model, ModelIndex, ModelKind, ModelName, NodeRef, OtelEmitter, OtelMappings, OtelMetricKind,
-    OtelMetricsEmitter, ParseAsType, ProcessorOutput, RelayName, RouteConstruction, SchemaField,
-    SchemaName, SignalingWireFormat, SqsEmitter, SqsFifoGroup, SqsQueueEmitter, VhostName,
-    parse_duration_text,
+    Assignment, AssignmentTarget, ClientConfigEntry, ClientDeadline, ClientIngestMode,
+    CodecBatchContainer, CreateClientHttp, CreateCodec, CreateEmitter, CreateIngestor,
+    CreateSchema, CreateSignalingProtocol, DomainName, EmitterEntity, EmitterEntityModel,
+    EndpointName, EnvelopeClauseForm, Expression, FieldName, HttpBodyMode, HttpEmitter,
+    HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, HttpRequestEmitter,
+    IcebergCatalogProperties, IcebergStorageBackend, IcebergTableEmitter, IngestTimestampSource,
+    IngestorInput, LiteralHeaderWrite, Model, ModelIndex, ModelKind, ModelName, NodeRef,
+    OtelEmitter, OtelMappings, OtelMetricKind, OtelMetricsEmitter, ParseAsType, ProcessorOutput,
+    RelayName, RouteConstruction, SchemaField, SchemaName, SignalingWireFormat, SqsEmitter,
+    SqsFifoGroup, SqsQueueEmitter, VhostName, parse_duration_text,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
@@ -1773,6 +1774,36 @@ pub(in crate::registry) fn validate_endpoint_paths(
         }
     }
 
+    Ok(())
+}
+
+/// Refuses an Iceberg emitter whose catalog client sets a file I/O property that its storage
+/// client supplies, so neither client's value silently replaces the other's. A missing or
+/// mistyped catalog client is the catalog reference's own refusal, so only an existing
+/// `ICEBERG_REST` client is paired here.
+pub(in crate::registry) fn validate_iceberg_client_pairing(
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    table: &IcebergTableEmitter,
+    backend: IcebergStorageBackend,
+    storage: &[ClientConfigEntry],
+) -> Result<(), Report<RegistryError>> {
+    let catalog = table.catalog.client_reference().client;
+    let Some(Model::ClientIcebergRest(catalog_model)) =
+        models.get(&NodeRef::new(ModelKind::Client, catalog.clone()))
+    else {
+        return Ok(());
+    };
+    IcebergCatalogProperties::pair(backend, storage, &catalog_model.config).change_context_lazy(
+        || RegistryError::EmitterClientPairing {
+            domain: domain.clone(),
+            identifier: identifier.clone(),
+            kind: <IcebergTableEmitter as EmitterEntityModel>::KIND,
+            storage_client: table.client.clone(),
+            catalog_client: catalog.clone(),
+        },
+    )?;
     Ok(())
 }
 

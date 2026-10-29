@@ -47,8 +47,8 @@ use crate::registry::{
             validate_emitter_envelope_expressions, validate_emitter_publishing_contract,
             validate_endpoint_paths, validate_http_emitter_client,
             validate_http_literal_request_fields, validate_http_request_expressions,
-            validate_ingestor_filter_where_for_internal_schemas, validate_ingestor_source,
-            validate_sqs_fifo_group_expression, validate_vhost_hostnames,
+            validate_iceberg_client_pairing, validate_ingestor_filter_where_for_internal_schemas,
+            validate_ingestor_source, validate_sqs_fifo_group_expression, validate_vhost_hostnames,
         },
         expression::add_udf_dependency_edges,
         materialized_state::{
@@ -1499,6 +1499,18 @@ impl DomainState {
                             backend
                                 .validate_location(&table.location)
                                 .change_context_lazy(invalid_location)?;
+                            let storage = client_model.configured_client().verified(
+                                "this model was resolved as a client above, and every client \
+                                 model configures a connector",
+                            );
+                            validate_iceberg_client_pairing(
+                                domain,
+                                identifier,
+                                models,
+                                table,
+                                backend,
+                                storage.config,
+                            )?;
                         }
                         if let (
                             nervix_models::EmitterEntity::Http(_),

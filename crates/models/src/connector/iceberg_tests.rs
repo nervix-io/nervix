@@ -15,7 +15,10 @@
 
 use strum::IntoEnumIterator as _;
 
-use super::{IcebergLocationError, IcebergNamespace, IcebergStorageBackend, IcebergTableEmitter};
+use super::{
+    IcebergCatalogProperties, IcebergLocationError, IcebergNamespace, IcebergPropertyCollision,
+    IcebergStorageBackend, IcebergTableEmitter,
+};
 use crate::{ConnectorKind, EmitterDeclaration};
 
 fn config_entry(key: &str, value: &str) -> crate::ClientConfigEntry {
@@ -30,6 +33,12 @@ fn client_schema(kind: ConnectorKind) -> crate::ClientConfigSchema {
         .expect("an Iceberg client is configured")
         .config
 }
+
+const STORAGE_BACKENDS: [IcebergStorageBackend; 3] = [
+    IcebergStorageBackend::S3,
+    IcebergStorageBackend::Gcs,
+    IcebergStorageBackend::AzureBlob,
+];
 
 #[test]
 fn iceberg_client_booleans_are_nervix_owned_and_checked_before_opening() {
@@ -278,4 +287,162 @@ fn a_location_refusal_keeps_its_url_cause_and_requires_an_authority() {
         error.current_context(),
         &IcebergLocationError::MissingAuthority
     );
+}
+
+#[test]
+fn every_storage_client_key_supplies_a_file_io_property_or_configures_its_transport() {
+    let transport = ["timeout_ms", "tls_ca_file", "tls_cert_file", "tls_key_file"];
+    for backend in STORAGE_BACKENDS {
+        let schema = client_schema(backend.connector());
+        for key in schema.keys() {
+            let property = backend.file_io_property(key.name);
+            if transport.contains(&key.name) {
+                assert_eq!(property, None, "{} supplies no file I/O property", key.name);
+                continue;
+            }
+            let property = property.unwrap_or_else(|| {
+                panic!("{backend:?} key {} supplies a file I/O property", key.name)
+            });
+            assert!(
+                backend.delegates(property),
+                "{} supplies {property}, a property of the backend's delegated namespace",
+                key.name
+            );
+        }
+    }
+}
+
+#[test]
+fn every_storage_client_declares_its_tls_files() {
+    for backend in STORAGE_BACKENDS {
+        let schema = client_schema(backend.connector());
+        for (key, file) in [
+            ("tls_ca_file", crate::ClientConfigFile::CertificateAuthority),
+            ("tls_cert_file", crate::ClientConfigFile::Certificate),
+            ("tls_key_file", crate::ClientConfigFile::PrivateKey),
+        ] {
+            let declared = schema
+                .key(key)
+                .expect("the storage client declares its TLS files");
+            assert_eq!(declared.value, crate::ClientConfigValue::File(file));
+            assert_eq!(declared.presence, crate::ClientConfigPresence::Optional);
+            assert_eq!(declared.owner, crate::ClientConfigOwner::Nervix);
+        }
+        let refusal = schema
+            .validate(&[config_entry("tls_cert_file", "client.pem")])
+            .expect_err("a client certificate needs its private key");
+        assert!(matches!(
+            refusal.current_context(),
+            crate::ClientConfigSchemaError::RequiresKey {
+                key: "tls_cert_file",
+                required: "tls_key_file",
+            }
+        ));
+    }
+}
+
+#[test]
+fn a_storage_client_supplies_owned_keys_under_their_properties_and_delegated_keys_as_written() {
+    let storage = [
+        config_entry("endpoint", "http://objects.example.com"),
+        config_entry("timeout_ms", "1000"),
+        config_entry("tls_ca_file", "ca.pem"),
+        config_entry("s3.driver_extension", "Case-Preserved"),
+    ];
+    let supplied: Vec<_> = IcebergStorageBackend::S3
+        .file_io_entries(&storage)
+        .map(|entry| (entry.property, entry.key, entry.value))
+        .collect();
+    assert_eq!(
+        supplied,
+        [
+            ("s3.endpoint", "endpoint", "http://objects.example.com"),
+            (
+                "s3.driver_extension",
+                "s3.driver_extension",
+                "Case-Preserved"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_catalog_loads_with_both_clients_properties_without_their_tls_files() {
+    let storage = [
+        config_entry("endpoint", "http://first.example.com"),
+        config_entry("s3.endpoint", "http://last.example.com"),
+        config_entry("region", "storage-region"),
+        config_entry("tls_ca_file", "storage-ca.pem"),
+        config_entry("timeout_ms", "1000"),
+    ];
+    let catalog = [
+        config_entry("uri", "http://catalog.example.com"),
+        config_entry("tls_ca_file", "catalog-ca.pem"),
+        config_entry("gcs.no-auth", "true"),
+        config_entry("token", "catalog-token"),
+    ];
+    let properties = IcebergCatalogProperties::pair(IcebergStorageBackend::S3, &storage, &catalog)
+        .expect("the two clients set disjoint properties");
+    let loaded: Vec<_> = properties.iter().collect();
+    assert_eq!(
+        loaded,
+        [
+            ("gcs.no-auth", "true"),
+            ("s3.endpoint", "http://last.example.com"),
+            ("s3.region", "storage-region"),
+            ("token", "catalog-token"),
+            ("uri", "http://catalog.example.com"),
+        ]
+    );
+}
+
+#[test]
+fn a_catalog_property_its_storage_client_supplies_is_refused_naming_both_keys() {
+    for (backend, storage, catalog, property) in [
+        (
+            IcebergStorageBackend::S3,
+            config_entry("endpoint", "http://objects.example.com"),
+            config_entry("s3.endpoint", "http://other.example.com"),
+            "s3.endpoint",
+        ),
+        (
+            IcebergStorageBackend::S3,
+            config_entry("client_region", "storage-region"),
+            config_entry("client.region", "catalog-region"),
+            "client.region",
+        ),
+        (
+            IcebergStorageBackend::S3,
+            config_entry("s3.driver_extension", "private-storage-value"),
+            config_entry("s3.driver_extension", "private-catalog-value"),
+            "s3.driver_extension",
+        ),
+        (
+            IcebergStorageBackend::Gcs,
+            config_entry("token", "storage-token"),
+            config_entry("gcs.oauth2.token", "catalog-token"),
+            "gcs.oauth2.token",
+        ),
+        (
+            IcebergStorageBackend::AzureBlob,
+            config_entry("account_name", "storage-account"),
+            config_entry("adls.account-name", "catalog-account"),
+            "adls.account-name",
+        ),
+    ] {
+        let storage = [storage];
+        let catalog = [config_entry("uri", "http://catalog.example.com"), catalog];
+        let refusal = IcebergCatalogProperties::pair(backend, &storage, &catalog)
+            .expect_err("both clients set the same property");
+        assert_eq!(
+            refusal.current_context(),
+            &IcebergPropertyCollision {
+                property: property.to_string(),
+                storage_key: storage[0].key.clone(),
+            }
+        );
+        let rendered = refusal.to_string();
+        assert!(!rendered.contains(&storage[0].value), "{rendered}");
+        assert!(!rendered.contains(&catalog[1].value), "{rendered}");
+    }
 }
