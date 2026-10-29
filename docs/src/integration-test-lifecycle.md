@@ -3017,10 +3017,14 @@ that a plain diagnostic build of the same scenarios met.
 [Two Stressed Scenarios In One Process](#two-stressed-scenarios-in-one-process) records what made
 them miss. `deloxide-stress` runs the active-only selection's probes, conformance checks and
 owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of
-the inventory's lifecycle scenario runs tagged `@deloxide_stress`, bounded at 45 minutes, and the
+the inventory's lifecycle scenario runs tagged `@deloxide_stress`, bounded at 66 minutes, and the
 `stress-paced-simulation` invocation of the 36 paced-driver runs with the stressed Rust driver,
 bounded at 40. The six transaction-retention and ten endpoint ACK examples run in separate serial
-invocations, each bounded at 15 minutes, within the same selection workload budget.
+invocations, each bounded at 15 minutes, within the same selection workload budget. On CI's Boat
+runner the 154 `stress-scenarios` runs take about 39 minutes one at a time: Check run
+40909456410 completed 153 of them in 2,342 seconds, about 22 percent longer than the same 153
+took on the previous runner. The 66-minute bound leaves 60 minutes of suite time after the
+teardown reserve, about 1.5 times that measurement.
 `deloxide-stress-restore` runs the build's probes and the `stress-restore-scenarios`
 invocation of the inventory's capture, restore and checkpoint-transfer runs tagged
 `@deloxide_stress_restore`, bounded at 70 minutes. Each selection has the inventory's 80-minute

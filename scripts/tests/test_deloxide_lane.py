@@ -429,7 +429,7 @@ class InventoryTests(unittest.TestCase):
         assert retention is not None
         baseline = inventory.invocations["stress-scenarios"]
         self.assertEqual(inventory.bounds.budget_seconds, 4800)
-        self.assertEqual(baseline.bound_seconds, 2700)
+        self.assertEqual(baseline.bound_seconds, 3960)
         self.assertEqual(endpoint.bound_seconds, 900)
         self.assertEqual(retention.bound_seconds, 900)
         self.assertEqual(retention.concurrency, 1)
