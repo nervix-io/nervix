@@ -707,19 +707,23 @@ builder publishes to `artifacts`. Fork PRs still need credentials to access R2. 
 displays the generic read-only CI policy even when the PR prefix is enabled; the job's daemon
 reports its actual write mode, which the start step prints and publication records.
 
-CI configures the cache bucket through the required repository variables `KACHE_BUCKET` (bucket
-name), `KACHE_BUCKET_REGION` (S3 region), and `KACHE_BUCKET_ENDPOINT` (S3 service URL), and reads its
-credentials from the repository secrets `KACHE_BUCKET_ACCESS_KEY_ID` and
-`KACHE_BUCKET_SECRET_ACCESS_KEY`. Each kache-backed job passes them, as kache's `KACHE_S3_*`
+CI keeps its cache in a European R2 bucket, near the European data centers its runners execute in.
+It reads the bucket's name and S3 service URL from the required repository secrets
+`KACHE_EU_BUCKET` and `KACHE_EU_BUCKET_ENDPOINT`, its S3 region from the repository variable
+`KACHE_BUCKET_REGION`, and its credentials from the repository secrets `KACHE_BUCKET_ACCESS_KEY_ID`
+and `KACHE_BUCKET_SECRET_ACCESS_KEY`. Each kache-backed job passes them, as kache's `KACHE_S3_*`
 environment variables, to `python3 scripts/kache_remote.py start` right after the setup action.
 Docker image builds pass the same settings to their builder, whose build command runs
 `scripts/kache_remote.py configure` before it starts the daemon. Either way the service URL is
 written into the daemon's TOML configuration before startup.
 
-For Cloudflare R2, set `KACHE_BUCKET_REGION` to `auto` and `KACHE_BUCKET_ENDPOINT` to
-`https://<account-id>.r2.cloudflarestorage.com`, without the bucket name in the URL. The bucket name
-belongs in `KACHE_BUCKET`. `scripts/kache_remote.py` rejects URLs with a bucket path; supplying
-the full bucket URL can make the remote cache appear empty.
+For Cloudflare R2, set `KACHE_BUCKET_REGION` to `auto` and `KACHE_EU_BUCKET_ENDPOINT` to the
+account's service URL, without the bucket name in the URL. That is
+`https://<account-id>.eu.r2.cloudflarestorage.com` for a bucket created in the EU jurisdiction,
+which R2 serves only through that endpoint, and `https://<account-id>.r2.cloudflarestorage.com` for
+one placed with a European location hint. The bucket name belongs in `KACHE_EU_BUCKET`.
+`scripts/kache_remote.py` rejects URLs with a bucket path; supplying the full bucket URL can make the
+remote cache appear empty.
 
 ### Cache Publication
 
