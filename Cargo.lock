@@ -6958,7 +6958,6 @@ dependencies = [
  "ubyte",
  "url",
  "uuid",
- "webpki-roots 1.0.11",
 ]
 
 [[package]]

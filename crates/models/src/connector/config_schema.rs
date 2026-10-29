@@ -600,6 +600,13 @@ impl ClientConfigSchema {
         }
     }
 
+    /// Whether `key` lies in one of the driver-delegated property namespaces of this schema.
+    pub fn delegates(self, key: &str) -> bool {
+        self.namespaces
+            .iter()
+            .any(|namespace| namespace.accepts(key))
+    }
+
     pub fn validate(
         self,
         entries: &[ClientConfigEntry],
@@ -642,11 +649,7 @@ impl ClientConfigSchema {
                 }));
             }
             let Some(key) = self.key(&entry.key) else {
-                if self
-                    .namespaces
-                    .iter()
-                    .any(|namespace| namespace.accepts(&entry.key))
-                {
+                if self.delegates(&entry.key) {
                     continue;
                 }
                 return Err(Report::new(ClientConfigSchemaError::UnknownKey {
