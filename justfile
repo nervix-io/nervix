@@ -2885,7 +2885,7 @@ test-docs: typed-ratchet-source-build install-cargo-crap
 # reference chapters are rendered from the current binaries, so a published book can never describe
 # an older build.
 book version="0.1.0-dev": test-docs docs-screenshots
-    python scripts/build_book.py --version {{ version }}
+    python3 scripts/build_book.py --version {{ version }}
 
 validate-skill:
     env GH_PROMPT_DISABLED=1 gh skill publish .agents/skills --dry-run
@@ -2951,14 +2951,14 @@ publish-dir source target zone_id alias="snapshot" bucket="nervix-docs":
     uv run --locked python scripts/publish_docs_alias.py --source {{ source }} --target {{ target }} --alias {{ alias }} --bucket {{ bucket }} --zone-id {{ zone_id }}
 
 purge-cache zone_id:
-    python scripts/purge_cloudflare_cache.py --zone-id {{ zone_id }}
+    python3 scripts/purge_cloudflare_cache.py --zone-id {{ zone_id }}
 
 worker-deploy zone_id="":
     #!/usr/bin/env bash
     set -euo pipefail
     npx --yes wrangler deploy --config cloudflare/docs-worker/wrangler.jsonc
     if [[ -n "{{ zone_id }}" ]]; then
-        python scripts/purge_cloudflare_cache.py --zone-id {{ zone_id }}
+        python3 scripts/purge_cloudflare_cache.py --zone-id {{ zone_id }}
     fi
 
 publish-book target zone_id alias="snapshot" bucket="nervix-docs":

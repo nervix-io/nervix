@@ -416,7 +416,7 @@ creates or updates the authenticated publisher's marked PR comment through `gh`.
 tested commit's line coordinates. The reporter maps sources onto tracked files as
 `just coverage-merge` does, so a `..` segment names the file it reaches, and the merged report,
 already relative to the repository, needs no checkout root. CI's reporter reads that report, so the
-different checkout paths of Blacksmith and GitHub-hosted runners are resolved once, by the merge. A
+checkout paths of the producers' runners are resolved once, by the merge. A
 focused local report, such as the Backup and Visual Create coverage recipes write, describes the
 local checkout and needs none either. For reports collected in another checkout, use
 `--source-root <original-checkout-path>`, or `--source-root-file` with the producer's

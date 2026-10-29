@@ -550,8 +550,10 @@ scenario waits for is the one thread that polls all of their steps, described un
 [Runner Stalls](#runner-stalls). Factor `4` was measured in Check run 40358096404: with 64 slots
 that thread ran on a CPU for 86 percent of the run, every scenario took about 1.45 times its
 median across the factor `3` runs, and the run needed 279,439 slot-seconds where 48 slots had
-needed at most 215,000. More slots added no throughput, so the job keeps factor `3`. Memory is
-no limit: the runner used at most 28 GiB of its 62.
+needed at most 215,000. More slots added no throughput, so the job keeps factor `3`. Memory was no
+limit on those runs' runner, which used at most 28 GiB of its 62. The job now runs on Boat's
+`boat-xlarge` machine, whose 32 GB and 4 GB of swap stay above that peak with less to spare; its
+runner load record shows how close a run comes.
 
 Admission grants feature capacity and the attempt's share of the run slots in one decision, after
 both are available. A scenario holds both through the end of teardown. A first run holds one slot.

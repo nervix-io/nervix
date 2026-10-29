@@ -343,6 +343,29 @@ passed to the test binaries, so a test name filter narrows the run:
 just test-connectors <filter>
 ```
 
+### CI runners
+
+CI jobs run on [Boat](https://boat.dev) machines, which the boat CI GitHub App starts for every job
+whose `runs-on` names a Boat size. Each job gets a fresh x86_64 Ubuntu 24.04 virtual machine with
+Docker, deleted when the job ends. `.github/actionlint.yaml` declares the Boat labels to
+`just validate-workflows`. A job's size follows the memory and disk its builds use rather than its
+CPUs, since a Boat machine has only 2 GB of memory per CPU:
+
+- `boat-xlarge`, with 16 CPUs, 32 GB and 251 GB of disk, runs validation, the unit tests, the
+  scenarios, client conformance, the extra checks, Shuttle, Loom, the Deloxide lane, Bolero, the
+  arm64 and diagnostic image builds and the benchmarks. In Check runs of October 2026 the Loom jobs
+  used about 20 GiB of memory, the scenarios up to 28 GiB and the extra checks about 95 GiB of disk.
+- `boat-large`, with 8 CPUs, 16 GB and 111 GB, runs the coverage reports, Turmoil, the book, the
+  amd64 image build and deployment check, and the chaos shards.
+- `boat-small`, with 2 CPUs and 4 GB, runs the jobs that only select, plan, gate or publish.
+
+Boat has no arm64 machine, so the arm64 deployment check runs on GitHub's hosted `ubuntu-24.04-arm`
+runner. A Boat machine sets the `en_US.UTF-8` locale, whose collation orders `sort` output
+differently from the `C.UTF-8` of GitHub's runner image, so every workflow sets `LC_ALL=C.UTF-8`.
+Its Docker daemon can start a few seconds after a job begins, so a job whose first steps use Docker
+waits for it. Its own Node.js comes from nvm, which a job's shell may not load, so a job that runs
+npm pins Node.js with `actions/setup-node`.
+
 ### Compiler architecture gate
 
 `just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler
