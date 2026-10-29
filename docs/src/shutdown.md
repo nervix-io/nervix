@@ -1168,6 +1168,8 @@ reissue its commands.
 Until admission succeeds, the node is live but inert with respect to ownership. Its public listeners and
 its interconnect answer requests, which keeps configured listening entities available on every live
 node, but no runtime routes exist, so a payload it accepts cannot reach recovered graph execution.
+An endpoint request therefore finds no route and is refused with HTTP 503 until the node installs
+its first revision, never with the 404 that a withdrawn route returns.
 A client producer or consumer open is refused as temporarily unavailable until the node has passed
 the catch-up barrier; the node does not report a stale local missing or stopped domain as a terminal
 endpoint refusal during that interval. The client can retry the open on its restored session.

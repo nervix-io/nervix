@@ -35,3 +35,4 @@ url = { workspace = true }
 bolero = { workspace = true }
 mysql_common = { workspace = true }
 nervix-arbitrary = { workspace = true }
+nervix-primitives = { workspace = true, features = ["test-util"] }

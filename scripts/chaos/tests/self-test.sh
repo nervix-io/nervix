@@ -601,8 +601,8 @@ sh -n "${chaos_dir}/continuous-load.sh" "${chaos_dir}/observe-nodes.sh" "${chaos
 # Every tool image a run starts is pinned in tool-images.sh by a registry-qualified digest.
 qualified_digest_reference='^[a-z0-9-]+(\.[a-z0-9-]+)+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$'
 mapfile -t pinned_image_variables < <(compgen -v chaos_ | grep -E '^chaos_[a-z]+_image$' | LC_ALL=C sort)
-[[ "${pinned_image_variables[*]}" == 'chaos_kafka_image chaos_kcat_image chaos_nettools_image chaos_probe_image chaos_pumba_image' ]] \
-    || fail "tool-images.sh does not pin exactly the Kafka, kcat, nettools, probe and Pumba images: ${pinned_image_variables[*]}"
+[[ "${pinned_image_variables[*]}" == 'chaos_kafka_image chaos_kcat_image chaos_nettools_image chaos_postgres_image chaos_probe_image chaos_pumba_image chaos_python_image' ]] \
+    || fail "tool-images.sh does not pin exactly the Kafka, kcat, nettools, PostgreSQL, probe, Pumba and Python images: ${pinned_image_variables[*]}"
 for pinned_image_variable in "${pinned_image_variables[@]}"; do
     [[ "${!pinned_image_variable}" =~ ${qualified_digest_reference} ]] \
         || fail "${pinned_image_variable} is not a registry-qualified digest reference: ${!pinned_image_variable}"
@@ -625,6 +625,12 @@ CHAOS_STATE_LOAD_FILE="${expected}" \
 CHAOS_STATE_LOAD_INTERVAL_MS="1000" \
 CHAOS_PACED_LOAD_FILE="${expected}" \
 CHAOS_PACED_LOAD_INTERVAL_MS="250" \
+CHAOS_PYTHON_IMAGE="${chaos_python_image}" \
+CHAOS_POSTGRES_IMAGE="${chaos_postgres_image}" \
+CHAOS_ENDPOINT_DIR="${tmp_dir}" \
+CHAOS_LIFE_LOAD_FILE="${expected}" \
+CHAOS_LIFE_LOAD_INTERVAL_MS="500" \
+CHAOS_ENDPOINT_INTERVAL_MS="250" \
 CHAOS_TRAFFIC_DIR="${tmp_dir}" \
 CHAOS_NODE_COUNT="3" \
 CHAOS_SUBNET="10.213.7.0/24" \
@@ -633,7 +639,7 @@ CHAOS_NODE_1_ADDRESS="10.213.7.11" \
 CHAOS_NODE_2_ADDRESS="10.213.7.12" \
 CHAOS_NODE_3_ADDRESS="10.213.7.13" \
     docker compose -f "${chaos_dir}/compose.yaml" --profile tools --profile three-node --profile rolling \
-    --profile stateful --profile paced config --format json \
+    --profile stateful --profile paced --profile endpoints --profile lifetimes config --format json \
     >"${compose_json}"
 
 jq -e --arg image "${placeholder_image}" \
@@ -654,6 +660,13 @@ jq -e --arg image "${placeholder_image}" \
     and .services["state-load"].environment.CHAOS_LOAD_INTERVAL_MS == "1000"
     and .services["paced-load"].labels["io.nervix.chaos.role"] == "load"
     and .services["paced-load"].environment.CHAOS_LOAD_INTERVAL_MS == "250"
+    and .services["life-load"].labels["io.nervix.chaos.role"] == "load"
+    and .services["life-load"].environment.CHAOS_LOAD_INTERVAL_MS == "500"
+    and .services["life-load"].environment.CHAOS_LOAD_TOPIC == "chaos_life_input"
+    and .services["endpoint-load"].labels["io.nervix.chaos.role"] == "load"
+    and .services["endpoint-websocket"].labels["io.nervix.chaos.role"] == "load"
+    and ([.services["endpoint-load"], .services["endpoint-websocket"]]
+         | all(.volumes | all(.read_only == true)))
     and .services.observer.labels["io.nervix.chaos.role"] == "observer"
     and .services["clock-observer"].labels["io.nervix.chaos.role"] == "observer"
     and .services["clock-observer"].image == $image
@@ -666,12 +679,16 @@ jq -e --arg image "${placeholder_image}" \
 jq -e --arg nervix "${placeholder_image}" \
     --arg kafka "${chaos_kafka_image}" \
     --arg kcat "${chaos_kcat_image}" \
-    --arg probe "${chaos_probe_image}" '
+    --arg probe "${chaos_probe_image}" \
+    --arg python "${chaos_python_image}" \
+    --arg postgres "${chaos_postgres_image}" '
     [.services.broker.image, .services["broker-admin"].image] == [$kafka, $kafka]
     and [.services.kcat.image, .services.load.image, .services["state-load"].image,
-         .services["paced-load"].image] == [$kcat, $kcat, $kcat, $kcat]
+         .services["paced-load"].image, .services["life-load"].image] == [$kcat, $kcat, $kcat, $kcat, $kcat]
     and [.services.probe.image, .services.observer.image] == [$probe, $probe]
-    and ([.services[].image] | all(. == $nervix or . == $kafka or . == $kcat or . == $probe))
+    and [.services["endpoint-load"].image, .services["endpoint-websocket"].image] == [$python, $python]
+    and .services.postgres.image == $postgres
+    and ([.services[].image] | all(. == $nervix or . == $kafka or . == $kcat or . == $probe or . == $python or . == $postgres))
 ' "${compose_json}" >/dev/null || fail "Compose does not start every tool service from its pinned image"
 
 # Peer-side partition rules follow a node across its restart only if its address stays fixed, and
@@ -864,6 +881,8 @@ printf 'chaos harness self-test passed\n'
 "${script_dir}/docker-events-self-test.sh"
 "${script_dir}/recovery-self-test.sh"
 "${script_dir}/stateful-self-test.sh"
+"${script_dir}/endpoint-self-test.sh"
+"${script_dir}/lifetimes-self-test.sh"
 "${script_dir}/backup-fault-self-test.sh"
 "${script_dir}/restore-self-test.sh"
 "${script_dir}/backup-state-self-test.sh"

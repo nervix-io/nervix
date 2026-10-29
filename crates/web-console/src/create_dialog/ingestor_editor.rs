@@ -13,8 +13,9 @@
 
 use leptos::prelude::*;
 use nervix_models::{
-    IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceOverflow, IngestorEntityKind,
-    OptionDeclaration, OptionForm, OptionPresence, WebsocketsUpgradeHeader,
+    HttpIngestorEntity, HttpRequestHeader, IngestDeliveryKind, IngestQuiesceKind,
+    IngestQuiesceOverflow, IngestorEntityKind, OptionDeclaration, OptionForm, OptionPresence,
+    WebsocketsIngestorEntity, WebsocketsUpgradeHeader,
 };
 
 use super::{
@@ -32,6 +33,7 @@ enum IngestorField {
     QueueGroup,
     Subscription,
     Query,
+    Method,
     MaxBodySize,
     Every,
     Instances,
@@ -55,6 +57,7 @@ impl IngestorField {
             Self::QueueGroup => "Queue group",
             Self::Subscription => "Subscription",
             Self::Query => "QUERY",
+            Self::Method => "METHOD",
             Self::MaxBodySize => "MAX BODY SIZE",
             Self::Every => "Every",
             Self::Instances => "Instances",
@@ -78,6 +81,7 @@ impl IngestorField {
             Self::QueueGroup => "create-ingestor-queue-group",
             Self::Subscription => "create-ingestor-subscription",
             Self::Query => "create-ingestor-query",
+            Self::Method => "create-ingestor-method",
             Self::MaxBodySize => "create-ingestor-max-body-size",
             Self::Every => "create-ingestor-every",
             Self::Instances => "create-ingestor-instances",
@@ -101,6 +105,7 @@ impl IngestorField {
             Self::QueueGroup => &source.queue_group,
             Self::Subscription => &source.subscription,
             Self::Query => &source.query,
+            Self::Method => &source.method,
             Self::MaxBodySize => &source.max_body_size,
             Self::Every => &source.every,
             Self::Instances => &source.instances,
@@ -124,6 +129,7 @@ impl IngestorField {
             Self::QueueGroup => &mut source.queue_group,
             Self::Subscription => &mut source.subscription,
             Self::Query => &mut source.query,
+            Self::Method => &mut source.method,
             Self::MaxBodySize => &mut source.max_body_size,
             Self::Every => &mut source.every,
             Self::Instances => &mut source.instances,
@@ -159,13 +165,24 @@ fn SourceFieldEditor(signals: CreateSignals, field: IngestorField) -> impl IntoV
 /// The typed control that stores one declared locator or option.
 enum EntityOptionField {
     Scalar(IngestorField),
+    RequestHeaders,
     UpgradeHeaders,
 }
 
 impl EntityOptionField {
-    fn from_keywords(keywords: &str) -> Option<Self> {
+    fn from_keywords(kind: Option<IngestorEntityKind>, keywords: &str) -> Option<Self> {
         let scalar = match keywords {
-            "HEADERS" => return Some(Self::UpgradeHeaders),
+            "HEADERS" => {
+                return match kind {
+                    Some(IngestorEntityKind::Http(HttpIngestorEntity::Request)) => {
+                        Some(Self::RequestHeaders)
+                    }
+                    Some(IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection)) => {
+                        Some(Self::UpgradeHeaders)
+                    }
+                    _ => None,
+                };
+            }
             "TOPIC" => IngestorField::Topic,
             "QUEUE" => IngestorField::Queue,
             "CHANNEL" => IngestorField::Channel,
@@ -173,6 +190,7 @@ impl EntityOptionField {
             "QUEUE GROUP" => IngestorField::QueueGroup,
             "SUBSCRIPTION" => IngestorField::Subscription,
             "QUERY" => IngestorField::Query,
+            "METHOD" => IngestorField::Method,
             "MAX BODY SIZE" => IngestorField::MaxBodySize,
             "EVERY" => IngestorField::Every,
             "INSTANCES" => IngestorField::Instances,
@@ -241,12 +259,70 @@ fn UpgradeHeadersEditor(signals: CreateSignals) -> impl IntoView {
 }
 
 #[component]
+fn RequestHeadersEditor(signals: CreateSignals) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
+        <fieldset class="create-field create-ingestor-request-headers" data-option="HEADERS">
+            <legend>"HEADERS · optional literal request fields"</legend>
+            <For each=move || { (0..signals.ingestor.get().source.request_headers.len()).collect::<Vec<_>>() }
+                key=|index| *index
+                children=move |index| view! {
+                    <div class="create-field-row">
+                        <label class="create-field"><span>"Name"</span>
+                            <input class="create-ingestor-request-header-name" type="text" autocomplete="off"
+                                disabled=pending
+                                prop:value=move || match signals.ingestor.get().source.request_headers.get(index) {
+                                    Some(header) => header.name.clone(), None => String::new(),
+                                }
+                                on:input=move |event| {
+                                    let value = event_target_value(&event);
+                                    signals.ingestor.update(|draft| {
+                                        if let Some(header) = draft.source.request_headers.get_mut(index) { header.name = value; }
+                                    });
+                                    signals.edit();
+                                } />
+                        </label>
+                        <label class="create-field"><span>"Value"</span>
+                            <input class="create-ingestor-request-header-value" type="text" autocomplete="off"
+                                disabled=pending
+                                prop:value=move || match signals.ingestor.get().source.request_headers.get(index) {
+                                    Some(header) => header.value.clone(), None => String::new(),
+                                }
+                                on:input=move |event| {
+                                    let value = event_target_value(&event);
+                                    signals.ingestor.update(|draft| {
+                                        if let Some(header) = draft.source.request_headers.get_mut(index) { header.value = value; }
+                                    });
+                                    signals.edit();
+                                } />
+                        </label>
+                        <button type="button" class="create-ingestor-request-header-remove" disabled=pending
+                            on:click=move |_| {
+                                signals.ingestor.update(|draft| {
+                                    if index < draft.source.request_headers.len() { draft.source.request_headers.remove(index); }
+                                });
+                                signals.edit();
+                            }>"Remove"</button>
+                    </div>
+                } />
+            <button type="button" class="create-ingestor-request-headers-add" disabled=pending
+                on:click=move |_| {
+                    signals.ingestor.update(|draft| draft.source.request_headers.push(HttpRequestHeader {
+                        name: String::new(), value: String::new(),
+                    }));
+                    signals.edit();
+                }>"Add request header"</button>
+        </fieldset>
+    }
+}
+
+#[component]
 fn EntityValueEditor(
     signals: CreateSignals,
     keywords: &'static str,
     default: Option<&'static str>,
 ) -> impl IntoView {
-    match EntityOptionField::from_keywords(keywords) {
+    match EntityOptionField::from_keywords(signals.ingestor.get().source.kind, keywords) {
         Some(EntityOptionField::Scalar(field)) => view! {
             <label class="create-field" data-option=keywords>
                 <span>{keywords}</span>
@@ -261,6 +337,7 @@ fn EntityValueEditor(
             </label>
         }.into_any(),
         Some(EntityOptionField::UpgradeHeaders) => view! { <UpgradeHeadersEditor signals=signals /> }.into_any(),
+        Some(EntityOptionField::RequestHeaders) => view! { <RequestHeadersEditor signals=signals /> }.into_any(),
         None => ().into_any(),
     }
 }
@@ -504,7 +581,7 @@ mod tests {
             let declaration = kind.capabilities();
             if let Some(locator) = declaration.locator {
                 assert!(
-                    EntityOptionField::from_keywords(locator.keywords).is_some(),
+                    EntityOptionField::from_keywords(Some(kind), locator.keywords).is_some(),
                     "{} {}",
                     kind.phrase(),
                     locator.keywords
@@ -513,7 +590,7 @@ mod tests {
             for option in declaration.options {
                 match option.form {
                     OptionForm::Value { .. } => assert!(
-                        EntityOptionField::from_keywords(option.keywords).is_some(),
+                        EntityOptionField::from_keywords(Some(kind), option.keywords).is_some(),
                         "{} {}",
                         kind.phrase(),
                         option.keywords

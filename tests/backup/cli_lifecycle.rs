@@ -16,7 +16,7 @@ fn given_backup_execution_reference(world: &mut ScenarioWorld, placeholder: Stri
 }
 
 impl ScenarioWorld {
-    /// Join cancellation before releasing a backup gate or the cluster's listener ports. The
+    /// Join cancellation before stopping the cluster or releasing its listener ports. The
     /// task's child is killed when its output future is dropped, even if the task never polled.
     pub(crate) async fn cancel_background_backup(
         &mut self,

@@ -2,7 +2,7 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The HTTP client Model, the polled request source with its delivery mode, the source
+//! - **Owns.** The HTTP client Model and transport declaration, the polled request source with its delivery mode, the source
 //!   that reads an HTTP endpoint this cluster serves, the request emitter Model, and what each entity
 //!   declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
@@ -28,17 +28,40 @@ use super::{
     entity_union::{connector_emitters, connector_ingestors},
 };
 use crate::{
-    AcknowledgementConfirmation, BatchUnavailability, ClientName, ConnectorKind, DeclaredDelivery,
-    DeclaredQuiesce, DomainClockPeriod, EmitterBatchLegality, EmitterBodyForm,
+    AcknowledgementConfirmation, BatchUnavailability, ByteSizeUnit, ClientName, ConnectorKind,
+    DeclaredDelivery, DeclaredQuiesce, DomainClockPeriod, EmitterBatchLegality, EmitterBodyForm,
     EmitterClientReference, EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities,
     EmitterReference, EmitterReferenceKind, EndpointIngestMode, EndpointName, EndpointType,
     Expression, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
     IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope,
     IngestorReference, IngestorReferenceKind, OptionDeclaration, OptionForm, OptionPresence,
-    OptionValue, PositionClass,
+    OptionValue, PayloadSizeLimit, PositionClass,
 };
 
 configured_client!(Http: unpooled, config CLIENT_CONFIG, CreateClientHttp => HttpConfigEntry);
+
+/// The HTTP client's declared transport rules. The CONFIG schema below names the settings that
+/// opt into redirects or a proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpTransportContract {
+    pub timeout: DeadlineKey,
+    pub redirect_limit_without_opt_in: usize,
+    pub redirect_limit_with_opt_in: usize,
+    pub reads_environment_proxy: bool,
+    pub redacts_targets_and_headers: bool,
+    pub tls_identity_requires_pair: bool,
+}
+
+impl CreateClientHttp {
+    pub const TRANSPORT: HttpTransportContract = HttpTransportContract {
+        timeout: DeadlineKey::Timeout,
+        redirect_limit_without_opt_in: 0,
+        redirect_limit_with_opt_in: 10,
+        reads_environment_proxy: false,
+        redacts_targets_and_headers: true,
+        tls_identity_requires_pair: true,
+    };
+}
 
 /// The current keys this connector reads, shared by validation, completion and inspection.
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
@@ -46,8 +69,9 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
     ClientConfigSchema::new(
         &[
             K::required("endpoint", V::Url(&["http", "https"])),
-            K::optional("method", V::String),
-            K::TIMEOUT,
+            K::optional("follow_redirects", V::Boolean),
+            K::optional("proxy", V::Url(&["http", "https"])),
+            K::required("timeout_ms", V::Milliseconds),
             K::TLS_CA,
             K::TLS_CERT,
             K::TLS_KEY,
@@ -57,33 +81,61 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
     )
 };
 
+/// The most bytes a polling request reads when its statement omits `MAX BODY SIZE`.
+pub const HTTP_DEFAULT_MAX_BODY_SIZE: PayloadSizeLimit =
+    match PayloadSizeLimit::new(nonzero_ext::nonzero!(16u64), ByteSizeUnit::MiB) {
+        Some(limit) => limit,
+        None => panic!("16 MiB fits in a 64-bit byte count"),
+    };
+
+/// One literal request header, in the polling statement's written order.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct HttpRequestHeader {
+    pub name: String,
+    pub value: String,
+}
+
 /// The request an HTTP client sends on a cadence of domain time, whose response is the payload.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct HttpRequestIngestor {
     pub client: ClientName,
+    pub method: String,
+    pub headers: Vec<HttpRequestHeader>,
+    pub max_body_size: Option<PayloadSizeLimit>,
     pub every: DomainClockPeriod,
     pub mode: HttpRequestIngestMode,
     pub quiesce: IngestQuiesceMode,
+}
+
+impl HttpRequestIngestor {
+    pub fn max_body_size_in_effect(&self) -> PayloadSizeLimit {
+        self.max_body_size.unwrap_or(HTTP_DEFAULT_MAX_BODY_SIZE)
+    }
 }
 
 /// What the connector of a HTTP REQUEST ingestor holds and how long it waits.
 const HTTP_REQUEST_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "the response body",
-        bound: BufferBound::Unbounded,
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("MAX BODY SIZE"),
+            overflow: BufferOverflow::FailPoll,
+        },
     }],
     waits: &[DeclaredWait {
         wait: "a request: name resolution, connection, TLS and the response",
         bound: WaitBound::Key {
             key: DeadlineKey::Timeout,
-            omitted: OmittedDeadline::Unbounded,
+            omitted: OmittedDeadline::Required,
         },
     }],
     driver_limits: &[
         "Response heads above 100 headers or 417,792 bytes are refused.",
-        "A request follows at most 10 redirects.",
+        "Redirects and proxies require the client's explicit opt-in.",
     ],
 };
 
@@ -134,7 +186,7 @@ impl IngestorDeclaration for HttpRequestIngestor {
         // An HTTP response's fields, as the client's header map keeps them: names in lowercase, every
         // value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-        metadata: IngestorMetadataScope::Headers,
+        metadata: IngestorMetadataScope::Http,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Http),
         position_class: PositionClass::None,
@@ -142,7 +194,35 @@ impl IngestorDeclaration for HttpRequestIngestor {
         delivery: &[DeclaredDelivery::NO_ACK],
         quiesce: &[DeclaredQuiesce::SUSPEND, DeclaredQuiesce::BUFFER],
         locator: None,
-        options: &[OptionDeclaration::EVERY],
+        options: &[
+            OptionDeclaration {
+                keywords: "METHOD",
+                presence: OptionPresence::Required,
+                form: OptionForm::Value {
+                    value: OptionValue::Text,
+                    example: "METHOD 'GET'",
+                },
+            },
+            OptionDeclaration {
+                keywords: "HEADERS",
+                presence: OptionPresence::Optional { default: None },
+                form: OptionForm::Value {
+                    value: OptionValue::LiteralMapping,
+                    example: "HEADERS { 'accept' = 'application/json' }",
+                },
+            },
+            OptionDeclaration {
+                keywords: "MAX BODY SIZE",
+                presence: OptionPresence::Optional {
+                    default: Some("16MiB"),
+                },
+                form: OptionForm::Value {
+                    value: OptionValue::Size,
+                    example: "MAX BODY SIZE 1MiB",
+                },
+            },
+            OptionDeclaration::EVERY,
+        ],
         bounds: HTTP_REQUEST_INGESTOR_BOUNDS,
     };
 }
@@ -319,5 +399,51 @@ connector_emitters! {
 super::publishing::emitter_modes! {
     pub enum HttpRequestPublishingMode {
         Ack { retry_policy: crate::RetryPolicy } => RequestAck,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use meticulous::ResultExt as _;
+
+    use super::*;
+
+    #[test]
+    fn polling_declares_literal_request_fields_and_its_response_bound() {
+        let [method, headers, body_size, every] = HttpRequestIngestor::CAPABILITIES.options else {
+            panic!("HTTP polling declares four request options");
+        };
+        assert_eq!(method.keywords, "METHOD");
+        assert_eq!(method.presence, OptionPresence::Required);
+        assert!(matches!(
+            method.form,
+            OptionForm::Value {
+                value: OptionValue::Text,
+                ..
+            }
+        ));
+        assert_eq!(headers.keywords, "HEADERS");
+        assert_eq!(headers.presence, OptionPresence::Optional { default: None });
+        assert!(matches!(
+            headers.form,
+            OptionForm::Value {
+                value: OptionValue::LiteralMapping,
+                ..
+            }
+        ));
+        assert_eq!(body_size.keywords, "MAX BODY SIZE");
+        let OptionPresence::Optional {
+            default: Some(default),
+        } = body_size.presence
+        else {
+            panic!("HTTP polling declares a default response bound");
+        };
+        assert_eq!(
+            default
+                .parse::<PayloadSizeLimit>()
+                .assured("the declared default is a size literal"),
+            HTTP_DEFAULT_MAX_BODY_SIZE
+        );
+        assert_eq!(every.keywords, "EVERY");
     }
 }

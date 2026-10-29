@@ -460,11 +460,10 @@ Feature: Stalled peers
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE HTTP CLIENT poll_source CONFIG {
         'endpoint' = 'http://{{http_peer}}/notifications',
-        'method' = 'GET',
         'timeout_ms' = 1000
       };
       CREATE HTTP REQUEST INGESTOR poll_reader
-        FROM poll_source EVERY 1s
+        FROM poll_source METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE

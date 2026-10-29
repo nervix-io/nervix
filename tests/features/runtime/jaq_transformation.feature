@@ -519,11 +519,10 @@ Feature: JAQ transformation
         CREATE HTTP CLIENT http_main
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
-          'method' = 'GET',
           'timeout_ms' = 5000
         };
         CREATE HTTP REQUEST INGESTOR http_notifications
-        FROM http_main EVERY 1s
+        FROM http_main METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

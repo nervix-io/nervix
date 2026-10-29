@@ -287,6 +287,22 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --test scenarios -- {{ args }}
 
+# Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
+# This supervision check has its own verdict, outside ordinary coverage reports.
+test-backup-cut-cleanup: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
+    evidence="$(mktemp -d {{ quote(cargo_target_dir + "/backup-cut-cleanup.XXXXXXXX") }})"
+    # Reuse the ordinary scenario build in CI without mixing qualification profiles into it.
+    instrumentation="$(CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} cargo llvm-cov show-env --sh)"
+    eval "$instrumentation"
+    export LLVM_PROFILE_FILE="$evidence/qualification-%p-%m.profraw"
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
+        cargo test --features testing --package nervix-server --test scenarios --no-run --message-format=json > "$evidence/build.jsonl"
+    python3 -m scripts.backup_cut_cleanup "$evidence"
+
 # Qualify ten consecutive three-node native metadata restores, retaining every attempt without retries.
 test-native-metadata-restore-repeat: tests-deps
     #!/usr/bin/env bash
@@ -3168,6 +3184,35 @@ verify-chaos-clock *args:
 # Run the state, clock and window verifier controls without the other external harness checks.
 test-chaos-stateful-verifiers:
     exec bash scripts/chaos/tests/stateful-self-test.sh
+
+# Run the endpoint route and WebSocket verifier controls without the other external harness checks.
+test-chaos-endpoint-verifiers:
+    exec bash scripts/chaos/tests/endpoint-self-test.sh
+
+# Retain shell coverage of the endpoint route and WebSocket verifier controls.
+coverage-chaos-endpoint-verifiers:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/verify-endpoint-evidence.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/endpoint-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-endpoint-verifier-coverage") }} scripts/chaos/tests/endpoint-self-test.sh
+
+# Run the materialized, generator, window, rotation, expiry, missing-topic and force-flush verifier
+# controls without the other external harness checks.
+test-chaos-lifetimes-verifiers:
+    exec bash scripts/chaos/tests/lifetimes-self-test.sh
+
+# Retain shell coverage of the lifetimes verifier controls.
+coverage-chaos-lifetimes-verifiers:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/verify-lifetimes-evidence.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/lifetimes-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-lifetimes-verifier-coverage") }} scripts/chaos/tests/lifetimes-self-test.sh
 
 # Retain shell coverage of the state, clock and window verifier controls.
 coverage-chaos-stateful-verifiers:
