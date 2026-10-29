@@ -35,7 +35,7 @@ impl EmitterConnectorStarter {
             let connections =
                 PooledEmitterClient::lease(context, &connector.client, connector.pooled_client())
                     .await
-                    .map_err(emitter_init_error)?;
+                    .change_context(EmitterRuntimeError::InitializeConnector)?;
             Self::row(
                 projection,
                 MySqlTableEmitter::new(

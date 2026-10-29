@@ -690,7 +690,15 @@ A MySQL pool is kept at its `POOL SIZE MIN` by a task no caller waits on, so tha
 witness of a pass that ends below the minimum. It reports `PoolMinimumError::NotRestored`, naming
 the minimum, above the failed checkout's `PoolMinimumError::CheckOut` and the driver's error, at
 `debug`, returns the connections the pass held, and passes again a second later. An emitter that
-needs a connection meanwhile reports its own failed checkout.
+needs a connection meanwhile reports its own failed checkout. The shared MySQL pool retains
+`ConfiguredDeadline` for `timeout_ms`, when present, and every checkout, validation and insert
+keeps a typed `DeadlineElapsed` on expiry. Driver checkout and validation errors retain their
+typed causes through the open/write contexts. The emitter's pool-borrow context adds no rendered
+copy of the report. Its deadline report also attaches the safe operation, key and duration for
+the host's public emitter diagnostic. MySQL initialization changes context on the shared-client
+report rather than reducing it to Display text, so that projection and the typed cause survive.
+Deadline failures are infrastructure outcomes and leave pending rows on the host's retry policy;
+they do not become definite record rejections.
 
 An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP emitter: a timeout, a
 DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
@@ -1605,10 +1613,11 @@ row whose own request exceeds `MAX SIZE`, that row receives a `validation` messa
 `Postgres insert of one row measures 1219 bytes, above MAX SIZE 600B`, and the other rows are sent
 in bounded requests. A row within `MAX SIZE` that its destination could never
 accept is the destination's `external` rejection of the `publish` operation, named with the
-destination's limit: a Postgres insert above the largest protocol message the server reads, or a
-MongoDB document above its 16 MiB document limit, which is rejected before the write that would
-carry it. A SQL write that fails for a reason specific to its rows is written again one row at a
-time, and each row the destination still refuses receives an `external` `publish` error with the
+destination's limit: a MongoDB document above its 16 MiB document limit, which is rejected before
+the write that would carry it. A Postgres emitter cannot declare a `MAX SIZE` above the largest
+protocol message the server reads, which `CREATE` refuses, so its rows never reach that limit. A
+SQL write that fails for a reason specific to its rows is written again one row at a time, and
+each row the destination still refuses receives an `external` `publish` error with the
 destination's reason. That includes a violated MySQL `CHECK` constraint, which the server reports
 under the generic SQLSTATE `HY000`, and a Postgres cardinality violation, which is how
 `ON CONFLICT DO UPDATE` refuses one insert that carries a key twice. A MongoDB write answers for

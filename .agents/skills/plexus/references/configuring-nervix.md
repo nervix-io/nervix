@@ -39,7 +39,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
-| MySQL table path parts, exact value bindings, duplicate-key actions and client pool options | `Emitters` → `MySQL`, and `Database Client Connection Pools` |
+| MySQL table path parts, exact value bindings, duplicate-key actions, operation deadlines and TLS identity file formats | `Emitters` → `MySQL`, and `Database Client Connection Pools` |
 | Sentry platform options, event defaults and limit, batch transformations, strict DSN/timeout configuration, the inherited HTTP transport, rejected versus retried statuses and retry hints | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
