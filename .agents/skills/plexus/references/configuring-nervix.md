@@ -40,7 +40,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names, BSON field-name admission, native widths/date precision, conflict filters, client URL configuration and paired TLS identity files | `Emitters` → `MongoDB`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions and client pool options | `Emitters` → `MySQL`, and `Database Client Connection Pools` |
-| Sentry platform options, event defaults, batch transformations and strict DSN/timeout configuration | `Emitters` → `Sentry`, then `Connector Capabilities` |
+| Sentry platform options, event defaults and limit, batch transformations, strict DSN/timeout configuration, the inherited HTTP transport, rejected versus retried statuses and retry hints | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
 | Session subscriptions and domain clock attachment | `Sessions` |
@@ -421,8 +421,9 @@ current connection, retry and deadline limits.
   `message.timeout.ms` or `delivery.timeout.ms` in the client's `CONFIG` as the producer's delivery
   bound. The producer always reports every record, so `delivery.report.only.error` in a client's
   `CONFIG` has no effect.
-- Every Sentry emitter references a `SENTRY CLIENT` with a project DSN, encodes one event JSON
-  object per record, and has no `write_header` invocation.
+- Every Sentry emitter references a `SENTRY CLIENT` with a project DSN and a positive `timeout_ms`,
+  encodes one event JSON object per record, or per batch through `ON EMITTING BATCH`, and has no
+  `write_header` invocation.
 - Every custom WASM guest is built for the current ABI, accepts
   `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and
   declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`. Its

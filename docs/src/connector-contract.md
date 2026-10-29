@@ -1927,8 +1927,8 @@ schema requires a positive request timeout, and its native DSN parser runs at th
 pre-commit offline boundary without network I/O. Both the
 envelope header and the event carry that identity, and every attempt sends the retained envelope
 byte for byte, including after the host reopens the emitter. Preparation checks the final event
-against the vocabulary-owned 1 MB decompressed event limit. It writes every other member as the codec wrote it, a number to
-its last digit. Both classify a definite local refusal as a record rejection;
+against the vocabulary-owned 1 MB decompressed event limit. It writes every other member with the value it
+read, a number exactly within the 64-bit integer range and otherwise as the nearest 64-bit float. Both classify a definite local refusal as a record rejection;
 their transport and service failures retain their existing retry boundaries.
 
 The host owns that membership. It keeps every payload it offers the emitter, with its exact bytes,
