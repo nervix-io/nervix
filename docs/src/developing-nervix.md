@@ -372,7 +372,8 @@ job begins, so a job whose first steps use Docker waits for it. Its own Node.js 
 which a job's shell may not load, so a job that runs Node.js or npm pins it with
 `actions/setup-node`. Its Rust toolchain is installed system-wide under `/usr/local/cargo`, so a
 job creates `~/.cargo` before it writes its Cargo configuration there, and the chaos shards drop
-that directory from the PATH their suite runs with. Its git is Ubuntu's 2.43, older than the 2.44
+that directory from the PATH their suite runs with and delete the commands, such as `cargo`, that
+the toolchain also puts in `/usr/local/bin`. Its git is Ubuntu's 2.43, older than the 2.44
 whose `--no-lazy-fetch` the test selection passes, so the jobs that run the selection or its tests
 install the current git from the git-core PPA, as GitHub's runner image does.
 

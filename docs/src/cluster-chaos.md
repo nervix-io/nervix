@@ -2798,8 +2798,10 @@ in this order:
    provide one.
 2. It installs `just`, and jq 1.8.1 from its release, checked against the release's SHA-256,
    because the worker's own jq is Ubuntu's 1.7.
-3. It removes every Rust toolchain directory from the `PATH` the suite runs with, and fails if
-   `cargo`, `rustc` or `rustup` is still reachable.
+3. It removes every Rust toolchain directory from the `PATH` the suite runs with. A system-wide
+   toolchain, as on a Boat worker, also puts its commands in `/usr/local/bin` beside tools the
+   suite needs, so the job deletes any `cargo`, `rustc` or `rustup` that the `PATH` still reaches
+   from its single-use worker, and fails if one is still reachable.
 4. It waits up to two minutes for the Docker daemon, which a Boat worker can start a few seconds
    after the job, then pulls the image and logs out of the registry.
 5. It runs the real network refusal controls once, with `just test-chaos-network-preflight`, under

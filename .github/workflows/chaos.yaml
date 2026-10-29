@@ -171,7 +171,9 @@ jobs:
 
       # The suite runs with just and the pinned jq on a PATH that holds no Rust toolchain,
       # which shows that the external command builds nothing. A user's toolchain lives in
-      # ~/.cargo and ~/.rustup; a system-wide one, as a Boat machine may have, in cargo and rustup.
+      # ~/.cargo and ~/.rustup; a system-wide one, as on a Boat machine, in cargo and rustup, and
+      # it also puts its commands in /usr/local/bin, beside tools the suite needs. The job deletes
+      # those commands from its single-use machine instead of dropping that directory.
       - name: Prepare the controller's tools on a PATH without a Rust toolchain
         run: |
           tools="${RUNNER_TEMP}/chaos-tools"
@@ -189,6 +191,13 @@ jobs:
               "" | */.cargo/bin | */.rustup/* | */cargo/bin | */rustup/*) ;;
               *) chaos_path="${chaos_path}:${entry}" ;;
             esac
+          done
+          for tool in cargo rustc rustup; do
+            for _ in 1 2 3; do
+              found="$(PATH="${chaos_path}" command -v "${tool}")" || break
+              echo "deleting ${found}, which the suite's PATH would still reach"
+              sudo rm -f -- "${found}"
+            done
           done
           for tool in cargo rustc rustup; do
             if PATH="${chaos_path}" command -v "${tool}" >/dev/null 2>&1; then
