@@ -14,6 +14,11 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+RabbitMQ's TLS file keys declare `amqps` as their permitted address scheme. The shared schema's
+`ClientConfigSchemaError::RequiresScheme` refuses TLS files with `amqp` before file inspection
+and commit, naming the key, `addr` and `amqps` without the configured values. The existing
+certificate/key pairing refusal remains independent of the scheme check.
+
 An OTEL literal outside its declared field domain is a typed registry mapping issue that names
 the signal, key and required constraint. It carries no literal value. A TLS file key with a
 plaintext endpoint is a typed client-schema scheme refusal before file inspection, for either

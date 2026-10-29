@@ -204,3 +204,64 @@ Feature: RabbitMQ queue declarations
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: A RabbitMQ client refuses TLS files with an amqp address before commit
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-1" has TLS resource directory "dev_tls" for hosts "broker.test"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE dev_tls;
+      """
+    When these Plexus commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
+      """
+    When these Plexus statements fail with "<diagnostic>"
+      """
+      CREATE RABBITMQ CLIENT broker MOUNT dev_tls VERSION 1 CONFIG {
+        'addr' = 'amqp://127.0.0.1:5672/%2f', <files>
+      };
+      """
+
+    Examples:
+      | cluster_size | files                                                                           | diagnostic                                                     |
+      | 1            | 'tls_ca_file' = '{{dev_tls}}/ca.crt'                                            | client config key 'tls_ca_file' requires 'addr' to use amqps   |
+      | 3            | 'tls_ca_file' = '{{dev_tls}}/ca.crt'                                            | client config key 'tls_ca_file' requires 'addr' to use amqps   |
+      | 1            | 'tls_cert_file' = '{{dev_tls}}/tls.crt', 'tls_key_file' = '{{dev_tls}}/tls.key' | client config key 'tls_cert_file' requires 'addr' to use amqps |
+      | 3            | 'tls_cert_file' = '{{dev_tls}}/tls.crt', 'tls_key_file' = '{{dev_tls}}/tls.key' | client config key 'tls_cert_file' requires 'addr' to use amqps |
+      | 1            | 'tls_cert_file' = '{{dev_tls}}/tls.crt'                                         | client config key 'tls_cert_file' requires 'tls_key_file'      |
+      | 3            | 'tls_cert_file' = '{{dev_tls}}/tls.crt'                                         | client config key 'tls_cert_file' requires 'tls_key_file'      |
+      | 1            | 'tls_key_file' = '{{dev_tls}}/tls.key'                                          | client config key 'tls_key_file' requires 'tls_cert_file'      |
+      | 3            | 'tls_key_file' = '{{dev_tls}}/tls.key'                                          | client config key 'tls_key_file' requires 'tls_cert_file'      |
+
+  Scenario Outline: A RabbitMQ client accepts TLS files with an amqps address before commit
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-1" has TLS resource directory "dev_tls" for hosts "broker.test"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE dev_tls;
+      """
+    When these Plexus commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE RABBITMQ CLIENT broker MOUNT dev_tls VERSION 1 CONFIG {
+        'addr' = 'amqps://127.0.0.1:5671/%2f', <files>
+      };
+      SHOW CREATE CLIENT broker;
+      """
+    Then the last command output contains
+      """
+      CREATE RABBITMQ CLIENT broker
+      """
+
+    Examples:
+      | cluster_size | files                                                                           |
+      | 1            | 'tls_ca_file' = '{{dev_tls}}/ca.crt'                                            |
+      | 3            | 'tls_ca_file' = '{{dev_tls}}/ca.crt'                                            |
+      | 1            | 'tls_cert_file' = '{{dev_tls}}/tls.crt', 'tls_key_file' = '{{dev_tls}}/tls.key' |
+      | 3            | 'tls_cert_file' = '{{dev_tls}}/tls.crt', 'tls_key_file' = '{{dev_tls}}/tls.key' |
