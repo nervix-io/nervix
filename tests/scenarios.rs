@@ -25902,6 +25902,33 @@ async fn given_postgres_table_exists(world: &mut ScenarioWorld, table: String) {
     prepare_postgres_table(world, table, false).await;
 }
 
+/// Provisions a case-preserving table in its own schema, each part quoted as one identifier, which
+/// is how a `TABLE 'schema.Table'` locator names the relation it writes.
+#[given(expr = "Postgres table {string} exists in schema {string}")]
+async fn given_postgres_table_exists_in_schema(
+    world: &mut ScenarioWorld,
+    table: String,
+    schema: String,
+) {
+    let quote = |identifier: &str| format!("\"{}\"", identifier.replace('"', "\"\""));
+    let schema = quote(&expand_placeholders(world, &schema));
+    let table = format!("{schema}.{}", quote(&expand_placeholders(world, &table)));
+    let client = world
+        .dependencies
+        .postgres_client(false)
+        .expect("failed to connect to Postgres");
+    sqlx::raw_sql(SqlxAssertSqlSafe(format!(
+        "CREATE SCHEMA IF NOT EXISTS {schema};
+         DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (postgres_user_id integer, postgres_now text, postgres_action text);"
+    )))
+    .execute(&client)
+    .await
+    .expect("failed to create the schema-qualified Postgres table");
+    world.postgres_table = Some(table);
+    world.postgres_tls = false;
+}
+
 #[given(expr = "Postgres table {string} with primary key exists")]
 async fn given_postgres_table_with_primary_key_exists(world: &mut ScenarioWorld, table: String) {
     prepare_postgres_table_with_primary_key(world, table, false).await;

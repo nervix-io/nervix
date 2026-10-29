@@ -841,6 +841,17 @@ quotes each part separately. Its declared placeholder bound is shared with the s
 the bound narrows rows by mapped column count. The [MySQL manual](emitters.md#mysql) gives its
 exact binary binding and conflict semantics.
 
+The Postgres client schema declares its address as a driver URL whose scheme and `sslmode` Nervix
+owns: validation and the connector read the one TLS policy through the same declared option, and
+a missing, repeated or undeclared choice is a value-free refusal before storage. The TLS files are
+conditioned on `sslmode=verify-full` in that schema, and sqlx's offline parser checks every other
+query option before commit. Its table declaration admits one or two nonempty, case-preserving
+identifier parts, which the connector quotes separately in the insert and its catalog lookup. Its
+declared batch maximum is the largest protocol message the server reads, the same bound the
+statement divider keeps every insert within, and its conflict rule is the vocabulary's, which the
+grammar applies at `CREATE`. The [Postgres manual](emitters.md#postgres) gives its text binding
+and conflict semantics.
+
 Offline refusals keep their driver cause beneath `OfflineClientConfigError`; lapin's URI parser
 exposes only a string, which remains an attached diagnostic. Public command outcomes select reviewed
 key-bearing contexts without rendering driver diagnostics that may contain credentials. Worker
@@ -2043,8 +2054,9 @@ the same requests again.
 The database emitters divide the whole run. ClickHouse measures the `JSONEachRow` body of an insert,
 each row's line encoded once and sent as a slice of one buffer. Postgres measures the one `unnest`
 statement every insert of the write executes and the text arrays it binds, exactly as the driver
-encodes them, and never lets that size exceed the largest protocol message the server reads, which
-bounds the Bind message that carries the arrays. MySQL measures each multi-row statement and every
+encodes them; its declared batch maximum, which `CREATE` holds `MAX SIZE` to, is the largest
+protocol message the server reads, so the measure also bounds the Bind message that carries the
+arrays. MySQL measures each multi-row statement and every
 value's binary-protocol encoding, and narrows the row limit to the rows whose placeholders fit the
 65,535 one statement binds. MongoDB measures each inserted document with the `_id` the driver
 prepends, or each upsert's filter and update documents, and rejects a row whose document exceeds
@@ -2054,8 +2066,9 @@ time; a Postgres cardinality violation, which is how `ON CONFLICT DO UPDATE` ref
 carries a key twice, is isolated the same way. Postgres and MySQL write the isolated rows on the
 connection the refused insert borrowed, so an insert borrows once and its per-record outcome never
 waits for the shared pool again during isolation. Postgres also runs a write's metadata lookup on
-its first insert's connection. Both release the connection before the next bounded insert or retry
-backoff. MongoDB answers per document, so it needs no isolation pass.
+its first insert's connection, and the lookup and the insert quote each declared table part as one
+identifier, so they name the same relation. Both release the connection before the next bounded
+insert or retry backoff. MongoDB answers per document, so it needs no isolation pass.
 
 Registered Bolero properties hold these rules against their owners, with measures that grow and
 shrink with a candidate: `connector-row-request-division` the division rule and both limits,

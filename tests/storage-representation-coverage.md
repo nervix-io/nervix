@@ -136,6 +136,10 @@ preserve the authored entries; the effective-default projection preserves those 
 idempotent, and public inspection remains idempotent.
 Scheme-restricted driver addresses include RabbitMQ's `amqps` TLS-file configurations; the
 property retains their complete ordered trust and identity entries through both encodings.
+Driver URLs with Nervix-owned query options include Postgres addresses, which set `sslmode` once
+to a declared choice; a TLS file conditioned on `verify-full` fixes that choice in the generated
+address, and the property retains the address, its file entries and their acceptance through
+both encodings.
 `models-archived-models` includes the typed `DESCRIBE CLIENT` statement and its client identity;
 the Plexus statement targets check its canonical text through both composed statement readers.
 

@@ -1614,8 +1614,9 @@ application calls require a callable/trait contract or `nervix::dispatch(reason 
 owning callable; a cold module default is insufficient. A dispatch contract states the external
 driver or callback boundary; it does not exempt compiler-visible local callback bodies or acquisitions.
 
-The MySQL insert builder carries a dispatch contract for the vocabulary's opaque iterator over
-at most two immutable table-name parts, with at most 128 bytes across them. The boundary is
+The MySQL insert builder and the Postgres table name builder carry a dispatch contract for the
+vocabulary's opaque iterator over at most two immutable table-name parts, with at most 128 bytes
+across them. The boundary is
 borrowed string traversal; local SQL quoting callbacks retain their recurring-execution checks.
 Statement construction reaches no internal runtime acquisition.
 
