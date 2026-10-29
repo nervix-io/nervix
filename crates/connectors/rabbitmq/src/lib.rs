@@ -21,5 +21,9 @@ pub mod queue;
 pub use queue::*;
 
 mod address;
+mod channel_closure;
+mod connection;
 mod offline_config;
+mod publisher;
+pub use connection::RabbitMqConnectError;
 pub use offline_config::validate_client_configuration;
