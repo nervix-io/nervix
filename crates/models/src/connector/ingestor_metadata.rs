@@ -99,25 +99,19 @@ impl IngestorMetadataField {
 /// The metadata fields one entity's messages expose, in the order a message hands their values
 /// over.
 ///
-/// An entity declares at most [`Self::MAX_FIELDS`] fields, which constructing a declaration checks,
-/// and their names are distinct, which the declaration tests check for every entity. A lookup by
-/// name therefore scans a bounded list.
+/// A declaration is a static list written beside its entity's other capabilities, and its names are
+/// distinct, which the declaration tests check for every entity. It grows only when the vocabulary
+/// declares a field, never with domains, graphs or clusters, and it is looked up by name only when
+/// an ingestor's programs are validated or bound, never per message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngestorMetadataDeclaration(&'static [IngestorMetadataField]);
 
 impl IngestorMetadataDeclaration {
-    /// The most fields one entity declares.
-    pub const MAX_FIELDS: usize = 32;
-
     /// The declaration of an entity whose messages expose no metadata field.
     pub const NONE: Self = Self(&[]);
 
     /// The declaration of `fields`, in the order a message hands their values over.
     pub const fn new(fields: &'static [IngestorMetadataField]) -> Self {
-        assert!(
-            fields.len() <= Self::MAX_FIELDS,
-            "an entity declares at most MAX_FIELDS metadata fields"
-        );
         Self(fields)
     }
 
@@ -132,7 +126,8 @@ impl IngestorMetadataDeclaration {
 
     /// The declared position of the field named `name`, where the entity declares one.
     pub fn position(self, name: &str) -> Option<usize> {
-        // A declaration holds at most MAX_FIELDS fields, so this scan is bounded.
+        // The scan is bounded by the fields one entity declares in the vocabulary, and it runs
+        // only when programs are validated or bound.
         self.0.iter().position(|field| field.name == name)
     }
 

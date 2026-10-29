@@ -308,7 +308,7 @@ impl ProjectedMetadataValues<'_> {
         let position = self.visited;
         self.visited = position
             .checked_add(1)
-            .assured("a declared position is below the declaration's bounded field count");
+            .assured("a declared position is below the declaration's field count, a slice length");
         let column = column?;
         let builder = self
             .columns
@@ -436,7 +436,7 @@ impl IngestMetadataValues for ProjectedMetadataValues<'_> {
         self.visited = self
             .visited
             .checked_add(1)
-            .assured("a declared position is below the declaration's bounded field count");
+            .assured("a declared position is below the declaration's field count, a slice length");
         if let Some(column) = column {
             self.columns
                 .get_mut(column)
@@ -1555,5 +1555,5 @@ mod tests {
     test,
     not(any(feature = "shuttle", feature = "loom", feature = "deloxide"))
 ))]
-#[path = "ingest_metadata_properties.rs"]
-mod properties;
+#[path = "ingest_metadata_projection_tests.rs"]
+mod projection_tests;

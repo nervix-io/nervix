@@ -3326,7 +3326,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "src/runtime/__fuzz__/runtime__ingest_metadata__properties__bolero_declared_metadata_rows_project_and_retain_exactly/corpus"
+corpus = "src/runtime/__fuzz__/runtime__ingest_metadata__projection_tests__bolero_declared_metadata_rows_project_and_retain_exactly/corpus"
 domain_version = 1
 features = []
 id = "ingest-metadata-projection"
@@ -3335,8 +3335,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-server"
 random_iterations = 256
-source = "src/runtime/ingest_metadata_properties.rs"
-test = "runtime::ingest_metadata::properties::bolero_declared_metadata_rows_project_and_retain_exactly"
+source = "src/runtime/ingest_metadata_projection_tests.rs"
+test = "runtime::ingest_metadata::projection_tests::bolero_declared_metadata_rows_project_and_retain_exactly"
 test_target = "lib"
 
 [[target]]
