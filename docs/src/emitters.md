@@ -2961,7 +2961,9 @@ a mismatched scheme at `CREATE` or `ALTER`, naming `LOCATION`, before opening ei
 
 The four Iceberg client schemas distinguish Nervix-owned options from driver properties.
 Nervix validates declared addresses, booleans and deadlines at `CREATE CLIENT`; for example,
-`'path_style_access' = 'yes'` and `'no_auth' = 'yes'` are refused. Unknown unprefixed keys are
+`'path_style_access' = 'yes'` and `'no_auth' = 'yes'` are refused. A Boolean option means the value
+it states: `'no_auth' = false` keeps the GCS client's authentication, and only `true` makes it send
+unsigned requests without loading credentials. Unknown unprefixed keys are
 refused rather than treated as driver settings. The generated
 [client key tables](./connector-capabilities.md#s3-client) list the current keys and file roles.
 S3 delegates `s3.*` and `client.*`, GCS delegates `gcs.*`, and Azure delegates `adls.*`.
@@ -2973,17 +2975,26 @@ strings without opening an operator. The Azure table's `LOCATION` selects its en
 supplies account and authentication options. GCS inline credentials use the driver's
 Base64-encoded JSON form in `credentials_json`.
 
-HTTPS currently uses the catalog client's built-in web PKI roots. The declared catalog TLS-file
-keys participate in admission and mounting; the Iceberg HTTP transports do not yet apply those
-files.
+Both Iceberg clients verify an HTTPS server's certificate against the bundled WebPKI roots, the
+platform's native roots and the client's own `tls_ca_file`. A client that also names `tls_cert_file`
+and `tls_key_file` presents that certificate chain and private key as its identity. Each client
+uses only its own files: the `ICEBERG_REST` client's for catalog requests, and the `S3`, `GCS` or
+`AZURE_BLOB` client's for data-file reads and writes and for the HTTP calls of its credential
+provider. Mount the resource that holds the files on each client that names them, as
+[Resources](./resources.md) describes. Nervix reads the files when the emitter opens. A file it
+cannot read or parse stops the emitter as a configuration failure that names whether the catalog
+or the object-store client's TLS failed. A client whose address is plain HTTP never uses its TLS
+files, though Nervix still reads them when the emitter opens.
 
-
-When building the REST catalog's file I/O properties, Nervix first supplies the storage client's
-properties and then the catalog client's properties. Within a storage client, the last entry
-for a normalized property takes precedence. A catalog entry for the same Iceberg
-property key takes precedence in the effective properties used by the table's file I/O,
-including its object-store operations. Keep the two clients' settings consistent when configuring
-both namespaces.
+The table's file I/O receives the storage client's properties and the catalog client's
+storage-namespace properties. Each Nervix-owned storage option supplies one Iceberg property:
+`endpoint` supplies `s3.endpoint`, `no_auth` supplies `gcs.no-auth`, `account_name` supplies
+`adls.account-name`, and so on. A delegated property supplies itself, as written. The deadline and
+TLS-file options configure the clients' own HTTP transport and supply no property. The two clients
+must not set the same property. Nervix refuses `CREATE` or `ALTER` of an emitter whose catalog client
+sets a property that its storage client supplies, and the refusal names the property, the
+storage option that supplies it and both clients. Within a storage client, the last entry for a
+property is its value.
 
 The catalog and object-store HTTP clients resolve endpoint names through the node's configured
 DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the

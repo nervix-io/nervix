@@ -327,6 +327,11 @@ current connection, retry and deadline limits.
   column mapped from an expression that can produce a null, such as an `OPTIONAL` field; wrap it in
   `coalesce(...)` with a never-null argument. A commit refuses a table changed after open in the same
   way, naming the column, and retries until the table can take the mapped columns again.
+- Set each Iceberg file I/O property on one client only. An Iceberg emitter whose catalog client
+  sets a storage property its storage client already supplies, such as `s3.endpoint` beside the S3
+  client's `endpoint`, is refused at `CREATE` or `ALTER`. Put each client's `tls_*` files on that
+  client and mount their resource there: the `ICEBERG_REST` client's files apply to catalog requests,
+  and the storage client's files apply to data files and credential calls.
 - Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
   capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
   an ingestor's `NO ACK` or an emitter's `NO ACK`.
