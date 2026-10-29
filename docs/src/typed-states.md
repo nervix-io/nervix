@@ -14,9 +14,10 @@ adds it only when the authored key is absent; an invalid explicit value still fa
 `DESCRIBE CLIENT` distinguishes these effective defaults from authored values, with the same
 confidential projection, while canonical configuration preserves omission.
 Scheme-dependent presence distinguishes a key required by an address scheme from an optional key
-permitted only with that scheme. OTEL TLS file keys use the latter state for HTTPS. The same
-vocabulary validation runs on authored and rendered entries, deferring an unresolved address
-template until rendering. Percent-encoded header pairs retain their encoded client configuration;
+permitted only with that scheme. OTEL TLS file keys use the latter state for HTTPS, and RabbitMQ
+TLS file keys use it for `amqps`. The same vocabulary validation runs on authored and rendered
+entries, deferring an unresolved address template until rendering. Percent-encoded header pairs
+retain their encoded client configuration;
 validation and the connector use one decoder into ordered named pairs, without feeding a decoded
 value back through that decoder. OTEL's field rules own exact types and literal value constraints;
 the registry establishes them before planning, and the connector verifies the prepared schema.
@@ -431,6 +432,22 @@ SQL destination; it does not reinterpret the whole path as one identifier. Poole
 configuration has one reserved-key declaration, shared by offline MySQL URL inspection and the
 host's resolved-configuration refusal. Pool capacity remains the client's typed `POOL SIZE`
 bounds, with no competing URL setting.
+
+The MySQL shared pool and each borrowed connection retain an `Option<ConfiguredDeadline>`:
+absence means the client omitted an operation bound, while a present value has already passed
+the shared schedulable-deadline validation. Checkout, validation and insert failures keep typed
+reports, including `DeadlineElapsed`, beneath their host contexts; a rendered reason is never
+the pool-borrow error's state. Paired identity-file presence is established by the client schema,
+then checked again when the driver options are constructed. The connector extends the parsed
+URL's TLS options rather than reconstructing their policy from the presence of a CA file.
+
+Postgres table names validate the same one- or two-part path at construction and decoding, and the
+connector quotes the parts it borrows from the validated name in both its insert and its catalog
+lookup. A Postgres address's TLS policy is the typed `PostgresSslMode`, read through the declared
+`sslmode` option that schema validation applies too; a spelling the option does not declare, or the
+option written twice, is refused rather than defaulted to a policy. A Postgres conflict clause's
+rules belong to `PostgresConflictAction`, whose typed refusal names a missing `DO UPDATE` target, an
+empty target column or an update without a mapped column outside its target.
 
 RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
 and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch

@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     bounds::{
-        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
-        WaitBound,
+        BufferBound, BufferCapacity, BufferOverflow, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
     },
     configured_client::configured_client,
     entity_union::connector_emitters,
@@ -37,7 +37,13 @@ configured_client!(MySql: pooled, config CLIENT_CONFIG, CreateClientMySql => MyS
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
     use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
     ClientConfigSchema::new(
-        &[K::required("addr", V::DriverAddress), K::TLS_CA],
+        &[
+            K::required("addr", V::DriverAddress),
+            K::TIMEOUT,
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
+        ],
         &[],
         &[],
     )
@@ -134,11 +140,16 @@ const MYSQL_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
     }],
     waits: &[DeclaredWait {
-        wait: "connection, its handshake and an insert",
-        bound: WaitBound::Unbounded,
+        wait: "pool checkout (including connection and handshake), initial validation, and each \
+               insert",
+        bound: WaitBound::Key {
+            key: DeadlineKey::Timeout,
+            omitted: OmittedDeadline::Unbounded,
+        },
     }],
     driver_limits: &[
-        "The driver has no connect, read or write timeout.",
+        "Without timeout_ms, pool checkout, connection validation and inserts have no deadline.",
+        "TLS identity keys use the driver's RSA PKCS#1 private-key format.",
         "A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row \
          limit.",
     ],
@@ -254,4 +265,55 @@ fn table_path(text: &str) -> Result<(), super::external_name::ExternalNameError>
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "tests the declared MySQL client contract")
+)]
+mod tests {
+    use super::*;
+    use crate::{ClientConfigEntry, ClientConfigSchemaError};
+
+    #[test]
+    fn operation_deadlines_and_tls_identity_follow_the_shared_schema_rules() {
+        let entries = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| ClientConfigEntry {
+                    key: (*key).to_string(),
+                    value: (*value).to_string(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let complete = entries(&[
+            ("addr", "mysql://127.0.0.1/nervix?require_ssl=true"),
+            ("timeout_ms", "1500"),
+            ("tls_cert_file", "/mount/client.pem"),
+            ("tls_key_file", "/mount/client-key.pem"),
+        ]);
+        CLIENT_CONFIG
+            .validate(&complete)
+            .expect("the declared deadline and paired identity are valid");
+        for key in ["tls_cert_file", "tls_key_file"] {
+            let mut incomplete = complete.clone();
+            incomplete.retain(|entry| entry.key != key);
+            let report = CLIENT_CONFIG
+                .validate(&incomplete)
+                .expect_err("identity files are paired");
+            assert!(
+                matches!(report.current_context(), ClientConfigSchemaError::RequiresKey { required, .. } if *required == key)
+            );
+        }
+        for value in ["0", "-1", "1.5", "18446744073709551615"] {
+            let invalid = entries(&[("addr", "mysql://127.0.0.1/nervix"), ("timeout_ms", value)]);
+            let report = CLIENT_CONFIG
+                .validate(&invalid)
+                .expect_err("the operation bound must be schedulable");
+            assert!(
+                matches!(report.current_context(), ClientConfigSchemaError::InvalidValue { key, .. } if key == "timeout_ms")
+            );
+        }
+    }
 }

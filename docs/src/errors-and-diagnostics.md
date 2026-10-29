@@ -14,6 +14,11 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+RabbitMQ's TLS file keys declare `amqps` as their permitted address scheme. The shared schema's
+`ClientConfigSchemaError::RequiresScheme` refuses TLS files with `amqp` before file inspection
+and commit, naming the key, `addr` and `amqps` without the configured values. The existing
+certificate/key pairing refusal remains independent of the scheme check.
+
 An OTEL literal outside its declared field domain is a typed registry mapping issue that names
 the signal, key and required constraint. It carries no literal value. A TLS file key with a
 plaintext endpoint is a typed client-schema scheme refusal before file inspection, for either
@@ -695,7 +700,15 @@ A MySQL pool is kept at its `POOL SIZE MIN` by a task no caller waits on, so tha
 witness of a pass that ends below the minimum. It reports `PoolMinimumError::NotRestored`, naming
 the minimum, above the failed checkout's `PoolMinimumError::CheckOut` and the driver's error, at
 `debug`, returns the connections the pass held, and passes again a second later. An emitter that
-needs a connection meanwhile reports its own failed checkout.
+needs a connection meanwhile reports its own failed checkout. The shared MySQL pool retains
+`ConfiguredDeadline` for `timeout_ms`, when present, and every checkout, validation and insert
+keeps a typed `DeadlineElapsed` on expiry. Driver checkout and validation errors retain their
+typed causes through the open/write contexts. The emitter's pool-borrow context adds no rendered
+copy of the report. Its deadline report also attaches the safe operation, key and duration for
+the host's public emitter diagnostic. MySQL initialization changes context on the shared-client
+report rather than reducing it to Display text, so that projection and the typed cause survive.
+Deadline failures are infrastructure outcomes and leave pending rows on the host's retry policy;
+they do not become definite record rejections.
 
 An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP emitter: a timeout, a
 DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
@@ -1192,6 +1205,16 @@ projects the offending driver property key through `OfflineClientConfigError`, r
 Iceberg storage reader's typed error beneath it. The public refusal does not print the property's
 value. Properties requiring a table or an initialized OpenDAL operator remain initialization
 checks.
+An Iceberg emitter whose catalog client sets a file I/O property that its storage client supplies
+is refused with `RegistryError::EmitterClientPairing`. That context names the domain, the emitter,
+its entity kind and both clients. Beneath it, the vocabulary's `IcebergPropertyCollision` names the
+property and the storage key that supplies it, as in `ICEBERG TABLE emitter 'output' in domain
+'shop' cannot pair storage client 'storage' with catalog client 'catalog': Iceberg property
+'s3.endpoint' is set by the storage client as 'endpoint' and by the catalog client`. Neither
+client's value is printed. A TLS file that either Iceberg client cannot use stops the emitter at
+open with `EmitterOpenError::InvalidConfiguration`. Beneath it, `IcebergClientTlsError` names the
+catalog or the object-store client, and the shared `TlsClientConfigError` beneath that names the
+file and the step that failed.
 An emitter whose connector keeps one value per header name and whose `INVOKE` clause writes one literal
 header name twice is refused with `RegistryError::ReplacedHeaderWrite`, which names the domain, the
 emitter, the emitter's connector and entity, the header as the emitter's
@@ -1231,6 +1254,13 @@ revision before runtime installation. A planning failure leaves the previously a
 the predecessor for a retry; runtime installation adds domain context and never selects a fallback
 configuration.
 
+The background runtime-installation supervisor logs a failed application's complete typed report and
+retries on the admission loop's half-second cadence, or sooner when the committed schedule or domain
+state changes. It reads current admitted state on each attempt and retains the last successful
+schedule as its predecessor. A repeated failure remains visible; retry does not turn it into a
+successful command outcome, change its classification, or require a new configuration command.
+Successful installation ends the retry cadence, and shutdown ends a pending retry wait.
+
 Resource planning checks the committed lookup key and codec, generator materialized source,
 output branch and route construction, and WASM guest-state generation before runtime binding.
 These failures name the owning node and relevant relay, codec, or field. A missing
@@ -1250,6 +1280,14 @@ memory capacity and reserved bytes beside configured workers, running jobs and p
 operator can distinguish memory waiting, worker waiting and dependency work. These are
 observations of the run; a successful later inspection does not identify the cause of an earlier
 timeout.
+
+### Client Inspection Admission
+
+Client inspection during incoming preflight may refuse full command-memory or filesystem queue
+capacity. An accepted transaction or restore model step waits for that capacity instead: temporary
+pressure is not an invalid configuration or a failed restore step. Oversized charges and closed
+executors retain their typed admission causes beneath the inspection context. Existing service-task
+cancellation ends a waiting inspection without converting it into an invalid-key diagnosis.
 
 ### Runtime Installation
 
@@ -1585,10 +1623,11 @@ row whose own request exceeds `MAX SIZE`, that row receives a `validation` messa
 `Postgres insert of one row measures 1219 bytes, above MAX SIZE 600B`, and the other rows are sent
 in bounded requests. A row within `MAX SIZE` that its destination could never
 accept is the destination's `external` rejection of the `publish` operation, named with the
-destination's limit: a Postgres insert above the largest protocol message the server reads, or a
-MongoDB document above its 16 MiB document limit, which is rejected before the write that would
-carry it. A SQL write that fails for a reason specific to its rows is written again one row at a
-time, and each row the destination still refuses receives an `external` `publish` error with the
+destination's limit: a MongoDB document above its 16 MiB document limit, which is rejected before
+the write that would carry it. A Postgres emitter cannot declare a `MAX SIZE` above the largest
+protocol message the server reads, which `CREATE` refuses, so its rows never reach that limit. A
+SQL write that fails for a reason specific to its rows is written again one row at a time, and
+each row the destination still refuses receives an `external` `publish` error with the
 destination's reason. That includes a violated MySQL `CHECK` constraint, which the server reports
 under the generic SQLSTATE `HY000`, and a Postgres cardinality violation, which is how
 `ON CONFLICT DO UPDATE` refuses one insert that carries a key twice. A MongoDB write answers for

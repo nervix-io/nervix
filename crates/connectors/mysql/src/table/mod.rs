@@ -6,7 +6,7 @@
 //!   connections the keeper of its declared minimum restores, the multi-row insert every write
 //!   becomes under the emitter's `BATCH` limits and the placeholders one statement binds, its bind
 //!   parameters and their exact encoded size, the `ON DUPLICATE KEY` clause of a conflict action,
-//!   and server-error classification.
+//!   TLS file installation, configured operation deadlines and server-error classification.
 //! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
 //!   and the `mysql_async` driver.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -24,7 +24,7 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
-use std::{num::NonZeroUsize, ops::Range, path::PathBuf, time::Duration};
+use std::{num::NonZeroUsize, ops::Range, time::Duration};
 
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array,
@@ -34,25 +34,33 @@ use arrow_array::{
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::DateTime;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use mysql_async::{
-    Conn, Opts, OptsBuilder, Params, Pool as DriverPool, PoolConstraints, PoolOpts, SslOpts, Value,
-    prelude::Queryable as _,
+    ClientIdentity, Conn, Opts, OptsBuilder, Params, Pool as DriverPool, PoolConstraints, PoolOpts,
+    Value, prelude::Queryable as _,
 };
 use nervix_connector::{
-    EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle, EmitterOpenError,
-    EmitterRecordPosition, EmitterStartResult, EmitterWriteError, EmitterWriteResult,
-    MappedEmitterMember, MappedEmitterRows, MeasuredRequest, PerRecordOutcome,
-    RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits, optional_client_config_value,
+    ClientConfigError, ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost,
+    EmitterLifecycle, EmitterOpenError, EmitterRecordPosition, EmitterStartResult,
+    EmitterWriteError, EmitterWriteResult, MappedEmitterMember, MappedEmitterRows, MeasuredRequest,
+    PerRecordOutcome, RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits,
+    client_config_value, client_tls_paths,
 };
 use nervix_models::{
     ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, MYSQL_MAX_PLACEHOLDERS, MySqlTableName,
 };
-use nervix_primitives::{sync::atomic::Ordering, time::Instant};
+use nervix_primitives::{
+    sync::atomic::Ordering,
+    time::{Instant, timeout},
+};
 use tracing::{debug, trace};
 
 mod pool_minimum;
+
+#[cfg(test)]
+#[path = "client_tests.rs"]
+mod client_tests;
 
 use pool_minimum::{KeptPool, PoolMinimum, PoolMinimumError};
 
@@ -69,13 +77,42 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The node's shared MySQL pool, with the task that keeps it at its declared minimum.
 pub struct MySqlPool {
-    pool: DriverPool,
+    pool: ConfiguredPool,
     /// Stopped when the shared client closes, together with the pool it keeps.
     _minimum: PoolMinimum,
 }
 
 /// One connection borrowed from the shared pool, returned to it when this is dropped.
-pub struct MySqlConnection(Conn);
+pub struct MySqlConnection {
+    connection: Conn,
+    timeout: Option<ConfiguredDeadline>,
+}
+
+/// The one pool and operation bound shared by writers and the keeper of its minimum.
+#[derive(Clone)]
+struct ConfiguredPool {
+    driver: DriverPool,
+    timeout: Option<ConfiguredDeadline>,
+}
+
+impl ConfiguredPool {
+    async fn connection(&self) -> error_stack::Result<Conn, MySqlWriteError> {
+        let acquisition = self.driver.get_conn();
+        let acquired = match self.timeout {
+            Some(deadline) => match timeout(deadline.bound(), acquisition).await {
+                Ok(acquired) => acquired,
+                Err(_) => {
+                    return Err(MySqlWriteError::report_deadline(
+                        deadline,
+                        "checking out a MySQL connection",
+                    ));
+                }
+            },
+            None => acquisition.await,
+        };
+        acquired.change_context(MySqlWriteError::CheckOut)
+    }
+}
 
 impl MySqlConnection {
     /// Execute an insert on this borrow, retaining it for any record-error isolation that follows.
@@ -89,11 +126,25 @@ impl MySqlConnection {
         rows: usize,
         params: Vec<Value>,
     ) -> error_stack::Result<u64, MySqlWriteError> {
-        self.0
-            .exec_drop(statement.sql(rows), Params::Positional(params))
-            .await
-            .map_err(MySqlWriteError::report_execute)?;
-        Ok(self.0.affected_rows())
+        let execution = self
+            .connection
+            .exec_drop(statement.sql(rows), Params::Positional(params));
+        let executed = match self.timeout {
+            Some(deadline) => match timeout(deadline.bound(), execution).await {
+                Ok(executed) => executed,
+                // Cancelling mysql_async's command routine leaves the connection disconnected;
+                // its recycler discards it instead of waiting for this unanswered command.
+                Err(_) => {
+                    return Err(MySqlWriteError::report_deadline(
+                        deadline,
+                        "the MySQL insert",
+                    ));
+                }
+            },
+            None => execution.await,
+        };
+        executed.map_err(MySqlWriteError::report_execute)?;
+        Ok(self.connection.affected_rows())
     }
 }
 
@@ -134,15 +185,29 @@ enum MySqlWriteError {
     MissingInsertColumn,
     #[error("MySQL ON CONFLICT DO UPDATE requires at least one VALUES column")]
     MissingUpdateColumn,
-    #[error("{reason}")]
-    Pool { reason: String },
+    #[error("borrowing the MySQL connection failed")]
+    Pool,
+    #[error("checking out the MySQL connection failed")]
+    CheckOut,
+    #[error("validating the MySQL connection failed")]
+    Validate,
+    #[error("the MySQL operation deadline expired")]
+    Deadline,
     #[error("MySQL insert failed with SQLSTATE {state} and code {code}")]
     Server { state: String, code: u16 },
     #[error("MySQL insert failed")]
-    Execute(#[source] mysql_async::Error),
+    Execute,
 }
 
 impl MySqlWriteError {
+    /// Retain the typed cause and project its safe operation and bound for host diagnostics.
+    fn report_deadline(deadline: ConfiguredDeadline, operation: &'static str) -> Report<Self> {
+        let elapsed = deadline.elapsed(operation);
+        Report::new(elapsed)
+            .change_context(Self::Deadline)
+            .attach_printable(elapsed.to_string())
+    }
+
     fn report_execute(error: mysql_async::Error) -> Report<Self> {
         match error {
             // Server text can repeat a rejected parameter; its state and code are safe.
@@ -150,7 +215,7 @@ impl MySqlWriteError {
                 state: error.state,
                 code: error.code,
             }),
-            error => Report::new(Self::Execute(error)),
+            error => Report::new(error).change_context(Self::Execute),
         }
     }
 
@@ -184,8 +249,7 @@ impl MySqlWriteError {
                 "MySQL request failed with SQLSTATE {} and code {}",
                 state, code
             )),
-            Self::Execute(error) => Some(format!("MySQL insert failed: {error}")),
-            Self::Pool { reason } => Some(reason.clone()),
+            Self::Execute | Self::Pool | Self::CheckOut | Self::Validate | Self::Deadline => None,
         };
         let report = report.change_context(EmitterWriteError::Publish { connector: MYSQL });
         match reason {
@@ -205,20 +269,23 @@ fn is_record_server_error(state: &str, code: u16) -> bool {
 }
 
 /// The driver's pool as the keeper of its declared minimum counts and draws on it.
-impl KeptPool for DriverPool {
+impl KeptPool for ConfiguredPool {
     type Checkout = Conn;
 
     /// The driver counts a connection from the moment it starts opening it until it closes it,
     /// whether the connection is idle, checked out or being recycled.
     fn established(&self) -> usize {
-        self.metrics().connection_count.load(Ordering::Relaxed)
+        self.driver
+            .metrics()
+            .connection_count
+            .load(Ordering::Relaxed)
     }
 
     /// The driver hands over a connection it holds idle before it opens a new one.
     async fn check_out(&self) -> Result<Conn, Report<PoolMinimumError>> {
-        self.get_conn()
+        self.connection()
             .await
-            .map_err(|error| Report::new(error).change_context(PoolMinimumError::CheckOut))
+            .change_context(PoolMinimumError::CheckOut)
     }
 }
 
@@ -234,20 +301,10 @@ impl MySqlPool {
         bounds: ClientPoolBounds,
     ) -> EmitterStartResult<Self> {
         let invalid = || Report::new(EmitterOpenError::InvalidConfiguration { connector: MYSQL });
-        let connect = || Report::new(EmitterOpenError::Initialize { connector: MYSQL });
-        let Some(addr) = optional_client_config_value(config, "addr") else {
-            return Err(invalid().attach_printable("missing MySQL client config key 'addr'"));
-        };
-        let opts = Opts::from_url(addr)
-            .map_err(|source| invalid().attach_printable(format!("invalid addr: {source}")))?;
-        let builder = if let Some(ca_file) = optional_client_config_value(config, "tls_ca_file") {
-            let ssl_opts = SslOpts::default()
-                .with_root_certs(vec![PathBuf::from(ca_file).into()])
-                .with_disable_built_in_roots(true);
-            OptsBuilder::from_opts(opts).ssl_opts(Some(ssl_opts))
-        } else {
-            OptsBuilder::from_opts(opts)
-        };
+        let initialized = || EmitterOpenError::Initialize { connector: MYSQL };
+        let builder = Self::options(config)?;
+        let operation_timeout = ConfiguredDeadline::timeout(config)
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: MYSQL })?;
         let minimum = usize::try_from(bounds.minimum()).map_err(|_| {
             invalid().attach_printable("POOL SIZE MIN exceeds this platform's pointer width")
         })?;
@@ -259,16 +316,34 @@ impl MySqlPool {
                 "driver rejected pool bounds MIN {minimum} MAX {maximum}"
             ))
         })?;
-        let pool =
-            DriverPool::new(builder.pool_opts(PoolOpts::default().with_constraints(constraints)));
-        let mut conn = pool
-            .get_conn()
-            .await
-            .map_err(|source| connect().attach_printable(source.to_string()))?;
-        conn.query_drop("SELECT 1").await.map_err(|source| {
-            connect().attach_printable(format!("failed to validate connection: {source}"))
-        })?;
-        drop(conn);
+        let pool = ConfiguredPool {
+            driver: DriverPool::new(
+                builder.pool_opts(PoolOpts::default().with_constraints(constraints)),
+            ),
+            timeout: operation_timeout,
+        };
+        let validation = async {
+            let mut connection = pool.connection().await?;
+            connection
+                .query_drop("SELECT 1")
+                .await
+                .change_context(MySqlWriteError::Validate)?;
+            Ok::<(), Report<MySqlWriteError>>(())
+        };
+        let validated = match operation_timeout {
+            Some(deadline) => match timeout(deadline.bound(), validation).await {
+                Ok(validated) => validated,
+                Err(_) => {
+                    return Err(MySqlWriteError::report_deadline(
+                        deadline,
+                        "initializing the MySQL connection",
+                    )
+                    .change_context(initialized()));
+                }
+            },
+            None => validation.await,
+        };
+        validated.change_context(initialized())?;
         let kept_minimum = PoolMinimum::keep(pool.clone(), minimum, MAINTENANCE_INTERVAL);
         Ok(Self {
             pool,
@@ -278,18 +353,48 @@ impl MySqlPool {
 
     /// Borrow one connection, which returns to the pool when the borrow is dropped.
     pub async fn connection(&self) -> EmitterWriteResult<MySqlConnection> {
-        {
-            let mapping_input = self.pool.get_conn().await.map(MySqlConnection);
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(source) => {
-                    Err(
-                        Report::new(EmitterWriteError::NotInitialized { connector: MYSQL })
-                            .attach_printable(source.to_string()),
-                    )
-                }
+        let connection = self
+            .pool
+            .connection()
+            .await
+            .change_context(EmitterWriteError::NotInitialized { connector: MYSQL })?;
+        Ok(MySqlConnection {
+            connection,
+            timeout: self.pool.timeout,
+        })
+    }
+
+    /// Preserve the URL's TLS policy while installing the explicitly declared files.
+    fn options(config: &[ClientConfigEntry]) -> EmitterStartResult<OptsBuilder> {
+        let invalid = || EmitterOpenError::InvalidConfiguration { connector: MYSQL };
+        let address = client_config_value(config, "addr", MYSQL).change_context(invalid())?;
+        let options = Opts::from_url(&address).change_context(invalid())?;
+        let paths = client_tls_paths(config);
+        if paths.is_empty() {
+            return Ok(OptsBuilder::from_opts(options));
+        }
+        let mut tls = match options.ssl_opts() {
+            Some(tls) => tls.clone(),
+            None => mysql_async::SslOpts::default(),
+        };
+        if let Some(ca_file) = paths.ca_file {
+            tls = tls.with_root_certs(vec![ca_file.into()]);
+        }
+        match (paths.cert_file, paths.key_file) {
+            (Some(certificate), Some(key)) => {
+                tls = tls.with_client_identity(Some(ClientIdentity::new(
+                    certificate.into(),
+                    key.into(),
+                )));
+            }
+            (None, None) => {}
+            _ => {
+                return Err(
+                    Report::new(ClientConfigError::IncompleteTlsIdentity).change_context(invalid())
+                );
             }
         }
+        Ok(OptsBuilder::from_opts(options).ssl_opts(Some(tls)))
     }
 }
 
@@ -366,10 +471,7 @@ impl MySqlTableEmitter {
     async fn connection(&self) -> error_stack::Result<MySqlConnection, MySqlWriteError> {
         match self.connections.connection().await {
             Ok(connection) => Ok(connection),
-            Err(error) => {
-                let reason = format!("{error:?}");
-                Err(error.change_context(MySqlWriteError::Pool { reason }))
-            }
+            Err(error) => Err(error.change_context(MySqlWriteError::Pool)),
         }
     }
 
@@ -1368,10 +1470,7 @@ mod tests {
             Ok(_) => panic!("the test pool has no connection"),
             Err(error) => error,
         };
-        assert!(matches!(
-            error.current_context(),
-            MySqlWriteError::Pool { .. }
-        ));
+        assert!(matches!(error.current_context(), MySqlWriteError::Pool));
         let report = MySqlWriteError::into_report(error);
         assert!(report.contains::<MySqlWriteError>());
         assert!(format!("{report:?}").contains("pool-acquire-detail"));
@@ -1556,7 +1655,10 @@ mod tests {
     async fn a_refused_driver_checkout_is_reported_as_the_keepers_checkout() {
         let opts = Opts::from_url("mysql://nervix@127.0.0.1:1/nervix")
             .expect("the address is a valid MySQL URL");
-        let pool = DriverPool::new(opts);
+        let pool = ConfiguredPool {
+            driver: DriverPool::new(opts),
+            timeout: None,
+        };
         assert_eq!(
             pool.established(),
             0,

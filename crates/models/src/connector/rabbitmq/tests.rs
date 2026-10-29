@@ -13,11 +13,14 @@
     )
 )]
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use rstest::rstest;
 
 use super::*;
-use crate::{ClientConfigValue, ClientPooling, EmitterPublishingModeKind, ExternalNameError};
+use crate::{
+    ClientConfigEntry, ClientConfigPresence, ClientConfigSchemaError, ClientConfigValue,
+    ClientPooling, EmitterPublishingModeKind, ExternalNameError,
+};
 
 #[rstest]
 #[case::mixed_case("Orders.Mixed-01".to_owned())]
@@ -55,6 +58,65 @@ fn client_configuration_keeps_uri_queries_at_the_driver_boundary() {
         Some(ClientConfigValue::DriverAddress)
     );
     assert_eq!(declaration.options, &[]);
+}
+
+#[rstest]
+#[case::trust(&["tls_ca_file"], "tls_ca_file")]
+#[case::identity(&["tls_cert_file", "tls_key_file"], "tls_cert_file")]
+#[case::trust_and_identity(&["tls_ca_file", "tls_cert_file", "tls_key_file"], "tls_ca_file")]
+fn tls_files_require_amqps_at_each_configuration_boundary(
+    #[case] files: &[&str],
+    #[case] refused_key: &'static str,
+    #[values(false, true)] rendered: bool,
+) {
+    let schema = CreateClientRabbitMq::<u64>::DECLARATION.config;
+    let mut config = vec![ClientConfigEntry {
+        key: "addr".to_owned(),
+        value: "amqp://private-user:private-password@private-broker:5672/private-vhost".to_owned(),
+    }];
+    for key in files {
+        config.push(ClientConfigEntry {
+            key: (*key).to_owned(),
+            value: format!("/private-files/{key}.pem"),
+        });
+    }
+    let result = if rendered {
+        schema.validate_rendered(&config)
+    } else {
+        schema.validate(&config)
+    };
+    let failure = result.expect_err("TLS files require an amqps address before file inspection");
+    assert_eq!(
+        failure.current_context(),
+        &ClientConfigSchemaError::RequiresScheme {
+            key: refused_key,
+            address: "addr",
+            scheme: "amqps",
+        }
+    );
+    assert_eq!(
+        format!("{failure:#}"),
+        format!("client config key '{refused_key}' requires 'addr' to use amqps")
+    );
+
+    config[0].value =
+        "amqps://private-user:private-password@private-broker:5671/private-vhost".to_owned();
+    let result = if rendered {
+        schema.validate_rendered(&config)
+    } else {
+        schema.validate(&config)
+    };
+    result.assured("the same complete TLS configuration is valid with amqps");
+    for key in files {
+        let declaration = schema.key(key).assured("RabbitMQ declares each TLS file");
+        assert_eq!(
+            declaration.presence,
+            ClientConfigPresence::OptionalForScheme {
+                address: "addr",
+                scheme: "amqps",
+            }
+        );
+    }
 }
 
 #[test]
