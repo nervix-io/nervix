@@ -1134,7 +1134,7 @@ Transport-specific expectations:
 - `CLICKHOUSE`: use an `https://...` `addr` with mounted `tls_ca_file` and required positive
   `timeout_ms`; HTTP addresses refuse TLS file keys.
 - `POSTGRES`: use `sslmode=verify-full` in the `addr` URL; Nervix honors `tls_ca_file`, `tls_cert_file`, and `tls_key_file`. `sslmode=disable` is the only other accepted policy.
-- `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file`.
+- `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file` and paired `tls_cert_file`/`tls_key_file` client identity files.
 - `MONGODB`: Nervix honors `tls_ca_file`, and `tls_cert_file` with `tls_key_file` as its client
   certificate; any of them enables TLS without `tls=true` in `addr`, and an `addr` with `tls=false`
   refuses them. See [MongoDB](#mongodb).
@@ -2637,9 +2637,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | connection, its handshake and an insert: unbounded |
-| Driver limits | The driver has no connect, read or write timeout.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |
+| Network waits | pool checkout (including connection and handshake), initial validation, and each insert: `timeout_ms`; unbounded when omitted |
+| Driver limits | Without timeout_ms, pool checkout, connection validation and inserts have no deadline.<br>TLS identity keys use the driver's RSA PKCS#1 private-key format.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [MYSQL TABLE capability and mirror reference](connector-capabilities.md#mysql-table-emit).
 <!-- connector-matrix:emit-mysql-table:end -->
@@ -2686,13 +2686,28 @@ CREATE MYSQL CLIENT mysql
   };
 ```
 
-For TLS connections, include `require_ssl=true`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path.
+For TLS connections, include `require_ssl=true`, mount a TLS resource, and set `'tls_ca_file'` to
+the mounted CA path. Supplying the CA preserves the URL's certificate-verification, hostname and
+built-in-root options. For mutual TLS, also set `tls_cert_file` and `tls_key_file` together. The
+driver reads a PEM certificate chain and an RSA PKCS#1 private key; for a PEM key this is the
+`RSA PRIVATE KEY` form, which OpenSSL can produce with `openssl rsa -traditional`.
 
-The current client CONFIG keys are required `addr` and optional `tls_ca_file`. The address must
+The current client CONFIG keys are required `addr` and optional `timeout_ms`, `tls_ca_file`,
+`tls_cert_file` and `tls_key_file`. The address must
 be a `mysql://` URL accepted by the driver's offline parser. URL query options belong to the
 driver, except connection-pool sizing: declare that capacity with `POOL SIZE MIN ... MAX ...`.
 Pool-size query parameters such as `pool_min` and `pool_max` are refused before the client is
 committed. Unknown standalone CONFIG keys are refused rather than ignored.
+
+`timeout_ms` is a positive, schedulable whole number of milliseconds. It bounds opening and
+validating the pool's first connection, each subsequent pool checkout (including connection
+establishment and authentication), and each insert. The minimum keeper uses the same checkout
+bound. Each of these is a separate operation; an insert's bound starts after checkout, and an
+isolated row's insert receives its own bound. Omitting the key leaves these waits unbounded.
+An elapsed bound is an infrastructure failure, reported with `timeout_ms` and its duration, and
+the emitter retries its pending rows on its declared policy. The driver discards a connection
+whose in-flight command was cancelled. A timeout does not establish whether the server committed
+an insert; use a stable key and an appropriate `ON CONFLICT` action where retries must converge.
 
 ### MongoDB
 

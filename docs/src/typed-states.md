@@ -424,6 +424,14 @@ configuration has one reserved-key declaration, shared by offline MySQL URL insp
 host's resolved-configuration refusal. Pool capacity remains the client's typed `POOL SIZE`
 bounds, with no competing URL setting.
 
+The MySQL shared pool and each borrowed connection retain an `Option<ConfiguredDeadline>`:
+absence means the client omitted an operation bound, while a present value has already passed
+the shared schedulable-deadline validation. Checkout, validation and insert failures keep typed
+reports, including `DeadlineElapsed`, beneath their host contexts; a rendered reason is never
+the pool-borrow error's state. Paired identity-file presence is established by the client schema,
+then checked again when the driver options are constructed. The connector extends the parsed
+URL's TLS options rather than reconstructing their policy from the presence of a CA file.
+
 Postgres table names validate the same one- or two-part path at construction and decoding, and the
 connector quotes the parts it borrows from the validated name in both its insert and its catalog
 lookup. A Postgres address's TLS policy is the typed `PostgresSslMode`, read through the declared

@@ -429,6 +429,8 @@ struct ScenarioWorld {
     last_restore_end: Option<crate::common::raw_session::TestRestoreEnd>,
     /// A restore stream a scenario sent in the background.
     background_restore: Option<crate::backup::restore::BackgroundRestore>,
+    /// Real filesystem capacity held while an accepted restore tries its client inspection.
+    restore_inspection_capacity: Option<backup::client_inspection::FilesystemHold>,
     /// A leadership move a scenario armed underneath the next durably admitted command.
     leadership_move: Option<AbortOnDropHandle<std::io::Result<()>>>,
     /// The restore step pause a scenario armed and has not released.
@@ -11783,6 +11785,30 @@ async fn when_runtime_installation_is_paused(world: &mut ScenarioWorld, node_id:
     world
         .fault_injection
         .pause_runtime_installation_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[given(expr = "the next {int} runtime installations on node {string} are refused")]
+fn given_runtime_installations_are_refused(
+    world: &mut ScenarioWorld,
+    count: usize,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let count = std::num::NonZeroUsize::new(count)
+        .expect("the scenario arms a positive number of installation refusals");
+    world
+        .fault_injection
+        .refuse_runtime_installations_on(crate::common::cluster::node_name(&node_id), count);
+}
+
+#[then(expr = "all runtime installation refusals on node {string} were delivered")]
+fn then_runtime_installation_refusals_were_delivered(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    assert!(
+        world
+            .fault_injection
+            .runtime_installation_refusals_delivered(&crate::common::cluster::node_name(&node_id))
+    );
 }
 
 #[then(expr = "node {string} reaches its runtime installation pause")]
@@ -33607,6 +33633,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
 
                 world.enter_phase(ScenarioPhase::TeardownStarted, "");
                 world.stop_consensus_load();
+                world.restore_inspection_capacity = None;
                 world.fault_injection.release_all_health_responses();
                 world.fault_injection.release_all_domain_clock_progress();
                 world.fault_injection.release_all_command_pauses();

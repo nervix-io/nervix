@@ -51,6 +51,7 @@ export CHAOS_NETWORK_TEST_CASE
 export CHAOS_NETWORK_TEST_RUN_ID="${run_id}"
 export CHAOS_NETWORK_TEST_PROBE="${chaos_probe_image}"
 export CHAOS_NETWORK_TEST_SIDECAR="${artifact_dir}/sidecar-id"
+export CHAOS_NETWORK_TEST_PENDING_NETEM="${artifact_dir}/pending-netem-id"
 cat >"${artifact_dir}/bin/docker" <<'WRAPPER'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -66,6 +67,18 @@ for argument in "$@"; do
 done
 if [[ "${fault}" == true ]]; then
     printf '%s\n' "${kind}" >"${CHAOS_NETWORK_TEST_STATE}"
+    if [[ "${kind}" == netem && "${CHAOS_NETWORK_TEST_CASE}" == netem-starting ]]; then
+        # Hold the real injector until the controller observes the incomplete installation.
+        arguments=(create)
+        for argument in "${@:2}"; do
+            if [[ "${argument}" != --detach ]]; then
+                arguments+=("${argument}")
+            fi
+        done
+        "${CHAOS_NETWORK_TEST_DOCKER}" "${arguments[@]}" >"${CHAOS_NETWORK_TEST_PENDING_NETEM}"
+        cat "${CHAOS_NETWORK_TEST_PENDING_NETEM}"
+        exit 0
+    fi
     if [[ "${kind}" == iptables && "${CHAOS_NETWORK_TEST_CASE}" == injector-exit ]]; then
         # A real failed injector, with retained Docker state and an attributable raw log.
         arguments=()
@@ -77,6 +90,20 @@ if [[ "${fault}" == true ]]; then
             fi
         done
         exec "${CHAOS_NETWORK_TEST_DOCKER}" "${arguments[@]}"
+    fi
+fi
+if [[ "${CHAOS_NETWORK_TEST_CASE}" == netem-starting && -s "${CHAOS_NETWORK_TEST_PENDING_NETEM}" ]]; then
+    if [[ "${inspector}" == true && ! -e "${CHAOS_NETWORK_TEST_PENDING_NETEM}.observed" ]]; then
+        # A prio root and loss leaf precede the classifier that sends gateway traffic to it.
+        : >"${CHAOS_NETWORK_TEST_PENDING_NETEM}.observed"
+        printf '# qdisc\nqdisc prio 504d: root bands 3\nqdisc netem 5050: parent 504d:3 limit 1000 loss 100%%\n# filter\n# iptables\n-P INPUT ACCEPT\n'
+        exit 0
+    fi
+    if [[ "$1" == inspect && "${3:-}" == '{{.State.Running}}' \
+        && "${4:-}" == "$(cat "${CHAOS_NETWORK_TEST_PENDING_NETEM}")" \
+        && ! -e "${CHAOS_NETWORK_TEST_PENDING_NETEM}.started" ]]; then
+        "${CHAOS_NETWORK_TEST_DOCKER}" start "$4" >/dev/null
+        : >"${CHAOS_NETWORK_TEST_PENDING_NETEM}.started"
     fi
 fi
 if [[ "${CHAOS_NETWORK_TEST_CASE}" == canary-launch && "$1" == run && "${fault}" == false && "${inspector}" == false ]]; then
@@ -147,18 +174,20 @@ export CHAOS_NETWORK_TEST_NETTOOLS="${chaos_nettools_image}"
 export CHAOS_NETWORK_TEST_CANARY_ID
 
 cases=(inspect-failure inspector-timeout injector-state log-failure cleanup-failure canary-launch
-    injector-exit sidecar-vanishes sidecar-inspect-failure probe-refusal)
+    injector-exit sidecar-vanishes sidecar-inspect-failure probe-refusal netem-starting)
 if [[ "$#" -gt 0 ]]; then
     cases=("$@")
 fi
 for test_case in "${cases[@]}"; do
     case "${test_case}" in
-        inspect-failure|inspector-timeout|injector-state|log-failure|cleanup-failure|canary-launch|injector-exit|sidecar-vanishes|sidecar-inspect-failure|probe-refusal) ;;
+        inspect-failure|inspector-timeout|injector-state|log-failure|cleanup-failure|canary-launch|injector-exit|sidecar-vanishes|sidecar-inspect-failure|probe-refusal|netem-starting) ;;
         *) fail "unknown preflight control ${test_case}" ;;
     esac
     CHAOS_NETWORK_TEST_CASE="${test_case}"
     CHAOS_NETWORK_TEST_CANARY_ID="${artifact_dir}/${test_case}/canary-id.txt"
     rm -f "${CHAOS_NETWORK_TEST_STATE}" "${CHAOS_NETWORK_TEST_SIDECAR}" "${CHAOS_NETWORK_TEST_STATE}.probe-refusal"
+    rm -f "${CHAOS_NETWORK_TEST_PENDING_NETEM}" "${CHAOS_NETWORK_TEST_PENDING_NETEM}.observed" \
+        "${CHAOS_NETWORK_TEST_PENDING_NETEM}.started"
     status=0
     PATH="${artifact_dir}/bin:${PATH}" timeout --foreground --kill-after=10s 120s \
         "${chaos_dir}/network-faults.sh" preflight --run-id "${run_id}" \
@@ -177,6 +206,10 @@ for test_case in "${cases[@]}"; do
         probe-refusal) expected=125; stage=netem.gateway-probe ;;
     esac
     [[ "${status}" -eq "${expected}" ]] || fail "${test_case} returned ${status}, expected ${expected}"
+    if [[ "${test_case}" == netem-starting ]]; then
+        [[ -f "${CHAOS_NETWORK_TEST_PENDING_NETEM}.observed" && -f "${CHAOS_NETWORK_TEST_PENDING_NETEM}.started" ]] \
+            || fail 'partial netem installation did not wait for the real injector'
+    fi
     result="${artifact_dir}/${test_case}/result.json"
     [[ -s "${result}" ]] || fail "${test_case} lost its structured failure"
     verdict=failed

@@ -673,6 +673,13 @@ retirement and nothing cancels it, since a destruction cannot stop part way. It 
 client alone, never the ingestor's or emitter's host or its intake, and Nervix never hands a client to
 another ingestor or emitter, so a replacement opens a client of its own.
 
+An ingestor-open failure during graph construction propagates through the runtime installation
+report, before an ingestor host loop exists. The control-plane installation supervisor retries that
+failed application on the admission loop's half-second cadence, or on a committed schedule or domain
+update, using the current admitted state. An emitter initialization failure inside an already
+running host remains owned by that host's declared retry policy. Neither path requires a fresh
+configuration command.
+
 A joined consumer whose coordinator does not answer holds a connector worker for those five
 seconds, and a producer holds one for its polling thread's last poll and up to half a second of
 flushing. A broker that stops answering while its clients retire therefore delays the node's other
@@ -805,6 +812,11 @@ not disable verification or silently fall back when unavailable.
 The server composition root extends the existing changed-model binding boundary before standalone
 mutation or transaction commit. It renders mount templates using the resource resolver and checks
 the rendered schema and Nervix-owned file paths on an admitted filesystem worker, charged to command memory.
+Request preflight refuses inspection when command memory or the filesystem wait queue is full.
+Applying a model step under an accepted transaction or restore instead waits for those existing
+capacities with `QueueAdmission::WaitForPlace`; lack of room has not judged the configuration.
+The service task's existing shutdown cancellation ends the wait. A charge larger than the whole
+class or a closed executor still fails inspection, and no uncharged config copy is made while waiting.
 Rendered values also pass the existing WebSockets configuration and Prometheus API-root owners;
 an optional Redis subscription capacity passes the same range parser its ingestor plan uses.
 Ingestor-only presence requirements stay with that plan.
@@ -2619,7 +2631,18 @@ and Arrow type retained beneath the publish context. It is not a per-record reje
 that keeps a MySQL pool at `POOL SIZE MIN` reports a pass that ends below it as
 `PoolMinimumError::NotRestored`, naming the minimum, above the failed checkout's `CheckOut` and the
 driver's error, before its next pass retries; a later writer's failure remains a separate
-diagnostic.
+diagnostic. MySQL's configured `timeout_ms` is read once through `ConfiguredDeadline` and retained
+with the node's shared driver pool. It bounds every checkout, including the minimum keeper's,
+initial connection validation, and each insert as separate operations. An elapsed operation keeps
+the typed `DeadlineElapsed` beneath its MySQL and host contexts and attaches its safe operation,
+key and duration for public emitter diagnostics. MySQL composition preserves the shared-client
+report through initialization. An elapsed operation is infrastructure failure, never a row
+rejection. Cancelling a driver command marks its connection disconnected, and the
+recycler discards it before handing out capacity again. Omitting the key retains the declared
+unbounded waits. TLS files extend the URL's existing `SslOpts`, retaining verification and trust
+choices, and paired identity files install the driver's RSA PKCS#1 identity. The silent-handshake,
+locked-insert/retry and shared-pool-contention scenarios own the public deadline observations;
+the mounted-certificate scenario uses an account that requires a client certificate.
 
 The host's source start keeps every connector report it composes an ingestor from. A client
 configuration that does not resolve, a connector plan that fails, such as a Syslog, Redis,
