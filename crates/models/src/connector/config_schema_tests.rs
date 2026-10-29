@@ -430,7 +430,7 @@ fn bolero_schema_checked_client_entries_round_trip() {
         schemes: &'static [&'static str],
     ) -> &'static str {
         if let Some(scheme) = address_schemes.get(key) {
-            return *scheme;
+            return scheme;
         }
         let index = arbitrary
             .entropy()
