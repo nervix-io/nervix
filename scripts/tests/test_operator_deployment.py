@@ -17,25 +17,12 @@ from scripts.tests.test_release_evidence import workflow_job
 ROOT = Path(__file__).resolve().parents[2]
 REVISION = "0123456789abcdef0123456789abcdef01234567"
 IMAGE = "ghcr.io/nervix-io/nervix@sha256:" + "a" * 64
-ARM64_IMAGE = "ghcr.io/nervix-io/nervix@sha256:" + "f" * 64
 SERVER_TAG = "ghcr.io/nervix-io/nervix:build"
 OPERATOR_IMAGE = "ghcr.io/nervix-io/nervix-k8s-operator@sha256:" + "b" * 64
-# What `docker buildx imagetools inspect` reports for a tag the image build pushed: each platform's
-# manifest beside its provenance attestation.
-SERVER_INDEX = {
-    "mediaType": "application/vnd.oci.image.index.v1+json",
-    "digest": "sha256:" + "9" * 64,
-    "manifests": [
-        {"digest": IMAGE.partition("@")[2], "platform": {"architecture": "amd64", "os": "linux"}},
-        {"digest": "sha256:" + "e" * 64, "platform": {"architecture": "unknown", "os": "unknown"},
-         "annotations": {"vnd.docker.reference.type": "attestation-manifest"}},
-        {"digest": ARM64_IMAGE.partition("@")[2], "platform": {"architecture": "arm64", "os": "linux"}},
-    ],
-}
 
 
 class ObservationTests(unittest.TestCase):
-    def test_image_identity_requires_the_tested_revision_and_architecture(self) -> None:
+    def test_image_identity_requires_the_tested_revision_and_native_architecture(self) -> None:
         image = {
             "Architecture": "amd64", "RepoDigests": ["ghcr.io/nervix-io/nervix@sha256:" + "c" * 64, IMAGE],
             "Config": {"Labels": {"org.opencontainers.image.revision": REVISION}},
@@ -49,20 +36,6 @@ class ObservationTests(unittest.TestCase):
         image["RepoDigests"] = []
         with self.assertRaisesRegex(ValueError, "digest"):
             deployment.server_identity([image], REVISION, "amd64", SERVER_TAG, pull_output)
-
-    def test_the_tested_architecture_selects_its_own_manifest(self) -> None:
-        self.assertEqual(deployment.platform_manifest(SERVER_INDEX, "amd64"), IMAGE.partition("@")[2])
-        self.assertEqual(deployment.platform_manifest(SERVER_INDEX, "arm64"), ARM64_IMAGE.partition("@")[2])
-        # A single manifest names its platform in its configuration, which the identity check reads.
-        single = {"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": "sha256:" + "d" * 64}
-        self.assertEqual(deployment.platform_manifest(single, "arm64"), "sha256:" + "d" * 64)
-        missing = copy.deepcopy(SERVER_INDEX)
-        missing["manifests"].pop()
-        duplicated = copy.deepcopy(SERVER_INDEX)
-        duplicated["manifests"].append(copy.deepcopy(SERVER_INDEX["manifests"][2]))
-        for name, index in (("missing", missing), ("duplicated", duplicated)):
-            with self.subTest(index=name), self.assertRaisesRegex(ValueError, "exactly one linux/arm64 manifest"):
-                deployment.platform_manifest(index, "arm64")
 
     def test_the_pull_selects_its_registry_digest_among_cached_references(self) -> None:
         metadata = {"RepoDigests": ["ghcr.io/nervix-io/nervix@sha256:" + "c" * 64, IMAGE]}
@@ -155,8 +128,6 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("nervix-io/nervix-k8s-operator", check)
         self.assertIn("ref: main", check)
         self.assertIn("just operator-deployment-check", check)
-        # The arm64 image runs on an amd64 runner through the host's QEMU registration.
-        self.assertLess(check.index("just docker-prepare-qemu"), check.index("just operator-deployment-check"))
         version = re.search(r"^\s+minikube-version: (\S+)$", check, re.M)
         self.assertIsNotNone(version)
         self.assertRegex(version[1], r"^\d+\.\d+\.\d+$")
@@ -167,27 +138,20 @@ class WorkflowTests(unittest.TestCase):
 
 class ControllerTests(unittest.TestCase):
     def test_the_controller_deploys_the_resolved_image_and_observes_public_membership(self) -> None:
-        for architecture, image in (("amd64", IMAGE), ("arm64", ARM64_IMAGE)):
-            with self.subTest(architecture=architecture):
-                self.deploy_and_observe(architecture, image)
-
-    def deploy_and_observe(self, architecture: str, image: str) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            check = deployment.DeploymentCheck(SERVER_TAG, REVISION, architecture, Path(directory), Path(directory) / "report")
+            check = deployment.DeploymentCheck(SERVER_TAG, REVISION, "amd64", Path(directory), Path(directory) / "report")
             calls = []
 
             def command(*args, **_kwargs):
                 calls.append(args)
                 output = ""
-                if args[:4] == ("docker", "buildx", "imagetools", "inspect"):
-                    output = json.dumps(SERVER_INDEX)
-                elif args[:2] == ("docker", "pull"):
-                    selected = args[-1] if args[-1].startswith("ghcr.io/nervix-io/nervix@") else OPERATOR_IMAGE
+                if args[:2] == ("docker", "pull"):
+                    selected = IMAGE if args[2] == SERVER_TAG else OPERATOR_IMAGE
                     output = "Digest: " + selected.partition("@")[2] + "\n"
                 elif args[:3] == ("docker", "image", "inspect"):
-                    metadata = {"RepoDigests": [args[3]], "Architecture": architecture,
+                    metadata = {"RepoDigests": [IMAGE], "Architecture": "amd64",
                                 "Config": {"Labels": {"org.opencontainers.image.revision": REVISION}}}
-                    if not args[3].startswith("ghcr.io/nervix-io/nervix@"):
+                    if args[3] != SERVER_TAG:
                         metadata["RepoDigests"] = [
                             "ghcr.io/nervix-io/nervix-k8s-operator@sha256:" + "c" * 64,
                             "ghcr.io/nervix-io/nervix-k8s-operator@sha256:" + "d" * 64,
@@ -203,9 +167,9 @@ class ControllerTests(unittest.TestCase):
                 elif "pods" in args and args[-1] == "json":
                     output = json.dumps({"items": [{
                         "metadata": {"name": f"nervix-{i}"},
-                        "spec": {"containers": [{"image": image}]},
+                        "spec": {"containers": [{"image": IMAGE}]},
                         "status": {"conditions": [{"type": "Ready", "status": "True"}],
-                                   "containerStatuses": [{"ready": True, "imageID": image}]},
+                                   "containerStatuses": [{"ready": True, "imageID": IMAGE}]},
                     } for i in range(3)]})
                 elif args[-1] == "ip":
                     output = "192.168.49.2\n"
@@ -222,16 +186,13 @@ class ControllerTests(unittest.TestCase):
                  mock.patch.object(check, "wait", side_effect=observed):
                 check.execute()
             self.assertEqual(json.loads((check.output / "result.json").read_text())["result"], "passed")
-            self.assertEqual(json.loads((check.output / "deployment.json").read_text())["items"][0]["spec"]["image"], image)
+            self.assertEqual(json.loads((check.output / "deployment.json").read_text())["items"][0]["spec"]["image"], IMAGE)
             identity = json.loads((check.output / "images.json").read_text())
             self.assertEqual(identity["operator_source_revision"], "c" * 40)
-            self.assertEqual(identity["server"], image)
+            self.assertEqual(identity["server"], IMAGE)
             self.assertEqual(identity["operator"], OPERATOR_IMAGE)
-            # The tested architecture's own manifest is pulled, deployed and run, whatever the host's.
-            self.assertIn(("docker", "pull", "--platform", f"linux/{architecture}", image), calls)
             cli, = [args for args in calls if args[:2] == ("docker", "run")]
-            self.assertIn(image, cli)
-            self.assertEqual(cli[cli.index("--platform") + 1], f"linux/{architecture}")
+            self.assertIn(IMAGE, cli)
             self.assertIn("/usr/local/bin/nervix-cli", cli)
             self.assertIn("http://192.168.49.2:31390", cli)
             self.assertEqual(calls[-1], ("minikube", "delete", "-p", check.profile))
@@ -239,7 +200,6 @@ class ControllerTests(unittest.TestCase):
             self.assertIn("image.tag=latest@sha256:" + "b" * 64, helm)
             start, = [args for args in calls if args[:2] == ("minikube", "start")]
             self.assertIn("--keep-context", start)
-            self.assertIn("--container-runtime=docker", start)
             self.assertTrue(all(check.profile in args for args in calls if args[0] == "kubectl"))
 
     def test_cleanup_and_diagnostic_failures_cannot_leave_a_passing_result(self) -> None:

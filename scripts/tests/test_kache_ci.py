@@ -53,6 +53,22 @@ KACHE_JOBS = {
     "docker-build.yaml": {"benchmark", "build-book"},
     "bolero.yaml": {"bolero-random", "bolero-fuzz"},
 }
+# A kache-backed job reads the bucket in its runner's region: Boat's machines run in Europe, and
+# GitHub's hosted runners and Blacksmith's runners in the US.
+EU_REMOTE = {
+    "KACHE_S3_BUCKET": "${{ secrets.KACHE_EU_BUCKET }}",
+    "KACHE_S3_REGION": "${{ vars.KACHE_BUCKET_REGION }}",
+    "KACHE_S3_ENDPOINT": "${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}",
+    "KACHE_S3_ACCESS_KEY": "${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}",
+    "KACHE_S3_SECRET_KEY": "${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}",
+}
+US_REMOTE = {
+    "KACHE_S3_BUCKET": "${{ vars.KACHE_BUCKET }}",
+    "KACHE_S3_REGION": "${{ vars.KACHE_BUCKET_REGION }}",
+    "KACHE_S3_ENDPOINT": "${{ vars.KACHE_BUCKET_ENDPOINT }}",
+    "KACHE_S3_ACCESS_KEY": "${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}",
+    "KACHE_S3_SECRET_KEY": "${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}",
+}
 REMOTE_ENVIRONMENT = {
     "KACHE_S3_BUCKET": "kache-ci",
     "KACHE_S3_REGION": "auto",
@@ -123,6 +139,19 @@ def workflow_env(workflow: str) -> str:
     return workflow.split("\njobs:\n", maxsplit=1)[0]
 
 
+def regional_remote(job: str) -> dict[str, str]:
+    """The settings of the cache bucket in the region of the job's runner."""
+    runner = re.search(r"^    runs-on: (\S+)$", job, re.MULTILINE)
+    if runner is None:
+        raise AssertionError("a kache-backed job names its runner")
+    label = runner.group(1)
+    if label.startswith("boat-"):
+        return EU_REMOTE
+    if label.startswith(("ubuntu-", "blacksmith-")):
+        return US_REMOTE
+    raise AssertionError(f"no cache bucket serves the region of runner {label}")
+
+
 class KacheWorkflowTests(unittest.TestCase):
     def test_every_kache_job_starts_its_remote_and_publishes_within_the_contract(self) -> None:
         manifest_keys = []
@@ -164,16 +193,7 @@ class KacheWorkflowTests(unittest.TestCase):
                     manifest_key = environment.pop("KACHE_MANIFEST_KEY")
                     self.assertTrue(manifest_key.endswith("-${{ runner.os }}-${{ runner.arch }}"), manifest_key)
                     manifest_keys.append(manifest_key.replace("${{ github.job }}", name))
-                    self.assertEqual(
-                        environment,
-                        {
-                            "KACHE_S3_BUCKET": "${{ secrets.KACHE_EU_BUCKET }}",
-                            "KACHE_S3_REGION": "${{ vars.KACHE_BUCKET_REGION }}",
-                            "KACHE_S3_ENDPOINT": "${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}",
-                            "KACHE_S3_ACCESS_KEY": "${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}",
-                            "KACHE_S3_SECRET_KEY": "${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}",
-                        },
-                    )
+                    self.assertEqual(environment, regional_remote(jobs[name]))
                     for earlier in steps[:setup]:
                         self.assertNotIn("KACHE_", earlier.text, earlier.name)
 
@@ -191,6 +211,15 @@ class KacheWorkflowTests(unittest.TestCase):
                     else:
                         self.assertEqual(publish_index, len(steps) - 1)
         self.assertEqual(len(manifest_keys), len(set(manifest_keys)), manifest_keys)
+
+    def test_a_job_takes_the_bucket_of_its_runners_region(self) -> None:
+        self.assertEqual(regional_remote("  tests:\n    runs-on: boat-xlarge\n"), EU_REMOTE)
+        self.assertEqual(regional_remote("  book:\n    runs-on: ubuntu-24.04\n"), US_REMOTE)
+        self.assertEqual(regional_remote("  tests:\n    runs-on: blacksmith-16vcpu-ubuntu-2404\n"), US_REMOTE)
+        with self.assertRaisesRegex(AssertionError, "no cache bucket serves the region of runner self-hosted"):
+            regional_remote("  tests:\n    runs-on: self-hosted\n")
+        with self.assertRaisesRegex(AssertionError, "names its runner"):
+            regional_remote("  tests:\n    runs-on: ${{ matrix.runner }}\n")
 
     def test_the_publication_step_records_a_failed_job_and_tolerates_a_missing_checkout(self) -> None:
         scenarios = job_steps(workflow_jobs(Path(".github/workflows/check.yaml").read_text())["scenarios"])
@@ -230,14 +259,12 @@ class KacheWorkflowTests(unittest.TestCase):
         justfile = Path("justfile").read_text()
 
         self.assertIn("uses: docker/setup-buildx-action@v3", workflow)
-        for name, value in (
-            ("KACHE_S3_BUCKET", "${{ secrets.KACHE_EU_BUCKET }}"),
-            ("KACHE_S3_REGION", "${{ vars.KACHE_BUCKET_REGION }}"),
-            ("KACHE_S3_ENDPOINT", "${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}"),
-            ("KACHE_S3_ACCESS_KEY", "${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}"),
-            ("KACHE_S3_SECRET_KEY", "${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}"),
-        ):
-            self.assertIn(f"{name}: {value}", workflow)
+        jobs = workflow_jobs(workflow)
+        for build in ("build-arch", "build-diagnostic"):
+            for name, value in regional_remote(jobs[build]).items():
+                with self.subTest(job=build, setting=name):
+                    self.assertIn(f"{name}: {value}", jobs[build])
+        for name in EU_REMOTE:
             self.assertIn(f'--build-arg "{name}=${{{name}}}"', justfile)
             self.assertIn(f'"${{{name}:?{name} is required}}"', justfile)
             self.assertIn(f"ARG {name}\n", dockerfile)

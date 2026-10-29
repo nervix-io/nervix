@@ -345,38 +345,55 @@ just test-connectors <filter>
 
 ### CI runners
 
-CI jobs run on [Boat](https://boat.dev) machines, which the boat CI GitHub App starts for every job
-whose `runs-on` names a Boat size. Each job gets a fresh x86_64 Ubuntu 24.04 virtual machine with
-Docker, deleted when the job ends. `.github/actionlint.yaml` declares the Boat labels to
-`just validate-workflows`. Boat runs a public repository's jobs only for the GitHub users its
-account setting lists, and only when both a run's author and the user who started it are on that
-list, so it refuses any other run, such as one for a pull request from a fork. A job's size follows
-the memory and disk its builds use rather than its CPUs, since a Boat machine has only 2 GB of
-memory per CPU, with 4 GB of swap beside it:
+Each CI job's `runs-on` label picks one of three kinds of machine.
+
+GitHub's own hosted runners, which are free for a public repository, run the jobs that coordinate
+a run or need little of a machine: the test selection, the PR title check, the image metadata and
+manifest, the chaos plans and verdicts, the Bolero gate and the combination of its shards, the
+benchmark comment, the coverage merges, the book and the deployment checks. `ubuntu-24.04` has 4
+CPUs, 16 GB of memory and a 14 GB SSD, and `ubuntu-24.04-arm` is the same machine on arm64, so each
+deployment check runs on its image's own architecture. The organization's GitHub plan runs at most
+20 hosted jobs at once across its repositories; in a week of October 2026 these jobs had at most 10
+running at once, while the chaos shards would have needed 42, so the shards stay on Boat.
+
+[Boat](https://boat.dev) machines, which the boat CI GitHub App starts for every job whose `runs-on`
+names a Boat size, run every other job but the Bolero sanitizer shards. Each gets a fresh x86_64
+Ubuntu 24.04 virtual machine with Docker, deleted when the job ends. `.github/actionlint.yaml`
+declares the Boat labels to `just validate-workflows`. Boat runs a public repository's jobs only for
+the GitHub users its account setting lists, and only when both a run's author and the user who
+started it are on that list, so it refuses any other run, such as one for a pull request from a
+fork. Each job starts one machine, and Boat's plan limits how many start each minute, hour and day.
+A job's size follows the memory and disk its builds use rather than its CPUs, since a Boat machine
+has only 2 GB of memory per CPU, with 4 GB of swap beside it:
 
 - `boat-xlarge`, with 16 CPUs, 32 GB and 251 GB of disk, runs validation, the diagnostic evidence,
   the unit tests, the scenarios, client conformance, the extra checks, Shuttle, Loom, the Deloxide
-  lane, Bolero, the image builds and the benchmarks. In runs of October 2026 the Loom jobs used
-  about 20 GiB of memory, the scenarios up to 28 GiB and the extra checks about 95 GiB of disk, and
-  the amd64 image build lost its runner on a 16 GB machine. Sixteen compilers of the instrumented
-  Loom build or of the Bolero sanitizer build exceed the machine's 32 GB, so those jobs set
-  `CARGO_BUILD_JOBS` to eight.
-- `boat-large`, with 8 CPUs, 16 GB and 111 GB, runs the coverage reports, Turmoil, the book, both
-  deployment checks and the chaos shards.
-- `boat-small`, with 2 CPUs and 4 GB, runs the jobs that only select, plan, gate or publish.
+  lane, the Bolero randomized properties, the image builds and the benchmarks. In runs of October
+  2026 the extra checks used about 95 GiB of disk and the amd64 image build lost its runner on a
+  16 GB machine. Sixteen compilers of the instrumented Loom build or of the Loom qualification
+  builds exceed the machine's 32 GB, so both Loom jobs set `CARGO_BUILD_JOBS` to eight; the Loom
+  build then peaked at 21 GiB.
+- `boat-large`, with 8 CPUs, 16 GB and 111 GB, runs Turmoil and the chaos shards.
 
-Boat has no arm64 machine, so the arm64 deployment check runs the arm64 image on an amd64 machine
-under QEMU, which `just docker-prepare-qemu` registers. A Boat machine sets the `en_US.UTF-8`
-locale, whose collation orders `sort` output differently from the `C.UTF-8` of GitHub's runner
-image, so every workflow sets `LC_ALL=C.UTF-8`. Its Docker daemon can start a few seconds after a
-job begins, so a job whose first steps use Docker waits for it. Its own Node.js comes from nvm,
-which a job's shell may not load, so a job that runs Node.js or npm pins it with
-`actions/setup-node`. Its Rust toolchain is installed system-wide under `/usr/local/cargo`, so a
-job creates `~/.cargo` before it writes its Cargo configuration there, and the chaos shards drop
-that directory from the PATH their suite runs with and delete the commands, such as `cargo`, that
-the toolchain also puts in `/usr/local/bin`. Its git is Ubuntu's 2.43, older than the 2.44
-whose `--no-lazy-fetch` the test selection passes, so the jobs that run the selection or its tests
-install the current git from the git-core PPA, as GitHub's runner image does.
+A Boat machine sets the `en_US.UTF-8` locale, whose collation orders `sort` output differently from
+the `C.UTF-8` of GitHub's runner image, so every workflow sets `LC_ALL=C.UTF-8`. Its Docker daemon
+can start a few seconds after a job begins, so a Boat job whose first steps use Docker waits for
+it. Its own Node.js comes from nvm, which a job's shell may not load, so a Boat job that runs
+Node.js or npm pins it with `actions/setup-node`. Its Rust toolchain is installed system-wide under
+`/usr/local/cargo`, so a job creates `~/.cargo` before it writes its Cargo configuration there, and
+the chaos shards drop that directory from the PATH their suite runs with and delete the commands,
+such as `cargo`, that the toolchain also puts in `/usr/local/bin`. Its git is Ubuntu's 2.43, older
+than the 2.44 whose `--no-lazy-fetch` the test selection passes, so the Boat jobs that run the
+selection's tests install the current git from the git-core PPA, as GitHub's runner image does.
+
+[Blacksmith](https://www.blacksmith.sh)'s `blacksmith-16vcpu-ubuntu-2404`, with 16 CPUs, 64 GB and
+GitHub's runner image, runs the Bolero sanitizer shards: their address-sanitized server build needs
+more than Boat's 32 GB, even with eight compilers. `.github/actionlint.yaml` declares the Blacksmith
+labels as well.
+
+A kache-backed job uses the cache bucket in its runner's region: the EU bucket on Boat's European
+machines, and the US bucket on GitHub's hosted runners and on Blacksmith's US runners.
+[What Runs Where](integration-test-lifecycle.md#what-runs-where) names their settings.
 
 ### Compiler architecture gate
 

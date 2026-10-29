@@ -707,22 +707,28 @@ builder publishes to `artifacts`. Fork PRs still need credentials to access R2. 
 displays the generic read-only CI policy even when the PR prefix is enabled; the job's daemon
 reports its actual write mode, which the start step prints and publication records.
 
-CI keeps its cache in a European R2 bucket, near the European data centers its runners execute in.
-It reads the bucket's name and S3 service URL from the required repository secrets
-`KACHE_EU_BUCKET` and `KACHE_EU_BUCKET_ENDPOINT`, its S3 region from the repository variable
-`KACHE_BUCKET_REGION`, and its credentials from the repository secrets
-`KACHE_EU_BUCKET_ACCESS_KEY_ID` and `KACHE_EU_BUCKET_SECRET_ACCESS_KEY`, which hold an R2 API token
-with object read and write access to that bucket. Each kache-backed job passes them, as kache's
-`KACHE_S3_*` environment variables, to `python3 scripts/kache_remote.py start` right after the
-setup action. Docker image builds pass the same settings to their builder, whose build command runs
-`scripts/kache_remote.py configure` before it starts the daemon. Either way the service URL is
-written into the daemon's TOML configuration before startup.
+CI keeps two R2 buckets and gives each kache-backed job the one in its runner's region. Jobs on
+Boat's machines, which run in Europe, use the European bucket: its name and S3 service URL come from
+the required repository secrets `KACHE_EU_BUCKET` and `KACHE_EU_BUCKET_ENDPOINT`, and its
+credentials from the repository secrets `KACHE_EU_BUCKET_ACCESS_KEY_ID` and
+`KACHE_EU_BUCKET_SECRET_ACCESS_KEY`, which hold an R2 API token with object read and write access to
+that bucket. Jobs on GitHub's hosted runners, a sample of which reported Azure's `centralus` region,
+and any job on Blacksmith's US runners use the US bucket: its name and service URL come from the
+required repository variables `KACHE_BUCKET` and `KACHE_BUCKET_ENDPOINT`, and its credentials from
+the repository secrets `KACHE_BUCKET_ACCESS_KEY_ID` and `KACHE_BUCKET_SECRET_ACCESS_KEY`. Both read
+their S3 region from the repository variable `KACHE_BUCKET_REGION`. `scripts/tests/test_kache_ci.py`
+holds every kache-backed job and Docker image build to the bucket of its `runs-on` label. Each
+kache-backed job passes its bucket's settings, as kache's `KACHE_S3_*` environment variables, to
+`python3 scripts/kache_remote.py start` right after the setup action. Docker image builds pass the
+same settings to their builder, whose build command runs `scripts/kache_remote.py configure` before
+it starts the daemon. Either way the service URL is written into the daemon's TOML configuration
+before startup.
 
-For Cloudflare R2, set `KACHE_BUCKET_REGION` to `auto` and `KACHE_EU_BUCKET_ENDPOINT` to the
-account's service URL, without the bucket name in the URL. That is
+For Cloudflare R2, set `KACHE_BUCKET_REGION` to `auto` and each bucket's endpoint to the account's
+service URL, without the bucket name in the URL. That is
 `https://<account-id>.eu.r2.cloudflarestorage.com` for a bucket created in the EU jurisdiction,
 which R2 serves only through that endpoint, and `https://<account-id>.r2.cloudflarestorage.com` for
-one placed with a European location hint. The bucket name belongs in `KACHE_EU_BUCKET`.
+any other bucket. The bucket name belongs in `KACHE_EU_BUCKET` or `KACHE_BUCKET`.
 `scripts/kache_remote.py` rejects URLs with a bucket path; supplying the full bucket URL can make the
 remote cache appear empty.
 

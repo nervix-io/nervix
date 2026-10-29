@@ -43,7 +43,7 @@ jobs:
         !contains(github.event.pull_request.labels.*.name, 'no-docker')) &&
       (github.event.action != 'labeled' ||
         contains(fromJSON('["benchmark", "chaos", "chaos-soak"]'), github.event.label.name))
-    runs-on: boat-small
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     outputs:
       build_id: ${{ steps.meta.outputs.build_id }}
@@ -416,7 +416,7 @@ jobs:
       !contains(github.event.pull_request.labels.*.name, 'no-docker') &&
       contains(github.event.pull_request.labels.*.name, 'benchmark') &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: boat-small
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       pull-requests: write
@@ -570,9 +570,9 @@ jobs:
       revision: ${{ github.sha }}
       suite: soak
 
-  # Every revision eligible for debian-latest must start through the deployment we ship. An amd64
-  # runner exercises both images, the arm64 one under QEMU because Boat has no arm64 machine, with
-  # the same image's CLI observing the public bootstrap port. 16 GB leave host headroom around
+  # Every revision eligible for debian-latest must start through the deployment we ship. Native
+  # runners exercise both images, with the same image's CLI observing the public bootstrap port.
+  # GitHub's free runners of both architectures have the 16 GB that leave host headroom around
   # minikube's 10 GiB.
   operator-deployment:
     name: operator-deployment-${{ matrix.arch }}
@@ -580,7 +580,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: boat-large
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -590,7 +590,9 @@ jobs:
       matrix:
         include:
           - arch: amd64
+            runner: ubuntu-24.04
           - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout tested server
         uses: actions/checkout@v4
@@ -624,27 +626,12 @@ jobs:
           minikube-version: 1.39.0
           start: false
 
-      # A Boat machine can start Docker a few seconds after the job begins.
-      - name: Wait for Docker
-        run: |
-          timeout 120 bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done' || {
-            echo "::error::the Docker daemon did not answer within 120 seconds"
-            exit 1
-          }
-
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      # The kernel's QEMU registration runs an image of another architecture in the CLI's container
-      # and in minikube's pods alike. The recipe registers nothing for the runner's own.
-      - name: Register QEMU for the image's architecture
-        env:
-          NERVIX_OPERATOR_ARCHITECTURE: ${{ matrix.arch }}
-        run: just docker-prepare-qemu "linux/${NERVIX_OPERATOR_ARCHITECTURE}"
 
       - name: Deploy and observe the built server image
         env:
@@ -672,7 +659,7 @@ jobs:
       github.event_name != 'schedule' &&
       (github.event_name != 'pull_request' ||
         github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: boat-small
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -681,14 +668,6 @@ jobs:
           - debian
           # - alpine
     steps:
-      # A Boat machine can start Docker a few seconds after the job begins.
-      - name: Wait for Docker
-        run: |
-          timeout 120 bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done' || {
-            echo "::error::the Docker daemon did not answer within 120 seconds"
-            exit 1
-          }
-
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -718,7 +697,7 @@ jobs:
   # `just book` runs first.
   build-book:
     name: build-book
-    runs-on: boat-large
+    runs-on: ubuntu-24.04
     # `just book` recaptures the console screenshots and renders the nervix-cli
     # reference from the current binary, so this job compiles the workspace and
     # drives a real browser rather than only rendering Markdown.
@@ -780,24 +759,10 @@ jobs:
           toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
-      # The console screenshots and the docs worker's deployment run npm. Boat's own Node.js comes
-      # from nvm, which a job's shell may not load.
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
           tool: just@latest,trunk
-
-      # Boat's base image has Ubuntu's git 2.43, and the test selection passes `--no-lazy-fetch`,
-      # which git 2.44 added. GitHub's runner image takes the current git from this PPA too.
-      - name: Install the current git
-        run: |
-          sudo add-apt-repository --yes ppa:git-core/ppa
-          sudo apt-get install --yes --no-install-recommends git
 
       # The book build compiles nervix-server and nervix-cli: the screenshot tool
       # drives a real server, and the nervix-cli reference is rendered from the
@@ -824,11 +789,11 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       - name: Compute docs target

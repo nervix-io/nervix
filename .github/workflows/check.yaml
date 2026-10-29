@@ -29,19 +29,12 @@ jobs:
   # rerun retains this decision; cancellation is never interpreted as completed test evidence.
   test-selection:
     name: test-selection
-    runs-on: boat-small
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       tests-required: ${{ steps.selection.outputs.tests-required }}
       bolero-required: ${{ steps.selection.outputs.bolero-required }}
     steps:
-      # Boat's base image has Ubuntu's git 2.43, and the test selection passes `--no-lazy-fetch`,
-      # which git 2.44 added. GitHub's runner image takes the current git from this PPA too.
-      - name: Install the current git
-        run: |
-          sudo add-apt-repository --yes ppa:git-core/ppa
-          sudo apt-get install --yes --no-install-recommends git
-
       - name: Checkout tested merge
         uses: actions/checkout@v4
         with:
@@ -75,7 +68,7 @@ jobs:
 
   conventional-pr-title:
     if: github.event_name == 'pull_request'
-    runs-on: boat-small
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
@@ -1000,7 +993,7 @@ jobs:
   coverage:
     name: coverage
     needs: [tests, scenarios, extra-tests]
-    runs-on: boat-large
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -1032,11 +1025,11 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       # The CRAP report runs the cargo-crap version scripts/cargo_crap.py pins, built through kache.
@@ -1147,7 +1140,7 @@ jobs:
     name: coverage-full
     needs: [test-selection, bolero, coverage, extra-tests, diagnostic-evidence, shuttle, loom, turmoil, deloxide]
     if: ${{ !cancelled() && (needs.test-selection.result != 'success' || needs.test-selection.outputs.tests-required == 'true') }}
-    runs-on: boat-large
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -2111,6 +2104,10 @@ jobs:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
+      # Sixteen compilers of the qualification builds exceeded the 32 GB of Boat's 16-CPU machine,
+      # which killed processes of both shards, so the builds keep the eight they had on an 8-CPU,
+      # 32 GB runner.
+      CARGO_BUILD_JOBS: "8"
     steps:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
