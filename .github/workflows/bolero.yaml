@@ -33,6 +33,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Boat machines set en_US.UTF-8, whose collation orders `sort` output differently. Keep the
+  # C.UTF-8 locale of GitHub's runner image, which the scripts and their tests expect.
+  LC_ALL: C.UTF-8
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   # Kache sizes its local store from the cache volume (5%, rounded and bounded).
   # Keep the default so a runner disk change also changes its cache budget.
@@ -56,7 +59,7 @@ jobs:
   bolero-random:
     name: bolero-random
     if: (inputs.event-name || github.event_name) != 'pull_request' || contains(fromJSON(inputs.labels-json || '[]'), 'bolero-random')
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    runs-on: boat-xlarge
     # Run 39649567371 took 47m10s; 90 minutes covers 1.5 times that duration plus publication.
     timeout-minutes: 90
     steps:
@@ -149,7 +152,7 @@ jobs:
       matrix:
         # Each shard runs whole harnesses of the inventory; `just fuzz-plan 3` shows the division.
         shard: [1, 2, 3]
-    runs-on: ubicloud-standard-16-ubuntu-2404
+    runs-on: boat-xlarge
     # The 205-target plan estimates up to 114 minutes per shard before discovery, qualification
     # and uploads. Fund 1.5 times that estimate plus their overhead on a slow runner.
     timeout-minutes: 240
@@ -340,7 +343,7 @@ jobs:
     name: bolero-fuzz-combined
     if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
     needs: [bolero-fuzz]
-    runs-on: ubicloud-standard-4-ubuntu-2404
+    runs-on: boat-large
     timeout-minutes: 15
     permissions:
       contents: read
@@ -377,7 +380,7 @@ jobs:
     name: bolero-gate
     if: always()
     needs: [bolero-random, bolero-fuzz, bolero-fuzz-combined]
-    runs-on: ubicloud-standard-2-ubuntu-2404
+    runs-on: boat-small
     timeout-minutes: 5
     outputs:
       randomized-result: ${{ steps.selection.outputs.randomized-result }}

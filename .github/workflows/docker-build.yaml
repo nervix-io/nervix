@@ -25,6 +25,9 @@ permissions:
   issues: write
 
 env:
+  # Boat machines set en_US.UTF-8, whose collation orders `sort` output differently. Keep the
+  # C.UTF-8 locale of GitHub's runner image, which the scripts and their tests expect.
+  LC_ALL: C.UTF-8
   # Kache sizes its local store from the cache volume (5%, rounded and bounded).
   # Keep the default so a runner disk change also changes its cache budget.
   KACHE_VERSION: "1.2.1"
@@ -40,7 +43,7 @@ jobs:
         !contains(github.event.pull_request.labels.*.name, 'no-docker')) &&
       (github.event.action != 'labeled' ||
         contains(fromJSON('["benchmark", "chaos", "chaos-soak"]'), github.event.label.name))
-    runs-on: ubicloud-standard-2-ubuntu-2404
+    runs-on: boat-small
     timeout-minutes: 40
     outputs:
       build_id: ${{ steps.meta.outputs.build_id }}
@@ -56,25 +59,23 @@ jobs:
   build-arch:
     name: build-${{ matrix.image }}-${{ matrix.arch }}
     needs: meta
-    runs-on: ${{ matrix.runner }}
+    # On a 4-vCPU, 16 GB machine the amd64 build lost its runner 36 minutes in, so every image
+    # build takes the 32 GB machine.
+    runs-on: boat-xlarge
     # Run 39534273321's amd64 build took 65 minutes. Reserve another half plus upload headroom.
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include:
-          # On a 4-vCPU, 16 GB machine the build lost its runner 36 minutes in. The arm64 and
-          # diagnostic builds finish on 8 vCPUs and 32 GB.
           - image: debian
             platform: linux/amd64
             arch: amd64
             llvm: "23"
-            runner: ubicloud-standard-8-ubuntu-2404
           - image: debian
             platform: linux/arm64
             arch: arm64
             llvm: "23"
-            runner: ubicloud-standard-8-ubuntu-2404
           # - image: alpine
           #   platform: linux/amd64
           #   arch: amd64
@@ -88,6 +89,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
+
+      # A Boat machine can start Docker a few seconds after the job begins.
+      - name: Wait for Docker
+        run: |
+          timeout 120 bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done' || {
+            echo "::error::the Docker daemon did not answer within 120 seconds"
+            exit 1
+          }
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -153,14 +162,22 @@ jobs:
         (contains(github.event.pull_request.labels.*.name, 'chaos') ||
           contains(github.event.pull_request.labels.*.name, 'chaos-soak')))
     # The diagnostic server's workspace crates compile with the detector's features, which the
-    # release image's cache does not hold, so this build takes the larger worker.
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    # release image's cache does not hold. Like the release builds, it takes the 32 GB machine.
+    runs-on: boat-xlarge
     timeout-minutes: 80
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
+
+      # A Boat machine can start Docker a few seconds after the job begins.
+      - name: Wait for Docker
+        run: |
+          timeout 120 bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done' || {
+            echo "::error::the Docker daemon did not answer within 120 seconds"
+            exit 1
+          }
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -201,7 +218,7 @@ jobs:
       github.event_name == 'pull_request' &&
       contains(github.event.pull_request.labels.*.name, 'benchmark') &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    runs-on: boat-xlarge
     timeout-minutes: 120
     permissions:
       contents: read
@@ -217,6 +234,14 @@ jobs:
         with:
           fetch-depth: 2
           persist-credentials: false
+
+      # A Boat machine can start Docker a few seconds after the job begins.
+      - name: Wait for Docker
+        run: |
+          timeout 120 bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done' || {
+            echo "::error::the Docker daemon did not answer within 120 seconds"
+            exit 1
+          }
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -389,7 +414,7 @@ jobs:
       !contains(github.event.pull_request.labels.*.name, 'no-docker') &&
       contains(github.event.pull_request.labels.*.name, 'benchmark') &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubicloud-standard-2-ubuntu-2404
+    runs-on: boat-small
     timeout-minutes: 10
     permissions:
       pull-requests: write
@@ -543,15 +568,17 @@ jobs:
       revision: ${{ github.sha }}
       suite: soak
 
-  # Every revision eligible for debian-latest must start through the deployment we ship. Native
-  # runners exercise both images, with the same image's CLI observing the public bootstrap port.
+  # Every revision eligible for debian-latest must start through the deployment we ship. An amd64
+  # runner exercises both images, the arm64 one under QEMU because Boat has no arm64 machine, with
+  # the same image's CLI observing the public bootstrap port. 16 GB leave host headroom around
+  # minikube's 10 GiB.
   operator-deployment:
     name: operator-deployment-${{ matrix.arch }}
     needs: [meta, build-arch]
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ matrix.runner }}
+    runs-on: boat-large
     timeout-minutes: 30
     permissions:
       contents: read
@@ -561,10 +588,7 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubicloud-standard-4-ubuntu-2404
           - arch: arm64
-            # The 4-vCPU ARM class has 12 GB; leave host headroom around minikube's 10 GiB.
-            runner: ubicloud-standard-8-arm-ubuntu-2404
     steps:
       - name: Checkout tested server
         uses: actions/checkout@v4
@@ -598,12 +622,27 @@ jobs:
           minikube-version: 1.39.0
           start: false
 
+      # A Boat machine can start Docker a few seconds after the job begins.
+      - name: Wait for Docker
+        run: |
+          timeout 120 bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done' || {
+            echo "::error::the Docker daemon did not answer within 120 seconds"
+            exit 1
+          }
+
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The kernel's QEMU registration runs an image of another architecture in the CLI's container
+      # and in minikube's pods alike. The recipe registers nothing for the runner's own.
+      - name: Register QEMU for the image's architecture
+        env:
+          NERVIX_OPERATOR_ARCHITECTURE: ${{ matrix.arch }}
+        run: just docker-prepare-qemu "linux/${NERVIX_OPERATOR_ARCHITECTURE}"
 
       - name: Deploy and observe the built server image
         env:
@@ -631,7 +670,7 @@ jobs:
       github.event_name != 'schedule' &&
       (github.event_name != 'pull_request' ||
         github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubicloud-standard-2-ubuntu-2404
+    runs-on: boat-small
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -640,6 +679,14 @@ jobs:
           - debian
           # - alpine
     steps:
+      # A Boat machine can start Docker a few seconds after the job begins.
+      - name: Wait for Docker
+        run: |
+          timeout 120 bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done' || {
+            echo "::error::the Docker daemon did not answer within 120 seconds"
+            exit 1
+          }
+
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -669,7 +716,7 @@ jobs:
   # `just book` runs first.
   build-book:
     name: build-book
-    runs-on: ubicloud-standard-4-ubuntu-2404
+    runs-on: boat-large
     # `just book` recaptures the console screenshots and renders the nervix-cli
     # reference from the current binary, so this job compiles the workspace and
     # drives a real browser rather than only rendering Markdown.
@@ -730,6 +777,13 @@ jobs:
         with:
           toolchain: "1.99"
           targets: wasm32-unknown-unknown
+
+      # The console screenshots and the docs worker's deployment run npm. Boat's own Node.js comes
+      # from nvm, which a job's shell may not load.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
