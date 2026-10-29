@@ -96,8 +96,12 @@ An acquisition timeout, an inability to connect, or the loss of a connection is 
 failure instead, and follows the emitter's existing retry policy and general-error reporting.
 
 Postgres has a 30-second acquisition deadline covering pool wait, connection establishment,
-authentication and validation, independent of how long an accepted query then runs. MySQL has no
-separate pool-wait deadline. A Redis publish checks its connection out within the client's
+authentication and validation, independent of how long an accepted query then runs. A MySQL client
+that sets `timeout_ms` bounds each checkout, including connection establishment and authentication,
+by that value, and bounds initial validation and each insert separately. Its minimum keeper uses
+the same checkout bound. An exhausted pool reports `checking out a MySQL connection did not finish
+within timeout_ms` with the configured duration, then the emitter retries on its policy. Omitting
+`timeout_ms` leaves these MySQL waits unbounded. A Redis publish checks its connection out within the client's
 `connect_timeout_ms`, 30 seconds by default, the same deadline that bounds opening each new command
 connection: a checkout that runs out of it reports `checking out a Redis command connection did not
 finish within connect_timeout_ms` with the bound. A MongoDB write has only its driver's deadlines:
