@@ -710,10 +710,11 @@ reports its actual write mode, which the start step prints and publication recor
 CI keeps its cache in a European R2 bucket, near the European data centers its runners execute in.
 It reads the bucket's name and S3 service URL from the required repository secrets
 `KACHE_EU_BUCKET` and `KACHE_EU_BUCKET_ENDPOINT`, its S3 region from the repository variable
-`KACHE_BUCKET_REGION`, and its credentials from the repository secrets `KACHE_BUCKET_ACCESS_KEY_ID`
-and `KACHE_BUCKET_SECRET_ACCESS_KEY`. Each kache-backed job passes them, as kache's `KACHE_S3_*`
-environment variables, to `python3 scripts/kache_remote.py start` right after the setup action.
-Docker image builds pass the same settings to their builder, whose build command runs
+`KACHE_BUCKET_REGION`, and its credentials from the repository secrets
+`KACHE_EU_BUCKET_ACCESS_KEY_ID` and `KACHE_EU_BUCKET_SECRET_ACCESS_KEY`, which hold an R2 API token
+with object read and write access to that bucket. Each kache-backed job passes them, as kache's
+`KACHE_S3_*` environment variables, to `python3 scripts/kache_remote.py start` right after the
+setup action. Docker image builds pass the same settings to their builder, whose build command runs
 `scripts/kache_remote.py configure` before it starts the daemon. Either way the service URL is
 written into the daemon's TOML configuration before startup.
 
