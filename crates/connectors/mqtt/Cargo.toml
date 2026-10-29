@@ -31,6 +31,7 @@ nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 nonzero_ext = { workspace = true }
+prometheus = { workspace = true }
 rumqttc = { workspace = true }
 rumqttc-core = { workspace = true }
 shuttle = { workspace = true, optional = true }

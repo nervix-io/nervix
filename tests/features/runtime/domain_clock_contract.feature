@@ -421,11 +421,10 @@ Feature: Domain clock contract regressions
       CREATE HTTP CLIENT clock_source
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?fixture=domain-clock&delay_ms=25',
-          'method' = 'GET',
           'timeout_ms' = 5000
         };
       CREATE HTTP REQUEST INGESTOR clock_source_reader
-        FROM clock_source EVERY 1h
+        FROM clock_source METHOD 'GET' EVERY 1h
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING clock_source_codec
         TIMESTAMP NOW
         TO clock_source_records
@@ -473,11 +472,10 @@ Feature: Domain clock contract regressions
       CREATE HTTP CLIENT cadence_source
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?fixture=http-cadence&delay_ms=25',
-          'method' = 'GET',
           'timeout_ms' = 5000
         };
       CREATE HTTP REQUEST INGESTOR cadence_source_reader
-        FROM cadence_source EVERY 1s
+        FROM cadence_source METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING cadence_source_codec
         TIMESTAMP NOW
         TO cadence_source_records

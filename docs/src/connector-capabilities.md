@@ -34,20 +34,20 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | HTTP REQUEST | Compare `HTTP REQUEST`: options, modes, headers. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
+| Entity | HTTP REQUEST | Compare `HTTP REQUEST`: options, modes, headers, ingest metadata. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
 | Reference | HTTP client |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
-| Options in statement order | `EVERY 1s` (duration); required |  |
+| Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |  |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |  |
-| Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |  |
+| Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | the response body: unbounded |  |
-| Network waits | a request: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |  |
-| Driver limits | Response heads above 100 headers or 417,792 bytes are refused.<br>A request follows at most 10 redirects. |  |
+| Buffers | the response body: set by MAX BODY SIZE; when exceeded, fails the poll; the next poll reads again |  |
+| Network waits | a request: name resolution, connection, TLS and the response: `timeout_ms`; required |  |
+| Driver limits | Response heads above 100 headers or 417,792 bytes are refused.<br>Redirects and proxies require the client's explicit opt-in. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### HTTP ENDPOINT ingest
@@ -125,9 +125,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | written |  |
-| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>admitted publishes or compact discard acknowledgements the connection reads ahead of the host: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |  |
+| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |  |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |  |
-| Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound. |  |
+| Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound.<br>ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow only. NO ACK retains backpressure. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### NATS SUBJECT ingest
@@ -719,7 +719,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |  |
-| Network waits | connection: name resolution, TCP and TLS: driver default, connectTimeoutMS, 10 s<br>server selection: driver default, 30 s<br>the handshake, a pool wait and a write: unbounded |  |
+| Network waits | connection: name resolution, TCP and TLS: driver default, connectTimeoutMS, 10 s<br>server selection: driver default, 30 s<br>the handshake, a pool wait, the collection lookup and a write: unbounded |  |
 | Driver limits | A document above the declared BSON document limit is rejected. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
@@ -758,8 +758,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
 | `endpoint` | required | URL (http or https) | Nervix; strict | no | none |
-| `method` | optional | string | Nervix; strict | no | none |
-| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `follow_redirects` | optional | boolean | Nervix; strict | no | none |
+| `proxy` | optional | URL (http or https) | Nervix; strict | no | none |
+| `timeout_ms` | required | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 | `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
 | `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
 | `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
@@ -1041,18 +1042,18 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | --- | --- | --- | --- | --- | --- |
 | `compression` | optional | gzip | Nervix; strict | no | none |
 | `endpoint` | required | URL (http or https) | Nervix; strict | no | none |
-| `headers` | optional | string | Nervix; strict | yes | none |
+| `headers` | optional | comma-separated name=percent-encoded-value pairs | Nervix; strict | yes | none |
 | `protocol` | required | grpc or http/protobuf | Nervix; strict | no | none |
 | `timeout_ms` | required | positive, schedulable whole milliseconds | Nervix; strict | no | none |
-| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
-| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
-| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+| `tls_ca_file` | optional; requires `endpoint` to use `https` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional; requires `endpoint` to use `https` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional; requires `endpoint` to use `https` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
 | Capability | Declaration |
 | --- | --- |
-| Additional declared constraints | comma-separated key=value pairs; split at the first '='; trim surrounding whitespace; lowercase keys; preserve values literally without percent-decoding; empty input means no headers<br>tls_ca_file, tls_cert_file and tls_key_file require an https endpoint for both grpc and http/protobuf; tls_cert_file and tls_key_file must occur together |
+| Additional declared constraints | comma-separated key=value pairs; split at the first '='; trim surrounding whitespace; lowercase keys; percent-decode values once as UTF-8; keep literal plus signs; empty input means no headers<br>tls_ca_file, tls_cert_file and tls_key_file require an https endpoint for both grpc and http/protobuf; tls_cert_file and tls_key_file must occur together |
 
 ### CLICKHOUSE client
 

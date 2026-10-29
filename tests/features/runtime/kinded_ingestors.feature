@@ -18,7 +18,6 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE ENDPOINT ws_ingress ON edge PATH '/stream' TYPE WEBSOCKETS;
       CREATE HTTP CLIENT http_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9/events',
-        'method' = 'GET',
         'timeout_ms' = 5000
       };
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
@@ -33,7 +32,7 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE WEBSOCKETS CLIENT ws_main CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
       CREATE SYSLOG CLIENT syslog_main CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
       CREATE HTTP REQUEST INGESTOR http_request_source
-        FROM http_main EVERY 1s MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
+        FROM http_main METHOD 'GET' EVERY 1s MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR http_endpoint_source
@@ -113,7 +112,7 @@ Feature: Ingestors name their connector and entity in the statement head
     Then the last command output contains
       """
       CREATE HTTP REQUEST INGESTOR http_request_source
-        FROM http_main EVERY 1s MODE NO ACK ON QUIESCE SUSPEND
+        FROM http_main METHOD 'GET' EVERY 1s MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node

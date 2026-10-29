@@ -13,6 +13,13 @@ Defaulted keys carry their declared value in their presence variant. The effecti
 adds it only when the authored key is absent; an invalid explicit value still fails validation.
 `DESCRIBE CLIENT` distinguishes these effective defaults from authored values, with the same
 confidential projection, while canonical configuration preserves omission.
+Scheme-dependent presence distinguishes a key required by an address scheme from an optional key
+permitted only with that scheme. OTEL TLS file keys use the latter state for HTTPS. The same
+vocabulary validation runs on authored and rendered entries, deferring an unresolved address
+template until rendering. Percent-encoded header pairs retain their encoded client configuration;
+validation and the connector use one decoder into ordered named pairs, without feeding a decoded
+value back through that decoder. OTEL's field rules own exact types and literal value constraints;
+the registry establishes them before planning, and the connector verifies the prepared schema.
 ClickHouse's rendered CONFIG validation requires a positive request deadline and HTTPS trust or
 refuses TLS file keys on HTTP. The case-preserving `ClickHouseTableName` is constructed only from
 one or two nonempty locator parts; the connector receives that validated name and quotes its parts
@@ -56,6 +63,11 @@ the group's row bound and the vocabulary's frame labels. An estimate that exceed
 is a typed error before allocation; the ingest group adds the opening operation's context and
 retains the cause for its general-error policy.
 
+A paced poll message carries a typed metadata variant. HTTP polling supplies its response status
+and scheduled poll instant in that variant, while sources with no integration fields carry the
+headers-only variant. The host copies the variant into a matching quiesce buffer and Arrow builder;
+neither a missing status nor a default timestamp can be mistaken for a valid HTTP response.
+
 The Pulsar emitter's running publishing choice keeps related state together: the `NO ACK` variant
 owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
 confirmation settings. An empty receipt collection means there are no outstanding receipts,
@@ -93,6 +105,12 @@ The source's absent subscription means it needs a resume. An installed subscript
 bounded receiver and exact reader task; close and suspend join that task before replacing it.
 Queued messages precede its terminal read failure. These handles, queued payloads and parsing
 state remain volatile and are never part of a persisted Model.
+
+Running MQTT acknowledgement state distinguishes automatic acknowledgement from manual
+acknowledgement with its bounded QoS 0 capacity. Each queued QoS 0 outcome owns its permit until
+the source takes it; acknowledged packets use their separate reserved capacity. Overflow is an
+ordinary admission outcome that drops and counts one publish, rather than a read failure or a
+missing connection. The queue, permits and host-supplied counter handle remain volatile.
 
 Text is parsed into a semantic Model, registry validation resolves its references and contracts,
 and planning produces an execution plan. Each stage passes forward a value whose type expresses

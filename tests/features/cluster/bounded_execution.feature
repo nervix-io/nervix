@@ -3,9 +3,10 @@ Feature: Bounded execution and transient memory
   @execution_class_drain @deloxide_stress
   Scenario Outline: Occupied bulk execution leaves management work responsive
     Given a <cluster_size> node nervix cluster is started
-    When bulk execution on node "<node_id>" is occupied
+    And client "management" is connected to node "<node_id>"
+    When bulk execution on every node is occupied
     Then node "<node_id>" observability path "/readyz" eventually responds with 200 and "ready"
-    And within "10s" these Plexus commands complete on node "<node_id>"
+    And within "10s" client "management" completes these Plexus statements
       """
       CREATE DOMAIN {{domain}};
       CREATE DOMAIN {{domain}}_first;
@@ -14,7 +15,11 @@ Feature: Bounded execution and transient memory
       CREATE DOMAIN {{domain}}_fourth;
       CREATE DOMAIN {{domain}}_fifth;
       """
-    And within "10s" these Plexus commands complete on node "<node_id>"
+    And the last command output contains
+      """
+      created domain '{{domain}}_fifth'
+      """
+    And within "10s" client "management" completes these Plexus statements
       """
       LIST DOMAINS;
       """
@@ -22,8 +27,7 @@ Feature: Bounded execution and transient memory
       """
       {{domain}}_fifth
       """
-    When bulk execution on node "<node_id>" is released
-    Then node "<node_id>" eventually observes a stable leader
+    And node "<node_id>" eventually observes a stable leader
 
     Examples:
       | cluster_size | node_id |
@@ -188,11 +192,10 @@ Feature: Bounded execution and transient memory
       CREATE RELAY polled_events SCHEMA polled_event UNBRANCHED;
       CREATE HTTP CLIENT polled_http CONFIG {
         'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
-        'method' = 'GET',
         'timeout_ms' = 5000
       };
       CREATE HTTP REQUEST INGESTOR polled_source
-        FROM polled_http EVERY 1s
+        FROM polled_http METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING polled_codec
         TO polled_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

@@ -86,6 +86,36 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/models/src/connector/header_pairs/__fuzz__/connector__header_pairs__tests__bolero_percent_encoded_headers_decode_to_complete_pairs/corpus"
+domain_version = 1
+features = []
+id = "models-header-pairs"
+invariant = "One through four percent-encoded OTLP header pairs decode to every original UTF-8 value, including whitespace, percent signs, commas, equals signs and plus signs, with normalized names and complete pair order. Empty input decodes to no pairs."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/connector/header_pairs/tests.rs"
+test = "connector::header_pairs::tests::bolero_percent_encoded_headers_decode_to_complete_pairs"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/src/connector/otel/__fuzz__/connector__otel__tests__bolero_otel_mappings_round_trip_with_literal_domains/corpus"
+domain_version = 1
+features = ["arrow"]
+id = "models-otel-mappings"
+invariant = "Complete OTEL mappings, attributes, resource and scope round-trip through JSON and archives; every declared field admits exactly its reference Arrow type, and signed severity and identifier literals obey independent domain references."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/connector/otel/tests.rs"
+test = "connector::otel::tests::bolero_otel_mappings_round_trip_with_literal_domains"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/interconnect/src/connection/__fuzz__/connection__retained_slots_tests__bolero_pool_slot_generations_have_one_worker_and_fixed_capacity/corpus"
 domain_version = 1
 features = []
@@ -2471,6 +2501,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_bulk_request_envelopes_preserve_payload_and_release_charges/corpus"
+domain_version = 1
+features = []
+id = "bulk-request-envelope-wire"
+invariant = "A complete current Bulk request envelope preserves class, request name and every payload byte through the production stream encoder and wire decoder; encoding returns the input charge before stream admission, and dropping the decoded value returns all charges."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-interconnect"
+random_iterations = 64
+source = "crates/interconnect/src/wire_properties.rs"
+test = "wire::properties::bolero_bulk_request_envelopes_preserve_payload_and_release_charges"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message/corpus"
 domain_version = 5
 features = []
@@ -2981,6 +3026,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/iceberg/src/table/__fuzz__/table__parquet_bounds__tests__bolero_staged_iceberg_file_encoding_round_trips_and_measures_exactly/corpus"
+domain_version = 1
+features = []
+id = "iceberg-staged-file-encoding"
+invariant = "Generated mapped rows survive Arrow IPC staging and readback, and counting their projected Parquet encoding, including its footer, equals the actual file bytes."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-connector-iceberg"
+random_iterations = 256
+source = "crates/connectors/iceberg/src/table/parquet_bounds.rs"
+test = "table::parquet_bounds::tests::bolero_staged_iceberg_file_encoding_round_trips_and_measures_exactly"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/iceberg/src/table/table_projection/__fuzz__/table__table_projection__tests__bolero_staged_columns_land_in_the_table_columns_of_their_names/corpus"
 domain_version = 1
 features = []
@@ -3312,7 +3372,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 10
+domain_version = 11
 features = []
 id = "client-config-schema"
 invariant = "Bounded entries drawn from every current client key schema preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."

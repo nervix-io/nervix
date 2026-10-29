@@ -13,7 +13,7 @@
 use meticulous::{OptionExt as _, ResultExt as _};
 
 use super::*;
-use crate::{ClientConfigEntry, ConnectorKind};
+use crate::{ClientConfigEntry, ConnectorKind, CreateClientHttp, DeadlineKey};
 
 fn entry(key: &str, value: &str) -> ClientConfigEntry {
     ClientConfigEntry {
@@ -274,7 +274,10 @@ fn a_tls_address_requires_its_declared_trust_file() {
         .client()
         .assured("HTTP declares a client")
         .config
-        .validate(&[entry("endpoint", "https://api.example.com")])
+        .validate(&[
+            entry("endpoint", "https://api.example.com"),
+            entry("timeout_ms", "5000"),
+        ])
         .assured("HTTPS uses its driver's built-in trust roots");
 }
 
@@ -304,6 +307,67 @@ fn a_deadline_uses_the_shared_positive_millisecond_contract() {
             ClientConfigSchemaError::InvalidValue { key, .. } if key == "timeout_ms"
         ));
     }
+}
+
+#[test]
+fn http_declares_one_strict_client_transport_contract() {
+    let client = ConnectorKind::Http
+        .client()
+        .assured("HTTP declares a client");
+    let keys: Vec<_> = client.config.keys().iter().map(|key| key.name).collect();
+    assert_eq!(
+        keys,
+        [
+            "endpoint",
+            "follow_redirects",
+            "proxy",
+            "timeout_ms",
+            "tls_ca_file",
+            "tls_cert_file",
+            "tls_key_file",
+        ]
+    );
+    client
+        .config
+        .validate(&[
+            entry("endpoint", "https://api.example.com"),
+            entry("follow_redirects", "true"),
+            entry("proxy", "http://proxy.example.com:8080"),
+            entry("timeout_ms", "5000"),
+        ])
+        .assured("the declared HTTP transport settings are valid together");
+    for (key, value) in [
+        ("follow_redirects", "yes"),
+        ("proxy", "socks5://proxy.example.com:1080"),
+    ] {
+        let refusal = client
+            .config
+            .validate(&[
+                entry("endpoint", "https://api.example.com"),
+                entry("timeout_ms", "5000"),
+                entry(key, value),
+            ])
+            .expect_err("the transport option has its declared value type");
+        assert!(matches!(
+            refusal.current_context(),
+            ClientConfigSchemaError::InvalidValue { key: found, .. } if found == key
+        ));
+    }
+    let missing = client
+        .config
+        .validate(&[entry("endpoint", "https://api.example.com")])
+        .expect_err("the HTTP timeout is required");
+    assert!(matches!(
+        missing.current_context(),
+        ClientConfigSchemaError::MissingRequired { key: "timeout_ms" }
+    ));
+    let contract = CreateClientHttp::TRANSPORT;
+    assert_eq!(contract.timeout, DeadlineKey::Timeout);
+    assert_eq!(contract.redirect_limit_without_opt_in, 0);
+    assert_eq!(contract.redirect_limit_with_opt_in, 10);
+    assert!(!contract.reads_environment_proxy);
+    assert!(contract.redacts_targets_and_headers);
+    assert!(contract.tls_identity_requires_pair);
 }
 
 #[test]
@@ -352,7 +416,7 @@ fn secret_metadata_controls_inspection_and_preserves_the_complete_entries() {
 
 #[test]
 fn bolero_schema_checked_client_entries_round_trip() {
-    use std::num::NonZeroUsize;
+    use std::{collections::BTreeMap, num::NonZeroUsize};
 
     use nervix_arbitrary::{Arbitrary, Domain};
     use strum::IntoEnumIterator as _;
@@ -370,6 +434,12 @@ fn bolero_schema_checked_client_entries_round_trip() {
                 .entropy()
                 .index(NonZeroUsize::new(schemas.len()).assured("clients declare schemas"));
             let schema = schemas[index];
+            let mut address_schemes = BTreeMap::new();
+            for key in schema.keys() {
+                if let ClientConfigPresence::OptionalForScheme { address, scheme } = key.presence {
+                    address_schemes.insert(address, scheme);
+                }
+            }
             let mut entries = Vec::new();
             for key in schema.keys() {
                 if matches!(key.presence, ClientConfigPresence::Defaulted(_))
@@ -379,6 +449,13 @@ fn bolero_schema_checked_client_entries_round_trip() {
                 }
                 let value = match key.value {
                     ClientConfigValue::String => arbitrary.string(),
+                    ClientConfigValue::PercentEncodedHeaders => format!(
+                        "x-fixture={}",
+                        percent_encoding::utf8_percent_encode(
+                            &arbitrary.string(),
+                            percent_encoding::NON_ALPHANUMERIC
+                        )
+                    ),
                     ClientConfigValue::Boolean => arbitrary.entropy().flag().to_string(),
                     ClientConfigValue::UnsignedInteger => arbitrary
                         .entropy()
@@ -397,10 +474,17 @@ fn bolero_schema_checked_client_entries_round_trip() {
                             .to_string()
                     }
                     ClientConfigValue::Url(schemes) => {
-                        let index = arbitrary.entropy().index(
-                            NonZeroUsize::new(schemes.len()).assured("a URL declares schemes"),
-                        );
-                        format!("{}://user:password@example.com/api", schemes[index])
+                        let scheme = match address_schemes.get(key.name) {
+                            Some(scheme) => *scheme,
+                            None => {
+                                let index = arbitrary.entropy().index(
+                                    NonZeroUsize::new(schemes.len())
+                                        .assured("a URL declares schemes"),
+                                );
+                                schemes[index]
+                            }
+                        };
+                        format!("{scheme}://user:password@example.com/api")
                     }
                     ClientConfigValue::DriverAddress => {
                         "redis://user:password@example.com/0".to_string()

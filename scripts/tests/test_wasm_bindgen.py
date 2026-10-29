@@ -234,5 +234,17 @@ class ImageTests(unittest.TestCase):
         self.assertLess(install, dockerfile.index("trunk build"))
 
 
+class WorkflowTests(unittest.TestCase):
+    """Every pull request whose diff requires the suites runs these tests under coverage."""
+
+    def test_the_extra_tests_job_measures_the_cli_tooling(self) -> None:
+        check = (ROOT / ".github/workflows/check.yaml").read_text(encoding="utf-8")
+        extras = re.split(r"\n  [a-z][a-z-]*:\n", check.split("\n  extra-tests:\n", 1)[1], maxsplit=1)[0]
+        self.assertIn("if: needs.test-selection.outputs.tests-required == 'true'", extras)
+        self.assertIn("run: just coverage-wasm-bindgen\n", extras)
+        upload = extras.split("- name: Upload native extra coverage\n", 1)[1].split("- name:", 1)[0]
+        self.assertIn("            target/wasm-bindgen-coverage/python.lcov\n", upload)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,11 +28,11 @@ use nervix_models::{
     BranchSelection, CanonicalPlexusError, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor,
     CreateReorderer, CreateWindowProcessor, EmitterBody, FieldPath, HeaderModel,
-    IngestTimestampSource, IngestorEntity, IngestorInput, KafkaIngestor, KafkaOffsetMode,
-    KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef, PlacementName, PlacementPolicy,
-    ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion, ResourceDescription,
-    ResourceEntryContent, ResourceManifestEntry, ResourceUsage, ResourceVersionEntries,
-    ScheduledNode, WasmStateInspection, expression_to_plexus,
+    IcebergTableEmitter, IngestTimestampSource, IngestorEntity, IngestorInput, KafkaIngestor,
+    KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef, PlacementName,
+    PlacementPolicy, ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion,
+    ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
+    ResourceVersionEntries, ScheduledNode, WasmStateInspection, expression_to_plexus,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use sorted_vec::SortedSet;
@@ -920,6 +920,16 @@ pub(in crate::application) fn format_emitter_describe_output(
         Some(batch) => format!("batch: {batch}"),
         None => "batch: none".to_owned(),
     });
+    if matches!(
+        emitter.connector.as_ref(),
+        nervix_models::EmitterEntity::Iceberg(_)
+    ) && emitter.batch.is_none()
+    {
+        lines.push(format!(
+            "data file target: {}MiB",
+            IcebergTableEmitter::DEFAULT_DATA_FILE_TARGET_BYTES / (1024 * 1024)
+        ));
+    }
     lines.push(format!(
         "flush: {}",
         emitter.flush_policy.to_canonical_plexus()

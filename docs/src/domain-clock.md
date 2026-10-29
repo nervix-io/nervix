@@ -648,6 +648,8 @@ Recurring domain cadence is anchored to its initial logical schedule. The source
 each HTTP or Prometheus polling occurrence and passes its scheduled logical instant into the
 connector's poll operation; connector crates never bind or wait on a domain clock. HTTP polling and
 generator cadence begin immediately, while Prometheus polling begins after one interval. When work
+returns an HTTP response, its `metadata.polled_at` is that scheduled logical instant, while the
+host's separate observed instant records when the response reached the ingestion boundary. When work
 misses multiple occurrences, the cadence returns the newest due instant once and advances directly
 to the first future boundary. Consumers that need both meanings keep the scheduled due instant
 separate from the fresh execution snapshot taken when work actually runs.
@@ -769,10 +771,14 @@ owners:
   scenarios cover the CLI restoring a clock after a transport loss and a reconnected console
   restoring its attachment.
 - The paced branch-buffering outline checks both tenant keys and both sequence values under
-  one-second logical flush and collection at rate 20, retaining its 800 ms physical receive
-  budget. Its subscription reader runs independently of the scenario runner. Controlled harness
-  regressions distinguish timely rows learned about after a runner delay from a genuinely missing
-  row whose original receive budget expires; they do not change the runtime's clock contract.
+  one-minute logical flush and collection at rate 1200. Each window still closes 50 ms after it
+  opens, while a physical clock would hold it for a minute, so the five-second physical receive
+  budget rejects the wrong clock by a factor of twelve and leaves nearly all of itself to relay
+  delivery between three nodes. A companion outline makes every relay owner wait 250 ms before
+  each batch it fans out and keeps the same budget. Each outline's subscription reader runs
+  independently of the scenario runner. Controlled harness regressions distinguish timely rows
+  learned about after a runner delay from a genuinely missing row whose original receive budget
+  expires; they do not change the runtime's clock contract.
 - The slow historical-domain Immediate outline keeps both tenant keys and exact payloads on one
   and three nodes at `TIME RATE 0.0001`. Its 100-microsecond physical batching minimum would take
   one physical second if scaled as logical time, so the receive budget stays 500 milliseconds.
@@ -783,8 +789,9 @@ owners:
   attach and detach statements, and of the clock requests, replies and frames. Mutations of a
   current clock frame decode deterministically or fail within the verification budgets.
 
-The Bolero properties run as ordinary randomized and corpus tests on every pull request. Their
-sanitizer-backed libFuzzer campaigns run in CI only for a pull request labeled `fuzz`; every other
-event deliberately skips them, and a skip supplies no fuzz evidence.
+The Bolero properties run as ordinary tests in the ordinary suites. Their sanitizer-backed
+libFuzzer campaigns, the preferred Bolero evidence, run in CI only for a pull request labeled
+`fuzz`, and their randomized and corpus job only for one labeled `bolero-random`; any other pull
+request deliberately skips them, and a skip supplies no evidence of its mode.
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md#commands-and-enforcement) owns
 that policy.

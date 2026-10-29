@@ -14,6 +14,14 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+An OTEL literal outside its declared field domain is a typed registry mapping issue that names
+the signal, key and required constraint. It carries no literal value. A TLS file key with a
+plaintext endpoint is a typed client-schema scheme refusal before file inspection, for either
+OTLP protocol. Header-pair parsing retains its typed cause beneath the value-free client key
+context. Neither path includes configured header values, file paths or endpoint credentials.
+The encoder verifies mapped types as a plan invariant; a violated invariant does not become a
+repeated connector initialization attempt.
+
 Sentry's offline DSN check retains `sentry_types::ParseDsnError` beneath
 `OfflineClientConfigError` for `dsn`, and connector initialization retains that same report
 beneath its open context. Public command refusals render the reviewed key context, never the
@@ -598,6 +606,13 @@ a decoding failure. A caller keeps the storage report beneath its own context:
 `RuntimeStateOperationError::Persistence` for a replica's installation or a snapshot task,
 `OwnershipHandoffError::Persistence` for a handoff, and the domain build's `ExecutionBuildError`
 step, which names the node and the state kind, for a state assignment.
+
+Bulk overlap refusals retain `AdmissionError` beneath `MaterializedSnapshotError::Admission`
+for captured checkpoint reads and group metadata, and beneath `SnapshotStagingError::Admission`
+for staged file operations. These are capacity failures, not malformed snapshots. A stopped
+materialized backup keeps the report beneath its capture context and refuses the backup without
+publishing an inventory. Its incomplete staged sections are released; a new backup after capacity
+returns reads the complete checkpoint afresh.
 
 Native Kafka stream conversion retains the rkyv validation failure beneath `DecodeState` and the
 placement-qualified `StateReplicationError::Capture`. A cancelled conversion keeps `Cancelled` at
@@ -1320,6 +1335,17 @@ while it retries. An Arrow schema that Iceberg cannot represent keeps the typed 
 error beneath `IcebergColumnError::MappedSchema`. The plan compares names and nested types after
 narrowing UTC datetimes to microseconds.
 
+An Iceberg emitter with `BATCH` also lays out the selected rows against the table schema before
+staging, so a projection failure there remains an `IcebergColumnError` beneath
+`EmitterWriteError::Publish`. Its Parquet size measurement retains the Parquet cause beneath that
+publish error if encoding fails. A successfully measured row whose complete Parquet file exceeds
+the declared `MAX SIZE` is instead a definitive per-row `validation` message error of the `encode`
+operation; `ON MESSAGE ERROR` routes it before the other rows are staged. A data file whose
+physical count or byte length violates a bound after a table schema change is a commit failure:
+the emitter does not append it and keeps the staged rows and acknowledgements for retry.
+Cleanup failures for incomplete staged files or a rejected data file are logged with their paths
+without replacing the original publish or commit failure.
+
 An Iceberg commit charges the bulk memory class for the staged files it reads back with
 `Executor::try_reserve`, so a charge the class has no room for is refused rather than queued. The
 refusal keeps the typed `AdmissionError` beneath `EmitterWriteError::Commit` and attaches the
@@ -1568,6 +1594,12 @@ warning instead of inventing per-record rejections. An OTLP/gRPC export the rece
 retries, whatever code tonic reports for it. An answered status other than `INVALID_ARGUMENT`,
 `RESOURCE_EXHAUSTED` or a code the OTLP specification lists as retryable is a misconfiguration
 failure, which the host does not retry.
+
+An HTTP polling request whose response exceeds `MAX BODY SIZE` fails that poll with a typed
+`ResponseTooLarge` cause. DNS, connection, TLS, response-body and timeout failures retain their
+typed transport causes with the request URL removed. A non-`2xx` answer reports its numeric status
+without target or header values. The ingestor host applies its general-error policy and may poll
+again on its next cadence.
 
 An HTTP emitter rejects a record at the first request field that fails, in the order it evaluates
 them: `METHOD`, `PATH`, and then each header write. A failed expression keeps the `evaluation`
@@ -2841,9 +2873,11 @@ refuse, and unit tests beside each owner.
 | The formatter reports rejected source with its stage and exit status | `plexus_format.feature` |
 | Input a decoder must refuse fails with the owner's typed error and never panics | The registered Bolero targets `plexus-statement-text`, `models-duration-text`, `wasm-protocol-malformed`, `runtime-arrow-bodies-malformed`, `client-producer-batches-malformed`, `relay-wire-messages-malformed`, `client-discriminators`, `backup-malformed-records` and `consensus-state-corruption` |
 
-Every registered Bolero property runs as an ordinary randomized and corpus test for each pull
-request. The sanitizer-backed fuzz campaign over the same targets runs in CI only for a pull
-request labeled `fuzz`; any other run skips it, and a skipped campaign is no fuzz evidence.
+Every registered Bolero property runs as an ordinary test in the ordinary suites. CI's randomized
+and corpus job over the registered targets runs only for a pull request labeled `bolero-random`,
+and the sanitizer-backed fuzz campaign over the same targets, the preferred Bolero evidence, only
+for one labeled `fuzz`; any other pull request skips them, and a skipped run is no evidence of its
+mode.
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md#commands-and-enforcement) owns the
 commands and the gate.
 

@@ -90,6 +90,25 @@ pub(in crate::registry) fn validate_ingestor_source(
             reason,
         })
     };
+    if let Some(nervix_models::IngestorEntity::Http(nervix_models::HttpIngestor::Request(source))) =
+        ingestor.input.transport_entity()
+    {
+        HttpMethod::parse(&source.method, HttpBodyMode::WithoutBody)
+            .map_err(|report| invalid(report.current_context().to_string()))?;
+        let mut headers = HttpApplicationHeaders::default();
+        for header in &source.headers {
+            let name = HttpHeaderName::parse(&header.name)
+                .map_err(|report| invalid(report.current_context().to_string()))?;
+            let value = HttpHeaderValue::parse(&header.value)
+                .map_err(|report| invalid(report.current_context().to_string()))?;
+            headers
+                .insert(name, value)
+                .map_err(|report| invalid(report.current_context().to_string()))?;
+        }
+        headers
+            .validate_total()
+            .map_err(|report| invalid(report.current_context().to_string()))?;
+    }
     let quiesce = ingestor.input.quiesce();
     if !ingestor.input.supports_quiesce(quiesce) {
         return Err(invalid(format!(
@@ -593,7 +612,7 @@ fn validate_otel_mapping_contract(
     } = connector.mappings();
     let types = nervix_models::EmitterEntityBody::mapped_value_types(connector)
         .verified("every OTEL signal declares its mapped field types");
-    let mut value_keys = HashSet::default();
+    let mut value_expressions = HashMap::default();
     for mapping in values {
         if types
             .value_type(nervix_models::MappedValueSection::Values, &mapping.column)
@@ -604,7 +623,10 @@ fn validate_otel_mapping_contract(
                 key: mapping.column.clone(),
             }));
         }
-        if !value_keys.insert(mapping.column.as_str()) {
+        if value_expressions
+            .insert(mapping.column.as_str(), &mapping.expression)
+            .is_some()
+        {
             return Err(invalid(OtelMappingIssue::DuplicateValue {
                 signal,
                 key: mapping.column.clone(),
@@ -612,7 +634,17 @@ fn validate_otel_mapping_contract(
         }
     }
     for field in connector.value_fields() {
-        if !field.presence.is_required(connector.is_delta()) || value_keys.contains(field.key) {
+        if let Some(expression) = value_expressions.get(field.key) {
+            if !field.rule.admits_literal(expression) {
+                return Err(invalid(OtelMappingIssue::LiteralValue {
+                    signal,
+                    key: field.key,
+                    rule: field.rule,
+                }));
+            }
+            continue;
+        }
+        if !field.presence.is_required(connector.is_delta()) {
             continue;
         }
         let issue = match field.presence {

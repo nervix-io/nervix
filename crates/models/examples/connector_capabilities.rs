@@ -62,6 +62,7 @@ fn option_value(value: OptionValue) -> String {
         OptionValue::Name(name) => format!("string literal checked by {}", name.label),
         OptionValue::Expression => "expression".to_owned(),
         OptionValue::Mapping => "named expressions".to_owned(),
+        OptionValue::LiteralMapping => "named string literals".to_owned(),
         OptionValue::Client(connector) => format!("{connector} client"),
         OptionValue::Clause => "composed clause".to_owned(),
         OptionValue::Size => "byte size".to_owned(),
@@ -451,6 +452,9 @@ fn client_key(key: &ClientConfigKey) -> Value {
         ClientConfigPresence::Defaulted(value) => format!("optional; default `{value}`"),
         ClientConfigPresence::RequiredForScheme { address, scheme } => {
             format!("required when `{address}` uses `{scheme}`")
+        }
+        ClientConfigPresence::OptionalForScheme { address, scheme } => {
+            format!("optional; requires `{address}` to use `{scheme}`")
         }
     };
     let owner = match key.owner {

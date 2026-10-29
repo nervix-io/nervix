@@ -505,6 +505,115 @@ Feature: MQTT ingestion
       | 1            | 0             |
       | 3            | 1             |
 
+  # The ingestor's client connects to the broker listener that holds it to a 10-second keep-alive
+  # and closes a connection that sends nothing for 15 seconds. The stalled emitter holds the
+  # publish's acknowledgement for two of those keep-alive intervals.
+  @mqtt_qos0_overflow_during_acknowledgement
+  Scenario Outline: An MQTT ACK SEQUENTIAL ingestor keeps polling when QoS 0 fills its read-ahead during an acknowledgement wait
+    Given MQTT is running
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And MQTT topic "overflow_ack_out_{{test_id}}" is observed
+    When these Plexus statements are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE MQTT CLIENT mqtt_ingress
+        CONFIG {
+          'addr' = '{{mqtt_short_keepalive_addr}}',
+          'client_id' = 'nervix-cucumber-ingestor-overflow-in-{{test_id}}'
+        };
+        CREATE MQTT CLIENT mqtt_out
+        CONFIG {
+          'addr' = '{{mqtt_addr}}',
+          'client_id' = 'nervix-cucumber-ingestor-overflow-out-{{test_id}}'
+        };
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'overflow_ack_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 200ms
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications WHERE input.user_id = 61 OR input.user_id = 63 TO mqtt_out TOPIC 'overflow_ack_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_codec
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications WHERE user_id = 61 OR user_id = 63;
+        START;
+      """
+    Then within "10s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
+      """
+      ready: true
+      """
+    When these Plexus statements are executed
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "ingestor" "mqtt_notifications" is saved as placeholder "mqtt_owner"
+    When emitter "mqtt_forward" enters stall mode
+    And MQTT QoS 1 message is published to topic "overflow_ack_{{test_id}}"
+      """
+      {"user_id":61}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":61
+      """
+    When 128 JSON messages with user id 62 are rapidly published to "MQTT" input "overflow_ack_{{test_id}}"
+    And MQTT QoS 1 message is published to topic "overflow_ack_{{test_id}}"
+      """
+      {"user_id":63}
+      """
+    And physical time passes for "20s"
+    And emitter "mqtt_forward" leaves stall mode
+    Then within "30s" the observed broker receives exactly 2 messages
+    And the last observed broker payload contains
+      """
+      "user_id":63
+      """
+    # A connection the broker had closed would make it deliver the publish again once the
+    # ingestor reconnected, because it never received the acknowledgement.
+    And the observed broker does not receive a payload within "10s"
+    Then the relay subscription receives a payload
+      """
+      "user_id":63
+      """
+    And the relay subscription does not receive a payload within "1s"
+    And node "{{mqtt_owner}}" observability metric "nervix_ingestor_read_ahead_dropped_payloads_total" with labels eventually equals 64
+      """
+      domain="{{domain}}"
+      ingestor="mqtt_notifications"
+      physical_node_id="{{mqtt_owner}}"
+      """
+    And within "10s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
+      """
+      nervix_ingestor_transport_redeliveries_total: 0
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
   # The listener lets the broker hold up to the client's own Receive Maximum of publishes in flight,
   # so one batch takes all 2,000 publishes and its acknowledgement requests a PUBACK for each. A
   # failed acknowledgement would drop the connection and count the batch's positions as transport

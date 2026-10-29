@@ -322,6 +322,7 @@ Feature: Configuration backup into a public archive
       """
       {"id":7,"source":"input"}
       """
+    And junction "wait_for_state" has parked a message on its materialized state
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}} --timeout 10s" from node "{{leader}}" into "slow-parked.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
@@ -1061,6 +1062,23 @@ Feature: Configuration backup into a public archive
     And the CLI recovers that archive to stdout with the same execution reference
     When the backup's archive is downloaded from node "{{assembler}}"
     Then the download is refused as "NotRetained"
+
+  Scenario: A cluster backup whose admission met a leadership change is learned under its reference and recovered with a different local destination
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_event ( id I64 );
+      """
+    Then the current leader node is saved as placeholder "admitting"
+    And a node other than placeholder "admitting" is saved as placeholder "successor"
+    Given leadership moves from node "{{admitting}}" to node "{{successor}}" before its next admission proposal
+    When a completed cluster backup is recovered with a different local destination
+    Then the leadership move before the admission proposal completed
+    When the backup's archive is downloaded from node "{{admitting}}"
+    Then the download is sent to node "{{successor}}", which assembled the archive
+    And the CLI recovers that archive to stdout with the same execution reference
 
   Scenario Outline: A backup taken while models change holds one coherent revision
     Given a <cluster_size> node nervix cluster is started
