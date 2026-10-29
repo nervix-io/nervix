@@ -651,17 +651,23 @@ fn bolero_schema_checked_client_entries_round_trip() {
                         };
                         format!("{scheme}://user:password@example.com/api")
                     }
-                    ClientConfigValue::DriverAddress => {
-                        "redis://user:password@example.com/0".to_string()
-                    }
+                    ClientConfigValue::DriverAddress => match address_schemes.get(key.name) {
+                        Some(scheme) => format!("{scheme}://user:password@example.com/0"),
+                        None => "redis://user:password@example.com/0".to_string(),
+                    },
                     ClientConfigValue::DriverUrl(declared) => {
-                        let index = arbitrary.entropy().index(
-                            NonZeroUsize::new(declared.schemes.len())
-                                .assured("a URL declares schemes"),
-                        );
+                        let scheme = match address_schemes.get(key.name) {
+                            Some(scheme) => *scheme,
+                            None => {
+                                let index = arbitrary.entropy().index(
+                                    NonZeroUsize::new(declared.schemes.len())
+                                        .assured("a URL declares schemes"),
+                                );
+                                declared.schemes[index]
+                            }
+                        };
                         let mut url = format!(
-                            "{}://user:password@example.com/db?application_name=fixture",
-                            declared.schemes[index]
+                            "{scheme}://user:password@example.com/db?application_name=fixture"
                         );
                         for option in declared.owned {
                             let owned_option = OwnedOptionOf {
