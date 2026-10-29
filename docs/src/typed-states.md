@@ -162,10 +162,13 @@ The representation depends on the question being asked:
 | Can a physical format encode the state? | A private wire, storage, Arrow, or atomic encoding | Decode at the boundary and expose typed operations to callers. |
 
 Consensus replication replies have explicit initial-probe, ordered-stream and finished phases.
-Leading empty requests confirm a log boundary over management capacity; the first data request
-transfers the remaining input to one ordered stream. Empty commit updates then remain in that
-stream's order. A failed or rejected initial probe ends its input, so no data stream can follow an
-unconfirmed boundary. These phases are volatile protocol state and are never persisted.
+Leading empty requests confirm a log boundary over management capacity. The initial-probe owner
+retains the last confirmed preceding log identity for this input. A first data request whose
+preceding identity differs requires an empty management check; a request at the beginning of the
+log has no preceding identity to verify. Only a complete match transfers the original data and
+remaining input to one ordered stream. Empty commit updates then remain in that stream's order.
+A failed or rejected prefix check ends its input. These phases and their confirmation are volatile
+protocol state and are never persisted or reused across stream generations.
 
 A pure conversion refusal is an ordinary typed outcome, even when it implements
 `std::error::Error` for a parsing trait. Its owner states that contract at the exact error type

@@ -24,7 +24,11 @@ within its explicit assertion bound. Every five seconds it records applied domai
 counters for each source, bytes forwarded by the pacer, and each node's applied revision and log,
 snapshot and purged indexes. On failure it also records a concise status for initialization,
 leader and voter membership. The opening count is a diagnostic observation of data streams;
-initial empty probes use the management path. An atomic maximum of bytes forwarded on one
+initial empty probes and unconfirmed-prefix checks use the management path. The rate-limited case
+also permits at most two data-stream openings: OpenRaft may complete a finite log-range input
+before supplying its moving pipeline input. Prefix conflicts must be resolved before data
+admission. The original 1,024 domains, 32,768-byte/s rate and 120-second assertion bound remain
+fixed. An atomic maximum of bytes forwarded on one
 connection proves that the paced path carried more than one production progress interval. The
 pacer also counts accepted, connected, failed, cancelled and completed connections, and total
 bytes. These observations do not inspect TLS or frame bytes or establish ordering the product
@@ -1873,9 +1877,8 @@ The after hook runs every scenario's cleanup through the phases above.
 ```text
 body complete
      |
-teardown started      cancel and join the background CLI backup;
-     |                release paused health responses, domain-clock progress pauses, and
-     |                command pauses; stop durable catch-up writers and domain write load
+teardown started      release paused health responses, domain-clock progress pauses,
+     |                command pauses and backup cut gates; stop durable catch-up writers and domain write load
      |                sessions, and clear consensus commit delays
 teardown diagnostics  every node's status at once within 10 s; the scenario's context
      |
@@ -1884,7 +1887,9 @@ stopping              abort CLI output readers and kill their child processes;
      |                and observers;
      |                stop HTTP and gRPC receivers within 6 s; close the browser and the
      |                session;
-     |                stop the cluster within 60 s;
+     |                finish retained background backups after releasing cut gates;
+     |                cancel and join any remaining background CLI before stopping the cluster,
+     |                sharing one absolute 60 s deadline;
      |                release proxies, silent peers, permits, and fixture ports
 finished
 ```
@@ -1909,7 +1914,12 @@ failures can collect the same snapshots.
 
 ### Cluster Teardown
 
-A cluster's nodes stop within one deadline of 60 seconds for all of them together.
+A cluster's nodes stop within one deadline of 60 seconds for all of them together. When cleanup
+released backup cut gates, it first joins retained background backup, Plexus and raw command tasks
+while every peer still serves the admitted work. That join and the node stops receive the same
+absolute deadline; finishing a backup consumes time from the node-stop budget instead of starting
+another timeout. A timed-out or failed background task remains visible in the cleanup log. The
+scenario body's result is preserved.
 
 1. Every node is asked to stop before any node is awaited.
 2. Every node's task is awaited concurrently under the one deadline. Each wait borrows its task from
@@ -1956,6 +1966,36 @@ while a keeper gives it back on a runtime worker. The close never waits for a wo
 compaction failed; see [Terminal Teardown](./shutdown.md#terminal-teardown).
 
 ### What Cleanup Releases
+
+Before diagnostics and node shutdown, the after hook releases every armed backup cut gate,
+including both lease and capture boundaries. The gate owner publishes release to existing
+waiters before clearing its registry, so a cut that already borrowed a gate continues and a
+later cut finds no hold. Cleanup applies after failed steps as well as successful bodies and is
+idempotent. It does not cancel an admitted backup or claim that releasing its gate completes it.
+
+After releasing gates, cleanup lets retained public backup work finish while its peers remain
+available. It then cancels and joins any remaining CLI task before stopping nodes or returning
+listener ports. The bounded CLI wait borrows its handle, keeping it owned for cancellation and join
+if the deadline passes. The explicit scenario cancellation step still kills and joins its own child.
+
+`just test-backup-cut-cleanup` qualifies that failed-step path through the real Cucumber after
+hook. Its fixture, outside the ordinary feature tree at `tests/fixtures/backup_cut_cleanup.feature`,
+starts a public backup, observes the armed boundary and deliberately fails the body. Both lease
+and capture cases run on one and three nodes, with four run slots and no retries. The supervisor
+requires Cucumber's six failures and failure exit, six completed after hooks, completed retained
+background work, and all twelve nodes stopped within the unchanged cleanup budget. The cases reach
+the Plexus, raw-command and CLI task owners. A passed body, missing case, retry, unfinished
+background operation or node, or teardown panic fails qualification. These deliberately failed
+bodies remain failed features; the supervision verdict is independent of ordinary coverage. Check
+runs it after the ordinary scenarios, reusing their instrumented build while directing qualification
+profiles to its own evidence directory without exporting them. It retains the child output, build
+manifest, executable hash, source snapshot, lifecycle log, node log and suite summary. The supervisor
+preserves the ordinary run's logs and summary separately.
+
+The cut gates' watch channels and test-only concurrent map are outside Deloxide's tracked
+thread-blocking locks. This change adds no product synchronization, memory-ordering claim or
+data-plane protocol; the focused gate-owner tests and supervised public interleavings establish
+the cleanup behavior.
 
 The resource-source-discovery fixture uses the existing node-scoped command-pause registry. Once
 reconciliation finds a usable source for an absent local copy, the fixture hides the source view

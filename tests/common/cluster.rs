@@ -1096,7 +1096,8 @@ impl Cluster {
             // A construction that failed has no assertion left to serve, so the nodes it started
             // stop together under the one cleanup budget rather than one after another under the
             // product shutdown deadlines a scenario-driven stop observes.
-            let teardown = cluster.shutdown_for_teardown().await;
+            let deadline = PhaseDeadline::after(CLUSTER_TEARDOWN_BUDGET);
+            let teardown = cluster.shutdown_for_teardown(deadline).await;
             let Some(unclean) = teardown.unclean() else {
                 return Err(error);
             };
@@ -1872,8 +1873,11 @@ impl Cluster {
     /// Cleanup follows the scenario's assertions, so it uses the harness budget rather than the
     /// product shutdown deadlines a scenario configured: a scenario that asserts on shutdown,
     /// drain or deadline expiry stops its nodes itself, before it reaches here.
-    pub(crate) async fn shutdown_for_teardown(&mut self) -> ClusterTeardown {
-        ClusterTeardown::stop_all(self.nodes.values_mut(), CLUSTER_TEARDOWN_BUDGET).await
+    pub(crate) async fn shutdown_for_teardown(
+        &mut self,
+        deadline: PhaseDeadline,
+    ) -> ClusterTeardown {
+        ClusterTeardown::stop_all(self.nodes.values_mut(), deadline).await
     }
 
     pub(crate) async fn restart(&mut self) -> io::Result<()> {
