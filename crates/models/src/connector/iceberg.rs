@@ -166,6 +166,18 @@ pub struct IcebergTableEmitter {
     pub max_commit_size: PayloadSizeLimit,
 }
 
+impl IcebergTableEmitter {
+    /// The Parquet writer's data-file rollover target when `BATCH` is absent.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "Iceberg TableProperties fixes the default write target file size at 512 MiB"
+        )
+    )]
+    pub const DEFAULT_DATA_FILE_TARGET_BYTES: u64 = 512 * 1024 * 1024;
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]

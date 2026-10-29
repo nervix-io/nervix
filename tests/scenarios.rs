@@ -105,7 +105,7 @@ use crate::common::{
         SUBSCRIBED_LINE, corpus_report,
     },
     cluster::{
-        AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster,
+        AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster, CommandHold,
         DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
         InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
         TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
@@ -12381,14 +12381,36 @@ async fn given_leadership_moves_under_next_durable_admission(
 ) {
     let from_node_id = expand_placeholders(world, &from_node_id);
     let to_node_id = expand_placeholders(world, &to_node_id);
-    let moved = world
-        .cluster()
-        .move_leadership_after_next_durable_admission(&from_node_id, &to_node_id);
+    let moved = world.cluster().move_leadership_under_next_command(
+        CommandHold::AfterDurableAdmission,
+        &from_node_id,
+        &to_node_id,
+    );
+    world.leadership_move = Some(moved);
+}
+
+#[given(
+    expr = "leadership moves from node {string} to node {string} before its next admission \
+            proposal"
+)]
+async fn given_leadership_moves_before_next_admission_proposal(
+    world: &mut ScenarioWorld,
+    from_node_id: String,
+    to_node_id: String,
+) {
+    let from_node_id = expand_placeholders(world, &from_node_id);
+    let to_node_id = expand_placeholders(world, &to_node_id);
+    let moved = world.cluster().move_leadership_under_next_command(
+        CommandHold::BeforeAdmissionProposal,
+        &from_node_id,
+        &to_node_id,
+    );
     world.leadership_move = Some(moved);
 }
 
 #[then("the leadership move under the durably admitted command completed")]
-async fn then_leadership_move_under_durable_admission_completed(world: &mut ScenarioWorld) {
+#[then("the leadership move before the admission proposal completed")]
+async fn then_leadership_move_completed(world: &mut ScenarioWorld) {
     let moved = world
         .leadership_move
         .take()
@@ -12398,7 +12420,7 @@ async fn then_leadership_move_under_durable_admission_completed(world: &mut Scen
         .expect("the leadership move ends once its command was released");
     ended
         .expect("the leadership move task runs to its end")
-        .expect("the successor reported itself the leader before the command was released");
+        .expect("both nodes reported the successor as the leader before the command was released");
 }
 
 #[given("the leader node forgets its transaction session bindings")]
@@ -28087,32 +28109,6 @@ async fn when_http_payload_is_posted_to_node_and_fails(
     }
 }
 
-#[when(
-    expr = "http payload is posted to node {string} with host {string} path {string} and is not \
-            routed"
-)]
-async fn when_http_payload_is_posted_to_node_and_is_not_routed(
-    world: &mut ScenarioWorld,
-    node_id: String,
-    host: String,
-    path: String,
-    #[step] step: &Step,
-) {
-    let host = expand_placeholders(world, &host);
-    let path = expand_placeholders(world, &path);
-    let payload = expand_placeholders(world, docstring(step));
-    let error = world
-        .cluster()
-        .publish_http(&node_id, &host, &path, &payload)
-        .await
-        .expect_err("expected http post to be unrouted");
-    let reported = error.to_string();
-    assert!(
-        reported.contains("404"),
-        "expected http post to node '{node_id}' to be unrouted, got: {reported}"
-    );
-}
-
 #[then("the relay subscription receives a payload")]
 async fn then_stream_subscription_receives_payload(world: &mut ScenarioWorld, #[step] step: &Step) {
     append_cucumber_log_line(&format!(
@@ -33542,17 +33538,11 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.enter_phase(ScenarioPhase::BodyComplete, &format!("result={body}"));
 
                 world.enter_phase(ScenarioPhase::TeardownStarted, "");
-                if let Some(Err(error)) = world.cancel_background_backup().await
-                    && !error.is_cancelled()
-                {
-                    append_cucumber_log_line(&format!(
-                        "scenario teardown failed: background CLI backup task: {error}"
-                    ));
-                }
                 world.stop_consensus_load();
                 world.fault_injection.release_all_health_responses();
                 world.fault_injection.release_all_domain_clock_progress();
                 world.fault_injection.release_all_command_pauses();
+                let backup_gates_released = world.fault_injection.release_all_backup_cut_pauses();
                 world.fault_injection.release_all_wasm_checkpoint_pauses();
                 for node in std::mem::take(&mut world.occupied_bulk_nodes) {
                     world.fault_injection.release_execution(&node);
@@ -33611,9 +33601,20 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.active_session_has_subscription = false;
                 world.last_server_error = None;
                 world.release_mysql_table_locks().await;
+                let cleanup_deadline = PhaseDeadline::after(CLUSTER_TEARDOWN_BUDGET);
+                if backup_gates_released > 0 {
+                    world.finish_background_backups(cleanup_deadline).await;
+                }
+                if let Some(Err(error)) = world.cancel_background_backup().await
+                    && !error.is_cancelled()
+                {
+                    append_cucumber_log_line(&format!(
+                        "scenario teardown failed: background CLI backup task: {error}"
+                    ));
+                }
                 let cluster_cleanup = match world.cluster.take() {
                     Some(mut cluster) => {
-                        let teardown = cluster.shutdown_for_teardown().await;
+                        let teardown = cluster.shutdown_for_teardown(cleanup_deadline).await;
                         for panicked in teardown.panics() {
                             append_cucumber_log_line(&format!(
                                 "scenario teardown failed: {panicked}"

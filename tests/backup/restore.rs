@@ -868,7 +868,8 @@ async fn given_cluster_is_replaced(world: &mut ScenarioWorld, node_count: usize,
         .take()
         .expect("the scenario runs the cluster it replaces");
     world.transaction_clients.clear();
-    let teardown = cluster.shutdown_for_teardown().await;
+    let deadline = PhaseDeadline::after(CLUSTER_TEARDOWN_BUDGET);
+    let teardown = cluster.shutdown_for_teardown(deadline).await;
     let panics = teardown
         .panics()
         .map(ToString::to_string)

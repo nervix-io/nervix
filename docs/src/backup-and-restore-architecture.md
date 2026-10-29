@@ -986,6 +986,14 @@ or twelve seconds with a ten-second client wait, on one and three nodes. An exha
 precede the second cut without cancelling the admitted backup. A fresh client recovers its original
 execution and downloads an archive retaining both quiesced cuts and the first cut's measured hold.
 
+The harness releases every test lease and capture gate before it shuts nodes down, including after
+a failed body. `just test-backup-cut-cleanup` supervises deliberately failed public backup cases at
+both boundaries on one and three nodes: the bodies must retain their failures and every node must
+stop within the existing cleanup budget. Retained public backup tasks finish before their peers
+stop, sharing that same deadline with node shutdown. [Integration Test Lifecycle](./integration-test-lifecycle.md#what-cleanup-releases)
+owns that independent supervision verdict and its retained source and logs. It changes no backup
+completion or cancellation guarantee.
+
 ### Representation Checks
 
 The registered [archive properties](./property-testing-and-fuzzing.md) compare complete current

@@ -1,0 +1,50 @@
+BEGIN;
+
+CREATE SCHEMA chaos_edge_record (
+  event_id STRING,
+  sequence I64,
+  content STRING
+);
+
+CREATE WIRE JSON SCHEMA chaos_edge_wire MODE STRICT (
+  event_id STRING,
+  sequence INTEGER,
+  content STRING
+);
+
+CREATE CODEC chaos_edge_json
+  FROM WIRE JSON SCHEMA chaos_edge_wire
+  TO SCHEMA chaos_edge_record;
+
+CREATE KAFKA CLIENT chaos_edge_kafka
+  CONFIG {
+    'bootstrap.servers' = 'broker:9092'
+  };
+
+CREATE VHOST chaos_edge chaos-edge.example;
+
+CREATE ENDPOINT chaos_edge_ingress ON chaos_edge PATH '/events' TYPE HTTP;
+
+CREATE RELAY chaos_edge_http SCHEMA chaos_edge_record UNBRANCHED CAPACITY 1;
+
+CREATE HTTP ENDPOINT INGESTOR chaos_edge_http_source
+  FROM chaos_edge_ingress MODE ACK MAX 64 ACK TIMEOUT 10s ON QUIESCE REJECT RETRY AFTER 1s
+  DECODE USING chaos_edge_json
+  TO chaos_edge_http
+    INHERIT ALL
+    UNBRANCHED
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE ATTACHED KAFKA TOPIC EMITTER chaos_edge_http_emitter
+  FROM chaos_edge_http
+  TO chaos_edge_kafka TOPIC 'chaos_edge_primary_http'
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_edge_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+COMMIT;

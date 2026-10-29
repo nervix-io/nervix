@@ -435,6 +435,14 @@ factory initializes one operator for the configured object-store root; data, man
 files use that same initialized storage after refreshes, successful commits and ambiguous-result
 reconciliation. This reuses the library's existing storage lifetime and adds no synchronization
 protocol or shared map. The emitter task remains the sole owner of commit retry pacing.
+Its declared `BATCH` file division measures Parquet bytes on the node's bounded bulk CPU workers
+before staging Arrow IPC segments; the emitter task still owns those segments and the one retained
+carrier acknowledgement until their catalog commit. The CPU queue and catalog I/O are asynchronous
+and outside Deloxide's tracked blocking locks. The one- and three-node Iceberg file-bound scenarios
+run in the active, order and lifecycle-stress selections to exercise the tracked host state beside
+that staging and commit path. The restore-stress lane remains part of the required four-lane
+qualification when this lifecycle changes, though it owns restore workloads rather than an
+Iceberg-specific scenario.
 
 Every pooled Redis or SQL emitter registers a wait slot once. The connector serializes its connection
 borrows. A ready borrow writes nothing; the first Pending poll publishes its wait and owns a guard
@@ -528,6 +536,12 @@ bind or unbind derive a replacement from the current publication with `ArcSwap::
 writers retry against the latest complete table, preserving unrelated domains and sources. A
 passive installation publishes no endpoint definitions. The listening socket remains present on
 every node independently of this table.
+
+The table also records whether a revision installed it since the node started or the runtime last
+cleared it. A revision application marks it installed once every domain of the revision has
+published its definitions. A request reads the route and that state from the same load. A
+published route is served whatever the state. A missing route is unrouted, answered with 404, only
+in an installed table; before installation it is uninstalled, answered with 503.
 
 An HTTP request resolves one route using borrowed host and path keys; only uppercase hosts need a
 normalization allocation. A WebSocket retains the resolved route and its signaling protocol from
@@ -1823,6 +1837,15 @@ measurements are task-owned administrative state and add no synchronization. The
 and cleanup paths retain their tracked-lock coverage; phase timing itself establishes no
 interleaving or memory-ordering guarantee. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
 owns the diagnostic contract.
+
+The test-only backup cut registry releases its watch-held lease and capture gates before clearing
+the map during scenario cleanup. Existing borrowers observe release; later cuts encounter no
+gate. Gate-owner tests with a paused clock cover waiting cuts, timed holds and later arrivals.
+The supervised failed-body Cucumber fixture reaches both public boundaries on one and three nodes
+and requires every node to stop while every body retains its failure. These watch channels and
+concurrent-map accesses are outside Deloxide's tracked locks. This harness cleanup adds no
+data-plane synchronization or memory-ordering claim; [Integration Test Lifecycle](./integration-test-lifecycle.md#what-cleanup-releases)
+owns its supervision verdict.
 
 A diagnostic node selects the `deloxide` mode. The `deloxide-order` feature adds historical order
 instrumentation to that same mode, and the `deloxide-stress` feature adds Deloxide's bounded

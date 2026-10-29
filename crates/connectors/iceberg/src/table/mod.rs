@@ -31,10 +31,11 @@
 )]
 
 mod offline_config;
+mod parquet_bounds;
 mod storage;
 mod table_projection;
 
-use std::{fs::File, path::PathBuf, time::Duration};
+use std::{fs::File, ops::Range, path::PathBuf, time::Duration};
 
 use ::iceberg::{
     Catalog, CatalogBuilder, Error as IcebergError, ErrorKind as IcebergErrorKind, NamespaceIdent,
@@ -72,26 +73,30 @@ use arrow_schema::{DataType, TimeUnit};
 use arrow_select::filter::filter as filter_arrow_array;
 use error_stack::{Report, ResultExt as _};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     ConfiguredDeadline, EmitterCommitReport, EmitterFinish, EmitterFinishResult, EmitterHost,
     EmitterLifecycle, EmitterOpenError, EmitterRecordAcknowledgementServices,
     EmitterRecordAcknowledgements, EmitterRecordPosition, EmitterStagedCommit, EmitterStartResult,
     EmitterWriteError, EmitterWriteResult, MappedEmitterCarrier, MappedEmitterRows,
-    PerRecordOutcome, RowEmitter, physical_time::actual_utc_now,
+    MeasuredRequest, PerRecordOutcome, RowEmitter, RowRequest, RowRequestLimits,
+    physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
 use nervix_execution::{
-    AdmissionError, Executor, MemoryClass, QueueAdmission, Reservation, StorageClass,
+    AdmissionError, CpuClass, Executor, MemoryClass, QueueAdmission, Reservation, StorageClass,
 };
-use nervix_models::{ClientConfigEntry, IcebergStorageBackend, IcebergTableName, Timestamp};
+use nervix_models::{
+    ClientConfigEntry, EmitterBatchPolicy, IcebergStorageBackend, IcebergTableName, Timestamp,
+};
 use nervix_primitives::{sync::StdArc, time::Instant};
 pub use offline_config::{validate_catalog_configuration, validate_client_configuration};
 use parquet::file::properties::WriterProperties;
+use parquet_bounds::measured_file_size;
 use storage::DnsStorageFactory;
 use table_projection::{IcebergColumnError, IcebergTableProjection};
 use tempfile::TempDir;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 use url::Url;
 
 const ICEBERG: &str = "iceberg";
@@ -133,6 +138,8 @@ pub struct IcebergTableEmitterConfig {
     /// The mapped columns every staged batch carries, in `VALUES` order, each nullable exactly
     /// when its expression can produce a null.
     pub mapped_schema: StdArc<arrow_schema::Schema>,
+    /// The optional hard row and encoded-Parquet-byte limits of one appended data file.
+    pub batch: Option<EmitterBatchPolicy>,
     pub commit: IcebergCommitPolicy,
     /// How generated staging and data files name the writer that produced them.
     pub writer: String,
@@ -153,6 +160,7 @@ pub struct IcebergTableEmitter {
     /// the table requires.
     staged_schema: StdArc<arrow_schema::Schema>,
     commit_policy: IcebergCommitPolicy,
+    batch_policy: Option<EmitterBatchPolicy>,
     staging_dir: TempDir,
     /// The node's bounded executor, whose filesystem workers write and read the staged files.
     executor: Executor,
@@ -452,8 +460,6 @@ impl IcebergTableEmitter {
         config: IcebergTableEmitterConfig,
         host: EmitterHost,
     ) -> EmitterStartResult<Self> {
-        use meticulous::ResultExt as _;
-
         let IcebergTableEmitterConfig {
             backend,
             dns,
@@ -464,6 +470,7 @@ impl IcebergTableEmitter {
             table,
             location,
             mapped_schema,
+            batch,
             commit,
             writer,
         } = config;
@@ -525,6 +532,7 @@ impl IcebergTableEmitter {
             commit_state: IcebergCommitState::default(),
             staged_schema,
             commit_policy: commit,
+            batch_policy: batch,
             staging_dir,
             executor,
             staged_sequence: 0,
@@ -1045,7 +1053,7 @@ impl EmitterLifecycle for IcebergTableEmitter {
 
 #[async_trait::async_trait]
 impl RowEmitter for IcebergTableEmitter {
-    /// Stages the rows of every carrier of the write, one staged file per carrier.
+    /// Stages each carrier in one file without BATCH, or in bounded files with BATCH.
     async fn publish(
         &mut self,
         rows: MappedEmitterRows<'_>,
@@ -1063,24 +1071,126 @@ impl RowEmitter for IcebergTableEmitter {
 }
 
 impl IcebergTableEmitter {
-    /// Stages one carrier's selected rows as one file, retaining the acknowledgements the carrier
-    /// hands over until the commit that publishes it.
+    /// Divides a carrier into staged files by the exact Parquet bytes its current table schema
+    /// would write. A row too large to fit in one file is returned for message-error delivery.
+    async fn staged_file_division(
+        &self,
+        staged: &RecordBatch,
+        policy: EmitterBatchPolicy,
+    ) -> EmitterWriteResult<nervix_connector::RowRequests<()>> {
+        let projection = IcebergTableProjection::plan(
+            &self.staged_schema,
+            self.client.table.metadata().current_schema(),
+        )
+        .map_err(IcebergColumnError::publish_failure)?;
+        let projected = projection
+            .project(staged)
+            .map_err(IcebergColumnError::publish_failure)?;
+        let reservation = self
+            .executor
+            .reserve(MemoryClass::Bulk, STAGED_WRITE_RESERVATION_BYTES)
+            .await
+            .change_context(EmitterWriteError::Publish { connector: ICEBERG })?;
+        self.executor
+            .run_cpu_with(
+                CpuClass::Bulk,
+                QueueAdmission::WaitForPlace,
+                reservation,
+                move |_reservation, cancellation| {
+                    RowRequestLimits::from(policy).try_divide(projected.num_rows(), |members| {
+                        cancellation
+                            .check()
+                            .change_context(EmitterWriteError::Publish { connector: ICEBERG })?;
+                        let candidate = projected.slice(members.start, members.len());
+                        let size = measured_file_size(&candidate)
+                            .change_context(EmitterWriteError::Publish { connector: ICEBERG })?;
+                        Ok(MeasuredRequest { size, request: () })
+                    })
+                },
+            )
+            .await
+            .change_context(EmitterWriteError::Publish { connector: ICEBERG })?
+    }
+
+    /// Stages a carrier's accepted rows in BATCH-sized files, retaining its one acknowledgement
+    /// handle on the final file until the catalog commit publishes all of them.
     async fn stage(
         &mut self,
         carrier: MappedEmitterCarrier<'_>,
         outcome: &mut PerRecordOutcome<EmitterRecordPosition>,
     ) -> EmitterWriteResult<()> {
         let staged = self.staged_batch(&carrier)?;
-        let staged_rows: u64 = staged.num_rows().arch_into();
-        let path = self.next_staged_path();
-        let staged_bytes = Self::write_ipc_batch(&self.executor, path.clone(), staged).await?;
-        self.staged_batches.push(IcebergStagedBatch {
-            path,
-            rows: staged_rows,
-            bytes: staged_bytes,
-            acknowledgements: carrier.acknowledgements,
-            domain_timestamp: carrier.occurred_at,
-        });
+        let mut ranges = Vec::<Range<usize>>::new();
+        let mut rejected_rows = vec![false; staged.num_rows()];
+        if let Some(policy) = self.batch_policy {
+            for request in self.staged_file_division(&staged, policy).await?.requests {
+                match request {
+                    RowRequest::Write { members, .. } => ranges.push(members),
+                    RowRequest::Oversize { member, oversize } => {
+                        rejected_rows[member] = true;
+                        outcome.reject(oversize.rejected(
+                            EmitterRecordPosition {
+                                batch_index: carrier.batch_index,
+                                row_index: carrier.selected_rows[member],
+                            },
+                            carrier.occurred_at,
+                            "Iceberg Parquet data file",
+                        ));
+                    }
+                }
+            }
+        } else {
+            ranges.push(0..staged.num_rows());
+        }
+
+        let mut new_files = Vec::with_capacity(ranges.len());
+        let mut staged_rows = 0_u64;
+        let mut staged_bytes = 0_u64;
+        for range in ranges {
+            let path = self.next_staged_path();
+            let rows: u64 = range.len().arch_into();
+            let batch = staged.slice(range.start, range.len());
+            let bytes = match Self::write_ipc_batch(&self.executor, path.clone(), batch).await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    if let Err(cleanup_error) = tokio::fs::remove_file(&path).await {
+                        debug!(
+                            path = %path.display(),
+                            error = %cleanup_error,
+                            "failed to remove incomplete Iceberg staged batch"
+                        );
+                    }
+                    for file in new_files {
+                        let file: IcebergStagedBatch = file;
+                        if let Err(cleanup_error) = tokio::fs::remove_file(&file.path).await {
+                            debug!(
+                                path = %file.path.display(),
+                                error = %cleanup_error,
+                                "failed to remove staged batch after Iceberg publish error"
+                            );
+                        }
+                    }
+                    return Err(error);
+                }
+            };
+            new_files.push(IcebergStagedBatch {
+                path,
+                rows,
+                bytes,
+                acknowledgements: None,
+                domain_timestamp: carrier.occurred_at,
+            });
+            staged_rows = staged_rows
+                .checked_add(rows)
+                .assured("the accepted ranges are disjoint rows of one mapped batch");
+            staged_bytes = staged_bytes
+                .checked_add(bytes)
+                .assured("staged bytes fit the node's u64 byte count");
+        }
+        if let Some(last) = new_files.last_mut() {
+            last.acknowledgements = carrier.acknowledgements;
+        }
+        self.staged_batches.extend(new_files);
         self.staged_rows = self
             .staged_rows
             .checked_add(staged_rows)
@@ -1089,11 +1199,13 @@ impl IcebergTableEmitter {
             .staged_bytes
             .checked_add(staged_bytes)
             .assured("both counts total bytes this emitter already staged on disk");
-        for row in carrier.selected_rows {
-            outcome.deliver(EmitterRecordPosition {
-                batch_index: carrier.batch_index,
-                row_index: *row,
-            });
+        for (member, row) in carrier.selected_rows.iter().enumerate() {
+            if !rejected_rows[member] {
+                outcome.deliver(EmitterRecordPosition {
+                    batch_index: carrier.batch_index,
+                    row_index: *row,
+                });
+            }
         }
         trace!(
             rows = staged_rows,
@@ -1132,7 +1244,7 @@ impl IcebergTableEmitter {
             .await?;
             let data_files = self
                 .client
-                .write_data_files(&self.staged_schema, batches)
+                .write_data_files(&self.staged_schema, batches, self.batch_policy)
                 .await?;
             // The rows the charge covered are in data files now.
             drop(charge);
@@ -1278,6 +1390,7 @@ impl IcebergTableEmitterClient {
         &mut self,
         staged: &arrow_schema::SchemaRef,
         batches: Vec<RecordBatch>,
+        batch_policy: Option<EmitterBatchPolicy>,
     ) -> EmitterWriteResult<Vec<DataFile>> {
         let commit_failure = |error: &dyn std::fmt::Display| {
             Report::new(EmitterWriteError::Commit { connector: ICEBERG })
@@ -1287,6 +1400,95 @@ impl IcebergTableEmitterClient {
         let projection =
             IcebergTableProjection::plan(staged, self.table.metadata().current_schema())
                 .map_err(IcebergColumnError::commit_failure)?;
+        if let Some(policy) = batch_policy {
+            let mut written = Vec::with_capacity(batches.len());
+            for batch in batches {
+                nervix_primitives::task::consume_budget().await;
+                let projected = projection
+                    .project(&batch)
+                    .map_err(IcebergColumnError::commit_failure)?;
+                if projected.num_rows() == 0 {
+                    continue;
+                }
+                let max_rows: usize = policy.max_messages.get().get().arch_into();
+                if projected.num_rows() > max_rows {
+                    return Err(commit_failure(&format!(
+                        "Iceberg staged batch has {} rows, above BATCH MAX MESSAGES {max_rows}",
+                        projected.num_rows()
+                    )));
+                }
+                let location_generator = DefaultLocationGenerator::new(self.table.metadata())
+                    .map_err(|error| commit_failure(&error))?;
+                self.data_file_sequence = self
+                    .data_file_sequence
+                    .checked_add(1)
+                    .assured("an emitter cannot commit 2^64 data files in one node lifetime");
+                let file_name_generator = DefaultFileNameGenerator::new(
+                    format!("{}-{}", self.file_name_prefix, self.data_file_sequence),
+                    None,
+                    DataFileFormat::Parquet,
+                );
+                let parquet_writer = ParquetWriterBuilder::new(
+                    WriterProperties::builder().build(),
+                    self.table.metadata().current_schema().clone(),
+                );
+                // Every staged BATCH segment is one file. The rolling writer's own size check
+                // runs before a write and could overshoot; the measured segment and the returned
+                // physical file size enforce the hard bound instead.
+                let rolling_writer = RollingFileWriterBuilder::new(
+                    parquet_writer,
+                    usize::MAX,
+                    self.table.file_io().clone(),
+                    location_generator,
+                    file_name_generator,
+                );
+                let mut writer = DataFileWriterBuilder::new(rolling_writer)
+                    .build(None)
+                    .await
+                    .map_err(|error| commit_failure(&error))?;
+                writer
+                    .write(projected)
+                    .await
+                    .map_err(|error| commit_failure(&error))?;
+                let files = writer
+                    .close()
+                    .await
+                    .map_err(|error| commit_failure(&error))?;
+                if files.len() != 1 {
+                    return Err(commit_failure(&format!(
+                        "Iceberg wrote {} data files for one staged BATCH segment",
+                        files.len()
+                    )));
+                }
+                let file = files
+                    .into_iter()
+                    .next()
+                    .assured("exactly one data file was returned");
+                let max_rows_u64: u64 = max_rows.arch_into();
+                if file.record_count() > max_rows_u64
+                    || file.file_size_in_bytes() > policy.max_size.bytes().get()
+                {
+                    let reason = format!(
+                        "Iceberg data file has {} rows and {} bytes, above BATCH MAX MESSAGES \
+                         {max_rows} or MAX SIZE {}",
+                        file.record_count(),
+                        file.file_size_in_bytes(),
+                        policy.max_size
+                    );
+                    if let Err(cleanup_error) = self.table.file_io().delete(file.file_path()).await
+                    {
+                        warn!(
+                            path = file.file_path(),
+                            error = %cleanup_error,
+                            "failed to remove Iceberg data file rejected by BATCH bounds"
+                        );
+                    }
+                    return Err(commit_failure(&reason));
+                }
+                written.push(file);
+            }
+            return Ok(written);
+        }
         let location_generator = DefaultLocationGenerator::new(self.table.metadata())
             .map_err(|error| commit_failure(&error))?;
         self.data_file_sequence = self
@@ -1302,8 +1504,12 @@ impl IcebergTableEmitterClient {
             WriterProperties::builder().build(),
             self.table.metadata().current_schema().clone(),
         );
-        let rolling_writer = RollingFileWriterBuilder::new_with_default_file_size(
+        let default_file_target =
+            usize::try_from(nervix_models::IcebergTableEmitter::DEFAULT_DATA_FILE_TARGET_BYTES)
+                .assured("Nervix builds for 64-bit targets only");
+        let rolling_writer = RollingFileWriterBuilder::new(
             parquet_writer,
+            default_file_target,
             self.table.file_io().clone(),
             location_generator,
             file_name_generator,
@@ -1510,7 +1716,6 @@ mod tests {
         TimestampNanosecondBuilder,
     };
     use arrow_schema::Field;
-    use meticulous::ResultExt as _;
     use nervix_dns::{DnsConfiguration, NameServers};
     use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
     use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};

@@ -439,9 +439,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   bound emitter can keep failing after one failed publish; read `Ingestors` → `ZeroMQ` and
   `Emitters` → `ZeroMQ`. OTEL clients
   must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key. An OTEL
-  `grpc` endpoint may use a DNS hostname: the node's resolver is used when the first export opens
-  the lazy connection, and the configured hostname remains the HTTPS certificate name. A DNS
-  outage follows the emitter's declared retry policy.
+  endpoint may use a DNS hostname on either protocol: the emitter opens without contacting it, the
+  node's resolver answers when an export needs a connection, and the configured hostname remains
+  the HTTPS certificate name. An endpoint that does not resolve or answer is a publish failure
+  retried on the emitter's declared retry policy, never an initialization error.
 - For a ZeroMQ PULL/PUSH pair, use `MODE NO ACK` on both sides and the typed `ZEROMQ CLIENT`
   `addr` and `bind` keys. A PULL ingestor reads frame 0 only and skips messages with no frames;
   PUSH sends one payload frame without a receiver receipt. TCP hostnames use the ZeroMQ driver's
@@ -492,7 +493,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   rows from successive Arrow carriers in one flush may share a payload, but rows from different
   source relays or concrete branches cannot. For the database emitters, the clause bounds each insert
   or bulk write by row count and the exact size of what it carries; for OTEL, it bounds each
-  protobuf export request by successful source-record count and uncompressed encoded size; see
+  protobuf export request by successful source-record count and uncompressed encoded size, and an
+  OTEL request never combines records of two Arrow carriers; see
   [Emitters](../../../docs/src/emitters.md#batching).
   For SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
   queue name ends in `.fifo`; `FROM BRANCH` requires branched input.
@@ -590,8 +592,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - A server endpoint WebSocket keeps its route and signaling protocol for the connection. After
   its source stops or is replaced, reconnect to use the new source; after signaling, the next
   refused payload on the preceding connection closes with 1013. Configured routes without a live
-  intake reject with HTTP 503, while withdrawn routes return 404. Another domain sharing the host
-  and path retains its own intake when a domain is stopped.
+  intake reject with HTTP 503, while withdrawn routes return 404. A node that has not installed a
+  revision since it started answers 503 for every unpublished route, never 404. Another domain
+  sharing the host and path retains its own intake when a domain is stopped.
 - Declare both required WASM limits immediately after `FILE`, in order: `MAX FUEL <positive_u64>
   MAX MEMORY <positive_byte_size>`. Fuel is reset per logical guest operation; memory caps each
   branch guest's Wasmtime linear memory.

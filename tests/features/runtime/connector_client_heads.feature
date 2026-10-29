@@ -25,8 +25,8 @@ Feature: Connector names head client definitions
       | 3            | KAFKA        |                       |                                                                                |
       | 1            | PULSAR       |                       | 'addr' = 'pulsar://127.0.0.1:6650'                                             |
       | 3            | PULSAR       |                       | 'addr' = 'pulsar://127.0.0.1:6650'                                             |
-      | 1            | HTTP         |                       | 'endpoint' = 'http://127.0.0.1:19080'                                          |
-      | 3            | HTTP         |                       | 'endpoint' = 'http://127.0.0.1:19080'                                          |
+      | 1            | HTTP         |                       | 'endpoint' = 'http://127.0.0.1:19080', 'timeout_ms' = 5000                     |
+      | 3            | HTTP         |                       | 'endpoint' = 'http://127.0.0.1:19080', 'timeout_ms' = 5000                     |
       | 1            | SENTRY       |                       | 'dsn' = 'http://public@127.0.0.1:8000/1', 'timeout_ms' = 5000                  |
       | 3            | SENTRY       |                       | 'dsn' = 'http://public@127.0.0.1:8000/1', 'timeout_ms' = 5000                  |
       | 1            | OTEL         |                       | 'endpoint' = 'http://127.0.0.1:4317', 'protocol' = 'grpc', 'timeout_ms' = 5000 |
@@ -80,10 +80,9 @@ Feature: Connector names head client definitions
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://127.0.0.1:19080',
-        'method' = 'GET',
         'timeout_ms' = 5000
       };
-      CREATE HTTP REQUEST INGESTOR polling FROM api EVERY 1s
+      CREATE HTTP REQUEST INGESTOR polling FROM api METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

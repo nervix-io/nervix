@@ -147,10 +147,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__endpoint_route_table__tests__bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "endpoint-route-table"
-invariant = "Bind, unbind, replace and teardown publish exactly the configured routes, preserve other domains, and prevent retained routes from admitting ended source lifetimes."
+invariant = "Bind, unbind, replace, teardown and installation publish exactly the configured routes, preserve other domains, prevent retained routes from admitting ended source lifetimes, and report a missing route as final only in an installed table."
 manifest = "Cargo.toml"
 max_input_bytes = 64
 package = "nervix-server"
@@ -3037,6 +3037,21 @@ package = "nervix-connector-iceberg"
 random_iterations = 256
 source = "crates/connectors/iceberg/src/table/mod.rs"
 test = "table::tests::bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/iceberg/src/table/__fuzz__/table__parquet_bounds__tests__bolero_staged_iceberg_file_encoding_round_trips_and_measures_exactly/corpus"
+domain_version = 1
+features = []
+id = "iceberg-staged-file-encoding"
+invariant = "Generated mapped rows survive Arrow IPC staging and readback, and counting their projected Parquet encoding, including its footer, equals the actual file bytes."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-connector-iceberg"
+random_iterations = 256
+source = "crates/connectors/iceberg/src/table/parquet_bounds.rs"
+test = "table::parquet_bounds::tests::bolero_staged_iceberg_file_encoding_round_trips_and_measures_exactly"
 test_target = "lib"
 
 [[target]]
