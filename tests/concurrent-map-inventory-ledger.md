@@ -328,6 +328,13 @@ work retains its existing acknowledgement ownership and registry bounds.
 | `RelayPeerProtocol::outbound_attempts`, `outbound_admissions` | send, status/cancel reconciliation, exact terminal reply, refusal cleanup and peer ending | per remote frame or ACK | retained peer owner; receiver epoch and full registrar identity | at most 2Q of each; idle retention 10 min; exact correlation retires once | retain: bounded peer protocol, Typed Ratchet 05 |
 | `RequestState::handlers` (`ArcSwap` of an immutable map) | copy-on-write registration; one load per request | per remote frame, lock-free | fixed at startup | none | retain: bounded protocol (copy-on-write table) |
 
+A consensus data-stream start with an unconfirmed preceding log identity adds one management
+prefix request before replication admission. That setup request reads the immutable target and
+handler publications through their existing owners. A matching preceding empty probe in the same
+input supplies the confirmation directly. Admitted data and later commit updates retain their
+duplex handles; prefix verification adds no discovery lookup per batch or acknowledgement and no
+concurrent map.
+
 Generator source reads still issue one description per occurrence, but issue a snapshot fetch only
 when the selected owner, placement or complete sealed envelope changes. An unchanged generation
 therefore avoids the fetch handler's immutable-table load and bulk connection lease. Connection

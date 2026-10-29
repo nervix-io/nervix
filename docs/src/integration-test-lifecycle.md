@@ -24,7 +24,11 @@ within its explicit assertion bound. Every five seconds it records applied domai
 counters for each source, bytes forwarded by the pacer, and each node's applied revision and log,
 snapshot and purged indexes. On failure it also records a concise status for initialization,
 leader and voter membership. The opening count is a diagnostic observation of data streams;
-initial empty probes use the management path. An atomic maximum of bytes forwarded on one
+initial empty probes and unconfirmed-prefix checks use the management path. The rate-limited case
+also permits at most two data-stream openings: OpenRaft may complete a finite log-range input
+before supplying its moving pipeline input. Prefix conflicts must be resolved before data
+admission. The original 1,024 domains, 32,768-byte/s rate and 120-second assertion bound remain
+fixed. An atomic maximum of bytes forwarded on one
 connection proves that the paced path carried more than one production progress interval. The
 pacer also counts accepted, connected, failed, cancelled and completed connections, and total
 bytes. These observations do not inspect TLS or frame bytes or establish ordering the product
