@@ -9,7 +9,6 @@ Feature: Accepted restores wait for client inspection capacity
       CREATE UNPACED DOMAIN {{domain}};
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://127.0.0.1:19080',
-        'method' = 'GET',
         'timeout_ms' = 5000
       };
       """

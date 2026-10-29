@@ -27,7 +27,7 @@ struct InspectionFixture {
     service: TestService,
     domain: DomainName,
     name: ClientName,
-    config: [ClientConfigEntry; 3],
+    config: [ClientConfigEntry; 2],
 }
 
 impl InspectionFixture {
@@ -41,10 +41,6 @@ impl InspectionFixture {
                 ClientConfigEntry {
                     key: "endpoint".into(),
                     value: "http://127.0.0.1:19080".into(),
-                },
-                ClientConfigEntry {
-                    key: "method".into(),
-                    value: "GET".into(),
                 },
                 ClientConfigEntry {
                     key: "timeout_ms".into(),
