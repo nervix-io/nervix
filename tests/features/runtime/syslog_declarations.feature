@@ -1,7 +1,8 @@
 Feature: Syslog listener and collector declarations
   SYSLOG LISTENER runs on every node and SYSLOG COLLECTOR sends through one client. Both sides
   deliver without acknowledgements and carry no transport headers, and what each declares applies
-  at CREATE without opening a socket.
+  at CREATE without opening a socket. A collector writes only a payload that fits one frame
+  within the frame limits the Syslog vocabulary declares.
 
   Scenario Outline: Syslog declarations render the listener and the collector they declare
     Given a <cluster_size> node nervix cluster is started
@@ -146,6 +147,131 @@ Feature: Syslog listener and collector declarations
     Then the last command error contains
       """
       write_header
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A Syslog UDP collector sends a payload at the declared datagram limit and refuses a larger one
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA syslog_event (
+        facility U8, severity U8, hostname STRING OPTIONAL, message STRING
+      );
+      CREATE SCHEMA outcome ( size I64 OPTIONAL, error_message STRING OPTIONAL );
+      CREATE CODEC ingest_codec FROM JSON TO SCHEMA syslog_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
+      CREATE RELAY outcomes SCHEMA outcome UNBRANCHED;
+      CREATE VHOST edge syslog-{{test_id}}.example.com;
+      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        TO events INHERIT ALL SET message = concat(repeat('x', 65483), input.message)
+          UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SYSLOG CLIENT syslog_listener CONFIG {
+        'protocol' = 'udp', 'addr' = '{{syslog_ingest_addr}}'
+      };
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND DECODE USING syslog_codec
+        TO outcomes SET size = octet_length(input.message) UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SYSLOG CLIENT syslog_main CONFIG {
+        'protocol' = 'udp', 'addr' = '{{syslog_ingest_addr}}'
+      };
+      CREATE SYSLOG COLLECTOR EMITTER limited_syslog FROM events
+        TO syslog_main MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
+          ENCODE USING syslog_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO outcomes
+          SET error_message = error.message
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION outcomes_subscription TO outcomes;
+      START;
+      """
+    # The encoded header `<34>1 - app-01 - - - - ` takes 23 bytes, so a 65,484-byte message fills
+    # the 65,507 bytes one datagram carries and a 65,485-byte message needs one byte more.
+    And http payload is posted to host "syslog-{{test_id}}.example.com" path "/events"
+      """
+      [{"facility":4,"severity":2,"hostname":"app-01","message":"y"},{"facility":4,"severity":2,"hostname":"app-01","message":"yz"}]
+      """
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "size":65484
+      encoded Syslog UDP payload is 65508 bytes | maximum is 65507
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A non-transparent Syslog TCP collector refuses a payload whose LF would end its frame
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA syslog_event (
+        facility U8, severity U8, hostname STRING OPTIONAL, message STRING
+      );
+      CREATE SCHEMA outcome ( message STRING OPTIONAL, error_message STRING OPTIONAL );
+      CREATE CODEC ingest_codec FROM JSON TO SCHEMA syslog_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
+      CREATE RELAY outcomes SCHEMA outcome UNBRANCHED;
+      CREATE VHOST edge syslog-{{test_id}}.example.com;
+      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SYSLOG CLIENT syslog_listener CONFIG {
+        'protocol' = 'tcp', 'addr' = '{{syslog_ingest_addr}}'
+      };
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND DECODE USING syslog_codec
+        TO outcomes SET message = input.message UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SYSLOG CLIENT syslog_main CONFIG {
+        'protocol' = 'tcp', 'addr' = '{{syslog_ingest_addr}}', 'framing' = 'non-transparent'
+      };
+      CREATE SYSLOG COLLECTOR EMITTER framed_syslog FROM events
+        TO syslog_main MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
+          ENCODE USING syslog_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO outcomes
+          SET error_message = error.message
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION outcomes_subscription TO outcomes;
+      START;
+      """
+    And http payload is posted to host "syslog-{{test_id}}.example.com" path "/events"
+      """
+      [{"facility":4,"severity":2,"hostname":"app-01","message":"single line"},{"facility":4,"severity":2,"hostname":"app-01","message":"first line\nsecond line"}]
+      """
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "message":"single line"
+      contains LF | non-transparent framing
       """
 
     Examples:

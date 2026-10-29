@@ -107,7 +107,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case("", "ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s", "SUSPEND")]
+    #[case(
+        "",
+        "ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
+        "SUSPEND"
+    )]
     #[case(
         "",
         "ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
