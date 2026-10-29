@@ -234,9 +234,9 @@ A run needs a Linux Docker host with the following.
   [Network Preflight](#network-preflight).
   - GitHub-hosted `ubuntu-24.04` workers qualify once the job has loaded `sch_prio`, `sch_sfq` and
     `sch_netem`.
-  - The repository's Blacksmith workers do not qualify. Their kernel offers none of those
-    disciplines, so every network run there stops in its preflight, and every other run, or a
-    suite before its first run, stops in the network-healing exercise of its verifier self-check.
+  - The repository's CI shards run on Ubicloud `ubicloud-standard-4` workers, whose job loads the
+    same modules before it pulls the image and stops the shard there when the kernel cannot
+    provide one.
 
 A host may run several runs and suites at once. Each run owns its Compose project, network, volumes
 and labels, and runs share nothing but the Docker daemon and the host's capacity. Concurrent runs
@@ -2768,8 +2768,9 @@ other methods, which a chaos run never substitutes for:
 The `plan` job reads the shards and their budgets from `just chaos suite shards`. It resolves the
 image to its digest, so every shard runs the same immutable image. A manual run must name a digest.
 
-Each shard then runs on its own GitHub-hosted `ubuntu-24.04` Docker worker. The job works in this
-order:
+Each shard then runs on its own Ubicloud `ubicloud-standard-4` Docker worker: a virtual machine
+with GitHub's `ubuntu-24.04` runner image and the 4 CPUs and 16 GB of the GitHub-hosted workers
+the suite was qualified on. The job works in this order:
 
 1. It loads the `sch_prio`, `sch_sfq` and `sch_netem` modules, and fails when the kernel cannot
    provide one.
