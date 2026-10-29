@@ -3221,17 +3221,17 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/http/src/request/emitter/__fuzz__/request__emitter__request_head_tests__bolero_request_heads_carry_every_prepared_field_and_their_declared_framing/corpus"
+corpus = "crates/connectors/http/src/request/emitter/__fuzz__/request__emitter__request_tests__bolero_requests_carry_every_prepared_field_on_every_route/corpus"
 domain_version = 1
 features = []
-id = "http-request-heads"
-invariant = "For valid prepared requests over content-defining, contentless and extension methods in their case variants, named, IPv4 and IPv6 origins with and without default ports, plain targets, application headers with and without Accept, and bounded bodies, the head the emitter writes parses as exactly one complete HTTP/1.1 request head carrying the prepared request line, Host, Connection, the Accept default and every application field in order, and declaring a body's length, an empty length for a bodyless POST, PUT or PATCH in any ASCII case, and no length otherwise."
+id = "http-emitter-requests"
+invariant = "For valid prepared requests over content-defining, contentless and extension methods in their case variants, named, IPv4 and IPv6 origins with and without default ports, plain targets, application headers with and without Accept, bounded bodies, and a route over HTTP/1.1, over HTTP/2 or forwarded by a proxy with or without its credentials, the request the emitter hands hyper carries exactly the prepared method, the target in origin form over HTTP/1.1 and in absolute form over HTTP/2 or through a forwarding proxy, Host and Connection over HTTP/1.1 only, the proxy's Proxy-Authorization when a forwarded request carries credentials, the Accept default, every application field in order, a zero Content-Length only for a bodyless POST, PUT or PATCH in any ASCII case, and exactly the prepared body; and the tunnel request for the target is a CONNECT naming its host and port, as its Host, with the proxy's credentials."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-http"
 random_iterations = 256
-source = "crates/connectors/http/src/request/emitter/request_head_tests.rs"
-test = "request::emitter::request_head_tests::bolero_request_heads_carry_every_prepared_field_and_their_declared_framing"
+source = "crates/connectors/http/src/request/emitter/request_tests.rs"
+test = "request::emitter::request_tests::bolero_requests_carry_every_prepared_field_on_every_route"
 test_target = "lib"
 
 [[target]]

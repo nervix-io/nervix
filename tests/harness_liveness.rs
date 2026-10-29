@@ -5912,8 +5912,8 @@ mod http_receiver_tests {
 
     use crate::http_receiver::{
         ClientCertificatePolicy, HttpReceiver, LengthPolicy, RECEIVER_CONNECTION_STOP_BUDGET,
-        ReceiverFault, ReceiverResponse, ReceiverScriptError, ReceiverTlsOptions,
-        ReceiverTransport,
+        ReceiverFault, ReceiverProtocols, ReceiverResponse, ReceiverScriptError,
+        ReceiverTlsOptions, ReceiverTransport,
     };
 
     /// How long a regression waits for something the receiver does promptly on an idle machine.
@@ -6548,10 +6548,69 @@ mod http_receiver_tests {
     }
 
     #[nervix_primitives::test]
+    async fn a_tls_receiver_offering_http2_captures_and_answers_requests_over_http2() {
+        let receiver = start(ReceiverTransport::Tls(ReceiverTlsOptions {
+            certificate_hosts: vec!["127.0.0.1".to_string()],
+            client_certificate: ClientCertificatePolicy::NotRequested,
+            protocols: ReceiverProtocols::Http2AndHttp1,
+        }))
+        .await;
+        receiver.script(script(
+            "respond 201; header X-Answer: scripted; body created\nrespond 200; interim 103",
+        ));
+        let files = receiver
+            .tls_files()
+            .assured("a TLS receiver writes its client files");
+        let ca = std::fs::read(files.join(HttpReceiver::tls_file_names()[0]))
+            .assured("the receiver wrote its files");
+        let ca = reqwest::Certificate::from_pem(&ca).assured("the receiver's CA is valid PEM");
+        let client = reqwest::Client::builder()
+            .add_root_certificate(ca)
+            .build()
+            .assured("the client configuration is valid");
+
+        let answered = client
+            .post(format!("{}/events?tenant=north", receiver.origin()))
+            .body("payload")
+            .send()
+            .await
+            .assured("the receiver answers a request over HTTP/2");
+        assert_eq!(answered.version(), reqwest::Version::HTTP_2);
+        assert_eq!(answered.status(), 201);
+        assert_eq!(answered.headers()["x-answer"], "scripted");
+        let body = answered
+            .text()
+            .await
+            .assured("the receiver sends the scripted body");
+        assert_eq!(body, "created");
+        let unsendable = client
+            .get(format!("{}/interim", receiver.origin()))
+            .send()
+            .await;
+        // The receiver records the fault before hyper resets the stream, so the client's failure
+        // already means it was recorded.
+        assert!(
+            unsendable.is_err(),
+            "a response HTTP/2 cannot send resets its request's stream"
+        );
+
+        let captured = receiver.captured();
+        assert_eq!(captured.len(), 2, "{captured:?}");
+        assert_eq!(captured[0].request_line(), "POST /events?tenant=north");
+        assert_eq!(captured[0].version, http::Version::HTTP_2);
+        assert_eq!(captured[0].body, b"payload");
+        assert_eq!(captured[1].request_line(), "GET /interim");
+        let stop = receiver.stop().await;
+        assert!(!stop.was_forced(), "{stop}");
+        assert_eq!(stop.faults, 1, "{stop}");
+    }
+
+    #[nervix_primitives::test]
     async fn a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others() {
         let receiver = start(ReceiverTransport::Tls(ReceiverTlsOptions {
             certificate_hosts: vec!["127.0.0.1".to_string()],
             client_certificate: ClientCertificatePolicy::Required,
+            protocols: ReceiverProtocols::Http1,
         }))
         .await;
         let files = receiver
@@ -6602,6 +6661,7 @@ mod http_receiver_tests {
         let receiver = start(ReceiverTransport::Tls(ReceiverTlsOptions {
             certificate_hosts: vec!["localhost".to_string()],
             client_certificate: ClientCertificatePolicy::NotRequested,
+            protocols: ReceiverProtocols::Http1,
         }))
         .await;
         let files = receiver

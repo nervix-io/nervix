@@ -293,10 +293,10 @@ name again for every new connection it opens.
 | --- | --- | --- | --- |
 | Interconnect at startup: the node's own advertised endpoint, its bootstrap endpoint, and the recovered Raft members' endpoints | `PeerResolver`, which calls the resolver directly | The connection setup timeout, five seconds, for each lookup | [Where The Interconnect Resolves](./interconnect.md#where-the-interconnect-resolves) |
 | Interconnect: every pool connection to a discovered peer | `PeerResolver` inside each connection attempt | The attempt's five-second connection setup timeout | [Where The Interconnect Resolves](./interconnect.md#where-the-interconnect-resolves) |
-| HTTP polling and Prometheus sources, Sentry and OTEL HTTP emitters | Reqwest 0.13's `dns_resolver`, installed by the shared `HttpClientConfig` | The client's `timeout_ms` for the whole request; required for Prometheus and OTEL, otherwise the thirty-second hook budget when unset | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
+| HTTP polling and Prometheus sources, Sentry and OTEL HTTP emitters | Reqwest 0.13's `dns_resolver`, installed by the shared `HttpClientConfig`; it resolves the declared proxy's host instead of the service when an HTTP client declares a `proxy` | The client's `timeout_ms` for the whole request, and for HTTP polling for the redirects it follows too; required for HTTP polling, Prometheus and OTEL, otherwise the thirty-second hook budget when unset | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | Iceberg REST catalog and its OAuth token request | Reqwest 0.12's `dns_resolver` on the client given to `RestCatalogBuilder::with_client` | The thirty-second hook budget | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | Iceberg S3, GCS and Azure object storage and its credential providers | Reqwest 0.13's `dns_resolver` on the client the connector installs through OpenDAL's `HttpClientLayer`; one initialized operator survives table metadata refreshes | The storage client's `timeout_ms` bounds an operation or I/O call, DNS, connection and TLS included; without it, the thirty-second hook ceiling sits inside the operator's 60-second metadata/delete and 10-second read/write bounds | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
-| HTTP request emitter | The connector resolves each request's target host itself | At most half of the request's one physical `timeout_ms`, whose rest bounds the address attempts, TLS and the request | [Request Preparation And Transport Ownership](./http-emitter-architecture.md#request-preparation-and-transport-ownership) |
+| HTTP request emitter | The connector resolves each request's target host itself, or its client's declared proxy's host | At most half of what is left of the attempt's one physical `timeout_ms` when each of its requests starts, whose rest bounds the address attempts, TLS, the proxy's tunnel and the request | [Request Preparation And Transport Ownership](./http-emitter-architecture.md#request-preparation-and-transport-ownership) |
 | RabbitMQ sources and emitters | The connector resolves and dials, then hands the transport to Lapin's `Connection::connector` | The client's `connect_timeout_ms`, 30 seconds by default, shared with the address attempts, TLS, the AMQP handshake and the entity's channel | [DNS for RabbitMQ](./connector-contract.md#dns-for-rabbitmq) |
 | Syslog UDP, TCP and TLS senders | The connector resolves and dials each new sender | The client's `connect_timeout_ms`, 30 seconds by default, shared with socket setup, or with the attempts and TLS | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
 | WebSocket `ws` and `wss` client sources | The connector resolves and dials each connection and resume | The client's `connect_timeout_ms`, 30 seconds by default, shared with the attempts, TLS and the upgrade | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
@@ -338,7 +338,7 @@ before any IPv6 answer and no attempt races another:
 | Syslog TLS sender | `connect_timeout_ms`, 30 seconds by default | TCP connection and TLS | No further step |
 | WebSocket client source | `connect_timeout_ms`, 30 seconds by default | TCP connection, TLS and the opening upgrade | The client's signaling protocol, when it declares one, under that protocol's own `TIMEOUT` |
 | Redis Pub/Sub source | `connect_timeout_ms`, 30 seconds by default | TCP connection and TLS | Redis setup and `SUBSCRIBE` within the same budget |
-| HTTP request emitter | `timeout_ms`, of which the lookup takes at most half | TCP connection | TLS, sending the request and reading its final response headers within the same timeout |
+| HTTP request emitter | What is left of the attempt's `timeout_ms` when one of its requests starts, of which the lookup takes at most half | TCP connection, to the declared proxy when the client declares one | TLS, the proxy's `CONNECT` tunnel for an `https` target, sending the request and reading its final response headers within the same timeout; a redirect the client follows starts its next request in what is left |
 | MQTT source, emitter or input retirement | The driver's connect timeout, five seconds | TCP connection with the driver's network options | TLS and the MQTT handshake by the driver within the same timeout; retirement's unsubscribe and disconnect also share that budget |
 
 Syslog UDP has no connection to confirm, so a sender binds a socket in the family of each answer in
@@ -363,22 +363,27 @@ the identity of the connection, whichever address accepted it:
   [Peer Identity And Authentication](./interconnect.md#peer-identity-and-authentication) describes.
 - **HTTP authority.** The `Host` header, the HTTP/2 `:authority`, the WebSocket upgrade's URL, and
   the request path and query stay as configured. A literal IPv6 host is written in brackets there.
-- **Proxies.** HTTP polling ignores proxy environment variables and uses only the HTTP client's
-  explicit `proxy` URL. The Reqwest clients for Prometheus, Sentry, OTEL HTTP and both Iceberg
-  clients keep Reqwest's default of honoring `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
-  `NO_PROXY`. When a request goes through a proxy, the
-  node's resolver resolves only the proxy's host; the proxy resolves the service, an HTTPS request
-  tunnels through it with `CONNECT`, and TLS still verifies the configured host. An SQS client
-  without a custom CA takes its proxy from the same variables under the same rule, and one with a
-  custom CA uses no proxy. No other path uses a proxy.
+- **Proxies.** An HTTP client sends every request, of HTTP polling and of the HTTP request
+  emitter alike, through its explicit `proxy` URL when it declares one and through no proxy
+  otherwise; neither reads a proxy environment variable. The Reqwest clients for Prometheus, Sentry
+  and OTEL HTTP, which the same shared `HttpClientConfig` builds, read no proxy variable either,
+  and those clients declare no `proxy`. Both Iceberg clients keep Reqwest's default of honoring
+  `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`. When a request goes through a proxy, the
+  node's resolver resolves only the proxy's host; the proxy resolves the service, an HTTP request
+  is sent to it in absolute form, an HTTPS request tunnels through it with `CONNECT`, and TLS still
+  verifies the configured host. An SQS client without a custom CA takes its proxy from the same
+  variables under the same rule, and one with a custom CA uses no proxy. No other path uses a
+  proxy.
 - **Request signing.** An SQS request is signed with SigV4 for its configured endpoint before its
   host is resolved, so the signature, the `Host` header and the certificate check name the same
   host.
-- **Redirects.** HTTP polling follows no redirect unless its client sets `follow_redirects = true`;
-  then each redirected host is resolved through the node's resolver. Other Reqwest clients that
-  follow a redirect use that same resolver, and a native session that follows a leader redirect
-  resolves the leader's advertised host through the client's resolver. The HTTP request emitter
-  follows no redirect.
+- **Redirects.** An HTTP client follows no redirect, from HTTP polling or from the HTTP request
+  emitter, unless it sets `follow_redirects = true`, and then only to its own origin, so a
+  redirected request goes to the same configured host and resolves it again through the node's
+  resolver, or through its proxy. The Reqwest clients for Prometheus, Sentry and OTEL HTTP follow no
+  redirect. The Iceberg clients that follow a redirect use the node's resolver, and a native session
+  that follows a leader redirect resolves the leader's advertised host through the client's
+  resolver.
 
 ## Failure Ownership
 

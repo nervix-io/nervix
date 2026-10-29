@@ -2,11 +2,12 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** HTTP client configuration interpretation, polling, response bodies, response-header
-//!   semantics, and ingestor-boundary arrival observation for the ingestor; sending prepared requests
-//!   and answering for each of them for the emitter.
-//! - **Depends on.** The connector contract, HTTP client settings, vocabulary configuration and
-//!   request fields, and `reqwest`.
+//! - **Owns.** HTTP client configuration interpretation, polling and the redirects a poll follows,
+//!   response bodies, response-header semantics, and ingestor-boundary arrival observation for the
+//!   ingestor; sending prepared requests and answering for each of them for the emitter.
+//! - **Depends on.** The connector contract, HTTP client settings, the client transport both
+//!   entities share, the node DNS resolver's operation budget, vocabulary configuration and request
+//!   fields, and `reqwest`.
 //! - **Must not know.** Domain clocks, runtime collectors, relays, branches, schedules, registry
 //!   state, or placement computation.
 
@@ -23,6 +24,9 @@
 )]
 
 mod emitter;
+mod transport;
+
+use std::{borrow::Cow, time::Duration};
 
 use async_trait::async_trait;
 pub use emitter::{HttpRequestEmitter, HttpRequestEmitterConfig};
@@ -34,13 +38,16 @@ use nervix_connector::{
     PacedIngestorConnector, RetainedIngestHeaders, client_config_value,
     physical_time::actual_utc_now,
 };
-use nervix_dns::DnsResolver;
+use nervix_dns::{DnsResolver, LookupShare, OperationBudget};
 use nervix_models::{ClientConfigEntry, HttpRequestHeader, PayloadSizeLimit, Timestamp};
 use reqwest::{
     Client as HttpClient, Method, StatusCode,
-    header::{HeaderMap, HeaderName, HeaderValue},
+    header::{HeaderMap, HeaderName, HeaderValue, LOCATION},
 };
 use thiserror::Error;
+use url::Url;
+
+use self::transport::{ClientTransport, RedirectAnswer, Redirects};
 
 const HTTP: &str = "http";
 
@@ -54,14 +61,21 @@ pub struct HttpRequestIngestorPlan {
 
 pub struct HttpRequestIngestor {
     client: HttpClient,
-    endpoint: String,
+    endpoint: Url,
     method: Method,
     headers: HeaderMap,
     max_body_size: PayloadSizeLimit,
+    /// The one deadline of a poll's request and the redirects it follows.
+    timeout: Duration,
+    redirects: Redirects,
 }
 
 #[derive(Debug, Error)]
 pub enum HttpRequestIngestorError {
+    /// The endpoint is not a URL. The value itself is never quoted: its path and query can carry
+    /// what only the client should know.
+    #[error("invalid HTTP endpoint")]
+    InvalidEndpoint,
     #[error("invalid HTTP method")]
     InvalidMethod,
     #[error("invalid HTTP request header")]
@@ -99,6 +113,8 @@ impl IngestorConnector for HttpRequestIngestor {
     async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
         let endpoint = Self::endpoint_from_config(&plan.config)
             .change_context(IngestorError::Open { connector: HTTP })?;
+        let endpoint = Self::endpoint_url(&endpoint)
+            .change_context(IngestorError::Open { connector: HTTP })?;
         let method = Method::from_bytes(plan.method.as_bytes())
             .map_err(|source| {
                 Report::new(source).change_context(HttpRequestIngestorError::InvalidMethod)
@@ -118,8 +134,10 @@ impl IngestorConnector for HttpRequestIngestor {
                 .change_context(IngestorError::Open { connector: HTTP })?;
             headers.insert(name, value);
         }
+        let transport = ClientTransport::declared(&plan.config, "HTTP")
+            .change_context(IngestorError::Open { connector: HTTP })?;
         let client = HttpClientConfig::new(&plan.config, "HTTP", &plan.dns)
-            .build_http_request()
+            .build()
             .change_context(IngestorError::Open { connector: HTTP })?;
         Ok(Self {
             client,
@@ -127,6 +145,8 @@ impl IngestorConnector for HttpRequestIngestor {
             method,
             headers,
             max_body_size: plan.max_body_size,
+            timeout: transport.timeout,
+            redirects: transport.redirects,
         })
     }
 }
@@ -135,14 +155,8 @@ impl IngestorConnector for HttpRequestIngestor {
 impl PacedIngestorConnector for HttpRequestIngestor {
     async fn poll(&mut self, scheduled_at: Timestamp) -> IngestorResult<IngestorPoll> {
         let response = self
-            .client
-            .request(self.method.clone(), self.endpoint.as_str())
-            .headers(self.headers.clone())
             .send()
             .await
-            .map_err(|source| {
-                Report::new(source.without_url()).change_context(HttpRequestIngestorError::Request)
-            })
             .change_context(IngestorError::Read { connector: HTTP })?;
         if response.status() == StatusCode::NO_CONTENT {
             return Ok(IngestorPoll {
@@ -181,6 +195,60 @@ impl PacedIngestorConnector for HttpRequestIngestor {
 impl HttpRequestIngestor {
     fn endpoint_from_config(config: &[ClientConfigEntry]) -> ClientConfigResult<String> {
         client_config_value(config, "endpoint", "HTTP")
+    }
+
+    fn endpoint_url(endpoint: &str) -> Result<Url, Report<HttpRequestIngestorError>> {
+        Url::parse(endpoint).map_err(|source| {
+            Report::new(source).change_context(HttpRequestIngestorError::InvalidEndpoint)
+        })
+    }
+
+    /// The response that ends a poll's request: its endpoint's answer, or the answer at the end of
+    /// the redirects its client follows. The request and every redirect it follows share one
+    /// `timeout_ms`, so each one is sent with what is left of it, and each carries the poll's
+    /// method and headers unchanged.
+    async fn send(&self) -> Result<reqwest::Response, Report<HttpRequestIngestorError>> {
+        let deadline = OperationBudget::start(self.timeout, LookupShare::Whole);
+        let mut url = Cow::Borrowed(&self.endpoint);
+        let mut followed = 0_usize;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let response = self
+                .client
+                .request(self.method.clone(), url.as_ref().clone())
+                .headers(self.headers.clone())
+                .timeout(deadline.remaining())
+                .send()
+                .await
+                .map_err(|source| {
+                    Report::new(source.without_url())
+                        .change_context(HttpRequestIngestorError::Request)
+                })?;
+            let answer = RedirectAnswer {
+                url: &url,
+                method: self.method.as_str(),
+                followed,
+                status: response.status().as_u16(),
+                location: Self::location(response.headers()),
+            };
+            let Some(next) = self.redirects.next(&answer) else {
+                return Ok(response);
+            };
+            url = Cow::Owned(next);
+            followed = followed
+                .checked_add(1)
+                .verified("a followed redirect is below the declared limit");
+        }
+    }
+
+    /// The one `Location` a response carries, when it carries exactly one in visible ASCII.
+    fn location(headers: &HeaderMap) -> Option<&str> {
+        let mut locations = headers.get_all(LOCATION).iter();
+        let location = locations.next()?;
+        if locations.next().is_some() {
+            return None;
+        }
+        location.to_str().ok()
     }
 
     async fn bounded_body(
@@ -296,6 +364,142 @@ mod tests {
                 .to_string()
                 .contains("missing HTTP client config key 'endpoint'")
         );
+    }
+
+    /// Answers one request on each of the first connections `listener` accepts, in order, and
+    /// returns each request's line.
+    async fn answer_requests(
+        listener: nervix_primitives::net::TcpListener,
+        answers: Vec<&'static [u8]>,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        for answer in answers {
+            nervix_primitives::task::consume_budget().await;
+            let (mut stream, _) = listener.accept().await.expect("the poll connects");
+            let mut request = tokio::io::BufReader::new(&mut stream);
+            let mut request_line = String::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let read = request
+                    .read_line(&mut line)
+                    .await
+                    .expect("the request head is readable");
+                assert!(read > 0, "the request ends with a complete head");
+                if request_line.is_empty() {
+                    request_line = line.trim_end().to_string();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            drop(request);
+            stream
+                .write_all(answer)
+                .await
+                .expect("the answer is writable");
+            lines.push(request_line);
+        }
+        lines
+    }
+
+    /// A polling ingestor of `endpoint` whose client declares `follow_redirects` as given.
+    async fn ingestor(endpoint: String, follow_redirects: &str) -> HttpRequestIngestor {
+        let config = vec![
+            ClientConfigEntry {
+                key: "endpoint".to_string(),
+                value: endpoint,
+            },
+            ClientConfigEntry {
+                key: "timeout_ms".to_string(),
+                value: "5000".to_string(),
+            },
+            ClientConfigEntry {
+                key: "follow_redirects".to_string(),
+                value: follow_redirects.to_string(),
+            },
+        ];
+        let plan = HttpRequestIngestorPlan {
+            config,
+            dns: DnsResolver::load(nervix_dns::DnsConfiguration::system())
+                .await
+                .expect("the host resolver configuration loads in tests"),
+            method: "GET".to_string(),
+            headers: vec![HttpRequestHeader {
+                name: "x-tenant".to_string(),
+                value: "north".to_string(),
+            }],
+            max_body_size: "1KiB".parse().expect("a byte size"),
+        };
+        HttpRequestIngestor::open(&plan, 0)
+            .await
+            .expect("a valid polling plan opens")
+    }
+
+    #[nervix_primitives::test]
+    async fn a_poll_follows_a_redirect_on_its_origin_only_when_its_client_opts_in() {
+        let listener =
+            nervix_primitives::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("a loopback listener binds");
+        let origin = listener.local_addr().expect("the listener has an address");
+        let served = nervix_primitives::task::spawn(answer_requests(
+            listener,
+            vec![
+                b"HTTP/1.1 302 Found\r\nLocation: /moved?page=2\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                b"HTTP/1.1 302 Found\r\nLocation: /moved?page=2\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ],
+        ));
+        let following = ingestor(format!("http://{origin}/events"), "true").await;
+        let response = following.send().await.expect("the redirect is followed");
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
+        let refusing = ingestor(format!("http://{origin}/events"), "false").await;
+        let response = refusing.send().await.expect("the redirect is the answer");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        drop(response);
+        assert_eq!(
+            served.await.expect("the origin answered every request"),
+            vec![
+                "GET /events HTTP/1.1".to_string(),
+                "GET /moved?page=2 HTTP/1.1".to_string(),
+                "GET /events HTTP/1.1".to_string(),
+            ]
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_redirect_off_the_poll_origin_is_its_answer() {
+        let listener =
+            nervix_primitives::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("a loopback listener binds");
+        let origin = listener.local_addr().expect("the listener has an address");
+        let served = nervix_primitives::task::spawn(answer_requests(
+            listener,
+            vec![
+                b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://other.invalid/moved\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ],
+        ));
+        let following = ingestor(format!("http://{origin}/events"), "true").await;
+        let response = following.send().await.expect("the redirect is the answer");
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            served.await.expect("the origin answered its request"),
+            vec!["GET /events HTTP/1.1".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_endpoint_that_is_not_a_url_is_refused_without_being_quoted() {
+        let error = HttpRequestIngestor::endpoint_url("not a url?token=secret")
+            .expect_err("a relative reference is not an endpoint");
+        assert!(matches!(
+            error.current_context(),
+            HttpRequestIngestorError::InvalidEndpoint
+        ));
+        assert!(!format!("{error:?}").contains("secret"));
     }
 
     async fn response_from_wire(wire: &'static [u8]) -> reqwest::Response {

@@ -1029,6 +1029,18 @@ build and the existing tests, and nothing in it changes behavior.
   decoding and back to integers only at the boundary.
 - Parse URLs and URL-like service addresses with the `url` crate. Do not manually split schemes,
   authorities, hosts, ports, paths, or query strings unless the format is not URL-compatible.
+- Speak HTTP only through a maintained HTTP implementation: `reqwest`, or `hyper` where `reqwest`
+  cannot express a contract, with `hyper-util` and `tower-http` for what they provide. Never
+  implement HTTP by hand below `hyper`: no request or response head written or parsed directly, and
+  no hand-written message framing, chunking, `CONNECT` tunnel or connection upgrade. A hand-written
+  exchange speaks one protocol version at best and repeats the parsing, framing, smuggling and
+  security defects a maintained stack has already fixed. A client negotiates every protocol version
+  its stack supports, HTTP/2 through ALPN included, unless a documented contract requires one.
+  Establishing a connection a contract needs, such as dialling through the node resolver within a
+  budget or TLS through `tokio-rustls`, stays below the HTTP layer and hands its stream to `hyper`,
+  and a redirect a contract follows is a new request through the same stack. Hand-written HTTP
+  that already exists is debt to replace, never a pattern to extend. Only a test fixture may write
+  exact or deliberately malformed bytes, to exercise how a client handles them.
 - Do not add `#[allow(...)]` annotations without explicit approval.
 - Do not use `std::mem::forget`, `Closure::forget`, leaked boxes, or equivalent lifetime leaks to
   keep browser callbacks alive. Use explicit ownership and cleanup or a crate-managed abstraction.

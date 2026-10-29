@@ -127,14 +127,16 @@ const HTTP_REQUEST_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
     }],
     waits: &[DeclaredWait {
-        wait: "a request: name resolution, connection, TLS and the response",
+        wait: "a request and the redirects it follows: name resolution, connection, TLS and each \
+               response",
         bound: WaitBound::Key {
             key: DeadlineKey::Timeout,
             omitted: OmittedDeadline::Required,
         },
     }],
     driver_limits: &[
-        "Response heads above 100 headers or 417,792 bytes are refused.",
+        "HTTP/1.1 response heads above 100 fields or 417,792 bytes, and HTTP/2 header lists of \
+         16,384 bytes or more as HTTP/2 counts them, are refused.",
         "Redirects and proxies require the client's explicit opt-in.",
     ],
 };
@@ -171,14 +173,20 @@ const HTTP_ENDPOINT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
 const HTTP_REQUEST_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[],
     waits: &[DeclaredWait {
-        wait: "a request: name resolution within half of it, each address's connection within an \
-               equal share of what is left, TLS, writing it and its final response headers",
+        wait: "a request and the redirects it follows: for each, name resolution within half of \
+               what is left, each address's connection within an equal share of what is left \
+               after it, the proxy's TLS and tunnel, TLS, writing it and its final response \
+               headers",
         bound: WaitBound::Key {
             key: DeadlineKey::Timeout,
             omitted: OmittedDeadline::Required,
         },
     }],
-    driver_limits: &["A response head above 74,240 bytes or 128 fields fails the attempt."],
+    driver_limits: &[
+        "HTTP/1.1 response heads above 100 fields or 417,792 bytes, and HTTP/2 header lists of \
+         16,384 bytes or more as HTTP/2 counts them, are refused.",
+        "Redirects and proxies require the client's explicit opt-in.",
+    ],
 };
 
 impl IngestorDeclaration for HttpRequestIngestor {

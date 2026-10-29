@@ -78,7 +78,7 @@ pub use emitter::{
     PerRecordOutcomeParts, PreparedRowRequest, PropertyValue, RecordEmitter, RecordEnvelope,
     RecordProperty, RejectedEmitterMember, RowEmitter, RowRequestEmitter, RowRequestPreparation,
 };
-pub use http_client::{HttpClientConfig, HttpClientConfigError};
+pub use http_client::{DeclaredProxy, HttpClientConfig, HttpClientConfigError};
 pub use ingest_metadata::{
     IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders, RetainedIngestHeaders,
 };

@@ -959,8 +959,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | none |
 | Acknowledgement confirmation | none |
 | Buffers | the response body: set by MAX BODY SIZE; when exceeded, fails the poll; the next poll reads again |
-| Network waits | a request: name resolution, connection, TLS and the response: `timeout_ms`; required |
-| Driver limits | Response heads above 100 headers or 417,792 bytes are refused.<br>Redirects and proxies require the client's explicit opt-in. |
+| Network waits | a request and the redirects it follows: name resolution, connection, TLS and each response: `timeout_ms`; required |
+| Driver limits | HTTP/1.1 response heads above 100 fields or 417,792 bytes, and HTTP/2 header lists of 16,384 bytes or more as HTTP/2 counts them, are refused.<br>Redirects and proxies require the client's explicit opt-in. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-ingest).
@@ -971,8 +971,13 @@ See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md
   response body at its declared size, or 16 MiB where omitted. A response above that bound fails
   its poll.
 - The HTTP client requires `endpoint` and `timeout_ms`. It also declares optional
-  `follow_redirects` and `proxy` settings, plus TLS trust and client identity files. The polling
-  client ignores proxy environment variables and follows no redirect unless opted in.
+  `follow_redirects` and `proxy` settings, plus TLS trust and client identity files. Polling follows
+  a redirect only to the client's own origin and only with `follow_redirects = true`, sends its
+  requests through the declared `proxy` alone and never through one the environment names, and
+  shares one `timeout_ms` between a request and the redirects it follows, as
+  [HTTP client transport](emitters.md#http-client-transport) describes. A redirect the poll does not
+  follow fails it with its status, and a failed poll's `transient error:` names its status or its
+  transport failure but never the endpoint's path or query.
 - `metadata.status` is the successful response's `U16` status and `metadata.polled_at` is the
   scheduled `DATETIME` instant of that poll. `read_header` and `read_headers` read the response's
   headers; `204 No Content` emits no row.
@@ -1861,7 +1866,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Acknowledgement confirmation | none |
 | Buffers | the query response: set by MAX BODY SIZE; when exceeded, fails the poll; the next poll reads again<br>samples the host takes in as one intake batch: at most 1024 samples; when full, holds back what fills it |
 | Network waits | a query: name resolution, connection, TLS and the response: `timeout_ms`; required |
-| Driver limits | Response heads above 100 headers or 417,792 bytes are refused. |
+| Driver limits | HTTP/1.1 response heads above 100 fields or 417,792 bytes, and HTTP/2 header lists of 16,384 bytes or more as HTTP/2 counts them, are refused. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [PROMETHEUS QUERY capability and mirror reference](connector-capabilities.md#prometheus-query-ingest).

@@ -313,8 +313,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | a request: name resolution within half of it, each address's connection within an equal share of what is left, TLS, writing it and its final response headers: `timeout_ms`; required |
-| Driver limits | A response head above 74,240 bytes or 128 fields fails the attempt. |
+| Network waits | a request and the redirects it follows: for each, name resolution within half of what is left, each address's connection within an equal share of what is left after it, the proxy's TLS and tunnel, TLS, writing it and its final response headers: `timeout_ms`; required |
+| Driver limits | HTTP/1.1 response heads above 100 fields or 417,792 bytes, and HTTP/2 header lists of 16,384 bytes or more as HTTP/2 counts them, are refused.<br>Redirects and proxies require the client's explicit opt-in. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-emit).
@@ -330,7 +330,10 @@ The referenced client must be a `HTTP CLIENT` in the same domain. Its `endpoint`
 query or fragment. It requires a positive, schedulable `timeout_ms`; the emitter's `METHOD` is its
 own expression. HTTPS retains certificate and hostname verification.
 The optional `tls_cert_file` and `tls_key_file` settings must be supplied together, and mounted TLS
-files use the client's pinned resource version. Validation does not probe the destination.
+files use the client's pinned resource version. The optional `follow_redirects` and `proxy`
+settings mean for the emitter what they mean for HTTP polling, as
+[HTTP client transport](#http-client-transport) describes. Validation does not probe the
+destination.
 
 Method, path and `write_header` name and value expressions must each be exact, non-null `STRING`
 values. Request expressions read the original `input` and, with a codec, finalized `output` and
@@ -435,40 +438,82 @@ source relays and branches it serves. It sends the requests a flush releases in 
 Independent executions have no total order, and an endpoint can apply a request after Nervix loses
 its response, so this order does not settle ambiguous remote effects.
 
-The HTTP emitter speaks HTTP/1.1. It creates a connection for each attempt and closes it after final
-headers, so an unread or stalled body cannot be reused as the next response. DNS resolution,
+The HTTP emitter sends each request through hyper, which speaks HTTP/2 when the endpoint's TLS
+negotiates it and HTTP/1.1 otherwise. It creates a connection for each request and closes it after
+final headers, so an unread or stalled body cannot be reused as the next response. DNS resolution,
 connection acquisition, TLS negotiation, the complete request send, interim responses and
-complete final headers share the client's physical `timeout_ms`; queueing behind an earlier
-request and host retry backoff do not consume the next attempt's timeout. Resolving the endpoint's
-host takes at most half of `timeout_ms`, whatever the name servers do, and each address it resolves
-to is tried in turn within an equal share of what is left, so an address that never answers leaves
-the next one time to connect and the request time to be sent and answered. HTTPS validates trust and
+complete final headers share the client's physical `timeout_ms`, and so do the requests of every
+redirect the client follows within one attempt; queueing behind an earlier request and host retry
+backoff do not consume the next attempt's timeout. Resolving the endpoint's host takes at most half
+of what is left of `timeout_ms` when a request starts, whatever the name servers do, and each
+address it resolves to is tried in turn within an equal share of what is left, so an address that
+never answers leaves the next one time to connect and the request time to be sent and answered. HTTPS validates trust and
 the destination hostname and uses the client's pinned CA and optional client certificate mounts.
 Starting the emitter reads local configuration and sends no probe.
 
-The transport writes `Host`, `Connection: close`, and `Content-Length`: the body's length when a
-body exists, and `0` for a `POST`, `PUT` or `PATCH` declared `WITHOUT BODY`, as servers that require
+Over HTTP/1.1 the transport writes `Host` and `Connection: close`, and over HTTP/2 hyper sends the
+authority as `:authority`. The request declares `Content-Length`: the body's length when a body
+exists, and `0` for a `POST`, `PUT` or `PATCH` declared `WITHOUT BODY`, as servers that require
 a length expect; any other method declared `WITHOUT BODY` carries no `Content-Length`. It adds
 `Accept: */*` only when the application did not write `Accept`. It adds no `Accept-Encoding` or
 `Content-Type`. The application may write `Accept`, `Content-Type`, `Authorization`, and `Cookie`
 with `write_header`. Response cookies are
-not retained; an authentication challenge sends no additional request. There is no redirect or
-library retry: every repeat is a separate emitter attempt under its declared policy.
+not retained; an authentication challenge sends no additional request. There is no library retry:
+every repeat is a separate emitter attempt under its declared policy, and a redirect is followed
+only as [HTTP client transport](#http-client-transport) describes.
 
-Each interim and final response header block may contain at most 128 fields and 64 KiB of field
-name and value bytes. Malformed headers or final framing and any exceeded bound fail the attempt,
-even when the final status line says `200`. Complete valid final `200`–`299` headers deliver the
+An HTTP/1.1 response head may carry at most 100 fields in 417,792 bytes, and an HTTP/2 header
+list stays under 16,384 bytes as HTTP/2 counts it, 32 bytes for each field beside its name and
+value; each interim and final head is held to them. Malformed headers or
+final framing, a status above `599` and any exceeded bound fail the attempt, even when the final
+status line says `200`. Complete valid final `200`–`299` headers deliver the
 record, including `202` and `204`; a stalled or failed body after those headers does not reverse
 delivery. The emitter never waits for a body or uses bodies and trailers as graph data.
 
 `408`, `425`, `429`, and `500`–`599` retain the current request and all later work for host retry.
 `401`, `403`, and `407` do the same and report an authentication or authorization infrastructure
 failure. DNS, connection, TLS, send, timeout, malformed response and loss before complete final
-headers are also infrastructure failures. Other `300`–`499` statuses and `101` reject only their
-record through `ON MESSAGE ERROR`; later records proceed after that policy completes. Redirects
-are never followed, `304` is not delivery, and `409` never implies an earlier delivery. Rejection
-diagnostics include the numeric status but no evaluated URL, header value, request body or response
-body.
+headers are also infrastructure failures, and so are a declared proxy that cannot be reached and a
+tunnel the proxy refuses. Other `300`–`499` statuses and `101` reject only their record through
+`ON MESSAGE ERROR`; later records proceed after that policy completes. A redirect the client does
+not follow is such a status, `304` is not delivery, and `409` never implies an earlier delivery.
+Rejection diagnostics include the numeric status but no evaluated URL, header value, request body
+or response body.
+
+#### HTTP client transport
+
+An `HTTP CLIENT` means the same transport for HTTP polling and for the HTTP emitter. Both speak
+HTTP through maintained implementations, Reqwest for polling and hyper for the emitter, over
+HTTP/2 when the endpoint's TLS negotiates it and HTTP/1.1 otherwise, and:
+
+- Without `follow_redirects`, or with `follow_redirects = false`, a redirect answer is the
+  response: an emitted record is rejected with its status, and a poll fails with it.
+- With `follow_redirects = true`, a `301`, `302`, `307` or `308` answer, and a `303` answer to a
+  `GET` or `HEAD`, whose one `Location` names the client's own origin, the same scheme, host and
+  port, sends the same request there again: the same method, headers and body, never turning a
+  `POST` into a `GET`. A relative `Location` is resolved against the request it answers, and its
+  fragment is dropped. One request follows at most 10 redirects, and every request of the chain
+  shares its one `timeout_ms`. A `Location` on another origin or carrying credentials, an answer
+  with no `Location` or with several, a `303` to any other method, which was handled where it was
+  sent, and the answer to the tenth repeat are the response.
+- `proxy` names an `http` or `https` proxy that every request of the client goes through. The node
+  resolves only the proxy's host; an `http` target is sent to the proxy in absolute form, and an
+  `https` target tunnels through it with `CONNECT`, after which TLS still verifies the configured
+  host. An `https` proxy is verified with the client's trust. User information in the URL, such as
+  `http://user:secret@proxy.internal:3128`, is sent as `Basic` proxy credentials, and
+  `SHOW CREATE CLIENT` redacts a proxy URL that carries it. For the emitter, a proxy it cannot reach
+  and a tunnel the proxy refuses, `407` included, keep the request pending for the next attempt.
+- No proxy environment variable, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` or their
+  lowercase forms, has any effect on either side.
+
+```plexus
+CREATE HTTP CLIENT partner CONFIG {
+  'endpoint' = 'https://partner.example.com',
+  'timeout_ms' = 5000,
+  'follow_redirects' = true,
+  'proxy' = 'http://egress.internal:3128'
+};
+```
 
 #### HTTP retries and acknowledgements
 

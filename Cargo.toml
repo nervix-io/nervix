@@ -250,6 +250,8 @@ cucumber = { workspace = true, features = ["libtest"] }
 flate2 = { workspace = true }
 h2 = { workspace = true }
 httparse = { workspace = true }
+# The scenario HTTP receiver serves a client that negotiates HTTP/2 with hyper's HTTP/2 server.
+hyper = { workspace = true, features = ["http2", "server"] }
 iceberg = { workspace = true }
 iceberg-catalog-rest = { workspace = true }
 iceberg-storage-opendal = { workspace = true }

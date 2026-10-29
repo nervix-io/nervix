@@ -11,6 +11,7 @@ pub(crate) mod console_connections;
 pub(crate) mod dependencies;
 pub(crate) mod generator_cadence;
 pub(crate) mod grpc_receiver;
+pub(crate) mod http_proxy;
 pub(crate) mod http_receiver;
 pub(crate) mod iceberg_catalog_gate;
 pub(crate) mod kafka_group_member;
