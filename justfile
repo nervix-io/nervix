@@ -287,6 +287,22 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --test scenarios -- {{ args }}
 
+# Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
+# This supervision check has its own verdict, outside ordinary coverage reports.
+test-backup-cut-cleanup: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
+    evidence="$(mktemp -d {{ quote(cargo_target_dir + "/backup-cut-cleanup.XXXXXXXX") }})"
+    # Reuse the ordinary scenario build in CI without mixing qualification profiles into it.
+    instrumentation="$(CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} cargo llvm-cov show-env --sh)"
+    eval "$instrumentation"
+    export LLVM_PROFILE_FILE="$evidence/qualification-%p-%m.profraw"
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
+        cargo test --features testing --package nervix-server --test scenarios --no-run --message-format=json > "$evidence/build.jsonl"
+    python3 -m scripts.backup_cut_cleanup "$evidence"
+
 # Qualify ten consecutive three-node native metadata restores, retaining every attempt without retries.
 test-native-metadata-restore-repeat: tests-deps
     #!/usr/bin/env bash
