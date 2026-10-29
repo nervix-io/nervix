@@ -1551,14 +1551,52 @@ async fn then_the_stallable_endpoint_accepts_no_connection_beyond(
         };
         panic!(
             "the endpoint '{name}' accepted connection {beyond} {} after connection 1, expected \
-             no more than {count}",
-            humantime::format_duration(after)
+             no more than {count}: {}",
+            humantime::format_duration(after),
+            endpoint_connection_timeline(proxy)
         );
     }
     append_cucumber_log_line(&format!(
-        "endpoint '{name}' accepted no connection beyond {count} within {}",
-        humantime::format_duration(window)
+        "endpoint '{name}' accepted no connection beyond {count} within {}: {}",
+        humantime::format_duration(window),
+        endpoint_connection_timeline(proxy)
     ));
+}
+
+/// Every connection `proxy` accepted, measured from its first: from which local address, when the
+/// proxy accepted it and when it stopped forwarding it, if it has.
+fn endpoint_connection_timeline(proxy: &StallableTcpProxy) -> String {
+    let connections = proxy.accepted_connections();
+    let Some(first) = connections.first() else {
+        return "no connection".to_string();
+    };
+    let origin = first.accepted_at;
+    let mut described = Vec::with_capacity(connections.len());
+    for (index, connection) in connections.iter().enumerate() {
+        let accepted = elapsed_since_first_connection(origin, connection.accepted_at);
+        let ended = match connection.ended_at {
+            Some(ended_at) => format!(
+                "ended +{}",
+                elapsed_since_first_connection(origin, ended_at)
+            ),
+            None => "still open".to_string(),
+        };
+        described.push(format!(
+            "connection {} from {} accepted +{accepted}, {ended}",
+            index + 1,
+            connection.peer
+        ));
+    }
+    described.join("; ")
+}
+
+/// How long after an endpoint's first connection, accepted at `origin`, it recorded `instant`.
+fn elapsed_since_first_connection(origin: Instant, instant: Instant) -> String {
+    let elapsed = instant.checked_duration_since(origin).assured(
+        "an endpoint records its connections in the order it accepts them on the monotonic clock, \
+         and ends each after accepting it",
+    );
+    humantime::format_duration(elapsed).to_string()
 }
 
 #[given("ClickHouse is running")]
