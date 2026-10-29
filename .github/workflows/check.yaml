@@ -386,8 +386,8 @@ jobs:
     if: contains(github.event.pull_request.labels.*.name, 'deloxide')
     runs-on: boat-xlarge
     # Setup, then at most the lane's bound, the qualification's bound and the reserve the uploads
-    # and the kache report keep after them.
-    timeout-minutes: 200
+    # and the kache report keep after them, within the six hours a Boat CI job may run.
+    timeout-minutes: 360
     strategy:
       # Each selection's verdict and evidence stand on their own.
       fail-fast: false
@@ -496,7 +496,7 @@ jobs:
       - name: Diagnostic lane
         run: |
           just toolchains-install
-          timeout --signal=TERM --kill-after=60 175m just coverage-native-extras "test-${SELECTION}"
+          timeout --signal=TERM --kill-after=60 335m just coverage-native-extras "test-${SELECTION}"
 
       - name: Runner diagnostics before Supervision qualification
         uses: ./.github/actions/runner-diagnostics

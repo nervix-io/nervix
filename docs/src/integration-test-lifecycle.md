@@ -2996,10 +2996,10 @@ verdict.
 | --- | --- | --- |
 | Setup before the lane | No bound of its own | Toolchain, LLVM, Go, TinyGo and kache installation, as in the other native jobs: 46 seconds for `deloxide` and 40 for `deloxide-order` in the measured run |
 | Diagnostic builds | 80 minutes, `build_budget_seconds` in the inventory | A separate bound for all selected test and driver builds. A measured cold stressed scenario build on a loaded local host took 33m08s; CI builds measured 5.5–11 minutes. The bound leaves time for the other builds and variation without reducing workload time |
-| Workloads | 80 minutes, `budget_seconds` in the inventory | Starts after every diagnostic build succeeds. Per-invocation bounds and the six-minute scenario teardown reserve still apply; workload time reduces the time left for later invocations |
-| Prerequisites, both stages and the coverage export | 175 minutes, `timeout` in the step | The two 80-minute stage bounds plus 15 minutes for prerequisites and export. The historical combined-stage run took 25m02s for `deloxide` and 23m24s for `deloxide-order`; prerequisites took 3m05s and 2m46s, and export 2 seconds each |
+| Workloads | 240 minutes, `budget_seconds` in the inventory | Starts after every diagnostic build succeeds. On CI's Boat runner the order selection's workloads take about three times as long as on the previous runner, about 180 minutes by the progress of Check run 40926015015. Per-invocation bounds and the six-minute scenario teardown reserve still apply; workload time reduces the time left for later invocations |
+| Prerequisites, both stages and the coverage export | 335 minutes, `timeout` in the step | The 80-minute build and 240-minute workload bounds plus 15 minutes for prerequisites and export. The historical combined-stage run took 25m02s for `deloxide` and 23m24s for `deloxide-order`; prerequisites took 3m05s and 2m46s, and export 2 seconds each |
 | Supervision qualification | 10 minutes, `timeout` in the step | A small probe build and up to seven bounded cases; only the untracked wait runs to its bound, 15 seconds, and the others end in milliseconds. It took 40 and 41 seconds in the measured run |
-| Uploads and the kache report | The rest of the 200-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict, then [cache publication](#cache-publication), which waits at most 120 seconds. In the measured run the uploads took 4 and 3 seconds |
+| Uploads and the kache report | The rest of the 360-minute job limit, the six hours a Boat CI job may run | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict, then [cache publication](#cache-publication), which waits at most 120 seconds. In the measured run the uploads took 4 and 3 seconds |
 
 The table's historical CI measurements come from the run of 2026-10-07 in which both selections passed with
 every owner of tracked locks reached: 110 workloads in `deloxide` and 118 in `deloxide-order`,
@@ -3033,8 +3033,8 @@ took on the previous runner. The 66-minute bound leaves 60 minutes of suite time
 teardown reserve, about 1.5 times that measurement.
 `deloxide-stress-restore` runs the build's probes and the `stress-restore-scenarios`
 invocation of the inventory's capture, restore and checkpoint-transfer runs tagged
-`@deloxide_stress_restore`, bounded at 70 minutes. Each selection has the inventory's 80-minute
-budget and its own CI runner.
+`@deloxide_stress_restore`, bounded at 70 minutes. Each selection has the inventory's 240-minute
+workload budget and its own CI runner.
 
 The split follows from what the disturbance costs. It barely lengthens a scenario, because the
 lifecycle scenarios wait on product cadences, timers and deadlines rather than on the CPU: in the CI

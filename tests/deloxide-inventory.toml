@@ -23,9 +23,13 @@
 # minutes also leaves room for the selection's other builds and variation without borrowing time
 # from its workloads. Expiry ends the lane with status 124 and identifies the build stage.
 build_budget_seconds = 4800
-# The unchanged real-time budget of one selection's workloads, started after every build completes.
-# CI bounds prerequisites, both stages and the coverage export together at 175 minutes.
-budget_seconds = 4800
+# The real-time budget of one selection's workloads, started after every build completes. On CI's
+# Boat runner the order selection's workloads run about three times as long as on its previous
+# runner: Check run 40926015015 reached its 24th scenario chunk after 4403s, which run 40825862815
+# reached after 1226s of the 3289s all its workloads took, so they take about 10800s. Four hours
+# cover that about 1.3 times. CI bounds prerequisites, both stages and the coverage export
+# together at 335 minutes, within the six hours a Boat CI job may run.
+budget_seconds = 14400
 # How long a process gets to end on SIGTERM before the lane kills it.
 stop_grace_seconds = 30
 # How long the scenario binary's own teardown may take after its suite budget expires. The lane

@@ -428,7 +428,7 @@ class InventoryTests(unittest.TestCase):
         self.assertIsNotNone(retention, "the six retention examples need their own bounded phase")
         assert retention is not None
         baseline = inventory.invocations["stress-scenarios"]
-        self.assertEqual(inventory.bounds.budget_seconds, 4800)
+        self.assertEqual(inventory.bounds.budget_seconds, 14400)
         self.assertEqual(baseline.bound_seconds, 3960)
         self.assertEqual(endpoint.bound_seconds, 900)
         self.assertEqual(retention.bound_seconds, 900)
