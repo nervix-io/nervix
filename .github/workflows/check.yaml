@@ -1953,6 +1953,9 @@ jobs:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
+      # Sixteen compilers of the instrumented Loom build exceeded the 32 GB of Boat's 16-CPU
+      # machine, so the build keeps the eight it had on an 8-CPU, 32 GB runner.
+      CARGO_BUILD_JOBS: "8"
     steps:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
