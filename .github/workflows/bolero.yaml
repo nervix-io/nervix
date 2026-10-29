@@ -56,7 +56,7 @@ jobs:
   bolero-random:
     name: bolero-random
     if: (inputs.event-name || github.event_name) != 'pull_request' || contains(fromJSON(inputs.labels-json || '[]'), 'bolero-random')
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: jog-8vcpu
     # Run 39649567371 took 47m10s; 90 minutes covers 1.5 times that duration plus publication.
     timeout-minutes: 90
     steps:
@@ -149,7 +149,7 @@ jobs:
       matrix:
         # Each shard runs whole harnesses of the inventory; `just fuzz-plan 3` shows the division.
         shard: [1, 2, 3]
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: jog-16vcpu
     # The 205-target plan estimates up to 114 minutes per shard before discovery, qualification
     # and uploads. Fund 1.5 times that estimate plus their overhead on a slow runner.
     timeout-minutes: 240
@@ -340,7 +340,7 @@ jobs:
     name: bolero-fuzz-combined
     if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
     needs: [bolero-fuzz]
-    runs-on: ubuntu-latest
+    runs-on: jog-4vcpu
     timeout-minutes: 15
     permissions:
       contents: read
@@ -377,7 +377,7 @@ jobs:
     name: bolero-gate
     if: always()
     needs: [bolero-random, bolero-fuzz, bolero-fuzz-combined]
-    runs-on: ubuntu-latest
+    runs-on: jog
     timeout-minutes: 5
     outputs:
       randomized-result: ${{ steps.selection.outputs.randomized-result }}

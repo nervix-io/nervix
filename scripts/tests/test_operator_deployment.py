@@ -155,6 +155,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("nervix-io/nervix-k8s-operator", check)
         self.assertIn("ref: main", check)
         self.assertIn("just operator-deployment-check", check)
+        # The arm64 image runs on an amd64 runner through the host's QEMU registration.
+        self.assertLess(check.index("just docker-prepare-qemu"), check.index("just operator-deployment-check"))
         version = re.search(r"^\s+minikube-version: (\S+)$", check, re.M)
         self.assertIsNotNone(version)
         self.assertRegex(version[1], r"^\d+\.\d+\.\d+$")

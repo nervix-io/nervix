@@ -343,6 +343,26 @@ passed to the test binaries, so a test name filter narrows the run:
 just test-connectors <filter>
 ```
 
+### CI runners
+
+CI jobs run on [Jog](https://usejog.com) machines, which Jog's GitHub App starts for every job whose
+`runs-on` names a Jog size. Each job gets a fresh x86_64 virtual machine with GitHub's `ubuntu-24.04`
+runner software, deleted when the job ends. `.github/actionlint.yaml` declares the Jog labels to
+`just validate-workflows`. Every size has 4 GB of memory per CPU, from `jog` with 2 CPUs and 8 GB to
+`jog-32vcpu` with 32 CPUs and 128 GB:
+
+- `jog-16vcpu` runs the unit tests, the scenarios, the Deloxide lane and the Bolero sanitizer shards.
+- `jog-8vcpu` runs validation, the diagnostic evidence, client conformance, the extra checks,
+  Shuttle, Loom, the Bolero randomized properties, the arm64 and diagnostic image builds and the
+  benchmarks.
+- `jog-4vcpu` runs Turmoil, the coverage reports, the book, the amd64 image build, both deployment
+  checks and the chaos shards.
+- `jog` runs the jobs that only select, plan, gate or publish.
+
+Jog has no arm64 machine, so the arm64 deployment check runs the arm64 image on an amd64 machine
+under QEMU, which `just docker-prepare-qemu` registers. Jog's machines leave out some tools GitHub's
+image has, such as Chromium, Microsoft Edge and Java 8 and 11, so a job that needs one installs it.
+
 ### Compiler architecture gate
 
 `just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler
