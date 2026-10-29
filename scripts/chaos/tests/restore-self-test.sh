@@ -41,7 +41,7 @@ expect_setup_rejection 'restore-fault needs three nodes' 'restore-fault requires
 expect_setup_rejection 'restore-volume needs three nodes' 'restore-volume requires --nodes 3' \
     "${chaos_dir}/run-baseline.sh" --scenario restore-volume --image fixture --nodes 1
 expect_setup_rejection 'restore-volume takes no fault' \
-    '--fault applies only to stateful, domain-time, backup-fault and restore-fault' \
+    '--fault applies only to stateful, endpoints, lifetimes, domain-time, backup-fault and restore-fault' \
     "${chaos_dir}/run-baseline.sh" --scenario restore-volume --image fixture --fault owner-crash
 expect_setup_rejection 'restore-volume holds no outage' \
     'restore-volume injects no fault; --outage-seconds is for crash scenarios' \

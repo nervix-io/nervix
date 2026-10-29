@@ -260,6 +260,131 @@ services:
     networks:
       - chaos
 
+  # The PostgreSQL server the lifetimes scenario's pooled emitters write to. Its data lives in memory
+  # for the run only.
+  postgres:
+    image: ${CHAOS_POSTGRES_IMAGE:?CHAOS_POSTGRES_IMAGE is required}
+    profiles:
+      - lifetimes
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: database
+    environment:
+      POSTGRES_PASSWORD: nervix
+    tmpfs:
+      - /var/lib/postgresql/data
+    logging:
+      driver: local
+      options:
+        max-file: "2"
+        max-size: 2m
+    networks:
+      - chaos
+
+  life-load:
+    image: ${CHAOS_KCAT_IMAGE:?CHAOS_KCAT_IMAGE is required}
+    profiles:
+      - lifetimes
+    entrypoint:
+      - /bin/sh
+      - /opt/chaos/continuous-load.sh
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: load
+    environment:
+      CHAOS_LOAD_INTERVAL_MS: ${CHAOS_LIFE_LOAD_INTERVAL_MS:?CHAOS_LIFE_LOAD_INTERVAL_MS is required}
+      CHAOS_LOAD_TOPIC: chaos_life_input
+      CHAOS_LOAD_STOP_FILE: stop-life-load
+      CHAOS_LOAD_HOLD_FILE: hold-life-load
+    volumes:
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/continuous-load.sh:/opt/chaos/continuous-load.sh:ro
+      - ${CHAOS_LIFE_LOAD_FILE:?CHAOS_LIFE_LOAD_FILE is required}:/opt/chaos/input.ndjson:ro
+      - ${CHAOS_TRAFFIC_DIR:?CHAOS_TRAFFIC_DIR is required}:/opt/chaos/traffic:ro
+    logging:
+      driver: local
+      options:
+        max-file: "2"
+        max-size: 2m
+    networks:
+      - chaos
+
+  # The endpoint client posts the endpoints scenario's records to every node's HTTP listener and
+  # writes its ledger of attempts to its log; the runner holds and releases it through the control
+  # files of its read-only endpoint directory.
+  endpoint-load:
+    image: ${CHAOS_PYTHON_IMAGE:?CHAOS_PYTHON_IMAGE is required}
+    profiles:
+      - endpoints
+    entrypoint:
+      - python3
+      - -I
+      - /opt/chaos/endpoint-client.py
+      - http
+      - --host
+      - chaos-edge.example
+      - --path
+      - /events
+      - --targets
+      - ${CHAOS_ENDPOINT_TARGETS:-nervix-1:8080}
+      - --interval-ms
+      - ${CHAOS_ENDPOINT_INTERVAL_MS:?CHAOS_ENDPOINT_INTERVAL_MS is required}
+      - --input
+      - /opt/chaos/endpoints/http-input.ndjson
+      - --control
+      - /opt/chaos/endpoints/control
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: load
+    volumes:
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/endpoint-client.py:/opt/chaos/endpoint-client.py:ro
+      - ${CHAOS_ENDPOINT_DIR:?CHAOS_ENDPOINT_DIR is required}:/opt/chaos/endpoints:ro
+    logging:
+      driver: local
+      options:
+        max-file: "2"
+        max-size: 2m
+    networks:
+      - chaos
+
+  # The WebSocket client keeps one connection to CHAOS_ENDPOINT_WEBSOCKET_TARGET open across the
+  # replacement of its source, then opens a new one.
+  endpoint-websocket:
+    image: ${CHAOS_PYTHON_IMAGE:?CHAOS_PYTHON_IMAGE is required}
+    profiles:
+      - endpoints
+    entrypoint:
+      - python3
+      - -I
+      - /opt/chaos/endpoint-client.py
+      - websocket
+      - --host
+      - chaos-edge.example
+      - --path
+      - /stream
+      - --target
+      - ${CHAOS_ENDPOINT_WEBSOCKET_TARGET:-nervix-1:8080}
+      - --interval-ms
+      - "100"
+      - --retained-records
+      - "20"
+      - --input
+      - /opt/chaos/endpoints/frame-input.ndjson
+      - --control
+      - /opt/chaos/endpoints/control
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: load
+    volumes:
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/endpoint-client.py:/opt/chaos/endpoint-client.py:ro
+      - ${CHAOS_ENDPOINT_DIR:?CHAOS_ENDPOINT_DIR is required}:/opt/chaos/endpoints:ro
+    logging:
+      driver: local
+      options:
+        max-file: "2"
+        max-size: 2m
+    networks:
+      - chaos
+
   # One independent observer per node follows the paced domain's clock through that node's
   # session route with the packaged CLI; the runner starts each with its CHAOS_CLOCK_HOST.
   clock-observer:

@@ -422,6 +422,7 @@ pub(super) mod tests {
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
         let route = runtime
             .resolve_endpoint("edge.example.com", "/events")
+            .into_route()
             .assured("the fixture installs its endpoint route");
         let routes = route.bindings()[0]
             .intake()
@@ -469,6 +470,7 @@ pub(super) mod tests {
                 nervix_primitives::task::consume_budget().await;
                 let route = runtime
                     .resolve_endpoint("edge.example.com", "/events")
+                    .into_route()
                     .assured("the benchmark route remains installed");
                 std::hint::black_box(route.endpoint_type());
                 std::hint::black_box(route.refusal());
@@ -485,6 +487,7 @@ pub(super) mod tests {
         }
         let retained = runtime
             .resolve_endpoint("edge.example.com", "/events")
+            .into_route()
             .assured("the benchmark route remains installed");
         for sample in 0..5 {
             let before = allocated.get();
@@ -517,6 +520,7 @@ pub(super) mod tests {
 
         let route = runtime
             .resolve_endpoint("edge.example.com", "/events")
+            .into_route()
             .assured("the fixture installs its endpoint route");
         let outcome = route
             .dispatch(
@@ -595,6 +599,7 @@ pub(super) mod tests {
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
         let route = runtime
             .resolve_endpoint("edge.example.com", "/events")
+            .into_route()
             .assured("a running endpoint ingestor publishes its route");
         let runtime_key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
@@ -629,6 +634,7 @@ pub(super) mod tests {
 
         let current = runtime
             .resolve_endpoint("edge.example.com", "/events")
+            .into_route()
             .assured("source stop retains the configured endpoint");
         assert!(current.bindings().is_empty());
         assert!(route.bindings()[0].intake().is_none());
@@ -671,6 +677,7 @@ pub(super) mod tests {
 
         let route = runtime
             .resolve_endpoint("edge.example.com", "/events")
+            .into_route()
             .assured("the fixture installs its endpoint route");
 
         // Nothing judged the body, so its sender is told to send it again, without a delay the
@@ -725,6 +732,7 @@ pub(super) mod tests {
             .assured("a running ingestor holds its quiesce control");
         let route = runtime
             .resolve_endpoint("edge.example.com", "/events")
+            .into_route()
             .assured("the fixture installs its endpoint route");
 
         quiesce.engage(IngestorQuiesceCause::EntityHold);
@@ -810,6 +818,7 @@ pub(super) mod tests {
             .assured("a running ingestor holds its quiesce control");
         let route = runtime
             .resolve_endpoint("edge.example.com", "/events")
+            .into_route()
             .assured("the fixture installs its endpoint route");
 
         quiesce.engage(IngestorQuiesceCause::EntityHold);
