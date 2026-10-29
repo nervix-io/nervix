@@ -1187,6 +1187,16 @@ projects the offending driver property key through `OfflineClientConfigError`, r
 Iceberg storage reader's typed error beneath it. The public refusal does not print the property's
 value. Properties requiring a table or an initialized OpenDAL operator remain initialization
 checks.
+An Iceberg emitter whose catalog client sets a file I/O property that its storage client supplies
+is refused with `RegistryError::EmitterClientPairing`. That context names the domain, the emitter,
+its entity kind and both clients. Beneath it, the vocabulary's `IcebergPropertyCollision` names the
+property and the storage key that supplies it, as in `ICEBERG TABLE emitter 'output' in domain
+'shop' cannot pair storage client 'storage' with catalog client 'catalog': Iceberg property
+'s3.endpoint' is set by the storage client as 'endpoint' and by the catalog client`. Neither
+client's value is printed. A TLS file that either Iceberg client cannot use stops the emitter at
+open with `EmitterOpenError::InvalidConfiguration`. Beneath it, `IcebergClientTlsError` names the
+catalog or the object-store client, and the shared `TlsClientConfigError` beneath that names the
+file and the step that failed.
 An emitter whose connector keeps one value per header name and whose `INVOKE` clause writes one literal
 header name twice is refused with `RegistryError::ReplacedHeaderWrite`, which names the domain, the
 emitter, the emitter's connector and entity, the header as the emitter's
@@ -1226,6 +1236,13 @@ revision before runtime installation. A planning failure leaves the previously a
 the predecessor for a retry; runtime installation adds domain context and never selects a fallback
 configuration.
 
+The background runtime-installation supervisor logs a failed application's complete typed report and
+retries on the admission loop's half-second cadence, or sooner when the committed schedule or domain
+state changes. It reads current admitted state on each attempt and retains the last successful
+schedule as its predecessor. A repeated failure remains visible; retry does not turn it into a
+successful command outcome, change its classification, or require a new configuration command.
+Successful installation ends the retry cadence, and shutdown ends a pending retry wait.
+
 Resource planning checks the committed lookup key and codec, generator materialized source,
 output branch and route construction, and WASM guest-state generation before runtime binding.
 These failures name the owning node and relevant relay, codec, or field. A missing
@@ -1245,6 +1262,14 @@ memory capacity and reserved bytes beside configured workers, running jobs and p
 operator can distinguish memory waiting, worker waiting and dependency work. These are
 observations of the run; a successful later inspection does not identify the cause of an earlier
 timeout.
+
+### Client Inspection Admission
+
+Client inspection during incoming preflight may refuse full command-memory or filesystem queue
+capacity. An accepted transaction or restore model step waits for that capacity instead: temporary
+pressure is not an invalid configuration or a failed restore step. Oversized charges and closed
+executors retain their typed admission causes beneath the inspection context. Existing service-task
+cancellation ends a waiting inspection without converting it into an invalid-key diagnosis.
 
 ### Runtime Installation
 

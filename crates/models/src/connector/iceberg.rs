@@ -15,7 +15,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -33,10 +33,11 @@ use super::{
     entity_union::connector_emitters,
 };
 use crate::{
-    ClientName, ConnectorKind, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
-    EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
-    EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, LocatorDeclaration,
-    LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue, PayloadSizeLimit,
+    ClientConfigEntry, ClientName, ConnectorKind, EmitterBatchLegality, EmitterBodyForm,
+    EmitterClientReference, EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities,
+    EmitterReference, EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings,
+    LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PayloadSizeLimit,
 };
 
 configured_client!(S3: unpooled, config CLIENT_CONFIG_S3, CreateClientS3 => S3ConfigEntry);
@@ -60,6 +61,9 @@ const CLIENT_CONFIG_S3: crate::ClientConfigSchema = {
             K::optional("secret_access_key", V::String).secret(),
             K::optional("session_token", V::String).secret(),
             K::TIMEOUT,
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
         ],
         &[N::Prefix("s3."), N::Prefix("client.")],
         &[],
@@ -82,6 +86,9 @@ const CLIENT_CONFIG_GCS: crate::ClientConfigSchema = {
             K::optional("no_auth", V::Boolean),
             K::optional("service_path", V::Url(&["http", "https"])),
             K::TIMEOUT,
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
             K::optional("token", V::String).secret(),
         ],
         &[N::Prefix("gcs.")],
@@ -106,6 +113,9 @@ const CLIENT_CONFIG_AZUREBLOB: crate::ClientConfigSchema = {
             K::optional("sas_token", V::String).secret(),
             K::optional("tenant_id", V::String),
             K::TIMEOUT,
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
         ],
         &[N::Prefix("adls.")],
         &[],
@@ -261,6 +271,78 @@ impl IcebergStorageBackend {
         }
         Ok(())
     }
+
+    /// The configuration schema of this backend's object-store client.
+    const fn client_config(self) -> crate::ClientConfigSchema {
+        match self {
+            Self::S3 => CLIENT_CONFIG_S3,
+            Self::Gcs => CLIENT_CONFIG_GCS,
+            Self::AzureBlob => CLIENT_CONFIG_AZUREBLOB,
+        }
+    }
+
+    /// The Iceberg file I/O property a Nervix-owned key of this backend's client supplies.
+    ///
+    /// `timeout_ms` and the TLS-file keys configure the client's own HTTP transport and supply
+    /// none. A key of a delegated driver namespace is not Nervix-owned; it supplies itself.
+    pub fn file_io_property(self, key: &str) -> Option<&'static str> {
+        match (self, key) {
+            (Self::S3, "access_key_id") => Some("s3.access-key-id"),
+            (Self::S3, "allow_anonymous") => Some("s3.allow-anonymous"),
+            (Self::S3, "client_region") => Some("client.region"),
+            (Self::S3, "disable_config_load") => Some("s3.disable-config-load"),
+            (Self::S3, "disable_ec2_metadata") => Some("s3.disable-ec2-metadata"),
+            (Self::S3, "endpoint") => Some("s3.endpoint"),
+            (Self::S3, "path_style_access") => Some("s3.path-style-access"),
+            (Self::S3, "region") => Some("s3.region"),
+            (Self::S3, "secret_access_key") => Some("s3.secret-access-key"),
+            (Self::S3, "session_token") => Some("s3.session-token"),
+            (Self::Gcs, "allow_anonymous") => Some("gcs.allow-anonymous"),
+            (Self::Gcs, "credentials_json") => Some("gcs.credentials-json"),
+            (Self::Gcs, "disable_config_load") => Some("gcs.disable-config-load"),
+            (Self::Gcs, "disable_vm_metadata") => Some("gcs.disable-vm-metadata"),
+            (Self::Gcs, "no_auth") => Some("gcs.no-auth"),
+            (Self::Gcs, "service_path") => Some("gcs.service.path"),
+            (Self::Gcs, "token") => Some("gcs.oauth2.token"),
+            (Self::AzureBlob, "account_key") => Some("adls.account-key"),
+            (Self::AzureBlob, "account_name") => Some("adls.account-name"),
+            (Self::AzureBlob, "authority_host") => Some("adls.authority-host"),
+            (Self::AzureBlob, "client_id") => Some("adls.client-id"),
+            (Self::AzureBlob, "client_secret") => Some("adls.client-secret"),
+            (Self::AzureBlob, "sas_token") => Some("adls.sas-token"),
+            (Self::AzureBlob, "tenant_id") => Some("adls.tenant-id"),
+            _ => None,
+        }
+    }
+
+    /// Whether `key` lies in one of the driver property namespaces this backend's client delegates.
+    pub fn delegates(self, key: &str) -> bool {
+        self.client_config().delegates(key)
+    }
+
+    /// The file I/O property one entry of this backend's client supplies, when it supplies one.
+    pub fn file_io_entry(self, entry: &ClientConfigEntry) -> Option<IcebergFileIoEntry<'_>> {
+        let property = match self.file_io_property(&entry.key) {
+            Some(property) => property,
+            None if self.delegates(&entry.key) => entry.key.as_str(),
+            None => return None,
+        };
+        Some(IcebergFileIoEntry {
+            property,
+            key: &entry.key,
+            value: &entry.value,
+        })
+    }
+
+    /// The file I/O properties a client of this backend supplies, in its configuration's order.
+    pub fn file_io_entries(
+        self,
+        config: &[ClientConfigEntry],
+    ) -> impl Iterator<Item = IcebergFileIoEntry<'_>> {
+        config
+            .iter()
+            .filter_map(move |entry| self.file_io_entry(entry))
+    }
 }
 
 /// Why a connector kind cannot select an Iceberg object store.
@@ -302,6 +384,80 @@ pub enum IcebergLocationError {
     },
     #[error("LOCATION must name an object-store bucket or container authority")]
     MissingAuthority,
+}
+
+/// One Iceberg file I/O property a storage client supplies, with the key that supplies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IcebergFileIoEntry<'a> {
+    /// The property the table's file I/O reads.
+    pub property: &'a str,
+    /// The client key that supplies it: a Nervix-owned key, or the delegated property itself.
+    pub key: &'a str,
+    pub value: &'a str,
+}
+
+/// The properties an Iceberg emitter's REST catalog loads with, which also configure the file I/O
+/// of the table it loads.
+///
+/// The storage client supplies its file I/O properties, and the catalog client supplies its
+/// configuration without its TLS files, which configure the catalog's own HTTP client instead. The
+/// two clients set disjoint properties: a property both would set is refused, so neither value
+/// silently replaces the other. Within the storage client, the last entry for a property is its
+/// value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IcebergCatalogProperties<'a> {
+    properties: BTreeMap<&'a str, &'a str>,
+}
+
+impl<'a> IcebergCatalogProperties<'a> {
+    /// Pairs a storage client of `backend` with a catalog client.
+    pub fn pair(
+        backend: IcebergStorageBackend,
+        storage: &'a [ClientConfigEntry],
+        catalog: &'a [ClientConfigEntry],
+    ) -> Result<Self, Report<IcebergPropertyCollision>> {
+        let mut properties = BTreeMap::new();
+        let mut storage_keys = BTreeMap::new();
+        for entry in backend.file_io_entries(storage) {
+            properties.insert(entry.property, entry.value);
+            storage_keys.insert(entry.property, entry.key);
+        }
+        for entry in catalog {
+            if let Some(declared) = CLIENT_CONFIG_ICEBERGREST.key(&entry.key)
+                && let crate::ClientConfigValue::File(_) = declared.value
+            {
+                continue;
+            }
+            if let Some(storage_key) = storage_keys.get(entry.key.as_str()) {
+                return Err(Report::new(IcebergPropertyCollision {
+                    property: entry.key.clone(),
+                    storage_key: (*storage_key).to_string(),
+                }));
+            }
+            properties.insert(entry.key.as_str(), entry.value.as_str());
+        }
+        Ok(Self { properties })
+    }
+
+    /// Each property with its value, in property order.
+    pub fn iter(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
+        self.properties
+            .iter()
+            .map(|(property, value)| (*property, *value))
+    }
+}
+
+/// Why an Iceberg emitter cannot pair its storage client with its catalog client.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error(
+    "Iceberg property '{property}' is set by the storage client as '{storage_key}' and by the \
+     catalog client"
+)]
+pub struct IcebergPropertyCollision {
+    /// The property both clients would set.
+    pub property: String,
+    /// The storage client's key that supplies it.
+    pub storage_key: String,
 }
 
 /// What the connector of a ICEBERG TABLE holds and how long it waits.
