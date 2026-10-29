@@ -16,11 +16,20 @@ use nervix_primitives::{sync::oneshot, task::JoinHandle};
 use nervix_recovery::Discarded as _;
 
 use super::*;
+use crate::common::port_pool::next_port;
 
 struct SnapshotProbe {
     transport: Transport,
     end: oneshot::Sender<()>,
     cleanup: JoinHandle<()>,
+}
+
+struct SnapshotProbePort(u16);
+
+impl Drop for SnapshotProbePort {
+    fn drop(&mut self) {
+        release_test_ports(&[self.0]);
+    }
 }
 
 struct BulkHold {
@@ -55,10 +64,9 @@ impl Cluster {
         let dns = DnsResolver::load(DnsConfiguration::system())
             .await
             .map_err(|error| io::Error::other(format!("{error:#}")))?;
+        let port = SnapshotProbePort(next_port()?);
         let (transport, _incoming) = Transport::bind(
-            "127.0.0.1:0"
-                .parse()
-                .assured("the probe uses a literal loopback address"),
+            std::net::SocketAddr::from(([127, 0, 0, 1], port.0)),
             TransportIdentity {
                 cluster_id: TEST_CLUSTER_ID.to_owned(),
                 node_id: probe,
@@ -80,6 +88,7 @@ impl Cluster {
                 .discarded("ending the probe's owner releases its transport");
             closing.shutdown().await;
             drop(directory);
+            drop(port);
         });
         let probe = SnapshotProbe {
             transport,
