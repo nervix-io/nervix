@@ -162,7 +162,7 @@ fn bolero_external_names_round_trip_through_every_representation() {
                 ClickHouseTableName,
                 arbitrary.clickhouse_table_name()
             );
-            assert_external_name_round_trips!(PostgresTableName, arbitrary.emitter_table_name());
+            assert_external_name_round_trips!(PostgresTableName, arbitrary.postgres_table_name());
             assert_external_name_round_trips!(MySqlTableName, arbitrary.mysql_table_name());
             assert_external_name_round_trips!(
                 MongoDbCollectionName,
