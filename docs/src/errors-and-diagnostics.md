@@ -1627,10 +1627,11 @@ row whose own request exceeds `MAX SIZE`, that row receives a `validation` messa
 `Postgres insert of one row measures 1219 bytes, above MAX SIZE 600B`, and the other rows are sent
 in bounded requests. A row within `MAX SIZE` that its destination could never
 accept is the destination's `external` rejection of the `publish` operation, named with the
-destination's limit: a Postgres insert above the largest protocol message the server reads, or a
-MongoDB document above its 16 MiB document limit, which is rejected before the write that would
-carry it. A SQL write that fails for a reason specific to its rows is written again one row at a
-time, and each row the destination still refuses receives an `external` `publish` error with the
+destination's limit: a MongoDB document above its 16 MiB document limit, which is rejected before
+the write that would carry it. A Postgres emitter cannot declare a `MAX SIZE` above the largest
+protocol message the server reads, which `CREATE` refuses, so its rows never reach that limit. A
+SQL write that fails for a reason specific to its rows is written again one row at a time, and
+each row the destination still refuses receives an `external` `publish` error with the
 destination's reason. That includes a violated MySQL `CHECK` constraint, which the server reports
 under the generic SQLSTATE `HY000`, and a Postgres cardinality violation, which is how
 `ON CONFLICT DO UPDATE` refuses one insert that carries a key twice. A MongoDB write answers for
