@@ -71,6 +71,8 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("message_count", "100"),
     ("mqtt_topic_filter", "'nx/topic'"),
     ("nats_queue_group", "'nx-workers'"),
+    ("nats_stream", "'nx_stream'"),
+    ("nats_consumer", "'nx_consumer'"),
     ("nats_subject", "'nx.subject'"),
     ("protobuf_message", "'nx.Message'"),
     ("node_id", "nx-node"),
