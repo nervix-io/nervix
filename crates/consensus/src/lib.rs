@@ -4685,8 +4685,9 @@ where
     /// Carry appends on the path this client was built for.
     ///
     /// A replication client sends initial empty probes on management capacity, then opens one
-    /// ordered stream for its first data batch and subsequent commit updates. That stream uses
-    /// its own idle bound rather than OpenRaft's heartbeat-derived soft TTL. A heartbeat client
+    /// ordered stream for its first data batch and subsequent commit updates. An unconfirmed data
+    /// prefix is checked on management within the same five-second data-setup budget. That stream
+    /// uses its own idle bound rather than OpenRaft's heartbeat-derived soft TTL. A heartbeat client
     /// keeps the one-probe-at-a-time shape on the independent management pool.
     fn stream_append<'s, S>(
         &'s mut self,

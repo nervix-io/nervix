@@ -117,9 +117,11 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - Selected execution state may use node-owned snapshot or replication mechanisms.
 - A consensus append-stream adapter consumes the caller's first request before attempting
   peer admission, so the caller's retry and cancellation gates also govern immediate failures.
-  Leading empty probes use management capacity; the first data request opens an ordered append
-  stream and later empty commit updates share it. Ended input opens no transport, and every
-  consumed request is submitted exactly once on its owning path.
+  Leading empty probes use management capacity. An unconfirmed first-data prefix is checked there
+  before data admission, under the same setup deadline as opening its ordered append stream.
+  A rejected or incomplete prefix ends that input with its exact result. Admitted requests are
+  submitted intact exactly once on their owning path; later empty commit updates share the data
+  stream. Ended input opens no transport.
 - Records, batches, payload attempts, handoff state, ACK guards, ACK tokens, and ACK maps are
   in-memory hot-path state and are never persisted.
 - Connectors adapt external systems at explicit data-plane boundaries. They do not weaken internal

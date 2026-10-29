@@ -596,7 +596,7 @@ Transport-specific schemes and keys:
 - `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`. This is primarily useful for SQS-compatible local/test endpoints.
+- `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`, which is primarily useful for SQS-compatible local/test endpoints. An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
 - `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
   `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
 
@@ -1364,8 +1364,10 @@ PKCS #1 or SEC1, to a broker that asks for a client certificate. A file that can
 holds no PEM certificate or no private key, fails the connection as a configuration error. A broker
 that requires a client certificate and receives none, or one it does not accept, ends the TLS
 session with an alert: `DESCRIBE INGESTOR` shows that the broker refused the TLS session, naming the
-alert, as the transient error, and the instance tries again on its `RETRY POLICY` cadence. An `amqp`
-address carries no TLS, so the client's TLS keys do not apply to it.
+alert, as the transient error, and the instance tries again on its `RETRY POLICY` cadence.
+`tls_ca_file`, `tls_cert_file` and `tls_key_file` require an `amqps` address, and certificate and
+key must be supplied together. A client that violates either rule is refused before commit,
+naming the key and its required constraint without repeating the address or file path.
 
 ### Redis Pub/Sub
 
@@ -1614,6 +1616,12 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-ingest).
 <!-- connector-matrix:ingest-nats-subject:end -->
 
+`SUBJECT` and `QUEUE GROUP` are string literals Nervix subscribes with exactly as written, letter
+case included, within the [external name rules](#external-names). A subscription subject may use
+the NATS wildcards as whole tokens: `SUBJECT 'orders.*.EU'` matches one token in the middle, and
+`SUBJECT 'orders.>'` every remaining token, so `>` comes last. A message's subject and reply
+subject are not exposed as typed metadata; programs read its payload and headers.
+
 NATS ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
 are mandatory; use `INSTANCES 1` for a single queue member.
 
@@ -1795,6 +1803,21 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sqs-queue-ingest).
 <!-- connector-matrix:ingest-sqs-queue:end -->
+
+`QUEUE` takes a string literal that SQS accepts as a queue name: 1 to 80 ASCII letters, digits,
+`-` and `_`, where a FIFO queue's name ends in `.fifo` and the suffix counts toward the 80. Nervix
+preserves its case in both directions, so `QUEUE 'Orders-EU_1.fifo'` reads exactly that queue. The
+ingestor reads a message's attributes through `read_header` and `read_headers`. It names
+`MODE ACK SEQUENTIAL` and `ON QUIESCE SUSPEND`, the only delivery and quiesce modes it declares: the
+queue keeps each message until the source deletes it, so suspending loses nothing.
+
+The `SQS CLIENT` an ingestor or emitter names declares `endpoint`, which is required, and the
+optional `region`, `access_key_id`, `secret_access_key`, `timeout_ms` and `tls_ca_file`, and
+`CREATE SQS CLIENT` refuses any other key. A client without `region` signs its requests for
+`us-east-1`, and one that omits `access_key_id` or `secret_access_key` signs with a placeholder in
+its place, which only an SQS-compatible endpoint that skips signature checks accepts. `timeout_ms`
+bounds an emitter's send; an ingestor's queue lookup, receives and deletions take the waits the
+table lists.
 
 Starting the ingestor sends no request to the service. Each source instance looks its queue up
 before its first poll and keeps the queue's URL from then on, suspensions included. The source
@@ -2077,6 +2100,13 @@ responses resolve with 503 (or the equivalent outcome frame) when intake stops o
 payload on a retained ended route closes with 1013. Open a new connection for a replacement source.
 Stopping a domain withdraws only its routes and intakes; other domains on the same host and path
 continue receiving requests. A withdrawn route returns HTTP 404.
+
+A node answers 404 only once it has installed a revision since it started. Before that, it cannot
+tell a route the cluster binds from one no domain declares. This happens, for example, when the
+node restarts while its cluster has no quorum to catch up through. Such a node refuses every
+request without a published route with HTTP 503 and no retry delay, and a WebSocket upgrade the
+same way. A route that is already published is served at once. Stopping the node clears its routes
+and returns it to that state.
 
 Server-side endpoints are hosted under a `VHOST`. A plain VHOST serves HTTP and WS on the HTTP listener. A TLS-enabled VHOST serves HTTPS and WSS on the separate HTTPS listener.
 

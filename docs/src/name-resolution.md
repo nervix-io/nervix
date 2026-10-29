@@ -322,6 +322,10 @@ so a service can move to new addresses without an alteration.
 Captured backup-section openings have one 30-second caller deadline that includes retries for
 request-capacity refusal. Pool connection lookups retain their five-second attempt budget; the
 caller deadline and stream ownership are described in [Membership, Consensus, And Bulk Transfer](./interconnect.md#membership-consensus-and-bulk-transfer).
+Consensus data setup shares one five-second deadline between an initial management-prefix check
+and replication-stream admission, including any connection lookup either needs. Caller-supplied
+leading empty probes retain their heartbeat-derived deadline. The pool's resolver and connection
+attempt policy are shared by both paths.
 
 ## Dialling The Answers
 
@@ -597,6 +601,10 @@ The scenario features are `cluster/dns_resolution.feature`, the `runtime/*_dns_r
 files for RabbitMQ, Redis, MQTT, Syslog, WebSocket, ClickHouse and SQS, the fixture-name scenarios
 in the HTTP polling, Prometheus, Sentry, OTEL, Iceberg, HTTP emitter and WebSocket client features,
 `tools/cli_session.feature`, and `runtime/client_wire_qualification.feature`.
+
+The RabbitMQ fixture-name delivery examples configure an address for AMQP and add mounted trust
+and a complete client identity for AMQPS. Both transports therefore cross the client's declared
+TLS-key scheme validation before exercising name resolution and broker delivery.
 
 The consensus append-admission unit fixtures construct the ordinary resolver from temporary
 resolver and hosts files with an explicit loopback name-server address. Their transport rejects a

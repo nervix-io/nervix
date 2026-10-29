@@ -147,10 +147,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__endpoint_route_table__tests__bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "endpoint-route-table"
-invariant = "Bind, unbind, replace and teardown publish exactly the configured routes, preserve other domains, and prevent retained routes from admitting ended source lifetimes."
+invariant = "Bind, unbind, replace, teardown and installation publish exactly the configured routes, preserve other domains, prevent retained routes from admitting ended source lifetimes, and report a missing route as final only in an installed table."
 manifest = "Cargo.toml"
 max_input_bytes = 64
 package = "nervix-server"
@@ -3372,7 +3372,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 11
+domain_version = 13
 features = []
 id = "client-config-schema"
 invariant = "Bounded entries drawn from every current client key schema preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."

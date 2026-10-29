@@ -14,9 +14,10 @@ adds it only when the authored key is absent; an invalid explicit value still fa
 `DESCRIBE CLIENT` distinguishes these effective defaults from authored values, with the same
 confidential projection, while canonical configuration preserves omission.
 Scheme-dependent presence distinguishes a key required by an address scheme from an optional key
-permitted only with that scheme. OTEL TLS file keys use the latter state for HTTPS. The same
-vocabulary validation runs on authored and rendered entries, deferring an unresolved address
-template until rendering. Percent-encoded header pairs retain their encoded client configuration;
+permitted only with that scheme. OTEL TLS file keys use the latter state for HTTPS, and RabbitMQ
+TLS file keys use it for `amqps`. The same vocabulary validation runs on authored and rendered
+entries, deferring an unresolved address template until rendering. Percent-encoded header pairs
+retain their encoded client configuration;
 validation and the connector use one decoder into ordered named pairs, without feeding a decoded
 value back through that decoder. OTEL's field rules own exact types and literal value constraints;
 the registry establishes them before planning, and the connector verifies the prepared schema.
@@ -162,10 +163,13 @@ The representation depends on the question being asked:
 | Can a physical format encode the state? | A private wire, storage, Arrow, or atomic encoding | Decode at the boundary and expose typed operations to callers. |
 
 Consensus replication replies have explicit initial-probe, ordered-stream and finished phases.
-Leading empty requests confirm a log boundary over management capacity; the first data request
-transfers the remaining input to one ordered stream. Empty commit updates then remain in that
-stream's order. A failed or rejected initial probe ends its input, so no data stream can follow an
-unconfirmed boundary. These phases are volatile protocol state and are never persisted.
+Leading empty requests confirm a log boundary over management capacity. The initial-probe owner
+retains the last confirmed preceding log identity for this input. A first data request whose
+preceding identity differs requires an empty management check; a request at the beginning of the
+log has no preceding identity to verify. Only a complete match transfers the original data and
+remaining input to one ordered stream. Empty commit updates then remain in that stream's order.
+A failed or rejected prefix check ends its input. These phases and their confirmation are volatile
+protocol state and are never persisted or reused across stream generations.
 
 A pure conversion refusal is an ordinary typed outcome, even when it implements
 `std::error::Error` for a parsing trait. Its owner states that contract at the exact error type

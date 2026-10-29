@@ -134,6 +134,7 @@ use crate::common::{
     mqtt_publish_filter::MqttPublishFilter,
     nats_endpoint::NatsEndpoint,
     node_bound_address::{NodeBoundAddress, NodeBoundListener, bind_as_its_node},
+    node_execution::{NodeExecutionEndpoint, ProbeExecution},
     node_startup::StartupPorts,
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
@@ -16555,6 +16556,8 @@ async fn when_named_client_submits_command_request(
 
 /// Measures a command batch on a client prepared before the fault, with its reply polled
 /// independently of the Cucumber runner. The deadline includes dispatch to the runtime task.
+/// Every node's control-class execution and reactor delay are read beside the probe and reported
+/// for its window, so a slow batch shows where its nodes' scheduling went.
 #[then(expr = "within {string} client {string} completes these Plexus statements")]
 async fn then_named_client_completes_plexus_statements_within(
     world: &mut ScenarioWorld,
@@ -16572,6 +16575,14 @@ async fn then_named_client_completes_plexus_statements_within(
     let commands = expand_placeholders(world, docstring(step));
     let statements = plexus_statements(&commands);
     assert!(!statements.is_empty(), "a timed probe requires statements");
+    let mut execution_endpoints = Vec::new();
+    for node_id in world.cluster().node_ids() {
+        let metrics_url = world
+            .cluster()
+            .observability_metrics_url(&node_id)
+            .assured("the node was listed by the same cluster");
+        execution_endpoints.push(NodeExecutionEndpoint::new(node_id, metrics_url));
+    }
     world.last_command_error = None;
     world.last_command_output = None;
     world.last_client_outcome = None;
@@ -16581,6 +16592,7 @@ async fn then_named_client_completes_plexus_statements_within(
         .assured("the scenario duration fits a monotonic instant");
     let (outcome, elapsed) =
         crate::common::runner_observation::observe_off_the_runner(async move {
+            let execution = ProbeExecution::begin(execution_endpoints);
             let mut last_outcome = None;
             for (position, statement) in statements.into_iter().enumerate() {
                 nervix_primitives::task::consume_budget().await;
@@ -16589,20 +16601,21 @@ async fn then_named_client_completes_plexus_statements_within(
                      position={position} elapsed={:?}",
                     started.elapsed()
                 ));
-                let outcome =
-                    nervix_primitives::time::timeout_at(deadline, client.execute(statement))
-                        .await
-                        .unwrap_or_else(|_| {
-                            panic!(
-                                "client '{name}' did not complete the Plexus statements within \
-                                 {limit:?}; pending statement {position}; domain={probe_domain}"
-                            )
-                        })
-                        .unwrap_or_else(|error| {
-                            panic!(
-                                "client '{name}' failed at Plexus statement {position}: {error:#}"
-                            )
-                        });
+                let Ok(reply) =
+                    nervix_primitives::time::timeout_at(deadline, client.execute(statement)).await
+                else {
+                    let execution = execution.describe().await;
+                    log_probe_execution(&name, &probe_domain, &execution);
+                    panic!(
+                        "client '{name}' did not complete the Plexus statements within {limit:?}; \
+                         pending statement {position}; domain={probe_domain}; execution over the \
+                         probe: {}",
+                        execution.join("; ")
+                    )
+                };
+                let outcome = reply.unwrap_or_else(|error| {
+                    panic!("client '{name}' failed at Plexus statement {position}: {error:#}")
+                });
                 let completed_at = Instant::now();
                 let elapsed = completed_at.duration_since(started);
                 assert!(
@@ -16628,12 +16641,22 @@ async fn then_named_client_completes_plexus_statements_within(
                 "Plexus control probe: client={name} domain={probe_domain} elapsed={elapsed:?} \
                  limit={limit:?}"
             ));
+            let execution = execution.describe().await;
+            log_probe_execution(&name, &probe_domain, &execution);
             (outcome, elapsed)
         })
         .await;
     world.last_command_output = Some(crate::common::cluster::flatten_outcome_messages(&outcome));
     world.last_client_outcome = Some(outcome);
     world.last_cluster_operation_elapsed = Some(elapsed);
+}
+
+fn log_probe_execution(client: &str, domain: &str, execution: &[String]) {
+    for node in execution {
+        append_cucumber_log_line(&format!(
+            "Plexus control execution: client={client} domain={domain} {node}"
+        ));
+    }
 }
 
 #[when(expr = "client {string} fails to execute these Plexus commands")]
@@ -28120,32 +28143,6 @@ async fn when_http_payload_is_posted_to_node_and_fails(
     }
 }
 
-#[when(
-    expr = "http payload is posted to node {string} with host {string} path {string} and is not \
-            routed"
-)]
-async fn when_http_payload_is_posted_to_node_and_is_not_routed(
-    world: &mut ScenarioWorld,
-    node_id: String,
-    host: String,
-    path: String,
-    #[step] step: &Step,
-) {
-    let host = expand_placeholders(world, &host);
-    let path = expand_placeholders(world, &path);
-    let payload = expand_placeholders(world, docstring(step));
-    let error = world
-        .cluster()
-        .publish_http(&node_id, &host, &path, &payload)
-        .await
-        .expect_err("expected http post to be unrouted");
-    let reported = error.to_string();
-    assert!(
-        reported.contains("404"),
-        "expected http post to node '{node_id}' to be unrouted, got: {reported}"
-    );
-}
-
 #[then("the relay subscription receives a payload")]
 async fn then_stream_subscription_receives_payload(world: &mut ScenarioWorld, #[step] step: &Step) {
     append_cucumber_log_line(&format!(
@@ -33581,17 +33578,11 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.enter_phase(ScenarioPhase::BodyComplete, &format!("result={body}"));
 
                 world.enter_phase(ScenarioPhase::TeardownStarted, "");
-                if let Some(Err(error)) = world.cancel_background_backup().await
-                    && !error.is_cancelled()
-                {
-                    append_cucumber_log_line(&format!(
-                        "scenario teardown failed: background CLI backup task: {error}"
-                    ));
-                }
                 world.stop_consensus_load();
                 world.fault_injection.release_all_health_responses();
                 world.fault_injection.release_all_domain_clock_progress();
                 world.fault_injection.release_all_command_pauses();
+                let backup_gates_released = world.fault_injection.release_all_backup_cut_pauses();
                 world.fault_injection.release_all_wasm_checkpoint_pauses();
                 for node in std::mem::take(&mut world.occupied_bulk_nodes) {
                     world.fault_injection.release_execution(&node);
@@ -33650,9 +33641,20 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.active_session_has_subscription = false;
                 world.last_server_error = None;
                 world.release_mysql_table_locks().await;
+                let cleanup_deadline = PhaseDeadline::after(CLUSTER_TEARDOWN_BUDGET);
+                if backup_gates_released > 0 {
+                    world.finish_background_backups(cleanup_deadline).await;
+                }
+                if let Some(Err(error)) = world.cancel_background_backup().await
+                    && !error.is_cancelled()
+                {
+                    append_cucumber_log_line(&format!(
+                        "scenario teardown failed: background CLI backup task: {error}"
+                    ));
+                }
                 let cluster_cleanup = match world.cluster.take() {
                     Some(mut cluster) => {
-                        let teardown = cluster.shutdown_for_teardown().await;
+                        let teardown = cluster.shutdown_for_teardown(cleanup_deadline).await;
                         for panicked in teardown.panics() {
                             append_cucumber_log_line(&format!(
                                 "scenario teardown failed: {panicked}"

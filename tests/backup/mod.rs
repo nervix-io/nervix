@@ -27,6 +27,7 @@ use crate::common::{
 
 mod branch_keys;
 mod branch_state;
+mod cleanup;
 mod cli_lifecycle;
 pub(crate) mod console;
 mod cut_diagnostics;
