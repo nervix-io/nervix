@@ -354,10 +354,9 @@ memory per CPU, from `ubicloud-standard-2` with 8 GB to `ubicloud-standard-30` w
 - `ubicloud-standard-16` runs the unit tests, the scenarios, the Deloxide lane and the Bolero
   sanitizer shards.
 - `ubicloud-standard-8` runs validation, the diagnostic evidence, client conformance, the extra
-  checks, Shuttle, Loom, the Bolero randomized properties, the arm64 and diagnostic image builds and
-  the benchmarks.
-- `ubicloud-standard-4` runs Turmoil, the coverage reports, the book, the amd64 image build and
-  deployment check, and the chaos shards.
+  checks, Shuttle, Loom, the Bolero randomized properties, the image builds and the benchmarks.
+- `ubicloud-standard-4` runs Turmoil, the coverage reports, the book, the amd64 deployment check
+  and the chaos shards.
 - `ubicloud-standard-2` runs the jobs that only select, plan, gate or publish.
 
 The arm64 deployment check runs natively on `ubicloud-standard-8-arm`, whose 24 GB leave host

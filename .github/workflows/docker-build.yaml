@@ -63,11 +63,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # On a 4-vCPU, 16 GB machine the build lost its runner 36 minutes in. The arm64 and
+          # diagnostic builds finish on 8 vCPUs and 32 GB.
           - image: debian
             platform: linux/amd64
             arch: amd64
             llvm: "23"
-            runner: ubicloud-standard-4-ubuntu-2404
+            runner: ubicloud-standard-8-ubuntu-2404
           - image: debian
             platform: linux/arm64
             arch: arm64
