@@ -1,0 +1,257 @@
+Feature: SQS queue declarations
+  SQS QUEUE uses one literal, case-preserving queue rule in both directions. Its delivery, quiesce
+  and publishing modes, and the configuration an SQS client honours, apply at CREATE without
+  contacting the service.
+
+  Scenario Outline: SQS queue declarations preserve queue literals in both directions
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (tenant STRING, value STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE SQS CLIENT sqs_main CONFIG {
+        'endpoint' = 'http://127.0.0.1:1',
+        'region' = 'eu-west-1',
+        'access_key_id' = 'declaration-key',
+        'secret_access_key' = 'declaration-secret',
+        'timeout_ms' = '5000'
+      };
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SQS QUEUE INGESTOR intake
+        FROM sqs_main QUEUE '<queue>' INSTANCES 2
+        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL
+        SET tenant = coalesce(read_header('tenant'), 'absent')
+        UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      SHOW CREATE INGESTOR intake;
+      """
+    Then the last command output contains
+      """
+      QUEUE '<queue>' INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 5s
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SQS QUEUE EMITTER publishing FROM events
+        TO sqs_main QUEUE '<queue>' <fifo_group>
+        MODE <mode> RETRY POLICY BACKOFF 250ms MAX 30s
+        ENCODE USING event_codec INHERIT ALL
+        INVOKE write_header('tenant', input.tenant)
+        <batch>
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      SHOW CREATE EMITTER publishing;
+      """
+    Then the last command output contains
+      """
+      QUEUE '<queue>'
+      """
+    And the last command output contains
+      """
+      MODE <mode> RETRY POLICY BACKOFF 250ms MAX 30s
+      """
+    And the last command output contains
+      """
+      <shown>
+      """
+
+    Examples:
+      | cluster_size | queue            | fifo_group              | mode   | batch                                 | shown                   |
+      | 1            | Orders-EU_1      |                         | SINGLE |                                       | write_header            |
+      | 3            | Orders-EU_1      |                         | SINGLE |                                       | write_header            |
+      | 1            | Orders-EU_1.fifo | FIFO GROUP input.tenant | BATCH  | BATCH MAX MESSAGES 10 MAX SIZE 256KiB | FIFO GROUP input.tenant |
+      | 3            | Orders-EU_1.fifo | FIFO GROUP input.tenant | BATCH  | BATCH MAX MESSAGES 10 MAX SIZE 256KiB | BATCH MAX MESSAGES 10   |
+
+  Scenario Outline: SQS queue ingestors refuse delivery and quiesce modes the queue does not declare
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (tenant STRING, value STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:1' };
+      """
+    When these Plexus commands fail
+      """
+      CREATE SQS QUEUE INGESTOR refused
+        FROM sqs_main QUEUE 'orders' MODE <mode>
+        ON QUIESCE <quiesce> DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      """
+    Then the last command error contains
+      """
+      <expected>
+      """
+
+    Examples:
+      | cluster_size | mode                                                               | quiesce                                      | expected                            |
+      | 1            | NO ACK                                                             | SUSPEND                                      | expected ACK, found NO              |
+      | 3            | NO ACK                                                             | SUSPEND                                      | expected ACK, found NO              |
+      | 1            | ACK PARALLEL MAX 11 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | SUSPEND                                      | expected SEQUENTIAL, found PARALLEL |
+      | 3            | ACK PARALLEL MAX 11 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | SUSPEND                                      | expected SEQUENTIAL, found PARALLEL |
+      | 1            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s      | DROP                                         | expected SUSPEND, found DROP        |
+      | 3            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s      | DROP                                         | expected SUSPEND, found DROP        |
+      | 1            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s      | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER      |
+      | 3            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s      | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER      |
+
+  Scenario Outline: SQS queue emitters refuse publishing modes the queue does not declare
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (tenant STRING, value STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:1' };
+      """
+    When these Plexus commands fail
+      """
+      CREATE SQS QUEUE EMITTER refused FROM events TO sqs_main QUEUE 'orders'
+        MODE <mode> ENCODE USING event_codec INHERIT ALL
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    Then the last command error contains
+      """
+      expected SINGLE | BATCH, found
+      """
+
+    Examples:
+      | cluster_size | mode                                                          |
+      | 1            | NO ACK RETRY POLICY BACKOFF 1s MAX 30s                        |
+      | 3            | NO ACK RETRY POLICY BACKOFF 1s MAX 30s                        |
+      | 1            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+      | 3            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+
+  Scenario Outline: SQS queue names outside the SQS rule are refused in both directions
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (tenant STRING, value STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:1' };
+      """
+    When these Plexus commands fail
+      """
+      CREATE SQS QUEUE INGESTOR refused_intake
+        FROM sqs_main QUEUE '<queue>'
+        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      """
+    Then the last command error contains
+      """
+      invalid sqs_queue '<queue>': <reason>
+      """
+    When these Plexus commands fail
+      """
+      CREATE SQS QUEUE EMITTER refused_publishing FROM events
+        TO sqs_main QUEUE '<queue>'
+        MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s
+        ENCODE USING event_codec INHERIT ALL
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    Then the last command error contains
+      """
+      invalid sqs_queue '<queue>': <reason>
+      """
+
+    Examples:
+      | cluster_size | queue                                                                             | reason                                             |
+      | 1            | orders.v2                                                                         | holds '.', which it may not hold                   |
+      | 3            | orders.v2                                                                         | holds '.', which it may not hold                   |
+      | 1            | Orders EU                                                                         | holds ' ', which it may not hold                   |
+      | 3            | Orders EU                                                                         | holds ' ', which it may not hold                   |
+      | 1            | .fifo                                                                             | holds nothing before its '.fifo' suffix            |
+      | 3            | .fifo                                                                             | holds nothing before its '.fifo' suffix            |
+      | 1            | orders-012345678901234567890123456789012345678901234567890123456789012345678.fifo | is 81 bytes long, longer than the 80 bytes allowed |
+      | 3            | orders-012345678901234567890123456789012345678901234567890123456789012345678.fifo | is 81 bytes long, longer than the 80 bytes allowed |
+
+  Scenario Outline: SQS clients refuse configuration an SQS client does not honour
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands fail
+      """
+      CREATE SQS CLIENT refused_client CONFIG {
+        <config>
+      };
+      """
+    Then the last command error contains
+      """
+      <expected>
+      """
+
+    Examples:
+      | cluster_size | config                                                    | expected                                                                                  |
+      | 1            | 'region' = 'eu-west-1'                                    | missing required client config key 'endpoint'                                             |
+      | 3            | 'region' = 'eu-west-1'                                    | missing required client config key 'endpoint'                                             |
+      | 1            | 'endpoint' = 'ftp://127.0.0.1:1'                          | invalid client config key 'endpoint': expected URL                                        |
+      | 3            | 'endpoint' = 'ftp://127.0.0.1:1'                          | invalid client config key 'endpoint': expected URL                                        |
+      | 1            | 'endpoint' = 'http://127.0.0.1:1', 'timeout_ms' = 'soon'  | invalid client config key 'timeout_ms': expected positive, schedulable whole milliseconds |
+      | 3            | 'endpoint' = 'http://127.0.0.1:1', 'timeout_ms' = 'soon'  | invalid client config key 'timeout_ms': expected positive, schedulable whole milliseconds |
+      | 1            | 'endpoint' = 'http://127.0.0.1:1', 'regoin' = 'eu-west-1' | unknown client config key 'regoin'                                                        |
+      | 3            | 'endpoint' = 'http://127.0.0.1:1', 'regoin' = 'eu-west-1' | unknown client config key 'regoin'                                                        |
+
+  Scenario Outline: SQS clients refuse a client identity that SQS connections never present
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE sqs_tls;
+      """
+    And node "node-1" has resource directory "sqs_tls_fixture" containing
+      """
+      {"ca.pem":"trust material is inspected by the connector when it initializes\n","client.pem":"an identity no SQS connection presents\n","client-key.pem":"an identity no SQS connection presents\n"}
+      """
+    When these Plexus commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE sqs_tls VERSION "{{sqs_tls_fixture}}";
+      """
+    And these Plexus commands fail
+      """
+      CREATE SQS CLIENT identity_client
+      MOUNT sqs_tls VERSION 1
+      CONFIG {
+        'endpoint' = 'https://127.0.0.1:1',
+        'tls_ca_file' = '{{ sqs_tls }}/ca.pem',
+        'tls_cert_file' = '{{ sqs_tls }}/client.pem',
+        'tls_key_file' = '{{ sqs_tls }}/client-key.pem'
+      };
+      """
+    Then the last command error contains
+      """
+      unknown client config key 'tls_cert_file'
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SQS CLIENT trusting_client
+      MOUNT sqs_tls VERSION 1
+      CONFIG {
+        'endpoint' = 'https://127.0.0.1:1',
+        'tls_ca_file' = '{{ sqs_tls }}/ca.pem'
+      };
+      SHOW CREATE CLIENT trusting_client;
+      """
+    Then the last command output contains
+      """
+      'tls_ca_file' = '{{ sqs_tls }}/ca.pem'
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

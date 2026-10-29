@@ -40,7 +40,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions, operation deadlines and TLS identity file formats | `Emitters` → `MySQL`, and `Database Client Connection Pools` |
-| Sentry platform options, event defaults, batch transformations and strict DSN/timeout configuration | `Emitters` → `Sentry`, then `Connector Capabilities` |
+| Sentry platform options, event defaults and limit, batch transformations, strict DSN/timeout configuration, the inherited HTTP transport, rejected versus retried statuses and retry hints | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
 | Session subscriptions and domain clock attachment | `Sessions` |
@@ -385,6 +385,13 @@ current connection, retry and deadline limits.
   `BUFFER` or `DROP` policy in generated Plexus.
 - Redis Pub/Sub uses `NO ACK` in both directions. Treat `CHANNEL` as a literal, case-preserving
   name and consult the Redis manual sections for its byte bound and unavailable header operations.
+- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`, and an emitter
+  `MODE SINGLE` or `MODE BATCH`. Treat `QUEUE` as a literal, case-preserving SQS name, and check
+  `SQS CLIENT` keys against `Ingestors` → `SQS`: it declares no client certificate keys.
+- `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
+  `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
+  tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
+  sections of `Ingestors` and `Emitters`.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
   `OWNED BY INGESTOR` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
@@ -432,8 +439,9 @@ current connection, retry and deadline limits.
   `message.timeout.ms` or `delivery.timeout.ms` in the client's `CONFIG` as the producer's delivery
   bound. The producer always reports every record, so `delivery.report.only.error` in a client's
   `CONFIG` has no effect.
-- Every Sentry emitter references a `SENTRY CLIENT` with a project DSN, encodes one event JSON
-  object per record, and has no `write_header` invocation.
+- Every Sentry emitter references a `SENTRY CLIENT` with a project DSN and a positive `timeout_ms`,
+  encodes one event JSON object per record, or per batch through `ON EMITTING BATCH`, and has no
+  `write_header` invocation.
 - Every custom WASM guest is built for the current ABI, accepts
   `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and
   declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`. Its
