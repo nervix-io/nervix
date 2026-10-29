@@ -339,7 +339,9 @@ The interconnect's outer and nested rkyv receive decoders acquire overlapping me
 immediate admission. A queued reservation that needs the retained input therefore cannot form a
 cycle with its decoder. A nested CPU job owns an independent charge for its encoded input as well
 as its decoded-value reservation, so cancelling the request cannot leave the job's bytes
-uncharged. Deloxide does not observe the asynchronous semaphore waits. The worker FIFO uses a
+uncharged. Its private charged-input trait exposes a byte borrow with an explicit recurring
+execution contract; both concrete carriers return their retained slice without synchronization.
+Deloxide does not observe the asynchronous semaphore waits. The worker FIFO uses a
 tracked lock, so `scenario.snapshot-receive-admission` and its stressed restore twin cover actual
 decode admission and completion in the diagnostic selections. Queued callback cancellation uses
 that existing FIFO owner without acquiring a new lock; the explicit cancellation interleaving

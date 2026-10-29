@@ -149,17 +149,29 @@ impl EncodedPayload {
     }
 }
 
-impl AsRef<[u8]> for EncodedPayload {
-    fn as_ref(&self) -> &[u8] {
-        &self.bytes
+/// Only owned carriers whose bytes retain their reservation may enter a decoding job.
+trait ChargedRkyvInput: Send + 'static {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "borrows the owned input's byte slice without allocation or synchronization"
+        )
+    )]
+    fn as_bytes(&self) -> &[u8];
+}
+
+impl ChargedRkyvInput for ChargedBytes {
+    fn as_bytes(&self) -> &[u8] {
+        self.as_ref()
     }
 }
 
-/// Only owned carriers whose bytes retain their reservation may enter a decoding job.
-trait ChargedRkyvInput: AsRef<[u8]> + Send + 'static {}
-
-impl ChargedRkyvInput for ChargedBytes {}
-impl ChargedRkyvInput for EncodedPayload {}
+impl ChargedRkyvInput for EncodedPayload {
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
 
 impl<T> Decoded<T> {
     pub(crate) fn into_parts(self) -> (T, Reservation) {
@@ -399,7 +411,7 @@ where
             cancellation.check().map_err(|error| {
                 TransportError::with_cause(Report::new(error), TransportError::Decode)
             })?;
-            let bytes = bytes.as_ref();
+            let bytes = bytes.as_bytes();
             let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
             aligned.extend_from_slice(bytes);
             let value = decode_aligned::<T>(&aligned, max_depth)?;
@@ -431,7 +443,7 @@ where
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
     let bytes = EncodedPayload { bytes, reservation };
     let decoded_charge = executor
-        .try_reserve(class, bytes.as_ref().len().arch_into())
+        .try_reserve(class, bytes.as_bytes().len().arch_into())
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
     decode_rkyv_charged(executor, cpu, bytes, decoded_charge).await
 }
