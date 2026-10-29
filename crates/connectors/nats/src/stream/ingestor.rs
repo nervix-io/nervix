@@ -770,6 +770,109 @@ mod tests {
         drop(second_pull.assured("the script sees the second pull"));
     }
 
+    /// A refusal that follows a delivery of the same pull fails the next read, once the read that
+    /// gathered the delivery has handed it to the host.
+    #[nervix_primitives::test]
+    async fn a_refusal_while_gathering_fails_the_next_read_after_the_gathered_delivery() {
+        let server = ScriptedServer::start().await;
+        let plan = plan(&server.addr());
+        let script = nervix_primitives::task::spawn(async move {
+            let (mut connection, inbox) = bind(&server).await;
+            expect_pull(&mut connection, 3).await;
+            connection
+                .deliver_for_reply(&inbox, "$JS.ACK.orders.nervix.1.1.1.0.0", b"first")
+                .await;
+            connection
+                .deliver_status(&inbox, 409, "Consumer Deleted")
+                .await;
+            connection
+        });
+        let mut source = opened(&plan).await;
+        let parallel = IngestorBatchRequest {
+            max_messages: NonZeroUsize::new(3).assured("a fixed window of three is positive"),
+            batch_timeout: Some(OBSERVATION_BOUND),
+        };
+
+        let batch = read(&mut source, parallel).await;
+        assert_eq!(
+            payloads(&batch),
+            vec![b"first".to_vec()],
+            "the delivery the pull brought before its refusal reaches the host"
+        );
+        let next = timeout(
+            OBSERVATION_BOUND,
+            source.next_batch(parallel, &IngestorReadCancellation::new()),
+        )
+        .await
+        .assured("the retained refusal returns at once");
+        let Err(error) = next else {
+            panic!("the next read reports the refusal the gathering read retained");
+        };
+        let cause = error
+            .downcast_ref::<NatsStreamIngestorError>()
+            .assured("the typed cause stays beneath the read failure");
+        assert!(
+            matches!(cause, NatsStreamIngestorError::PullRefused { .. }),
+            "the retained failure is the refusal: {cause}"
+        );
+        assert!(source.needs_resume());
+        script
+            .await
+            .assured("the script refuses the pull after its first delivery");
+    }
+
+    /// A parallel read whose pull brings fewer deliveries than it asked for returns them once its
+    /// batch timeout passes. Its pull request stays outstanding, so the next read takes what that
+    /// request brings later without asking again.
+    #[nervix_primitives::test]
+    async fn a_parallel_read_returns_what_arrived_once_its_batch_timeout_passes() {
+        let server = ScriptedServer::start().await;
+        let plan = plan(&server.addr());
+        let (first_read, first_read_ended) = oneshot::channel::<()>();
+        let (second_read, second_read_ended) = oneshot::channel::<()>();
+        let script = nervix_primitives::task::spawn(async move {
+            let (mut connection, inbox) = bind(&server).await;
+            expect_pull(&mut connection, 3).await;
+            connection
+                .deliver_for_reply(&inbox, "$JS.ACK.orders.nervix.1.1.1.0.0", b"first")
+                .await;
+            first_read_ended
+                .await
+                .assured("the test ends its first read before the next delivery");
+            connection
+                .deliver_for_reply(&inbox, "$JS.ACK.orders.nervix.1.2.2.0.0", b"second")
+                .await;
+            second_read_ended
+                .await
+                .assured("the test ends its second read before the script checks it");
+            connection.ping_client().await;
+            connection
+        });
+        let mut source = opened(&plan).await;
+        let parallel = IngestorBatchRequest {
+            max_messages: NonZeroUsize::new(3).assured("a fixed window of three is positive"),
+            batch_timeout: Some(Duration::from_millis(50)),
+        };
+
+        let first = read(&mut source, parallel).await;
+        assert_eq!(payloads(&first), vec![b"first".to_vec()]);
+        first_read
+            .send(())
+            .assured("the script waits for the first read to end");
+        let second = read(&mut source, parallel).await;
+        assert_eq!(
+            payloads(&second),
+            vec![b"second".to_vec()],
+            "the next read takes what the outstanding pull request brings"
+        );
+        second_read
+            .send(())
+            .assured("the script waits for the second read to end");
+        script
+            .await
+            .assured("the client sent no second pull request while the first was outstanding");
+    }
+
     #[nervix_primitives::test]
     async fn a_refused_pull_fails_the_read_and_leaves_the_instance_to_resume() {
         let server = ScriptedServer::start().await;
