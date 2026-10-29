@@ -427,8 +427,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   replacement attempt. Design
   application effects for duplicates and uncertain ACK confirmation. Read `Emitters` → `Client emitters`,
   `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
-- Request/response emitters do not take `ACK TIMEOUT`. ClickHouse and OTEL clients require a positive
-  `timeout_ms`; SQS, Sentry, or Iceberg object-store clients use it when a request
+- Request/response emitters do not take `ACK TIMEOUT`. ClickHouse, OTEL and Sentry clients require a
+  positive `timeout_ms`; SQS or Iceberg object-store clients use it when a request
   needs an explicit bound. A ClickHouse HTTPS address also requires `tls_ca_file` from a mounted
   resource, while HTTP refuses TLS file keys. Its table locator has one or two case-preserving
   dot-separated parts, each quoted by the connector when sent. The emitter's declared retry
@@ -518,15 +518,19 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   30 minutes by default, and never applies them to a Pub/Sub ingestor's subscription connection.
   Read `Connection lifetimes` in that same pools entry before choosing values; `DESCRIBE CLIENT
   <name>` shows both, marking an omitted one `(default)`.
-- Give a `POSTGRES` client an absolute `postgres://` or `postgresql://` `addr` URL that selects
-  either `sslmode=disable` or `sslmode=verify-full`; no other mode is accepted and there is no
+- Give a `POSTGRES` client an absolute `postgres://` or `postgresql://` `addr` URL that sets
+  `sslmode` once, to either `disable` or `verify-full`; no other mode is accepted and there is no
   opportunistic fallback. Mounted `tls_ca_file`, `tls_cert_file`, and `tls_key_file` are the
   TLS-file interface, certificate and key must be supplied together, and TLS files require
-  `verify-full`.
+  `verify-full`. A `POSTGRES TABLE` names `'Orders'` or `'sales.Orders'`, each part sent with its
+  case kept; `ON CONFLICT (...) DO UPDATE` needs a target and a mapped column outside it, and
+  `MAX SIZE` is at most `1073741822B`. Read
+  [Emitters → Postgres](../../../docs/src/emitters.md#postgres).
 - Give a `RABBITMQ` client an `amqp://` or `amqps://` `addr` that names a host and no port 0; Nervix
   refuses any other address before commit. Mounted `tls_ca_file`, `tls_cert_file` and
-  `tls_key_file` apply to `amqps` only, certificate and key must be supplied together, and the
-  connection presents them to a broker that requires a client certificate. Read
+  `tls_key_file` require `amqps`; `CREATE` refuses these keys with `amqp`. Certificate and key must
+  be supplied together, and the connection presents them to a broker that requires a client
+  certificate. Read
   [Ingestors → RabbitMQ](../../../docs/src/ingestors.md#rabbitmq).
 - Treat every route as a newly constructed output. Add `INHERIT` only where that node permits it,
   and initialize every required output field on set-only routes.
@@ -633,8 +637,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   singleton wire schema directly with `FROM SYSLOG`, keep the format independent of the UDP/TCP/TLS
   client transport, and use only the documented `SYSLOG LISTENER INGESTOR ... MODE NO ACK` source
   and `NO ACK` emitter forms.
-- For a Sentry emitter, reference a `SENTRY CLIENT` containing the project DSN and use a codec
-  that emits one Sentry event JSON object per record. Do not add header writes to the Sentry route.
+- For a Sentry emitter, reference a `SENTRY CLIENT` containing the project DSN and a positive
+  `timeout_ms`, and use a codec that emits one Sentry event JSON object per record. Do not add header
+  writes to the Sentry route.
 - List topics, queues, streams, tables, buckets, catalogs, namespaces, collections, and other
   external prerequisites separately. Nervix does not create them as a side effect of starting a
   node.

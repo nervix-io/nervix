@@ -411,6 +411,15 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "MYSQL TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mysql_deadlines.feature", scenario = "A MySQL emitter whose server never answers is reported within timeout_ms" },
+  { feature = "tests/features/runtime/mysql_deadlines.feature", scenario = "A MySQL insert deadline is reported and its rows are retried after a table unlock" },
+  { feature = "tests/features/runtime/mysql_deadlines.feature", scenario = "MySQL emitters report a pool checkout deadline while their shared connection is busy" },
+]
+
+[[capability]]
 capability = "MODE ACK"
 entity = "MYSQL TABLE EMITTER"
 scenarios = [

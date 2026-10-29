@@ -103,6 +103,25 @@ rules_are_default() {
     ' "${state}"
 }
 
+# Pumba installs the root, loss leaf and destination classifier in separate commands.
+# A partial netem installation must not start the blocked-traffic probe.
+preflight_rules_are_installed() {
+    local kind="$1" state="$2"
+    if [[ "${kind}" == iptables ]]; then
+        ! rules_are_default "${state}"
+        return
+    fi
+    awk '
+        /^# qdisc$/ { section = "qdisc"; next }
+        /^# filter$/ { section = "filter"; next }
+        /^# iptables$/ { section = "iptables"; next }
+        section == "qdisc" && /^qdisc prio 504d: root / { root = 1 }
+        section == "qdisc" && /^qdisc netem 5050: parent 504d:3 / && / loss 100%([[:space:]]|$)/ { loss = 1 }
+        section == "filter" && / flowid 504d:3([[:space:]]|$)/ { classifier = 1 }
+        END { exit !(root && loss && classifier) }
+    ' "${state}"
+}
+
 # Deletes Pumba's root qdisc and Pumba's INPUT DROP rules, and nothing else.
 remove_owned_rules() {
     local target="$1"
@@ -407,7 +426,7 @@ preflight() {
         local attempt
         for attempt in $(seq 1 30); do
             inspect_rules "${preflight_canary}" "${directory}/${kind}-installed.txt"
-            if ! rules_are_default "${directory}/${kind}-installed.txt"; then
+            if preflight_rules_are_installed "${kind}" "${directory}/${kind}-installed.txt"; then
                 installed=true
                 break
             fi
@@ -416,7 +435,7 @@ preflight() {
             sleep 1
         done
         if [[ "${installed}" != true ]]; then
-            preflight_fail "${kind}.installation" "Pumba ${kind} installed nothing on the canary after ${attempt} observations"
+            preflight_fail "${kind}.installation" "Pumba ${kind} installation was incomplete on the canary after ${attempt} observations"
         fi
         if preflight_canary_reaches "${gateway}"; then
             preflight_fail "${kind}.effect" "Pumba ${kind} was installed but the canary still reached its gateway"

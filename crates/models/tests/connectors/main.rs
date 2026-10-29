@@ -654,8 +654,17 @@ fn emitter_declaration(kind: EmitterEntityKind) -> EmitterDeclaration {
             OtelEmitterEntity::Logs | OtelEmitterEntity::Traces | OtelEmitterEntity::Metrics,
         )
         | EmitterEntityKind::Iceberg(IcebergEmitterEntity::Table) => request(optional),
+        EmitterEntityKind::Postgres(PostgresEmitterEntity::Table) => EmitterDeclaration {
+            batch: EmitterBatchLegality::Required {
+                maximum: Some(
+                    "1073741822B"
+                        .parse()
+                        .assured("PQ_LARGE_MESSAGE_LIMIT is a whole number of bytes"),
+                ),
+            },
+            ..request(required)
+        },
         EmitterEntityKind::ClickHouse(ClickHouseEmitterEntity::Table)
-        | EmitterEntityKind::Postgres(PostgresEmitterEntity::Table)
         | EmitterEntityKind::MySql(MySqlEmitterEntity::Table)
         | EmitterEntityKind::MongoDb(MongoDbEmitterEntity::Collection) => request(required),
     }

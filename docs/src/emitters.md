@@ -192,7 +192,7 @@ to discard a record.
 | Redis Pub/Sub | `NO ACK` | Server acceptance of `PUBLISH`; the subscriber count is not a delivery guarantee |
 | ZeroMQ | `NO ACK` | Socket acceptance |
 | SQS | `SINGLE`; `BATCH` | Successful per-record or per-entry service response |
-| Sentry | `ACK` | Successful one-event envelope response |
+| Sentry | `ACK` | A `2xx` answer to the event's one-event envelope |
 | OTEL | `ACK` | Successful OTLP Export response; `partial_success` is acknowledged with a warning |
 | ClickHouse, Postgres, MySQL | `ACK` | Successful insert/write result |
 | MongoDB | `ACK` | The server's answer that it applied the document, from a successful write or from a failed one, such as a write whose write concern the deployment could not satisfy |
@@ -836,14 +836,14 @@ The rows around it are written.
 The destination's own limits bound every write too. A MySQL statement binds at most 65,535
 placeholders, so an insert carries at most as many rows as fit them: 13,107 rows of five mapped
 columns, whatever `MAX MESSAGES` allows. Postgres reads no protocol message above 1,073,741,822
-bytes, and a write's measured size is never smaller than the message that carries its arrays, so a
-Postgres write is kept within that size too; a row whose own insert exceeds it follows
-`ON MESSAGE ERROR` as an `external` `publish` error. A MongoDB document holds at most 16 MiB, so a
-row whose document exceeds it follows `ON MESSAGE ERROR` as an `external` `publish` error naming
-16777216 bytes before any write, and the rows around it are written. MongoDB takes 100,000 writes
-in one command, more than `MAX MESSAGES` allows, and its driver divides a write larger than the
-`maxMessageSizeBytes` the server reports into several commands whose documents it still answers
-for one by one.
+bytes, so a Postgres emitter accepts `MAX SIZE` up to `1073741822B` and is refused above it at
+`CREATE`; a write's measured size is never smaller than the message that carries its arrays, so
+every Postgres insert stays within the message the server reads. A MongoDB document holds at most
+16 MiB, so a row whose document exceeds it follows `ON MESSAGE ERROR` as an `external` `publish`
+error naming 16777216 bytes before any write, and the rows around it are written. MongoDB takes
+100,000 writes in one command, more than `MAX MESSAGES` allows, and its driver divides a write
+larger than the `maxMessageSizeBytes` the server reports into several commands whose documents it
+still answers for one by one.
 
 A write that fails for a reason specific to its rows — a constraint, a value its column cannot
 hold, a packet the server refuses as too large — is written again one row at a time, so the rows
@@ -1126,15 +1126,18 @@ Transport-specific expectations:
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
 - `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
-- `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; Nervix honors the
-  client's `tls_ca_file`, `tls_cert_file`, and `tls_key_file`.
+  An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses
+  `tls_cert_file` and `tls_key_file`.
+- `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; its `tls_ca_file` adds
+  a trust root beside the platform's native roots, and `tls_cert_file` with `tls_key_file` presents
+  a client certificate.
 - `OTEL`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file`, `tls_cert_file`, and
   `tls_key_file` for both OTLP/gRPC and OTLP/HTTP-protobuf. `tls_ca_file` adds a server trust root,
   and TLS file keys with an `http://` endpoint are refused; see [OTEL](#otel).
 - `CLICKHOUSE`: use an `https://...` `addr` with mounted `tls_ca_file` and required positive
   `timeout_ms`; HTTP addresses refuse TLS file keys.
 - `POSTGRES`: use `sslmode=verify-full` in the `addr` URL; Nervix honors `tls_ca_file`, `tls_cert_file`, and `tls_key_file`. `sslmode=disable` is the only other accepted policy.
-- `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file`.
+- `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file` and paired `tls_cert_file`/`tls_key_file` client identity files.
 - `MONGODB`: Nervix honors `tls_ca_file`, and `tls_cert_file` with `tls_key_file` as its client
   certificate; any of them enables TLS without `tls=true` in `addr`, and an `addr` with `tls=false`
   refuses them. See [MongoDB](#mongodb).
@@ -1488,7 +1491,8 @@ the failure as its transient error; it confirms nothing, so its input stays unac
 reopens on its `RETRY POLICY` backoff. The emitter reads the client's `addr`, trusts its
 `tls_ca_file` and presents its `tls_cert_file` and `tls_key_file` as a RabbitMQ source does; see
 [RabbitMQ](./ingestors.md#rabbitmq). A broker that refuses the TLS session leaves the emitter
-unavailable with that refusal as its transient error.
+unavailable with that refusal as its transient error. The client's `tls_ca_file`, `tls_cert_file`
+and `tls_key_file` require an `amqps` address; combining them with `amqp` is refused before commit.
 
 ### Redis Pub/Sub
 
@@ -1663,6 +1667,14 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-emit).
 <!-- connector-matrix:emit-nats-subject:end -->
+
+`SUBJECT` names one literal subject, published to exactly as written, letter case included. It
+follows the [ingestion subject rule](ingestors.md#external-names) without the `*` and `>`
+wildcards, so `SUBJECT 'orders.*'` is refused when the emitter is created. A message carries its
+subject, the written headers and the payload; the emitter sets no reply subject or JetStream
+message id of its own. `BATCH` is optional. The NATS protocol sets no message size of its own:
+each server announces its `max_payload`, and the client refuses a batch message above it before
+writing it, as [Broker and message emitters](#broker-and-message-emitters) describes.
 
 `NO ACK` publishes through Core NATS. A write delivers its records only after the client's queued
 bytes have drained and their connection has flushed. The flush is local: the server answers
@@ -1869,6 +1881,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sqs-queue-emit).
 <!-- connector-matrix:emit-sqs-queue:end -->
 
+`QUEUE` uses the same rule as [SQS ingestion](ingestors.md#sqs): 1 to 80 ASCII letters, digits,
+`-` and `_`, a FIFO queue's `.fifo` suffix included, preserved exactly as written. `write_header`
+writes message attributes, and the emitter declares no envelope clause or `PROPERTIES` block. The
+`SQS CLIENT` it names declares the keys the [SQS ingestion section](ingestors.md#sqs) lists.
+
 `SINGLE` issues one request per message. `BATCH` groups messages within SQS's fixed limit of ten
 entries and 256 KiB per request; both modes issue requests sequentially and acknowledge service
 responses. Per-entry transient failures retry only those entries, while invalid entries and a
@@ -1957,8 +1974,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [SENTRY EVENT capability and mirror reference](connector-capabilities.md#sentry-event-emit).
 <!-- connector-matrix:emit-sentry-event:end -->
 
-Sentry emission uses a `SENTRY CLIENT` whose required `dsn` contains the project endpoint and
-public key:
+Sentry emission uses a `SENTRY CLIENT` whose required `dsn` names the project and whose required
+`timeout_ms` bounds each envelope request:
 
 ```plexus
 CREATE SENTRY CLIENT sentry_main
@@ -1979,45 +1996,105 @@ CREATE SENTRY EVENT EMITTER sentry_errors
   ON GENERAL ERROR LOG;
 ```
 
-The codec must produce one top-level JSON object per record. Its fields use the Sentry event
-protocol, such as `message`, `level`, `environment`, `release`, `tags`, `extra`, `user`, and
-`exception`. Nervix preserves the complete object and supplies `event_id`, `timestamp`, and
-`platform` when they are omitted. The default timestamp is the batch's execution time. The
-optional `PLATFORM '<value>'` clause, before `MODE`, supplies an absent platform; leaving the
-clause out selects `other`. A platform already supplied by the codec is preserved. `DESCRIBE`
-shows the effective platform, while `SHOW CREATE` retains whether the clause was written.
-Nervix then creates a Sentry envelope, derives the envelope URL and
-authentication header from the DSN, and submits the event. An invalid event object is handled as a
-route-local encoding error.
+#### Sentry client
 
-Nervix prepares and retains the complete encoded envelope once per payload, before its first
-publish attempt. If `event_id` is omitted, Nervix generates a UUID once during that preparation.
-A supplied valid `event_id` keeps its exact spelling, including hyphens and letter case; the
-envelope header and event body carry the same value. Every retry of the retained payload sends
-the same envelope bytes, including the event id and any default fields, even when the connector
-is reopened after a failed request.
+Nervix owns every key of a `SENTRY CLIENT` and refuses a key it does not declare:
 
-Sentry sends one event per envelope and acknowledges the successful HTTP response. On `429` or
-`503`, Nervix honors `Retry-After` and `X-Sentry-Rate-Limits`; the server interval extends the
-declared retry delay when it is longer.
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `dsn` | Yes | The project DSN, `<scheme>://<public-key>[:<secret-key>]@<host>[:<port>]/[<path>/]<project-id>`, with an `http` or `https` scheme. It is confidential, and client inspection redacts it. |
+| `timeout_ms` | Yes | A positive whole number of milliseconds that bounds each envelope request, as [Client Deadlines](#client-deadlines) defines. |
+| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the platform's native roots. |
+| `tls_cert_file`, `tls_key_file` | No | The PEM certificate and private key HTTPS presents as the client's identity, supplied together. |
 
-With `BATCH`, `ON EMITTING BATCH` builds one event from the candidate array, usually placing its
-members under `extra`. The envelope still has exactly one `event` item. `MAX SIZE` measures the
-transformed event JSON; Nervix also checks the final serialized event, after default fields are
-added, against Sentry's 1 MB decompressed event limit before sending the envelope. An oversized
-event follows the emitter's message error policy. The envelope header, item header, and newline
-framing are outside `MAX SIZE`.
+`CREATE CLIENT` checks the complete DSN with Sentry's own parser, including rendered template
+values, before it commits the client and without connecting to the service. A DSN without a
+public key or a project, or with another scheme, is refused naming `dsn` without exposing its
+value. From the DSN, Nervix derives the envelope endpoint,
+`<scheme>://<host>[:<port>]/[<path>/]api/<project-id>/envelope/`, and the `X-Sentry-Auth` header,
+which carries the DSN's keys and names the client `nervix/<version>`.
 
-Use a JSON wire codec or a JAQ-native codec with JSON output. Sentry emitters require `ENCODE
-USING`, do not accept `write_header`, and still require explicit leakage for sensitive event
-fields. The strict client configuration requires `dsn` and a positive `timeout_ms`. Nervix
-validates the complete DSN with Sentry's native parser at `CREATE CLIENT`, including rendered
-values, before committing the client or connecting to the service. An invalid DSN names `dsn`
-without exposing its value. Client inspection redacts the DSN. The optional `tls_ca_file`,
-`tls_cert_file`, and `tls_key_file` keys have their usual meanings; a certificate and private key
-must be supplied together. Unknown keys are refused.
-Sentry resolves the DSN endpoint through the node's configured DNS resolver; a `timeout_ms`
-includes that lookup, connection setup, TLS, and the response.
+The emitter sends through the HTTP client Nervix shares with Prometheus and OTEL over HTTP, and
+inherits its transport contract:
+
+- The DSN's host is resolved through the node's DNS resolver, and `timeout_ms` covers that lookup,
+  connection setup, TLS, sending the envelope and the response headers. The response body is
+  never read.
+- The proxy environment variables `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` are
+  honored, as [Connection Identity](name-resolution.md#connection-identity) describes.
+- Up to ten redirects are followed, each new host resolved like the first, and every followed
+  request carries the `X-Sentry-Auth` header. A `307` or `308` answer sends the envelope again to
+  its `Location`, but a `301`, `302` or `303` answer is followed with a `GET` that carries no
+  envelope. The answer at the end of the chain decides the event, so an endpoint that redirects
+  can acknowledge an event that Sentry never received: set `dsn` to the host that accepts
+  envelopes.
+
+#### Sentry events
+
+The codec produces one top-level JSON object per payload: per record, or per batch through
+`ON EMITTING BATCH`. Its fields use the Sentry event protocol, such as `message`, `level`,
+`environment`, `release`, `tags`, `extra`, `user` and `exception`. Nervix keeps every field the
+codec wrote with its value, including fields the protocol does not define. A number is written
+as the value it reads as: exactly within the 64-bit integer range, and otherwise as the nearest
+64-bit float, so digits beyond a float's precision do not survive. Nervix adds only the fields
+the codec left out:
+
+| Field | Value when the codec leaves it out |
+| --- | --- |
+| `event_id` | A random UUID, generated once when the payload is prepared and written as 32 lowercase hexadecimal digits |
+| `timestamp` | The batch's domain execution time, in RFC 3339 |
+| `platform` | The `PLATFORM` clause's value, or `other` when the statement leaves the clause out |
+
+A supplied `event_id` keeps its exact spelling, including hyphens and letter case. The optional
+`PLATFORM '<value>'` clause is written before `MODE`. `DESCRIBE` shows the effective platform,
+while `SHOW CREATE` retains whether the clause was written.
+
+Each envelope carries exactly one `event` item: an envelope header with the event's `event_id`,
+an item header with the event's byte length, and the event, each followed by a newline. Nervix
+sends no other item; Sentry's transaction, attachment, session and check-in items are not
+offered. The envelope is prepared once per payload, before the first publish attempt, and
+retained: every retry sends the same bytes, the event id and the defaults included, even after
+the host reopens the connector following a failed request.
+
+An event is limited to 1,000,000 bytes, Sentry's decompressed event limit. The limit counts the
+serialized event after the defaults are added; the envelope header, the item header and the
+newline framing do not count.
+
+With `BATCH`, the codec's `ON EMITTING BATCH` transformation builds the one event of a batch from
+the candidate array, usually placing its members under `extra`; an emitter whose codec declares
+no such transformation is refused, as [Batching](#batching) describes. The batch is then
+delivered, rejected or retried as that one event. `MAX SIZE` measures the transformed event JSON,
+before the defaults are added.
+
+Use a JSON wire codec or a JAQ-native codec with JSON output; any other output fails preparation
+as an invalid event. Sentry emitters require `ENCODE USING`, refuse `write_header`, and still
+require explicit leakage for sensitive event fields.
+
+#### Sentry outcomes and retries
+
+Preparation refuses an event before anything is sent when the payload is not a JSON object, when
+a field is one the Sentry event protocol cannot read, such as a numeric `level`, an `event_id`
+that is not a UUID or a `timestamp` that is neither Unix seconds nor an RFC 3339 string, and when
+the event exceeds the 1,000,000-byte limit. Every record the payload carries then follows
+`ON MESSAGE ERROR` with one `external` message error of the `publish` operation, which names the
+cause; the envelope is neither sent nor retained for a retry.
+
+A write sends its envelopes one at a time, in order, and the answer to each decides its event:
+
+| Answer | Outcome |
+| --- | --- |
+| A `2xx` status | The event is delivered and its records are acknowledged. |
+| `400`, `413` or `422` | Sentry rejected the event. Its records follow `ON MESSAGE ERROR` with an `external` message error of the `publish` operation naming the status, and the write continues with the next envelope. |
+| Any other status, such as `401`, `403`, `404`, `408`, `429` or a `5xx` | The write stops. This event and every later one stay retained and are sent again on the mode's `RETRY POLICY`, while the events delivered before it stay delivered. |
+| No answer within `timeout_ms`, or a failed lookup, connection, TLS handshake or redirect | As for a retried status. |
+
+Such an event is sent again until Sentry delivers or rejects it, so a revoked key or a deleted
+project holds the emitter in retry until an operator repairs its client. On every retried status,
+Nervix reads `Retry-After`, as a number of seconds or as an HTTP date taken against actual UTC,
+and `X-Sentry-Rate-Limits`, taking the longest delay any of its quotas names, whatever their
+categories. When the longer of the two exceeds the policy's next backoff delay, the next attempt
+waits for it instead, even beyond `MAX`; a value Nervix cannot read, and a delay the node's
+monotonic clock cannot schedule, extends nothing.
 
 ### OTEL
 
@@ -2487,13 +2564,37 @@ unnest(...)`. The [batching clause](#batching) is required: each insert carries 
 poison-isolation path, tables without an idempotent `ON CONFLICT` policy may observe duplicates when
 healthy records are re-executed.
 
+`TABLE` names a table, or a schema and its table, as one or two nonempty parts separated by `.`:
+`TABLE 'Orders'` or `TABLE 'sales.Orders'`, each part on the table identifier alphabet and the whole
+name within 128 bytes. Nervix sends each part as its own quoted identifier with its case kept, so
+`'sales.Orders'` is the relation `"sales"."Orders"`, and the insert and the lookup of the table's
+column types name that same relation. A one-part name resolves through the connection's
+`search_path`. An empty part or a third part is refused at `CREATE`.
+
+Each mapped value is bound as text, in the one text array its column binds, and the statement casts
+it to the column's declared type:
+
+| Plexus type | Bound text |
+| --- | --- |
+| `BOOL` | `true` or `false` |
+| `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64` | Decimal integer text, through the full `U64` range |
+| `F32`, `F64` | The shortest decimal text that reads back as the same `F64`, an `F32` widened first; a non-finite value binds `NULL` |
+| `STRING` | The UTF-8 text |
+| `BYTES` | `bytea` hex text: `\x`, then two hex digits per octet |
+| `DATETIME` | RFC 3339 timestamp text at UTC offset `+00:00` |
+| `ARRAY<T>`, `VEC<T>` | Recursive JSON text; `BYTES` elements are padded base64 and non-finite floats are `null` |
+
+A null binds as a `NULL` element. A mapping whose inferred type is none of these is refused at
+`CREATE`. A value the column's type cannot read from its text, such as `U64` above a `bigint`'s
+range, is a row Postgres rejects with its SQLSTATE.
+
 Postgres emitters may include an insert conflict policy after `VALUES`:
 
 <!-- connector-matrix:emit-postgres-table:start -->
 ```plexus,ignore
 CREATE POSTGRES TABLE EMITTER <name>
   FROM <relay>
-  TO <client> TABLE 'Orders'
+  TO <client> TABLE 'sales.Orders'
     MODE <mode>
     VALUES { '<field>' = <expression>, ... }
   [ON CONFLICT DO NOTHING | ON CONFLICT ('id') DO UPDATE]
@@ -2509,13 +2610,13 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Capability | Declaration |
 | --- | --- |
 | Reference | POSTGRES client |
-| Locator and validation rule | TABLE 'Orders' (postgres_table) |
+| Locator and validation rule | TABLE 'sales.Orders' (postgres_table) |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `ON CONFLICT DO NOTHING` (keyword choice); `ON CONFLICT ('id') DO UPDATE` (keyword choice); optional; omitted when unset |
+| Options in statement order | `ON CONFLICT DO NOTHING` (keyword choice); `ON CONFLICT ('id') DO UPDATE` (composed clause); optional; omitted when unset |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | required |
-| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Protocol batch maximum | 1073741822B |
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
@@ -2527,15 +2628,23 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [POSTGRES TABLE capability and mirror reference](connector-capabilities.md#postgres-table-emit).
 <!-- connector-matrix:emit-postgres-table:end -->
 
-`DO UPDATE` updates every mapped `VALUES` column except the conflict target columns, and requires a conflict target. `DO NOTHING` may be used with or without a target.
-Postgres refuses a `DO UPDATE` insert that carries one conflict key twice, so such an insert is
-written again one record at a time, and the later record updates the earlier one.
+`DO UPDATE` updates every mapped `VALUES` column except the conflict target columns, so it requires
+a conflict target and at least one mapped column outside it. `DO NOTHING` may be used with or
+without a target; without one, it skips a row that conflicts on any unique constraint. Target
+columns are nonempty names of the table's unique index columns, in written order, and need not be
+mapped. A clause that breaks these rules is refused at `CREATE`. Postgres refuses a `DO UPDATE`
+insert that carries one conflict key twice, so such an insert is written again one record at a time,
+and the later record updates the earlier one.
 
 Postgres clients declare their connection-pool bounds and connect with a `postgres://` or
-`postgresql://` URL. The URL must select one of two TLS policies: `sslmode=disable` for an
-unencrypted connection, or `sslmode=verify-full` for TLS with certificate-chain and hostname
+`postgresql://` URL. Nervix owns the URL's scheme and its TLS policy: the URL sets `sslmode`
+exactly once, under that name or the driver's `ssl-mode`, to one of two policies: `sslmode=disable`
+for an unencrypted connection, or `sslmode=verify-full` for TLS with certificate-chain and hostname
 verification. There is no opportunistic fallback and no encrypted connection without peer
-verification. See [Database Client Connection Pools](database-client-pools.md) for the accepted
+verification. `CREATE CLIENT` refuses another scheme, a missing, repeated or other `sslmode`, and
+TLS files without `sslmode=verify-full`, each naming the key and the rule rather than the URL. The
+driver reads the URL's other query options, and its parser checks them before the client is
+committed. See [Database Client Connection Pools](database-client-pools.md) for the accepted
 pool counts:
 
 ```plexus
@@ -2609,9 +2718,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | connection, its handshake and an insert: unbounded |
-| Driver limits | The driver has no connect, read or write timeout.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |
+| Network waits | pool checkout (including connection and handshake), initial validation, and each insert: `timeout_ms`; unbounded when omitted |
+| Driver limits | Without timeout_ms, pool checkout, connection validation and inserts have no deadline.<br>TLS identity keys use the driver's RSA PKCS#1 private-key format.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [MYSQL TABLE capability and mirror reference](connector-capabilities.md#mysql-table-emit).
 <!-- connector-matrix:emit-mysql-table:end -->
@@ -2658,13 +2767,28 @@ CREATE MYSQL CLIENT mysql
   };
 ```
 
-For TLS connections, include `require_ssl=true`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path.
+For TLS connections, include `require_ssl=true`, mount a TLS resource, and set `'tls_ca_file'` to
+the mounted CA path. Supplying the CA preserves the URL's certificate-verification, hostname and
+built-in-root options. For mutual TLS, also set `tls_cert_file` and `tls_key_file` together. The
+driver reads a PEM certificate chain and an RSA PKCS#1 private key; for a PEM key this is the
+`RSA PRIVATE KEY` form, which OpenSSL can produce with `openssl rsa -traditional`.
 
-The current client CONFIG keys are required `addr` and optional `tls_ca_file`. The address must
+The current client CONFIG keys are required `addr` and optional `timeout_ms`, `tls_ca_file`,
+`tls_cert_file` and `tls_key_file`. The address must
 be a `mysql://` URL accepted by the driver's offline parser. URL query options belong to the
 driver, except connection-pool sizing: declare that capacity with `POOL SIZE MIN ... MAX ...`.
 Pool-size query parameters such as `pool_min` and `pool_max` are refused before the client is
 committed. Unknown standalone CONFIG keys are refused rather than ignored.
+
+`timeout_ms` is a positive, schedulable whole number of milliseconds. It bounds opening and
+validating the pool's first connection, each subsequent pool checkout (including connection
+establishment and authentication), and each insert. The minimum keeper uses the same checkout
+bound. Each of these is a separate operation; an insert's bound starts after checkout, and an
+isolated row's insert receives its own bound. Omitting the key leaves these waits unbounded.
+An elapsed bound is an infrastructure failure, reported with `timeout_ms` and its duration, and
+the emitter retries its pending rows on its declared policy. The driver discards a connection
+whose in-flight command was cancelled. A timeout does not establish whether the server committed
+an insert; use a stable key and an appropriate `ON CONFLICT` action where retries must converge.
 
 ### MongoDB
 
@@ -2950,7 +3074,9 @@ a mismatched scheme at `CREATE` or `ALTER`, naming `LOCATION`, before opening ei
 
 The four Iceberg client schemas distinguish Nervix-owned options from driver properties.
 Nervix validates declared addresses, booleans and deadlines at `CREATE CLIENT`; for example,
-`'path_style_access' = 'yes'` and `'no_auth' = 'yes'` are refused. Unknown unprefixed keys are
+`'path_style_access' = 'yes'` and `'no_auth' = 'yes'` are refused. A Boolean option means the value
+it states: `'no_auth' = false` keeps the GCS client's authentication, and only `true` makes it send
+unsigned requests without loading credentials. Unknown unprefixed keys are
 refused rather than treated as driver settings. The generated
 [client key tables](./connector-capabilities.md#s3-client) list the current keys and file roles.
 S3 delegates `s3.*` and `client.*`, GCS delegates `gcs.*`, and Azure delegates `adls.*`.
@@ -2962,17 +3088,26 @@ strings without opening an operator. The Azure table's `LOCATION` selects its en
 supplies account and authentication options. GCS inline credentials use the driver's
 Base64-encoded JSON form in `credentials_json`.
 
-HTTPS currently uses the catalog client's built-in web PKI roots. The declared catalog TLS-file
-keys participate in admission and mounting; the Iceberg HTTP transports do not yet apply those
-files.
+Both Iceberg clients verify an HTTPS server's certificate against the bundled WebPKI roots, the
+platform's native roots and the client's own `tls_ca_file`. A client that also names `tls_cert_file`
+and `tls_key_file` presents that certificate chain and private key as its identity. Each client
+uses only its own files: the `ICEBERG_REST` client's for catalog requests, and the `S3`, `GCS` or
+`AZURE_BLOB` client's for data-file reads and writes and for the HTTP calls of its credential
+provider. Mount the resource that holds the files on each client that names them, as
+[Resources](./resources.md) describes. Nervix reads the files when the emitter opens. A file it
+cannot read or parse stops the emitter as a configuration failure that names whether the catalog
+or the object-store client's TLS failed. A client whose address is plain HTTP never uses its TLS
+files, though Nervix still reads them when the emitter opens.
 
-
-When building the REST catalog's file I/O properties, Nervix first supplies the storage client's
-properties and then the catalog client's properties. Within a storage client, the last entry
-for a normalized property takes precedence. A catalog entry for the same Iceberg
-property key takes precedence in the effective properties used by the table's file I/O,
-including its object-store operations. Keep the two clients' settings consistent when configuring
-both namespaces.
+The table's file I/O receives the storage client's properties and the catalog client's
+storage-namespace properties. Each Nervix-owned storage option supplies one Iceberg property:
+`endpoint` supplies `s3.endpoint`, `no_auth` supplies `gcs.no-auth`, `account_name` supplies
+`adls.account-name`, and so on. A delegated property supplies itself, as written. The deadline and
+TLS-file options configure the clients' own HTTP transport and supply no property. The two clients
+must not set the same property. Nervix refuses `CREATE` or `ALTER` of an emitter whose catalog client
+sets a property that its storage client supplies, and the refusal names the property, the
+storage option that supplies it and both clients. Within a storage client, the last entry for a
+property is its value.
 
 The catalog and object-store HTTP clients resolve endpoint names through the node's configured
 DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
@@ -3246,7 +3381,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
 | Redis Pub/Sub | Retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |
-| Sentry | Retry after an ambiguous HTTP result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; an accepted event can still be subject to Sentry service policy | None |
+| Sentry | Retry after an ambiguous HTTP result, which sends the same envelope and `event_id` again; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; a `301`, `302` or `303` redirect whose final answer is `2xx` acknowledges an event that was never sent; an accepted event can still be subject to Sentry service policy | None |
 | OTEL | Retry after an ambiguous Export result, which resends the same request bytes; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; `partial_success` acknowledges the whole request, so receiver-rejected records in that response are lost | None |
 | HTTP | Retry after a lost response, failed connection, or timeout following an endpoint that applied the request; a lost ACK or attached sibling failure | Any failure after detached relay acceptance; a `2xx` delivers on its headers, so an endpoint that later fails its own processing loses the record | None; the endpoint can deduplicate by a stable key the emitter writes with `write_header` |
 | ClickHouse | Retry after an ambiguous insert result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a crash after insert but before acknowledgement can also leave an inserted batch that later retries | None |

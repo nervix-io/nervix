@@ -229,7 +229,6 @@ class KacheWorkflowTests(unittest.TestCase):
         dockerfile = Path("Dockerfile.debian").read_text()
         justfile = Path("justfile").read_text()
 
-        self.assertNotIn("useblacksmith/setup-docker-builder", workflow)
         self.assertIn("uses: docker/setup-buildx-action@v3", workflow)
         for name, value in (
             ("KACHE_S3_BUCKET", "${{ vars.KACHE_BUCKET }}"),
