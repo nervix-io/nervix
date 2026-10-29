@@ -596,7 +596,7 @@ Transport-specific schemes and keys:
 - `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`. This is primarily useful for SQS-compatible local/test endpoints.
+- `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`, which is primarily useful for SQS-compatible local/test endpoints. An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
 - `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
   `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
 
@@ -1618,6 +1618,12 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-ingest).
 <!-- connector-matrix:ingest-nats-subject:end -->
 
+`SUBJECT` and `QUEUE GROUP` are string literals Nervix subscribes with exactly as written, letter
+case included, within the [external name rules](#external-names). A subscription subject may use
+the NATS wildcards as whole tokens: `SUBJECT 'orders.*.EU'` matches one token in the middle, and
+`SUBJECT 'orders.>'` every remaining token, so `>` comes last. A message's subject and reply
+subject are not exposed as typed metadata; programs read its payload and headers.
+
 NATS ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
 are mandatory; use `INSTANCES 1` for a single queue member.
 
@@ -1799,6 +1805,21 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sqs-queue-ingest).
 <!-- connector-matrix:ingest-sqs-queue:end -->
+
+`QUEUE` takes a string literal that SQS accepts as a queue name: 1 to 80 ASCII letters, digits,
+`-` and `_`, where a FIFO queue's name ends in `.fifo` and the suffix counts toward the 80. Nervix
+preserves its case in both directions, so `QUEUE 'Orders-EU_1.fifo'` reads exactly that queue. The
+ingestor reads a message's attributes through `read_header` and `read_headers`. It names
+`MODE ACK SEQUENTIAL` and `ON QUIESCE SUSPEND`, the only delivery and quiesce modes it declares: the
+queue keeps each message until the source deletes it, so suspending loses nothing.
+
+The `SQS CLIENT` an ingestor or emitter names declares `endpoint`, which is required, and the
+optional `region`, `access_key_id`, `secret_access_key`, `timeout_ms` and `tls_ca_file`, and
+`CREATE SQS CLIENT` refuses any other key. A client without `region` signs its requests for
+`us-east-1`, and one that omits `access_key_id` or `secret_access_key` signs with a placeholder in
+its place, which only an SQS-compatible endpoint that skips signature checks accepts. `timeout_ms`
+bounds an emitter's send; an ingestor's queue lookup, receives and deletions take the waits the
+table lists.
 
 Starting the ingestor sends no request to the service. Each source instance looks its queue up
 before its first poll and keeps the queue's URL from then on, suspensions included. The source

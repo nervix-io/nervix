@@ -40,7 +40,9 @@ use crate::{
 
 configured_client!(Sqs: unpooled, config CLIENT_CONFIG, CreateClientSqs => SqsConfigEntry);
 
-/// The current keys this connector reads, shared by validation, completion and inspection.
+/// The current keys this connector reads, shared by validation, completion and inspection. An SQS
+/// connection trusts `tls_ca_file`, or the platform's roots without it, and presents no client
+/// certificate, so the schema declares no client-identity key.
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
     use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
     ClientConfigSchema::new(
@@ -51,8 +53,6 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
             K::optional("secret_access_key", V::String).secret(),
             K::TIMEOUT,
             K::TLS_CA,
-            K::TLS_CERT,
-            K::TLS_KEY,
         ],
         &[],
         &[],
@@ -150,6 +150,7 @@ impl IngestorDeclaration for SqsQueueIngestor {
         position_class: PositionClass::BrokerRedelivered,
         acknowledgement_confirmation: AcknowledgementConfirmation::Answered,
         delivery: &[DeclaredDelivery::ACK_SEQUENTIAL],
+        // The queue keeps each message until the source deletes it, so suspending loses nothing.
         quiesce: &[DeclaredQuiesce::SUSPEND],
         locator: Some(LocatorDeclaration {
             keywords: "QUEUE",
@@ -247,6 +248,7 @@ impl EmitterDeclaration for SqsQueueEmitter {
         headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Sqs),
         body: EmitterBodyForm::Codec,
+        // A batch payload is one SQS message, so it fits within the message size SQS admits.
         batch: EmitterBatchLegality::Optional {
             maximum: Some(SQS_MESSAGE_SIZE_MAXIMUM),
         },
@@ -316,3 +318,7 @@ impl SqsQueueName {
         self.as_str().ends_with(SQS_FIFO_SUFFIX)
     }
 }
+
+#[cfg(test)]
+#[path = "sqs_tests.rs"]
+mod tests;
