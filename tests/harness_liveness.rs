@@ -10,8 +10,8 @@
 //!   process-observation, process-report, WebSocket close-reply, console-connection and WebSocket peer regressions
 //!   with Rust's test runner, and the stand-in nodes, clients, images and processes those regressions
 //!   talk to.
-//!   It also owns registration of generator cadence, paced-interconnect cadence and bounded
-//!   subscription payload observations.
+//!   It also owns registration of generator cadence, paced-interconnect cadence, bounded
+//!   subscription payload observations and the per-node execution readings of timed probes.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, node-bound address, process-cluster convergence, cluster-teardown, scenario-phase,
 //!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, backup phase, gRPC-receiver,
@@ -21,8 +21,8 @@
 //!   coordinator a stopping
 //!   node is read through, and the client wire session protocol the stand-in nodes answer status
 //!   requests with.
-//!   It also depends on the focused generator cadence, paced-interconnect cadence and subscription
-//!   payload observation owners.
+//!   It also depends on the focused generator cadence, paced-interconnect cadence, subscription
+//!   payload observation and node execution reading owners.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 use websocket_close::reply_to_close;
@@ -70,6 +70,10 @@ mod nats_observer_tests;
 mod node_bound_address;
 #[path = "common/node_bound_address_tests.rs"]
 mod node_bound_address_tests;
+#[path = "common/node_execution.rs"]
+mod node_execution;
+#[path = "common/node_execution_tests.rs"]
+mod node_execution_tests;
 #[path = "common/node_liveness.rs"]
 mod node_liveness;
 #[path = "common/node_startup.rs"]

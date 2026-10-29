@@ -852,6 +852,20 @@ own bulk-length refusal stays a record outcome; the emitter declares optional ba
 a learned size ceiling. The Redis-specific declaration tests, generated grammar conformance and
 one-/three-node public declaration scenarios qualify these facts together.
 
+`SQS QUEUE` shares one queue-name rule between ingestion and emission: 1 to 80 ASCII letters,
+digits, `-` and `_`, where a FIFO queue's name ends in `.fifo` within those 80 characters, passed
+through exactly as written. Its declaration permits `ACK SEQUENTIAL` and `SUSPEND` for intake,
+since the queue keeps a message until the source deletes it, and `SINGLE` or `BATCH` for emission,
+where a `.fifo` queue requires `FIFO GROUP` and a standard queue refuses it. Message attributes are
+its headers in both directions, as `last_wins` exact names; the emitter declares no envelope and
+optional batching up to the 256 KiB SQS admits in one message. An SQS client declares only the keys
+its connections read: `endpoint`, `region`, `access_key_id`, `secret_access_key` and `tls_ca_file`
+in both directions, and `timeout_ms`, which bounds an emitter's send. An SQS connection trusts
+`tls_ca_file`, or the platform's roots without it, and presents no client certificate, so the
+client declares neither client-identity key.
+The SQS-specific declaration tests, generated grammar conformance and one-/three-node public
+declaration scenarios qualify these facts together.
+
 Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
 endpoint ingestors reference endpoints, while a Syslog listener references a client; all three
 declare every-node execution. Scheduling and placement-reference completion read that capability,
@@ -1945,8 +1959,8 @@ schema requires a positive request timeout, and its native DSN parser runs at th
 pre-commit offline boundary without network I/O. Both the
 envelope header and the event carry that identity, and every attempt sends the retained envelope
 byte for byte, including after the host reopens the emitter. Preparation checks the final event
-against the vocabulary-owned 1 MB decompressed event limit. It writes every other member as the codec wrote it, a number to
-its last digit. Both classify a definite local refusal as a record rejection;
+against the vocabulary-owned 1 MB decompressed event limit. It writes every other member with the value it
+read, a number exactly within the 64-bit integer range and otherwise as the nearest 64-bit float. Both classify a definite local refusal as a record rejection;
 their transport and service failures retain their existing retry boundaries.
 
 The host owns that membership. It keeps every payload it offers the emitter, with its exact bytes,
@@ -2555,9 +2569,11 @@ it does not classify network or server failures as validation outcomes. HTTP res
 retains its UTF-8 and numeric parsing causes beneath the response-head failure.
 
 A MySQL mapped column that the emitter cannot bind fails the whole publish with its exact column
-and Arrow type retained beneath the publish context. It is not a per-record rejection. Pool
-maintenance reports its own failed connection attempt before its next retry; a later writer's
-failure remains a separate diagnostic.
+and Arrow type retained beneath the publish context. It is not a per-record rejection. The task
+that keeps a MySQL pool at `POOL SIZE MIN` reports a pass that ends below it as
+`PoolMinimumError::NotRestored`, naming the minimum, above the failed checkout's `CheckOut` and the
+driver's error, before its next pass retries; a later writer's failure remains a separate
+diagnostic.
 
 The host's source start keeps every connector report it composes an ingestor from. A client
 configuration that does not resolve, a connector plan that fails, such as a Syslog, Redis,
