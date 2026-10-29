@@ -17,7 +17,7 @@ use nervix_primitives::{
 use rstest::rstest;
 
 use crate::{
-    broker_observer::{BrokerMessage, BrokerObserver},
+    broker_observer::{BrokerMessage, BrokerObserver, BrokerRecordTime},
     nats_observer::NatsObserver,
     nats_observer_tests::StandInNatsServer,
 };
@@ -168,15 +168,26 @@ async fn a_stalled_delivery_still_fails_at_the_captured_sequence_deadline() {
 
 #[nervix_primitives::test]
 async fn forwarded_reads_preserve_the_complete_message_and_observer() {
-    let (messages, receiver) = mpsc::channel(2);
+    let created = BrokerRecordTime::Created {
+        unix_millis: 981_173_106_789,
+    };
+    let appended = BrokerRecordTime::Appended {
+        unix_millis: 981_173_106_790,
+    };
+    let (messages, receiver) = mpsc::channel(3);
     let message = BrokerMessage::from_bytes(b"\xff", headers())
         .with_key(Some("key".to_string()))
-        .with_group(Some("group".to_string()));
+        .with_group(Some("group".to_string()))
+        .with_time(Some(created));
     messages.send(message).await.assured("the channel has room");
+    messages
+        .send(BrokerMessage::from_bytes(b"appended", Vec::new()).with_time(Some(appended)))
+        .await
+        .assured("the channel has room for the second message");
     messages
         .send(BrokerMessage::from_bytes(b"next", Vec::new()))
         .await
-        .assured("the channel has room for the second message");
+        .assured("the channel has room for the third message");
     let reader = spawn(async move {
         let _messages = messages;
         std::future::pending::<()>().await;
@@ -191,6 +202,13 @@ async fn forwarded_reads_preserve_the_complete_message_and_observer() {
     assert_eq!(first.headers, headers());
     assert_eq!(first.key.as_deref(), Some("key"));
     assert_eq!(first.group.as_deref(), Some("group"));
+    assert_eq!(first.time, Some(created));
+    let second = observer
+        .next_message()
+        .await
+        .assured("the second message is buffered");
+    assert_eq!(second.payload, "appended");
+    assert_eq!(second.time, Some(appended));
     assert_eq!(
         observer
             .try_next_payload(Duration::ZERO)
