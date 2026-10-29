@@ -224,6 +224,16 @@ impl ClientConfigValue {
         true
     }
 
+    /// Whether `value`, which parses as `count`, is the count an integer kind admits: written as
+    /// plain decimal digits, without the sign the integer parser also accepts, and not zero for a
+    /// positive integer.
+    fn admits_count(self, value: &str, count: u64) -> bool {
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+        self != Self::PositiveInteger || count != 0
+    }
+
     fn validate(self, key: &str, value: &str) -> Result<(), Report<ClientConfigSchemaError>> {
         let invalid = || ClientConfigSchemaError::InvalidValue {
             key: key.to_string(),
@@ -241,10 +251,7 @@ impl ClientConfigValue {
             }
             Self::UnsignedInteger | Self::PositiveInteger => {
                 let count = value.parse::<u64>().change_context(invalid())?;
-                if value.is_empty()
-                    || !value.bytes().all(|byte| byte.is_ascii_digit())
-                    || (self == Self::PositiveInteger && count == 0)
-                {
+                if !self.admits_count(value, count) {
                     return Err(Report::new(invalid()));
                 }
             }
