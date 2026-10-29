@@ -63,6 +63,11 @@ the group's row bound and the vocabulary's frame labels. An estimate that exceed
 is a typed error before allocation; the ingest group adds the opening operation's context and
 retains the cause for its general-error policy.
 
+A paced poll message carries a typed metadata variant. HTTP polling supplies its response status
+and scheduled poll instant in that variant, while sources with no integration fields carry the
+headers-only variant. The host copies the variant into a matching quiesce buffer and Arrow builder;
+neither a missing status nor a default timestamp can be mistaken for a valid HTTP response.
+
 The Pulsar emitter's running publishing choice keeps related state together: the `NO ACK` variant
 owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
 confirmation settings. An empty receipt collection means there are no outstanding receipts,
@@ -100,6 +105,12 @@ The source's absent subscription means it needs a resume. An installed subscript
 bounded receiver and exact reader task; close and suspend join that task before replacing it.
 Queued messages precede its terminal read failure. These handles, queued payloads and parsing
 state remain volatile and are never part of a persisted Model.
+
+Running MQTT acknowledgement state distinguishes automatic acknowledgement from manual
+acknowledgement with its bounded QoS 0 capacity. Each queued QoS 0 outcome owns its permit until
+the source takes it; acknowledged packets use their separate reserved capacity. Overflow is an
+ordinary admission outcome that drops and counts one publish, rather than a read failure or a
+missing connection. The queue, permits and host-supplied counter handle remain volatile.
 
 Text is parsed into a semantic Model, registry validation resolves its references and contracts,
 and planning produces an execution plan. Each stage passes forward a value whose type expresses
@@ -151,10 +162,13 @@ The representation depends on the question being asked:
 | Can a physical format encode the state? | A private wire, storage, Arrow, or atomic encoding | Decode at the boundary and expose typed operations to callers. |
 
 Consensus replication replies have explicit initial-probe, ordered-stream and finished phases.
-Leading empty requests confirm a log boundary over management capacity; the first data request
-transfers the remaining input to one ordered stream. Empty commit updates then remain in that
-stream's order. A failed or rejected initial probe ends its input, so no data stream can follow an
-unconfirmed boundary. These phases are volatile protocol state and are never persisted.
+Leading empty requests confirm a log boundary over management capacity. The initial-probe owner
+retains the last confirmed preceding log identity for this input. A first data request whose
+preceding identity differs requires an empty management check; a request at the beginning of the
+log has no preceding identity to verify. Only a complete match transfers the original data and
+remaining input to one ordered stream. Empty commit updates then remain in that stream's order.
+A failed or rejected prefix check ends its input. These phases and their confirmation are volatile
+protocol state and are never persisted or reused across stream generations.
 
 A pure conversion refusal is an ordinary typed outcome, even when it implements
 `std::error::Error` for a parsing trait. Its owner states that contract at the exact error type

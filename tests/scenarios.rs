@@ -105,7 +105,7 @@ use crate::common::{
         SUBSCRIBED_LINE, corpus_report,
     },
     cluster::{
-        AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster,
+        AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster, CommandHold,
         DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
         InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
         TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
@@ -133,6 +133,7 @@ use crate::common::{
     mqtt_publish_filter::MqttPublishFilter,
     nats_endpoint::NatsEndpoint,
     node_bound_address::{NodeBoundAddress, NodeBoundListener, bind_as_its_node},
+    node_execution::{NodeExecutionEndpoint, ProbeExecution},
     node_startup::StartupPorts,
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
@@ -414,6 +415,8 @@ struct ScenarioWorld {
     last_backup: Option<backup::TestBackup>,
     /// A CLI backup paused at its quiesced cut while the scenario exercises other operations.
     background_backup: Option<AbortOnDropHandle<std::process::Output>>,
+    /// The exact CLI child started by the background-backup step, for cancellation assertions.
+    background_backup_pid: Option<nix::unistd::Pid>,
     /// How the last backup download a scenario shaped itself ended.
     last_backup_download: Option<crate::common::raw_session::TestDownloadEnd>,
     /// The `SHOW CREATE` output of models a scenario saved, by the name it saved them as and then
@@ -4682,6 +4685,7 @@ impl ScenarioWorld {
             None
         };
         let mut process = tokio::process::Command::new(scenario_cli_binary());
+        process.kill_on_drop(true);
         process.args([
             "--server",
             &grpc_uri,
@@ -4800,6 +4804,7 @@ async fn when_cli_suggests_for(world: &mut ScenarioWorld, input: String, node: S
     let output = nervix_primitives::time::timeout(
         Duration::from_secs(60),
         tokio::process::Command::new(scenario_cli_binary())
+            .kill_on_drop(true)
             .args([
                 "--server",
                 &grpc_uri,
@@ -5289,6 +5294,7 @@ async fn when_cli_follows_missing_domain(world: &mut ScenarioWorld, domain: Stri
     let output = nervix_primitives::time::timeout(
         Duration::from_secs(10),
         tokio::process::Command::new(scenario_cli_binary())
+            .kill_on_drop(true)
             .args([
                 "--server",
                 &grpc_uri,
@@ -12376,14 +12382,36 @@ async fn given_leadership_moves_under_next_durable_admission(
 ) {
     let from_node_id = expand_placeholders(world, &from_node_id);
     let to_node_id = expand_placeholders(world, &to_node_id);
-    let moved = world
-        .cluster()
-        .move_leadership_after_next_durable_admission(&from_node_id, &to_node_id);
+    let moved = world.cluster().move_leadership_under_next_command(
+        CommandHold::AfterDurableAdmission,
+        &from_node_id,
+        &to_node_id,
+    );
+    world.leadership_move = Some(moved);
+}
+
+#[given(
+    expr = "leadership moves from node {string} to node {string} before its next admission \
+            proposal"
+)]
+async fn given_leadership_moves_before_next_admission_proposal(
+    world: &mut ScenarioWorld,
+    from_node_id: String,
+    to_node_id: String,
+) {
+    let from_node_id = expand_placeholders(world, &from_node_id);
+    let to_node_id = expand_placeholders(world, &to_node_id);
+    let moved = world.cluster().move_leadership_under_next_command(
+        CommandHold::BeforeAdmissionProposal,
+        &from_node_id,
+        &to_node_id,
+    );
     world.leadership_move = Some(moved);
 }
 
 #[then("the leadership move under the durably admitted command completed")]
-async fn then_leadership_move_under_durable_admission_completed(world: &mut ScenarioWorld) {
+#[then("the leadership move before the admission proposal completed")]
+async fn then_leadership_move_completed(world: &mut ScenarioWorld) {
     let moved = world
         .leadership_move
         .take()
@@ -12393,7 +12421,7 @@ async fn then_leadership_move_under_durable_admission_completed(world: &mut Scen
         .expect("the leadership move ends once its command was released");
     ended
         .expect("the leadership move task runs to its end")
-        .expect("the successor reported itself the leader before the command was released");
+        .expect("both nodes reported the successor as the leader before the command was released");
 }
 
 #[given("the leader node forgets its transaction session bindings")]
@@ -16517,6 +16545,8 @@ async fn when_named_client_submits_command_request(
 
 /// Measures a command batch on a client prepared before the fault, with its reply polled
 /// independently of the Cucumber runner. The deadline includes dispatch to the runtime task.
+/// Every node's control-class execution and reactor delay are read beside the probe and reported
+/// for its window, so a slow batch shows where its nodes' scheduling went.
 #[then(expr = "within {string} client {string} completes these Plexus statements")]
 async fn then_named_client_completes_plexus_statements_within(
     world: &mut ScenarioWorld,
@@ -16534,6 +16564,14 @@ async fn then_named_client_completes_plexus_statements_within(
     let commands = expand_placeholders(world, docstring(step));
     let statements = plexus_statements(&commands);
     assert!(!statements.is_empty(), "a timed probe requires statements");
+    let mut execution_endpoints = Vec::new();
+    for node_id in world.cluster().node_ids() {
+        let metrics_url = world
+            .cluster()
+            .observability_metrics_url(&node_id)
+            .assured("the node was listed by the same cluster");
+        execution_endpoints.push(NodeExecutionEndpoint::new(node_id, metrics_url));
+    }
     world.last_command_error = None;
     world.last_command_output = None;
     world.last_client_outcome = None;
@@ -16543,6 +16581,7 @@ async fn then_named_client_completes_plexus_statements_within(
         .assured("the scenario duration fits a monotonic instant");
     let (outcome, elapsed) =
         crate::common::runner_observation::observe_off_the_runner(async move {
+            let execution = ProbeExecution::begin(execution_endpoints);
             let mut last_outcome = None;
             for (position, statement) in statements.into_iter().enumerate() {
                 nervix_primitives::task::consume_budget().await;
@@ -16551,20 +16590,21 @@ async fn then_named_client_completes_plexus_statements_within(
                      position={position} elapsed={:?}",
                     started.elapsed()
                 ));
-                let outcome =
-                    nervix_primitives::time::timeout_at(deadline, client.execute(statement))
-                        .await
-                        .unwrap_or_else(|_| {
-                            panic!(
-                                "client '{name}' did not complete the Plexus statements within \
-                                 {limit:?}; pending statement {position}; domain={probe_domain}"
-                            )
-                        })
-                        .unwrap_or_else(|error| {
-                            panic!(
-                                "client '{name}' failed at Plexus statement {position}: {error:#}"
-                            )
-                        });
+                let Ok(reply) =
+                    nervix_primitives::time::timeout_at(deadline, client.execute(statement)).await
+                else {
+                    let execution = execution.describe().await;
+                    log_probe_execution(&name, &probe_domain, &execution);
+                    panic!(
+                        "client '{name}' did not complete the Plexus statements within {limit:?}; \
+                         pending statement {position}; domain={probe_domain}; execution over the \
+                         probe: {}",
+                        execution.join("; ")
+                    )
+                };
+                let outcome = reply.unwrap_or_else(|error| {
+                    panic!("client '{name}' failed at Plexus statement {position}: {error:#}")
+                });
                 let completed_at = Instant::now();
                 let elapsed = completed_at.duration_since(started);
                 assert!(
@@ -16590,12 +16630,22 @@ async fn then_named_client_completes_plexus_statements_within(
                 "Plexus control probe: client={name} domain={probe_domain} elapsed={elapsed:?} \
                  limit={limit:?}"
             ));
+            let execution = execution.describe().await;
+            log_probe_execution(&name, &probe_domain, &execution);
             (outcome, elapsed)
         })
         .await;
     world.last_command_output = Some(crate::common::cluster::flatten_outcome_messages(&outcome));
     world.last_client_outcome = Some(outcome);
     world.last_cluster_operation_elapsed = Some(elapsed);
+}
+
+fn log_probe_execution(client: &str, domain: &str, execution: &[String]) {
+    for node in execution {
+        append_cucumber_log_line(&format!(
+            "Plexus control execution: client={client} domain={domain} {node}"
+        ));
+    }
 }
 
 #[when(expr = "client {string} fails to execute these Plexus commands")]
@@ -17218,7 +17268,8 @@ async fn run_cli_inspection(
         .arg("--password")
         .arg(TEST_AUTH_PASSWORD)
         .arg("--command")
-        .arg(query);
+        .arg(query)
+        .kill_on_drop(true);
     if let CliConnectionCase::MissingCa = connection {
         command
             .arg("--tls-ca-cert")
@@ -28081,32 +28132,6 @@ async fn when_http_payload_is_posted_to_node_and_fails(
     }
 }
 
-#[when(
-    expr = "http payload is posted to node {string} with host {string} path {string} and is not \
-            routed"
-)]
-async fn when_http_payload_is_posted_to_node_and_is_not_routed(
-    world: &mut ScenarioWorld,
-    node_id: String,
-    host: String,
-    path: String,
-    #[step] step: &Step,
-) {
-    let host = expand_placeholders(world, &host);
-    let path = expand_placeholders(world, &path);
-    let payload = expand_placeholders(world, docstring(step));
-    let error = world
-        .cluster()
-        .publish_http(&node_id, &host, &path, &payload)
-        .await
-        .expect_err("expected http post to be unrouted");
-    let reported = error.to_string();
-    assert!(
-        reported.contains("404"),
-        "expected http post to node '{node_id}' to be unrouted, got: {reported}"
-    );
-}
-
 #[then("the relay subscription receives a payload")]
 async fn then_stream_subscription_receives_payload(world: &mut ScenarioWorld, #[step] step: &Step) {
     append_cucumber_log_line(&format!(
@@ -33540,6 +33565,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.fault_injection.release_all_health_responses();
                 world.fault_injection.release_all_domain_clock_progress();
                 world.fault_injection.release_all_command_pauses();
+                let backup_gates_released = world.fault_injection.release_all_backup_cut_pauses();
                 world.fault_injection.release_all_wasm_checkpoint_pauses();
                 for node in std::mem::take(&mut world.occupied_bulk_nodes) {
                     world.fault_injection.release_execution(&node);
@@ -33598,9 +33624,20 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.active_session_has_subscription = false;
                 world.last_server_error = None;
                 world.release_mysql_table_locks().await;
+                let cleanup_deadline = PhaseDeadline::after(CLUSTER_TEARDOWN_BUDGET);
+                if backup_gates_released > 0 {
+                    world.finish_background_backups(cleanup_deadline).await;
+                }
+                if let Some(Err(error)) = world.cancel_background_backup().await
+                    && !error.is_cancelled()
+                {
+                    append_cucumber_log_line(&format!(
+                        "scenario teardown failed: background CLI backup task: {error}"
+                    ));
+                }
                 let cluster_cleanup = match world.cluster.take() {
                     Some(mut cluster) => {
-                        let teardown = cluster.shutdown_for_teardown().await;
+                        let teardown = cluster.shutdown_for_teardown(cleanup_deadline).await;
                         for panicked in teardown.panics() {
                             append_cucumber_log_line(&format!(
                                 "scenario teardown failed: {panicked}"

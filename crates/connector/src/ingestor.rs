@@ -376,6 +376,13 @@ pub trait BrokerIngestorConnector: IngestorConnector {
 pub struct IngestorPollMessage {
     pub payload: Vec<u8>,
     pub headers: RetainedIngestHeaders,
+    pub metadata: IngestorPollMetadata,
+}
+
+/// The metadata a paced connector returns with one message.
+pub enum IngestorPollMetadata {
+    Headers,
+    Http { status: u16, polled_at: Timestamp },
 }
 
 /// The result of one host-scheduled ingestor poll.

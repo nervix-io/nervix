@@ -34,12 +34,11 @@ Feature: HTTP client TLS resource mounts
         MOUNT dev_tls VERSION 1
         CONFIG {
           'endpoint' = '{{mock_https_addr}}/http/{{test_id}}',
-          'method' = 'GET',
           'timeout_ms' = 5000,
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE HTTP REQUEST INGESTOR http_notifications
-        FROM http_tls EVERY 1s
+        FROM http_tls METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

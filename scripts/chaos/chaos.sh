@@ -24,6 +24,8 @@ Usage:
   just chaos run former-owner-restart --image IMAGE [--isolation-seconds N] [--records N]
   just chaos run cluster-restart --image IMAGE [--nodes 1|3] [--outage-seconds N] [--records N]
   just chaos run stateful --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
+  just chaos run endpoints --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
+  just chaos run lifetimes --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
   just chaos run domain-time --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
   just chaos run mixed-instability --image IMAGE [--seed N] [--duration 30m] [--policy POLICY]
       [--coverage LIST] [--plan FILE] [--max-memory-bytes N] [--max-recovery-backlog N] [--max-pending N]
@@ -43,7 +45,7 @@ Run `just chaos run rolling-restart --help` for rolling-restart options.
 Run `just chaos run pause-resume --help` for pause-resume options.
 Run `just chaos run partition-recovery --help` for partition-recovery options.
 Run `just chaos run degraded-links --help` for degradation profiles and thresholds.
-Run `just chaos run stateful --help` for stateful and domain-time faults.
+Run `just chaos run stateful --help` for stateful, endpoints, lifetimes and domain-time faults.
 Run `just chaos run mixed-instability --help` for seeded plans, quorum policies and coverage.
 Run `just chaos suite --help` for the smoke and soak suites that CI runs.
 
@@ -102,6 +104,17 @@ stateful  Interleaved branches through a deduplicator, a window, materialized re
           checkpointed WASM processor, held at an observed durability milestone, then one fault
           faults: none (default), owner-crash, owner-pause, owner-partition, cluster-restart
           topologies: one-node (--nodes 1: none, cluster-restart), three-node (--nodes 3, default)
+endpoints  HTTP intake under MODE ACK through every node's listener into two domains that share one
+           host and path, one domain withdrawn and bound again, a WebSocket kept open across the
+           replacement of its source, then one fault while intake continues
+           faults: none (default), owner-crash, owner-partition, cluster-restart
+           topologies: one-node (--nodes 1: none, cluster-restart), three-node (--nodes 3, default)
+lifetimes  Interleaved branches through a junction that waits for materialized state, a generator, a
+           window of sketches and an LRU-bounded relay; materialized rows replaced by higher, lower and
+           equal timestamps; an expiring branch expired and recreated; buffered route output
+           force-flushed by an alteration; an emitter recovering from a missing topic; then one fault
+           faults: none (default), owner-crash, owner-partition, cluster-restart
+           topologies: one-node (--nodes 1: none, cluster-restart), three-node (--nodes 3, default)
 domain-time  A paced domain's clock, authority and logical deadlines followed by independent
              observers through faults of every voter in turn
              faults: none (default), voter-crash, voter-pause, voter-partition, voter-stop,
@@ -159,7 +172,7 @@ case "${command_name}" in
             stale-follower | former-owner-restart | cluster-restart)
                 exec "${script_dir}/run-recovery.sh" --scenario "${scenario}" "$@"
                 ;;
-            stateful | domain-time | mixed-instability | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume)
+            stateful | endpoints | lifetimes | domain-time | mixed-instability | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume)
                 exec "${script_dir}/run-baseline.sh" --scenario "${scenario}" "$@"
                 ;;
             *)

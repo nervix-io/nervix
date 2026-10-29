@@ -69,7 +69,9 @@ metadata work. For Postgres the unit is one bounded insert: the metadata lookup 
 its first insert's connection, and an insert the database refuses for one of its rows writes those
 rows one at a time on the same connection before returning it. MySQL likewise keeps one connection
 for a bounded insert and the isolation of any rows it refuses. For Redis the unit is one publish
-and its response. A flush containing several inserts releases capacity between them so other
+and its response. For MongoDB the driver checks a connection out for each command it sends, the
+collection lookup before a write and each insert or bulk-write command, and returns it when the
+command answers. A flush containing several inserts releases capacity between them so other
 emitters can make progress. An emitter waiting out a flush interval or a retry backoff holds no
 connection at all.
 
@@ -87,6 +89,9 @@ status: WAITING
 detail: waiting for a connection from client 'postgres_main' for 3s
 ```
 
+A MongoDB write waits for a connection inside its driver, which reports no waiting state, so
+`DESCRIBE EMITTER` never shows that wait as `WAITING`.
+
 An acquisition timeout, an inability to connect, or the loss of a connection is an infrastructure
 failure instead, and follows the emitter's existing retry policy and general-error reporting.
 
@@ -95,8 +100,12 @@ authentication and validation, independent of how long an accepted query then ru
 separate pool-wait deadline. A Redis publish checks its connection out within the client's
 `connect_timeout_ms`, 30 seconds by default, the same deadline that bounds opening each new command
 connection: a checkout that runs out of it reports `checking out a Redis command connection did not
-finish within connect_timeout_ms` with the bound. MongoDB retains its native server-selection and
-operation timeouts.
+finish within connect_timeout_ms` with the bound. A MongoDB write has only its driver's deadlines:
+server selection ends after `serverSelectionTimeoutMS`, 30 seconds by default, and opening a
+connection's TCP and TLS session after `connectTimeoutMS`, 10 seconds by default, both set in
+`addr`. The wait for a pooled connection, the connection handshake and each command's answer have
+no deadline. The driver implements neither `waitQueueTimeoutMS` nor `socketTimeoutMS`, so setting
+them in `addr` bounds none of these waits.
 
 ## What each bound counts
 
@@ -124,7 +133,7 @@ driver leaves out:
 | Client type | The driver's own minimum | What Nervix adds |
 | --- | --- | --- |
 | `POSTGRES` | Counts every connection the driver holds, idle or checked out. The driver opens it with the pool and replaces a connection it closes at a lifetime or after a failure when the pool would otherwise fall below it. | Nothing. |
-| `MYSQL` | A retention floor only: the driver keeps up to that many idle connections once they are returned, and never opens one to reach it. | A maintenance task reads the pool's established connections once a second and checks the shortfall out of the pool, which opens a connection for each checkout it has no idle one for. |
+| `MYSQL` | A retention floor only: the driver keeps up to that many idle connections once they are returned, and never opens one to reach it. | Once a second a maintenance task checks connections out of the pool one at a time, holding each, until the pool's established connections, the ones emitters hold included, reach `MIN`, and then returns them. The pool hands over its idle connections first and opens one for each checkout it has none idle for, so the task opens exactly the missing ones. |
 | `MONGODB` | Counts every application connection to a server, available, being established or checked out. The driver populates each ready server's pool up to it in the background. | Nothing. |
 | `REDIS` | Counts idle connections only, so every checkout would make the driver open another beside the connection in use, up to `MAX`. Nervix does not use it. | Opening the pool establishes `MIN` command connections. Whenever the pool closes one, Nervix counts the connections still established, the ones publishers hold included, and has the pool open the missing ones. |
 
@@ -134,6 +143,11 @@ emitter opens the pool again on its retry policy. When the pool later closes a c
 lifetime or after a failed `PING`, Nervix brings it back to `MIN` at once. If Redis cannot be
 reached then, each attempt waits up to `connect_timeout_ms` and the next follows as soon as it ends,
 while a publisher that finds no connection idle still opens one for itself.
+
+For MySQL, opening the pool validates one connection, and the maintenance task brings the pool to
+`MIN` a second later. A checkout that fails ends its pass, which returns the connections it held,
+and the next pass tries again a second later, while an emitter that finds no connection idle still
+opens one for itself.
 
 ## Connection lifetimes
 

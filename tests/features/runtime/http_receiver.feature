@@ -32,11 +32,10 @@ Feature: HTTP receiver fixture
       CREATE HTTP CLIENT receiver_api
         CONFIG {
           'endpoint' = '{{http_receiver.api}}/poll/{{test_id}}?page=1',
-          'method' = 'GET',
           'timeout_ms' = 5000
         };
       CREATE HTTP REQUEST INGESTOR poll_receiver
-        FROM receiver_api EVERY 1s
+        FROM receiver_api METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -104,14 +103,13 @@ Feature: HTTP receiver fixture
         MOUNT receiver_tls VERSION 1
         CONFIG {
           'endpoint' = '{{http_receiver.secure}}/poll/{{test_id}}',
-          'method' = 'GET',
           'timeout_ms' = 5000,
           'tls_ca_file' = '{{receiver_tls}}/ca.pem',
           'tls_cert_file' = '{{receiver_tls}}/client.pem',
           'tls_key_file' = '{{receiver_tls}}/client-key.pem'
         };
       CREATE HTTP REQUEST INGESTOR poll_secure
-        FROM receiver_secure EVERY 1s
+        FROM receiver_secure METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -160,11 +158,10 @@ Feature: HTTP receiver fixture
       CREATE HTTP CLIENT receiver_untrusted
         CONFIG {
           'endpoint' = '{{http_receiver.untrusted}}/poll/{{test_id}}',
-          'method' = 'GET',
           'timeout_ms' = 5000
         };
       CREATE HTTP REQUEST INGESTOR poll_untrusted
-        FROM receiver_untrusted EVERY 1s
+        FROM receiver_untrusted METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

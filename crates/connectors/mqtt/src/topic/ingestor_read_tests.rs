@@ -28,6 +28,7 @@ use super::{
     PublishReadOutcome,
 };
 use crate::topic::{
+    ingestor::metrics_fixture::IngestorMetricsFixture,
     scripted_broker::{ScriptedBroker, ScriptedConnection},
     test_fixtures::DnsFixture,
 };
@@ -322,6 +323,7 @@ fn acknowledged_plan(addr: &str, dns: DnsResolver, window: NonZeroU64) -> MqttTo
         qos: MqttQos::AtLeastOnce,
         acknowledgement_window: Some(window),
         dns,
+        read_ahead_dropped: IngestorMetricsFixture::new().counter(),
     })
 }
 

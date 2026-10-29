@@ -17,7 +17,7 @@
     )
 )]
 
-use nervix_models::IngestorMetadataScope;
+use nervix_models::{IngestorMetadataScope, Timestamp};
 use nervix_primitives::sync::Arc;
 
 /// Transport headers of one ingestor message, visited in the order its entity's declared header model
@@ -88,6 +88,11 @@ impl IngestMessageHeaders for RetainedIngestHeaders {
 /// row copies only those borrows.
 #[derive(Clone, Copy)]
 pub enum IngestMetadataRow<'a> {
+    Http {
+        status: u16,
+        polled_at: Timestamp,
+        headers: &'a dyn IngestMessageHeaders,
+    },
     Websockets {
         frame_type: nervix_models::WebsocketsFrameType,
         // A buffered frame can outlive the exact connection whose upgrade supplied these fields.
@@ -112,6 +117,7 @@ impl IngestMetadataRow<'_> {
     /// appended into.
     pub fn scope(&self) -> IngestorMetadataScope {
         match self {
+            Self::Http { .. } => IngestorMetadataScope::Http,
             Self::Websockets { .. } => IngestorMetadataScope::Websockets,
             Self::Kafka { .. } => IngestorMetadataScope::Kafka,
             Self::Syslog { .. } => IngestorMetadataScope::Syslog,

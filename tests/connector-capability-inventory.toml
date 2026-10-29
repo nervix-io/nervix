@@ -109,6 +109,41 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "METHOD"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+]
+
+[[capability]]
+capability = "HEADERS"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+]
+
+[[capability]]
+capability = "MAX BODY SIZE"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+]
+
+[[capability]]
+capability = "metadata.status"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+]
+
+[[capability]]
+capability = "metadata.polled_at"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "HTTP REQUEST INGESTOR"
 scenarios = [
@@ -465,8 +500,7 @@ scenarios = [
 capability = "MODE ACK"
 entity = "OTEL LOGS EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "Each OTEL signal requires its VALUES mappings on <nodes> nodes" },
-  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "OTEL refuses an unsupported publication mode on <nodes> nodes" },
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL log and trace emitters export typed relay records over OTLP gRPC" },
   { feature = "tests/features/runtime/otel_export_retries.feature", scenario = "An OTEL Export request that timed out is sent again byte for byte" },
 ]
 
@@ -474,7 +508,7 @@ scenarios = [
 capability = "RESOURCE"
 entity = "OTEL LOGS EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "OTEL refuses unsupported attributes and computed resources on <nodes> nodes" },
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL log and trace emitters export typed relay records over OTLP gRPC" },
   { feature = "tests/features/runtime/otel_export_retries.feature", scenario = "An OTEL Export request that timed out is sent again byte for byte" },
 ]
 
@@ -482,6 +516,7 @@ scenarios = [
 capability = "SCOPE"
 entity = "OTEL LOGS EMITTER"
 scenarios = [
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL log and trace emitters export typed relay records over OTLP gRPC" },
   { feature = "tests/features/runtime/otel_export_retries.feature", scenario = "An OTEL Export request that timed out is sent again byte for byte" },
 ]
 
@@ -510,7 +545,6 @@ scenarios = [
 capability = "METRIC GAUGE"
 entity = "OTEL METRICS EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "Each OTEL signal requires its VALUES mappings on <nodes> nodes" },
   { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL gauge and histogram metric emitters export their points" },
 ]
 
@@ -518,8 +552,6 @@ scenarios = [
 capability = "METRIC HISTOGRAM"
 entity = "OTEL METRICS EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "Each OTEL signal requires its VALUES mappings on <nodes> nodes" },
-  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "An OTEL histogram field requires its declared exact type on <nodes> nodes" },
   { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL gauge and histogram metric emitters export their points" },
 ]
 
@@ -534,7 +566,6 @@ scenarios = [
 capability = "MODE ACK"
 entity = "OTEL METRICS EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "OTEL refuses an unsupported publication mode on <nodes> nodes" },
   { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL metric emitters export over OTLP HTTP protobuf and gRPC" },
 ]
 
@@ -577,8 +608,6 @@ scenarios = [
 capability = "MODE ACK"
 entity = "OTEL TRACES EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "Each OTEL signal requires its VALUES mappings on <nodes> nodes" },
-  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "OTEL refuses an unsupported publication mode on <nodes> nodes" },
   { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL log and trace emitters export typed relay records over OTLP gRPC" },
 ]
 

@@ -685,10 +685,14 @@ reading, and the transport's own window or prefetch keeps the peer from sending 
 waits for the buffer to drain. A protocol without flow control drops what does not fit and counts
 it. A buffer that drops without counting, or whose overflow fails the publish for the host to retry,
 is declared as it behaves, and a buffer that nothing bounds yet is declared unbounded, so the matrix
-shows each gap until its connector closes it. A `PROMETHEUS QUERY` response is bounded by its
-statement's `MAX BODY SIZE`: a response that exceeds it fails the poll, which the ingestor reports
-as its transient error, and the next poll reads again. An `HTTP REQUEST` poll's response body has
-no such bound yet and is declared unbounded.
+shows each gap until its connector closes it. A `PROMETHEUS QUERY` or `HTTP REQUEST` response is
+bounded by its statement's `MAX BODY SIZE` (16 MiB where omitted). A response that exceeds the
+bound fails the poll, which the ingestor reports as its transient error, and the next poll reads
+again. The HTTP polling request's method and literal headers are carried by the typed ingestor plan;
+its client supplies the required total `timeout_ms` and TLS settings. The polling client reads no
+proxy from the environment and follows redirects only when `follow_redirects` is true. Its optional
+`proxy` is the only proxy it uses. An HTTP response carries its status and scheduled poll instant
+into the same metadata group as its response headers, including when quiescence buffers the poll.
 
 A per-connection bound does not bound the total when the listener accepts an unlimited number of
 connections. The Syslog listener declares frame assembly and completed frames waiting for its
@@ -1301,12 +1305,24 @@ Receive Maximum, 65,535. The broker then sends no further publish at QoS 1 while
 their acknowledgements, so a batch holds at most that many, and an `ACK PARALLEL MAX` above 65,535
 gathers at most 65,535 of them before its `BATCH TIMEOUT` ends it. The extra capacity lets the
 connection keep reading while the host holds a batch. The broker holds back no publish at QoS 0,
-which a subscription at QoS 1 receives from a publisher
-that sends at QoS 0, and under `NO ACK`, where the client acknowledges every publish on receipt,
-it holds back none. The read-ahead holds as many publishes as the Receive Maximum admits, or 64
-under `NO ACK`. Once it is full, the task holds the next publish and polls nothing until the
-source reads one, so the connection's flow control holds the broker back, and the client sends no
-keep-alive until the host reads again.
+which a subscription at QoS 1 receives from a publisher that sends at QoS 0. In an `ACK` mode the
+read-ahead reserves the full Receive Maximum for QoS 1/2 packet outcomes and admits up to 64 QoS 0
+outcomes alongside them, in the same packet-ordered queue. Each queued QoS 0 outcome owns one
+capacity permit until the source takes it. Excess QoS 0 publishes are dropped and counted, so
+they cannot stop event-loop polling, consume a QoS 1/2 slot, delay a `PUBACK`, or stop keep-alive
+pings. An oversized QoS 0 publish that cannot enter read-ahead is counted as overflow rather than
+as an oversized outcome; no payload is counted twice.
+
+The host resolves `nervix_ingestor_read_ahead_dropped_payloads_total` once per ingestor and physical
+node and passes its counter handle to the connector. The driver increments it at each overflow,
+including while the host waits for downstream acknowledgement. Prometheus exposes the count with
+`domain`, `ingestor` and `physical_node_id` labels; a reconnect does not reset it. It is separate
+from codec rejections, oversized payloads, quiesce drops and transport redeliveries.
+
+Under `NO ACK`, the client acknowledges every publish on receipt and the broker holds back none.
+Its read-ahead holds 64 outcomes. Once it is full, the task holds the next outcome and polls
+nothing until the source reads one, so the connection's flow control holds the broker back and
+the client sends no keep-alive until the host reads again.
 
 Acknowledging a batch requests a `PUBACK` for each of its publishes at QoS 1 and returns once the
 event loop has written all of them to the connection and flushed them. The broker answers none, so
@@ -1314,7 +1330,9 @@ that is everything the source can confirm. A batch never asks for more acknowled
 client's request queue holds, so no request waits for room. The acknowledgement never waits on a
 task that stopped polling. While the task holds a publish for room in a full read-ahead, only the
 host's next read, which follows the acknowledgement, could let it write, so the acknowledgement
-fails with `MqttTopicIngestorError::ReadAheadFull`. When the connection ended first, it fails with the
+fails with `MqttTopicIngestorError::ReadAheadFull`. In an ACK mode, QoS 0 cannot cause this state:
+the broker would have to exceed the advertised Receive Maximum for acknowledged publishes.
+When the connection ended first, it fails with the
 lost connection beneath `MqttTopicIngestorError::Acknowledge`. A connection whose broker stopped reading
 it holds the writes, and the client's flush has no deadline of its own, so the acknowledgement
 waits at most one keep-alive interval, 60 seconds unless the broker's `CONNACK` announced its own,
@@ -2016,8 +2034,18 @@ bytes; the one- and three-node Sentry scenarios qualify those bytes through a re
 after a mock endpoint's `503` response. See
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md#behavioral-properties).
 
-Iceberg is a row emitter that stages each carrier of the run as its own file, which its commit
-publishes.
+Iceberg is a row emitter. Without `BATCH` it stages each carrier of the run as one Arrow IPC file,
+and its commit writes the rows with the 512 MiB Parquet rollover target. With `BATCH`, the typed
+start plan hands the row and byte limits to the connector. It projects selected rows onto the
+loaded table schema, counts the complete Parquet encoding on the bounded bulk CPU workers, and
+uses the shared fallible row division to make staged Arrow IPC segments. A row whose own file is
+too large is refused alone through `ON MESSAGE ERROR`; the accepted segments become one data file
+each in the catalog commit. The connector retains a carrier's one acknowledgement handle on its
+final staged segment, so splitting files neither acknowledges at staging nor repeats a commit
+acknowledgement. If staging any segment fails, it removes the segments from that carrier's attempt
+and leaves the host's unresolved rows retryable. Commit checks the written files' physical row and
+byte counts before appending them. The property target `iceberg-staged-file-encoding` checks Arrow
+IPC readback and that the counting Parquet writer agrees with the encoded file's byte length.
 
 OTEL is a row request emitter, which the host hands one carrier per preparation. Without `BATCH` it
 prepares the successfully mapped rows of the carrier as one Export request. With `BATCH`, its typed
@@ -2527,9 +2555,11 @@ it does not classify network or server failures as validation outcomes. HTTP res
 retains its UTF-8 and numeric parsing causes beneath the response-head failure.
 
 A MySQL mapped column that the emitter cannot bind fails the whole publish with its exact column
-and Arrow type retained beneath the publish context. It is not a per-record rejection. Pool
-maintenance reports its own failed connection attempt before its next retry; a later writer's
-failure remains a separate diagnostic.
+and Arrow type retained beneath the publish context. It is not a per-record rejection. The task
+that keeps a MySQL pool at `POOL SIZE MIN` reports a pass that ends below it as
+`PoolMinimumError::NotRestored`, naming the minimum, above the failed checkout's `CheckOut` and the
+driver's error, before its next pass retries; a later writer's failure remains a separate
+diagnostic.
 
 The host's source start keeps every connector report it composes an ingestor from. A client
 configuration that does not resolve, a connector plan that fails, such as a Syslog, Redis,
