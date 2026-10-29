@@ -3,7 +3,8 @@ Feature: RabbitMQ name resolution
   A RabbitMQ source or emitter resolves the host of its client's `addr` through the node's resolver
   each time it opens a connection, dials the answers in order, and verifies an `amqps` broker's
   certificate against that host. The test broker requires a client certificate on its TLS listener,
-  so `amqps` clients present the mounted scenario identity. These scenarios point every node at a
+  so `amqps` clients configure TLS trust and present the mounted scenario identity. Plain `amqp`
+  clients configure their address. These scenarios point every node at a
   DNS fixture the scenario controls, and provision every queue explicitly.
 
   Scenario Outline: RabbitMQ sources and emitters reach a broker named by the node DNS fixture over <scheme>
@@ -33,10 +34,7 @@ Feature: RabbitMQ name resolution
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RABBITMQ CLIENT rabbit_main MOUNT dev_tls VERSION 1 CONFIG {
-        'addr' = '{{<address>}}',
-        'tls_ca_file' = '{{dev_tls}}/ca.pem',
-        'tls_cert_file' = '{{dev_tls}}/node.pem',
-        'tls_key_file' = '{{dev_tls}}/node-key.pem'
+        'addr' = '{{<address>}}'<tls_config>
       };
       CREATE RABBITMQ QUEUE INGESTOR rabbit_in
       FROM rabbit_main QUEUE 'dns_in_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
@@ -68,11 +66,11 @@ Feature: RabbitMQ name resolution
     And the DNS fixture eventually receives a question for "rabbitmq.nervix.test"
 
     Examples:
-      | scheme | address               | cluster_size |
-      | AMQP   | rabbitmq_dns_addr     | 1            |
-      | AMQP   | rabbitmq_dns_addr     | 3            |
-      | AMQPS  | rabbitmq_tls_dns_addr | 1            |
-      | AMQPS  | rabbitmq_tls_dns_addr | 3            |
+      | scheme | address               | tls_config                                                                                                                    | cluster_size |
+      | AMQP   | rabbitmq_dns_addr     |                                                                                                                               | 1            |
+      | AMQP   | rabbitmq_dns_addr     |                                                                                                                               | 3            |
+      | AMQPS  | rabbitmq_tls_dns_addr | , 'tls_ca_file' = '{{dev_tls}}/ca.pem', 'tls_cert_file' = '{{dev_tls}}/node.pem', 'tls_key_file' = '{{dev_tls}}/node-key.pem' | 1            |
+      | AMQPS  | rabbitmq_tls_dns_addr | , 'tls_ca_file' = '{{dev_tls}}/ca.pem', 'tls_cert_file' = '{{dev_tls}}/node.pem', 'tls_key_file' = '{{dev_tls}}/node-key.pem' | 3            |
 
   Scenario Outline: An AMQPS client rejects a broker certificate that does not name the host it resolved
     Given RabbitMQ is running
