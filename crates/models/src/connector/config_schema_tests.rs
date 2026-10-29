@@ -510,9 +510,10 @@ fn bolero_schema_checked_client_entries_round_trip() {
                         let root = if arbitrary.entropy().flag() { "/" } else { "" };
                         format!("{scheme}://{host}:{port}{root}")
                     }
-                    ClientConfigValue::DriverAddress => {
-                        "redis://user:password@example.com/0".to_string()
-                    }
+                    ClientConfigValue::DriverAddress => match address_schemes.get(key.name) {
+                        Some(scheme) => format!("{scheme}://user:password@example.com/0"),
+                        None => "redis://user:password@example.com/0".to_string(),
+                    },
                     ClientConfigValue::Choice(choices) => {
                         let index = arbitrary.entropy().index(
                             NonZeroUsize::new(choices.len()).assured("a choice declares values"),
