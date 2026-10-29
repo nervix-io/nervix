@@ -262,10 +262,14 @@ async fn then_archive_is_the_recovered_backup(world: &mut ScenarioWorld, file: S
         .open_session(&leader, &world.domain)
         .await
         .assured("the recovery session opens");
-    let recovered = session
-        .run_command_result_with_reference(&recovery.to_canonical_plexus(), &reference)
-        .await
-        .assured("the recovery is answered");
+    let recovered = backup_command_outcome(
+        world,
+        &mut session,
+        &recovery.to_canonical_plexus(),
+        &reference,
+    )
+    .await
+    .assured("the recovery is answered");
     assert_eq!(
         recovered.origin,
         nervix_client_core::OutcomeOrigin::Recovered,

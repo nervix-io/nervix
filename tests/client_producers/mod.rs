@@ -949,6 +949,53 @@ async fn when_producer_submits_long_id(
     submit(world, producer, batch, SubmittedBody::Rows(rows)).await;
 }
 
+/// A reproducible printable payload that Parquet cannot reduce to a short repeated run.
+fn iceberg_file_bound_payload(length: usize, seed: u64) -> String {
+    let mut state = seed;
+    (0..length)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            char::from(u8::try_from((state >> 32) % 94).expect("modulo 94 fits u8") + b'!')
+        })
+        .collect()
+}
+
+#[when(expr = "producer {string} submits Iceberg file-bound batch {string}")]
+async fn when_producer_submits_iceberg_file_bound_rows(
+    world: &mut ScenarioWorld,
+    producer: String,
+    batch: String,
+) {
+    let fields = world
+        .scenario_producer(&producer)
+        .description()
+        .fields
+        .clone();
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["user_id", "action"],
+        "the Iceberg file-bound fixture uses user_id and action"
+    );
+    let rows = RecordBatch::try_new(
+        StdArc::new(SchemaField::arrow_schema(&fields)),
+        vec![
+            StdArc::new(Int64Array::from(vec![41, 42, 43])),
+            StdArc::new(StringArray::from(vec![
+                iceberg_file_bound_payload(1_800, 41),
+                iceberg_file_bound_payload(1_800, 42),
+                iceberg_file_bound_payload(8_192, 43),
+            ])),
+        ],
+    )
+    .expect("the Iceberg file-bound rows match the producer schema");
+    submit(world, producer, batch, SubmittedBody::Rows(rows)).await;
+}
+
 #[then(expr = "batch {string} remains pending for {string}")]
 async fn then_batch_remains_pending(world: &mut ScenarioWorld, batch: String, duration: String) {
     let duration = parse_duration_text(&duration).expect("a literal duration");
