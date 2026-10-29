@@ -67,7 +67,7 @@ env:
 jobs:
   plan:
     name: plan
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-2-ubuntu-2404
     timeout-minutes: 10
     outputs:
       image: ${{ steps.image.outputs.image }}
@@ -129,10 +129,10 @@ jobs:
   run:
     name: ${{ inputs.suite }} ${{ inputs.image-kind }} shard ${{ matrix.shard.shard }}
     needs: plan
-    # A GitHub-hosted worker: Pumba's network faults need the prio, sfq and netem queueing
-    # disciplines, which the Blacksmith workers' kernel does not provide, so every run there stops
-    # in its network preflight or verifier self-check.
-    runs-on: ubuntu-24.04
+    # A Ubicloud worker with the 4 CPUs and 16 GB of the GitHub-hosted worker the suites were
+    # qualified on. Pumba's network faults need the prio, sfq and netem queueing disciplines: the
+    # job loads them before it pulls the image, and stops when the kernel cannot provide one.
+    runs-on: ubicloud-standard-4-ubuntu-2404
     # The shard's CI reserve funds the separate 600s network qualification and its 10s termination
     # grace, in addition to the measured evidence, cleanup and upload allowance.
     timeout-minutes: ${{ matrix.shard.job_minutes }}
@@ -287,7 +287,7 @@ jobs:
     name: ${{ inputs.suite }} ${{ inputs.image-kind }} verdict
     needs: [plan, run]
     if: always() && needs.plan.result == 'success'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-2-ubuntu-2404
     timeout-minutes: 10
     steps:
       - name: Checkout

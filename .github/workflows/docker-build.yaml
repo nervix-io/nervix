@@ -40,7 +40,7 @@ jobs:
         !contains(github.event.pull_request.labels.*.name, 'no-docker')) &&
       (github.event.action != 'labeled' ||
         contains(fromJSON('["benchmark", "chaos", "chaos-soak"]'), github.event.label.name))
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-2-ubuntu-2404
     timeout-minutes: 40
     outputs:
       build_id: ${{ steps.meta.outputs.build_id }}
@@ -67,12 +67,12 @@ jobs:
             platform: linux/amd64
             arch: amd64
             llvm: "23"
-            runner: blacksmith-4vcpu-ubuntu-2404
+            runner: ubicloud-standard-4-ubuntu-2404
           - image: debian
             platform: linux/arm64
             arch: arm64
             llvm: "23"
-            runner: blacksmith-8vcpu-ubuntu-2404
+            runner: ubicloud-standard-8-ubuntu-2404
           # - image: alpine
           #   platform: linux/amd64
           #   arch: amd64
@@ -152,7 +152,7 @@ jobs:
           contains(github.event.pull_request.labels.*.name, 'chaos-soak')))
     # The diagnostic server's workspace crates compile with the detector's features, which the
     # release image's cache does not hold, so this build takes the larger worker.
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-8-ubuntu-2404
     timeout-minutes: 80
     steps:
       - name: Checkout
@@ -199,7 +199,7 @@ jobs:
       github.event_name == 'pull_request' &&
       contains(github.event.pull_request.labels.*.name, 'benchmark') &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-8-ubuntu-2404
     timeout-minutes: 120
     permissions:
       contents: read
@@ -387,7 +387,7 @@ jobs:
       !contains(github.event.pull_request.labels.*.name, 'no-docker') &&
       contains(github.event.pull_request.labels.*.name, 'benchmark') &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-2-ubuntu-2404
     timeout-minutes: 10
     permissions:
       pull-requests: write
@@ -559,10 +559,10 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: blacksmith-4vcpu-ubuntu-2404
+            runner: ubicloud-standard-4-ubuntu-2404
           - arch: arm64
             # The 4-vCPU ARM class has 12 GB; leave host headroom around minikube's 10 GiB.
-            runner: blacksmith-8vcpu-ubuntu-2404-arm
+            runner: ubicloud-standard-8-arm-ubuntu-2404
     steps:
       - name: Checkout tested server
         uses: actions/checkout@v4
@@ -629,7 +629,7 @@ jobs:
       github.event_name != 'schedule' &&
       (github.event_name != 'pull_request' ||
         github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-2-ubuntu-2404
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -667,7 +667,7 @@ jobs:
   # `just book` runs first.
   build-book:
     name: build-book
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-4-ubuntu-2404
     # `just book` recaptures the console screenshots and renders the nervix-cli
     # reference from the current binary, so this job compiles the workspace and
     # drives a real browser rather than only rendering Markdown.

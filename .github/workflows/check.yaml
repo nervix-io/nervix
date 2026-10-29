@@ -26,7 +26,7 @@ jobs:
   # rerun retains this decision; cancellation is never interpreted as completed test evidence.
   test-selection:
     name: test-selection
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2-ubuntu-2404
     timeout-minutes: 5
     outputs:
       tests-required: ${{ steps.selection.outputs.tests-required }}
@@ -65,7 +65,7 @@ jobs:
 
   conventional-pr-title:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2-ubuntu-2404
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
@@ -81,7 +81,7 @@ jobs:
 
   checks:
     name: checks
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-8-ubuntu-2404
     # Cold validation includes Clippy and the complete compiler matrix.
     timeout-minutes: 120
     steps:
@@ -244,7 +244,7 @@ jobs:
     name: diagnostic-evidence
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-8-ubuntu-2404
     timeout-minutes: 45
     permissions:
       contents: read
@@ -360,7 +360,7 @@ jobs:
   deloxide:
     name: deloxide (${{ matrix.selection }})
     if: contains(github.event.pull_request.labels.*.name, 'deloxide')
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-16-ubuntu-2404
     # Setup, then at most the lane's bound, the qualification's bound and the reserve the uploads
     # and the kache report keep after them.
     timeout-minutes: 200
@@ -532,7 +532,7 @@ jobs:
     name: tests
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-16-ubuntu-2404
     timeout-minutes: 60
     permissions:
       contents: read
@@ -724,7 +724,7 @@ jobs:
     name: scenarios
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-16-ubuntu-2404
     # The harness derives 105 minutes of scenarios from this limit, with 35 for setup/builds and
     # 15 for cleanup/export/uploads. Keep tests/common/suite_watchdog.rs in step.
     timeout-minutes: 155
@@ -949,7 +949,7 @@ jobs:
   coverage:
     name: coverage
     needs: [tests, scenarios, extra-tests]
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-4-ubuntu-2404
     timeout-minutes: 20
     permissions:
       contents: read
@@ -1096,7 +1096,7 @@ jobs:
     name: coverage-full
     needs: [test-selection, bolero, coverage, extra-tests, diagnostic-evidence, shuttle, loom, turmoil, deloxide]
     if: ${{ !cancelled() && (needs.test-selection.result != 'success' || needs.test-selection.outputs.tests-required == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-4-ubuntu-2404
     timeout-minutes: 15
     permissions:
       contents: read
@@ -1202,7 +1202,7 @@ jobs:
   client-conformance:
     name: client-conformance
     if: contains(github.event.pull_request.labels.*.name, 'client-conformance')
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-8-ubuntu-2404
     # The suite budget below is derived from this limit: builds before the scenarios, then at most
     # the budget, then the reserve the harness keeps for its own cleanup and the log upload.
     timeout-minutes: 60
@@ -1380,7 +1380,7 @@ jobs:
     if: needs.test-selection.outputs.tests-required == 'true'
     # Half the suite job's cores saves capacity. Budget cold ordinary instrumentation,
     # compiler checks and modeled primitive builds.
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-8-ubuntu-2404
     timeout-minutes: 120
     permissions:
       contents: read
@@ -1696,7 +1696,7 @@ jobs:
   shuttle:
     name: shuttle
     if: contains(github.event.pull_request.labels.*.name, 'shuttle')
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-8-ubuntu-2404
     timeout-minutes: 240
     permissions:
       contents: read
@@ -1874,7 +1874,7 @@ jobs:
   loom:
     name: loom
     if: contains(github.event.pull_request.labels.*.name, 'loom')
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-8-ubuntu-2404
     # The models took 10 to 11 minutes on a warm cache. The limit leaves room for a cold
     # instrumented build and for the models the inventory adds.
     timeout-minutes: 60
@@ -2029,7 +2029,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2]
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-8-ubuntu-2404
     timeout-minutes: 120
     permissions:
       contents: read
@@ -2181,7 +2181,7 @@ jobs:
   turmoil:
     name: turmoil
     if: contains(github.event.pull_request.labels.*.name, 'turmoil')
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubicloud-standard-4-ubuntu-2404
     # The emergency guard around the build, the tests and the upload. The tests end themselves
     # first: every run has its own real-time bound, and `just test-turmoil` gives all of them
     # together an 8-minute budget, which ends a wedged run with status 124 and leaves the record
