@@ -213,6 +213,7 @@ async fn a_poll_its_codec_refuses_whole_enters_nothing() {
                 messages: vec![IngestorPollMessage {
                     payload: REFUSED.to_vec(),
                     headers: RetainedIngestHeaders::none(),
+                    metadata: nervix_connector::IngestorPollMetadata::Headers,
                 }],
                 failures: Vec::new(),
                 observed_at: Timestamp::from_unix_nanos(1),
@@ -247,10 +248,12 @@ async fn a_poll_consumes_a_message_its_codec_refuses_and_delivers_the_rest() {
                     IngestorPollMessage {
                         payload: REFUSED.to_vec(),
                         headers: RetainedIngestHeaders::none(),
+                        metadata: nervix_connector::IngestorPollMetadata::Headers,
                     },
                     IngestorPollMessage {
                         payload: br#"{"user_id":9}"#.to_vec(),
                         headers: RetainedIngestHeaders::none(),
+                        metadata: nervix_connector::IngestorPollMetadata::Headers,
                     },
                 ],
                 failures: Vec::new(),

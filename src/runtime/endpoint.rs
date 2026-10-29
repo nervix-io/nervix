@@ -126,7 +126,11 @@ pub(super) fn normalize_http_host(host: &str) -> Cow<'_, str> {
 }
 
 impl Runtime {
-    pub(crate) fn resolve_endpoint(&self, host: &str, path: &str) -> Option<ResolvedEndpointRoute> {
+    pub(crate) fn resolve_endpoint(
+        &self,
+        host: &str,
+        path: &str,
+    ) -> EndpointResolution<ResolvedEndpointRoute> {
         self.inner.endpoint_intake_routes.resolve(host, path)
     }
 

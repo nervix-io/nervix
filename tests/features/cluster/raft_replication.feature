@@ -17,6 +17,7 @@ Feature: Pipelined raft replication and bounded log retention
     Given inbound interconnect traffic to stopped node "node-3" is paced at 32768 bytes per second
     When node "node-3" starts catching up through its paced interconnect
     Then within "120s" the paced follower applies 1024 domains named "moving_append"
+    And the paced catch-up uses at most two data streams
 
   Scenario: Failed follower stream setup stays paced while the surviving quorum commits
     Given a 3 node nervix cluster is started

@@ -703,6 +703,15 @@ impl RuntimeIngestorHost {
         metadata: &IngestMetadataRow<'_>,
     ) -> IngestorIntakeResult<BufferedIngestMetadata> {
         match metadata {
+            IngestMetadataRow::Http {
+                status,
+                polled_at,
+                headers,
+            } => Ok(BufferedIngestMetadata::Http {
+                status: *status,
+                polled_at: *polled_at,
+                headers: RetainedIngestHeaders::capture(*headers),
+            }),
             IngestMetadataRow::Websockets {
                 frame_type,
                 headers,

@@ -51,7 +51,9 @@ impl TransportPosition {
                 offset: *offset,
             }),
             IngestMetadataRow::Syslog { peer_addr } => Some(Self::Syslog { peer: *peer_addr }),
-            IngestMetadataRow::Headers { .. } | IngestMetadataRow::Websockets { .. } => None,
+            IngestMetadataRow::Headers { .. }
+            | IngestMetadataRow::Http { .. }
+            | IngestMetadataRow::Websockets { .. } => None,
         }
     }
 }

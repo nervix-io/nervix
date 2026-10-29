@@ -138,6 +138,9 @@ macro_rules! client_plan {
 }
 
 client_plan!(HttpRequestIngestorStartPlan {
+    method: String,
+    headers: Vec<nervix_models::HttpRequestHeader>,
+    max_body_size: nervix_models::PayloadSizeLimit,
     every: nervix_models::DomainClockPeriod,
 });
 
@@ -841,6 +844,9 @@ impl IngestorConnectorPlan {
             (
                 IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
                     client: expected,
+                    method,
+                    headers,
+                    max_body_size,
                     every,
                     ..
                 })),
@@ -854,6 +860,10 @@ impl IngestorConnectorPlan {
                         resolved.mount.as_ref(),
                         &resolved.config,
                     )?,
+                    method: method.clone(),
+                    headers: headers.clone(),
+                    max_body_size: max_body_size
+                        .unwrap_or(nervix_models::HTTP_DEFAULT_MAX_BODY_SIZE),
                     every: *every,
                 },
             ))),
@@ -1240,6 +1250,9 @@ mod tests {
         IngestorCase {
             source: IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
                 client: named("upstream"),
+                method: "GET".to_owned(),
+                headers: Vec::new(),
+                max_body_size: None,
                 every: cadence(),
                 mode: nervix_models::HttpRequestIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
@@ -1252,6 +1265,9 @@ mod tests {
             plan: IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(
                 HttpRequestIngestorStartPlan {
                     client: client(),
+                    method: "GET".to_owned(),
+                    headers: Vec::new(),
+                    max_body_size: nervix_models::HTTP_DEFAULT_MAX_BODY_SIZE,
                     every: cadence(),
                 },
             )),

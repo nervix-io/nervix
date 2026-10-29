@@ -268,10 +268,12 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             every_node: false,
             reference: IngestorReferenceKind::Schema,
         },
-        IngestorEntityKind::Http(HttpIngestorEntity::Request) => headers_only(
-            Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-            ConnectorKind::Http,
-        ),
+        IngestorEntityKind::Http(HttpIngestorEntity::Request) => IngestorDeclaration {
+            headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
+            metadata: IngestorMetadataScope::Http,
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Http),
+        },
         IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) => IngestorDeclaration {
             headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
             metadata: IngestorMetadataScope::Kafka,
@@ -544,6 +546,13 @@ fn the_metadata_scopes_declare_their_fields_in_order() {
             .collect::<Vec<_>>()
     };
     assert!(described(IngestorMetadataScope::Headers).is_empty());
+    assert_eq!(
+        described(IngestorMetadataScope::Http),
+        [
+            ("status".to_owned(), ParseAsType::U16),
+            ("polled_at".to_owned(), ParseAsType::Datetime),
+        ]
+    );
     assert_eq!(
         described(IngestorMetadataScope::Kafka),
         [

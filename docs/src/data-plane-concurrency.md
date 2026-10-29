@@ -457,6 +457,13 @@ The connection returns before the next insert or retry backoff. The MySQL public
 scenario exercises the real driver and database; these external asynchronous waits are outside
 Deloxide's tracked locks and the model checkers' coverage.
 
+A MySQL pool keeps its `POOL SIZE MIN` with one keeper task, which the pool's handle stops. The
+keeper holds no lock and waits on no notification: once a second it reads the driver's count of
+established connections and, below the minimum, awaits the driver's checkouts one at a time,
+holding each until its pass ends, so every connection it opens is one the driver accounts against
+the maximum. These external asynchronous waits are outside Deloxide's tracked locks and the model
+checkers' coverage; unit tests drive the production keeper over a stand-in pool on a paused clock.
+
 Generators retain the domain acknowledgement tracker. Ingest executions, groups and endpoint
 bindings retain the same domain/ingestor tracker pair. Task and branch metric handles retain the
 exact placement's dirty mark. Client batch outcome counters, quiesced payload counters/gauges and
@@ -519,6 +526,12 @@ bind or unbind derive a replacement from the current publication with `ArcSwap::
 writers retry against the latest complete table, preserving unrelated domains and sources. A
 passive installation publishes no endpoint definitions. The listening socket remains present on
 every node independently of this table.
+
+The table also records whether a revision installed it since the node started or the runtime last
+cleared it. A revision application marks it installed once every domain of the revision has
+published its definitions. A request reads the route and that state from the same load. A
+published route is served whatever the state. A missing route is unrouted, answered with 404, only
+in an installed table; before installation it is uninstalled, answered with 503.
 
 An HTTP request resolves one route using borrowed host and path keys; only uppercase hosts need a
 normalization allocation. A WebSocket retains the resolved route and its signaling protocol from
@@ -1815,6 +1828,15 @@ measurements are task-owned administrative state and add no synchronization. The
 and cleanup paths retain their tracked-lock coverage; phase timing itself establishes no
 interleaving or memory-ordering guarantee. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
 owns the diagnostic contract.
+
+The test-only backup cut registry releases its watch-held lease and capture gates before clearing
+the map during scenario cleanup. Existing borrowers observe release; later cuts encounter no
+gate. Gate-owner tests with a paused clock cover waiting cuts, timed holds and later arrivals.
+The supervised failed-body Cucumber fixture reaches both public boundaries on one and three nodes
+and requires every node to stop while every body retains its failure. These watch channels and
+concurrent-map accesses are outside Deloxide's tracked locks. This harness cleanup adds no
+data-plane synchronization or memory-ordering claim; [Integration Test Lifecycle](./integration-test-lifecycle.md#what-cleanup-releases)
+owns its supervision verdict.
 
 A diagnostic node selects the `deloxide` mode. The `deloxide-order` feature adds historical order
 instrumentation to that same mode, and the `deloxide-stress` feature adds Deloxide's bounded

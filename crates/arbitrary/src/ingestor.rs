@@ -148,8 +148,25 @@ impl Arbitrary<'_> {
 
     /// An HTTP request polled on a cadence of domain time.
     pub fn http_request_source(&mut self) -> HttpRequestIngestor {
+        let method =
+            ["GET", "HEAD", "POST", "PATCH"][usize::from(self.entropy().byte() % 4)].to_owned();
+        let mut headers = Vec::new();
+        for index in 0..(self.entropy().byte() % 3) {
+            headers.push(nervix_models::HttpRequestHeader {
+                name: format!("x-nervix-event-{index}"),
+                value: format!("fixture-{}'\"\\", self.entropy().byte()),
+            });
+        }
+        let max_body_size = if self.entropy.flag() {
+            Some(self.payload_size_limit())
+        } else {
+            None
+        };
         let source = HttpRequestIngestor {
             client: self.name(),
+            method,
+            headers,
+            max_body_size,
             every: self.clock_period(),
             mode: HttpRequestIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,

@@ -2183,7 +2183,8 @@ mod tests {
             "CREATE DOMAIN default; CREATE SCHEMA notification ( user_id U32 )\n"
         ));
         assert!(command_buffer_is_complete(
-            "CREATE HTTP CLIENT http_main CONFIG { 'url' = 'http://example.com/a;b' }\n"
+            "CREATE HTTP CLIENT http_main CONFIG { 'endpoint' = 'http://example.com/a;b', \
+             'timeout_ms' = 5000 }\n"
         ));
     }
 

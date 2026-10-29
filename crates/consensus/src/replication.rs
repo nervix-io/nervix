@@ -68,10 +68,9 @@ use crate::{
 #[cfg(test)]
 mod append_setup_tests;
 
-/// How many entries one append batch may gather before the byte target stops it. A newly elected
-/// leader may send from a previous-log boundary its follower does not have. The follower can
-/// report that conflict only after the whole batch crosses the link, so bound speculative entry
-/// count independently of the byte target.
+/// How many entries one append batch may gather before the byte target stops it. Prefix
+/// verification avoids speculative data during initial conflict search; this cap bounds each
+/// admitted batch, including a conflict if the follower changes after prefix verification.
 pub(crate) const MAX_APPEND_BATCH_ENTRIES: u64 = 256;
 /// How many submitted batches one follower may leave unacknowledged.
 pub(crate) const MAX_OUTSTANDING_APPEND_BATCHES: usize = 16;
@@ -119,7 +118,10 @@ pub(crate) fn heartbeat_deadline(option: &RPCOption) -> Duration {
 
 /// Initial probes have no log data; commit updates following data stay on the ordered stream.
 enum ReplicationReplyPhase<S> {
-    Probing(S),
+    Probing {
+        input: S,
+        confirmed_prefix: Option<LogIdOf>,
+    },
     Streaming(BoxStream<'static, Result<StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>>),
     Finished,
 }
@@ -142,7 +144,10 @@ where
         nervix_primitives::task::consume_budget().await;
         let phase = std::mem::replace(&mut self.phase, ReplicationReplyPhase::Finished);
         match phase {
-            ReplicationReplyPhase::Probing(mut input) => {
+            ReplicationReplyPhase::Probing {
+                mut input,
+                confirmed_prefix,
+            } => {
                 let request = input.next().await?;
                 if request.entries.is_empty() {
                     let boundary = request.prev_log_id.clone();
@@ -155,12 +160,18 @@ where
                         Err(error) => return Some(Err(error)),
                     };
                     let answer = response.into_stream_result(boundary.clone(), boundary.clone());
-                    if answer == Ok(boundary) {
-                        self.phase = ReplicationReplyPhase::Probing(input);
+                    if answer == Ok(boundary.clone()) {
+                        self.phase = ReplicationReplyPhase::Probing {
+                            input,
+                            confirmed_prefix: boundary,
+                        };
                     }
                     Some(Ok(answer))
                 } else {
-                    let mut answers = match self.client.open_replication_data(request, input).await
+                    let mut answers = match self
+                        .client
+                        .open_replication_data(request, input, confirmed_prefix)
+                        .await
                     {
                         Ok(answers) => answers,
                         Err(error) => return Some(Err(error)),
@@ -200,12 +211,12 @@ where
             return Ok(Box::pin(futures_util::stream::empty()));
         };
         if !first.entries.is_empty() {
-            return self.open_replication_data(first, input).await;
+            return self.open_replication_data(first, input, None).await;
         }
         let boundary = first.prev_log_id.clone();
         let response = self.append_entries(first, option.clone()).await?;
         let answer = response.into_stream_result(boundary.clone(), boundary.clone());
-        let continues = answer == Ok(boundary);
+        let continues = answer == Ok(boundary.clone());
         let first_answer = futures_util::stream::iter([Ok(answer)]);
         if !continues {
             return Ok(Box::pin(first_answer));
@@ -213,7 +224,10 @@ where
         let owner = ReplicationReplies {
             client: self,
             option,
-            phase: ReplicationReplyPhase::Probing(input),
+            phase: ReplicationReplyPhase::Probing {
+                input,
+                confirmed_prefix: boundary,
+            },
         };
         let remaining = futures_util::stream::unfold(owner, |mut owner| async move {
             let answer = owner.next().await?;
@@ -226,6 +240,7 @@ where
         &self,
         first: AppendEntriesRequest<TypeConfig>,
         input: S,
+        confirmed_prefix: Option<LogIdOf>,
     ) -> Result<
         BoxStream<'static, Result<StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>>,
         RPCError<TypeConfig>,
@@ -234,28 +249,79 @@ where
         S: Stream<Item = AppendEntriesRequest<TypeConfig>> + Send + Unpin + 'static,
     {
         self.connectivity.check().map_err(unreachable_err)?;
-        debug!(
-            target = %self.target,
-            previous = ?first.prev_log_id,
-            first_entry = ?first.entries.first().map(|entry| &entry.log_id),
-            last_entry = ?first.entries.last().map(|entry| &entry.log_id),
-            entry_count = first.entries.len(),
-            "raft append stream opening with first batch"
-        );
-        self.append_stream_open_recorder
-            .record_append_stream_attempt(&self.target);
-        let input = futures_util::stream::iter([first]).chain(input);
-        let answers = open_append_stream(
-            &self.interconnect,
-            &self.executor,
-            &self.local_node_id,
-            &self.target,
-            input,
-        )
-        .await?;
-        self.append_stream_open_recorder
-            .record_append_stream_open(&self.target);
-        Ok(answers)
+        let setup = async {
+            self.append_stream_open_recorder
+                .record_append_stream_attempt(&self.target);
+            if let Some(previous) = &first.prev_log_id
+                && Some(previous) != confirmed_prefix.as_ref()
+            {
+                // A first data batch may start at an unknown follower boundary. Check only that
+                // prefix before transferring entries. Capping the probe's commit position keeps
+                // it from committing an unchecked suffix; the original request stays intact.
+                let prefix = AppendEntriesRequest::<TypeConfig> {
+                    vote: first.vote.clone(),
+                    prev_log_id: first.prev_log_id.clone(),
+                    entries: Vec::new(),
+                    leader_commit: first.leader_commit.clone().min(first.prev_log_id.clone()),
+                };
+                let prefix =
+                    wire::HeartbeatRequest(wire::AppendEntriesRecord::from_request(prefix));
+                let response = self
+                    .interconnect
+                    .request_with_timeout(
+                        &self.target,
+                        prefix,
+                        wire::OpenAppendStream::SETUP_TIMEOUT,
+                    )
+                    .await
+                    .map_err(|error| unreachable_err(error.into_error()))?;
+                let response = response.map_err(unreachable_err)?.into_response();
+                let answer = response
+                    .into_stream_result(first.prev_log_id.clone(), first.prev_log_id.clone());
+                debug!(
+                    target = %self.target,
+                    previous = ?previous,
+                    result = ?answer,
+                    "raft data prefix checked before stream admission"
+                );
+                if answer != Ok(first.prev_log_id.clone()) {
+                    let answers: BoxStream<
+                        'static,
+                        Result<StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>,
+                    > = Box::pin(futures_util::stream::iter([Ok(answer)]));
+                    return Ok(answers);
+                }
+            }
+            debug!(
+                target = %self.target,
+                previous = ?first.prev_log_id,
+                first_entry = ?first.entries.first().map(|entry| &entry.log_id),
+                last_entry = ?first.entries.last().map(|entry| &entry.log_id),
+                entry_count = first.entries.len(),
+                "raft append stream opening with first batch"
+            );
+            let input = futures_util::stream::iter([first]).chain(input);
+            let answers = open_append_stream(
+                &self.interconnect,
+                &self.executor,
+                &self.local_node_id,
+                &self.target,
+                input,
+            )
+            .await?;
+            self.append_stream_open_recorder
+                .record_append_stream_open(&self.target);
+            Ok(answers)
+        };
+        // One setup deadline covers prefix verification, local admission and stream headers.
+        // Data setup has no dependency on the caller's heartbeat-derived soft TTL.
+        match timeout(wire::OpenAppendStream::SETUP_TIMEOUT, setup).await {
+            Ok(result) => result,
+            Err(_) => Err(stream_failed(
+                &self.target,
+                "the append stream did not open in time",
+            )),
+        }
     }
 }
 
@@ -488,7 +554,7 @@ impl AppendStreamGeneration {
 }
 
 /// Open one ordered append stream to `target` and pipeline `input` over it.
-pub(crate) async fn open_append_stream<S>(
+async fn open_append_stream<S>(
     interconnect: &Transport,
     executor: &Executor,
     local_node_id: &ClusterNodeName,
@@ -501,29 +567,17 @@ pub(crate) async fn open_append_stream<S>(
 where
     S: Stream<Item = AppendEntriesRequest<TypeConfig>> + Send + Unpin + 'static,
 {
-    // The follower's handler accepts the stream before its Raft core sees any batch, so opening
-    // takes the stream's own setup deadline rather than one sized for a heartbeat. Applying it here
-    // also bounds the local admission the transport performs outside its peer-facing deadline.
-    let opened = timeout(
-        wire::OpenAppendStream::SETUP_TIMEOUT,
-        interconnect.open_duplex_stream(
+    // The network client's setup deadline surrounds this private materialization, including
+    // local admission, after any required prefix verification.
+    let (sender, receiver) = interconnect
+        .open_duplex_stream(
             target,
             wire::OpenAppendStream {
                 leader_node_id: local_node_id.clone(),
             },
-        ),
-    )
-    .await;
-    let (sender, receiver) = match opened {
-        Ok(Ok(halves)) => halves,
-        Ok(Err(error)) => return Err(stream_failed(target, error)),
-        Err(_) => {
-            return Err(stream_failed(
-                target,
-                "the append stream did not open in time",
-            ));
-        }
-    };
+        )
+        .await
+        .map_err(|error| stream_failed(target, error))?;
     let sender_progress = sender.progress();
 
     let (outstanding_tx, outstanding_rx) = mpsc::channel(MAX_OUTSTANDING_APPEND_BATCHES);

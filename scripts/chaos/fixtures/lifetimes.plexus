@@ -1,0 +1,368 @@
+BEGIN;
+
+CREATE SCHEMA chaos_life_record (
+  event_id STRING,
+  branch_name STRING,
+  sequence I64,
+  branch_index I64,
+  content STRING
+);
+
+CREATE WIRE JSON SCHEMA chaos_life_wire MODE STRICT (
+  event_id STRING,
+  branch_name STRING,
+  sequence INTEGER,
+  branch_index INTEGER,
+  content STRING
+);
+
+CREATE CODEC chaos_life_json
+  FROM WIRE JSON SCHEMA chaos_life_wire
+  TO SCHEMA chaos_life_record;
+
+CREATE SCHEMA chaos_life_profile (
+  branch_name STRING,
+  profile_version I64,
+  label STRING,
+  updated_at DATETIME
+);
+
+CREATE WIRE JSON SCHEMA chaos_life_profile_wire MODE STRICT (
+  branch_name STRING,
+  profile_version INTEGER,
+  label STRING,
+  updated_at DATETIME
+);
+
+CREATE CODEC chaos_life_profile_json
+  FROM WIRE JSON SCHEMA chaos_life_profile_wire
+  TO SCHEMA chaos_life_profile;
+
+CREATE BRANCH chaos_life_branch SCHEMA chaos_branch_key TTL 10m MAX INSTANCES 16 EVICT LRU;
+
+CREATE BRANCH chaos_life_expiring SCHEMA chaos_branch_key TTL 20s;
+
+CREATE BRANCH chaos_life_rotation SCHEMA chaos_branch_key TTL 10m MAX INSTANCES 2 EVICT LRU;
+
+CREATE RELAY chaos_life_profiles SCHEMA chaos_life_profile BRANCHED BY chaos_life_branch CAPACITY 1 WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+
+CREATE KAFKA TOPIC INGESTOR chaos_life_profile_ingestor
+  FROM chaos_kafka TOPIC 'chaos_life_profile_input' OFFSET BY CONSUMER GROUP 'chaos_life_profiles' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING chaos_life_profile_json
+  TIMESTAMP AT updated_at
+  TO chaos_life_profiles
+    INHERIT ALL
+    BRANCHED BY chaos_life_branch SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE RELAY chaos_life_records SCHEMA chaos_life_record BRANCHED BY chaos_life_branch CAPACITY 1;
+
+CREATE KAFKA TOPIC INGESTOR chaos_life_ingestor
+  FROM chaos_kafka TOPIC 'chaos_life_input' OFFSET BY CONSUMER GROUP 'chaos_life' MODE ACK PARALLEL MAX 32 BATCH TIMEOUT 100ms ACK TIMEOUT 120s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING chaos_life_json
+  TO chaos_life_records
+    INHERIT ALL
+    BRANCHED BY chaos_life_branch SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE SCHEMA chaos_life_enriched_record (
+  event_id STRING,
+  branch_name STRING,
+  sequence I64,
+  branch_index I64,
+  content STRING,
+  profile_version I64,
+  label STRING
+);
+
+CREATE WIRE JSON SCHEMA chaos_life_enriched_wire MODE STRICT (
+  event_id STRING,
+  branch_name STRING,
+  sequence INTEGER,
+  branch_index INTEGER,
+  content STRING,
+  profile_version INTEGER,
+  label STRING
+);
+
+CREATE CODEC chaos_life_enriched_json
+  FROM WIRE JSON SCHEMA chaos_life_enriched_wire
+  TO SCHEMA chaos_life_enriched_record;
+
+CREATE RELAY chaos_life_enriched SCHEMA chaos_life_enriched_record BRANCHED BY chaos_life_branch CAPACITY 1;
+
+CREATE ATTACHED JUNCTION chaos_life_enrich
+  FROM chaos_life_records
+  BRANCHED BY chaos_life_branch
+  USING MATERIALIZED STATE chaos_life_profiles REQUIRED WAIT
+  TO chaos_life_enriched
+    INHERIT ALL
+    SET profile_version = relay_state.chaos_life_profiles.profile_version,
+        label = relay_state.chaos_life_profiles.label
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED KAFKA TOPIC EMITTER chaos_life_enriched_emitter
+  FROM chaos_life_enriched
+  TO chaos_kafka TOPIC 'chaos_life_enriched_output'
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_life_enriched_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE SCHEMA chaos_life_generated_record (
+  branch_name STRING,
+  profile_version I64,
+  label STRING
+);
+
+CREATE WIRE JSON SCHEMA chaos_life_generated_wire MODE STRICT (
+  branch_name STRING,
+  profile_version INTEGER,
+  label STRING
+);
+
+CREATE CODEC chaos_life_generated_json
+  FROM WIRE JSON SCHEMA chaos_life_generated_wire
+  TO SCHEMA chaos_life_generated_record;
+
+CREATE RELAY chaos_life_generated SCHEMA chaos_life_generated_record BRANCHED BY chaos_life_branch CAPACITY 1;
+
+CREATE GENERATOR chaos_life_generator
+  USING MATERIALIZED STATE chaos_life_profiles
+  EACH 1s
+  BRANCHED BY chaos_life_branch
+  TO chaos_life_generated
+    SET branch_name = relay_state.chaos_life_profiles.branch_name,
+        profile_version = relay_state.chaos_life_profiles.profile_version,
+        label = relay_state.chaos_life_profiles.label
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED KAFKA TOPIC EMITTER chaos_life_generated_emitter
+  FROM chaos_life_generated
+  TO chaos_kafka TOPIC 'chaos_life_generated_output'
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_life_generated_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE SCHEMA chaos_life_window_summary (
+  branch_name STRING,
+  records I64,
+  first_index I64,
+  last_index I64,
+  index_sum I64,
+  distinct_residues I64,
+  median_index F64 OPTIONAL
+);
+
+CREATE WIRE JSON SCHEMA chaos_life_window_wire MODE STRICT (
+  branch_name STRING,
+  records INTEGER,
+  first_index INTEGER,
+  last_index INTEGER,
+  index_sum INTEGER,
+  distinct_residues INTEGER,
+  median_index NUMBER OPTIONAL
+);
+
+CREATE CODEC chaos_life_window_json
+  FROM WIRE JSON SCHEMA chaos_life_window_wire
+  TO SCHEMA chaos_life_window_summary;
+
+CREATE RELAY chaos_life_windows SCHEMA chaos_life_window_summary BRANCHED BY chaos_life_branch CAPACITY 1;
+
+CREATE DETACHED WINDOW PROCESSOR chaos_life_window
+  FROM chaos_life_records
+  WIDTH 6s DURATION
+  STEP 6s DURATION
+  MAX STATE SIZE 1048576B
+  BRANCHED BY chaos_life_branch
+  TO chaos_life_windows
+    SET branch_name = first(input.branch_name),
+        records = count(input.branch_index),
+        first_index = min(input.branch_index),
+        last_index = max(input.branch_index),
+        index_sum = sum(input.branch_index),
+        distinct_residues = approx_count_distinct(input.branch_index % 3, 10),
+        median_index = approx_quantile(input.branch_index, 50, 128)
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED KAFKA TOPIC EMITTER chaos_life_window_emitter
+  FROM chaos_life_windows
+  TO chaos_kafka TOPIC 'chaos_life_window_output'
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_life_window_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE RELAY chaos_life_rotating SCHEMA chaos_life_record BRANCHED BY chaos_life_rotation CAPACITY 1;
+
+CREATE ATTACHED REINGESTOR chaos_life_rotate
+  FROM chaos_life_records
+  TO chaos_life_rotating
+    INHERIT ALL
+    BRANCHED BY chaos_life_rotation SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED KAFKA TOPIC EMITTER chaos_life_rotating_emitter
+  FROM chaos_life_rotating
+  TO chaos_kafka TOPIC 'chaos_life_rotating_output'
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_life_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE RELAY chaos_life_buffered SCHEMA chaos_life_record UNBRANCHED CAPACITY 1;
+
+CREATE KAFKA TOPIC INGESTOR chaos_life_flush_ingestor
+  FROM chaos_kafka TOPIC 'chaos_life_flush_input' OFFSET BY CONSUMER GROUP 'chaos_life_flush' MODE ACK PARALLEL MAX 64 BATCH TIMEOUT 100ms ACK TIMEOUT 600s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING chaos_life_json
+  TO chaos_life_buffered
+    INHERIT ALL
+    UNBRANCHED
+    FLUSH EACH 300s MAX BATCH SIZE 1MiB
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE ATTACHED KAFKA TOPIC EMITTER chaos_life_buffered_emitter
+  FROM chaos_life_buffered
+  TO chaos_kafka TOPIC 'chaos_life_buffered_output'
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_life_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE RELAY chaos_life_expiring_profiles SCHEMA chaos_life_profile BRANCHED BY chaos_life_expiring CAPACITY 1 WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+
+CREATE KAFKA TOPIC INGESTOR chaos_life_expiring_profile_ingestor
+  FROM chaos_kafka TOPIC 'chaos_life_expiring_profile_input' OFFSET BY CONSUMER GROUP 'chaos_life_expiring_profiles' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING chaos_life_profile_json
+  TIMESTAMP AT updated_at
+  TO chaos_life_expiring_profiles
+    INHERIT ALL
+    BRANCHED BY chaos_life_expiring SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE RELAY chaos_life_expiring_records SCHEMA chaos_life_record BRANCHED BY chaos_life_expiring CAPACITY 1;
+
+CREATE KAFKA TOPIC INGESTOR chaos_life_expiring_ingestor
+  FROM chaos_kafka TOPIC 'chaos_life_expiring_input' OFFSET BY CONSUMER GROUP 'chaos_life_expiring' MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING chaos_life_json
+  TO chaos_life_expiring_records
+    INHERIT ALL
+    BRANCHED BY chaos_life_expiring SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE RELAY chaos_life_expiring_enriched SCHEMA chaos_life_enriched_record BRANCHED BY chaos_life_expiring CAPACITY 1;
+
+CREATE ATTACHED JUNCTION chaos_life_expiring_enrich
+  FROM chaos_life_expiring_records
+  BRANCHED BY chaos_life_expiring
+  USING MATERIALIZED STATE chaos_life_expiring_profiles REQUIRED WAIT
+  TO chaos_life_expiring_enriched
+    INHERIT ALL
+    SET profile_version = relay_state.chaos_life_expiring_profiles.profile_version,
+        label = relay_state.chaos_life_expiring_profiles.label
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED KAFKA TOPIC EMITTER chaos_life_expiring_emitter
+  FROM chaos_life_expiring_enriched
+  TO chaos_kafka TOPIC 'chaos_life_expiring_output'
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_life_enriched_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE RELAY chaos_life_late SCHEMA chaos_life_record UNBRANCHED CAPACITY 1;
+
+CREATE KAFKA TOPIC INGESTOR chaos_life_late_ingestor
+  FROM chaos_kafka TOPIC 'chaos_life_late_input' OFFSET BY CONSUMER GROUP 'chaos_life_late' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING chaos_life_json
+  TO chaos_life_late
+    INHERIT ALL
+    UNBRANCHED
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE ATTACHED KAFKA TOPIC EMITTER chaos_life_late_emitter
+  FROM chaos_life_late
+  TO chaos_kafka TOPIC 'chaos_life_late_output'
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_life_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE POSTGRES CLIENT chaos_life_pg
+  POOL SIZE MIN 1 MAX 1
+  CONFIG {
+    'addr' = 'postgresql://postgres:nervix@postgres:5432/postgres?sslmode=disable&application_name=chaos_life_pool'
+  };
+
+CREATE RELAY chaos_life_pooled SCHEMA chaos_life_record UNBRANCHED CAPACITY 1;
+
+CREATE KAFKA TOPIC INGESTOR chaos_life_pool_ingestor
+  FROM chaos_kafka TOPIC 'chaos_life_pool_input' OFFSET BY CONSUMER GROUP 'chaos_life_pool' MODE ACK PARALLEL MAX 16 BATCH TIMEOUT 100ms ACK TIMEOUT 900s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING chaos_life_json
+  TO chaos_life_pooled
+    INHERIT ALL
+    UNBRANCHED
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE ATTACHED POSTGRES TABLE EMITTER chaos_life_pool_first
+  FROM chaos_life_pooled
+  TO chaos_life_pg TABLE 'chaos_life_pool_first'
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 5s
+    VALUES {
+      'event_id' = input.event_id,
+      'sequence' = input.sequence
+    }
+    ON CONFLICT ('event_id') DO NOTHING
+  BATCH MAX MESSAGES 4 MAX SIZE 1MiB
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE ATTACHED POSTGRES TABLE EMITTER chaos_life_pool_second
+  FROM chaos_life_pooled
+  TO chaos_life_pg TABLE 'chaos_life_pool_second'
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 5s
+    VALUES {
+      'event_id' = input.event_id,
+      'sequence' = input.sequence
+    }
+    ON CONFLICT ('event_id') DO NOTHING
+  BATCH MAX MESSAGES 4 MAX SIZE 1MiB
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+COMMIT;

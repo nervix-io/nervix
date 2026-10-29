@@ -841,6 +841,19 @@ jobs:
           just toolchains-install
           just test-scenarios-coverage
 
+      # These bodies must fail. The supervisor separately requires complete after-hook cleanup;
+      # their failure status is preserved and contributes no ordinary coverage verdict.
+      - name: Failed backup cut cleanup
+        run: just test-backup-cut-cleanup
+
+      - name: Upload failed backup cut cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-cut-cleanup
+          path: target/backup-cut-cleanup.*
+          if-no-files-found: warn
+
       - name: Upload scenarios coverage
         if: always()
         uses: actions/upload-artifact@v4

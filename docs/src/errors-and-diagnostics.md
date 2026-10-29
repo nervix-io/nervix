@@ -270,7 +270,7 @@ attempt, so reporting an immediate local refusal does not create an unpaced retr
 | Boundary | Fixed shape | What crosses | Where a report resumes |
 | --- | --- | --- | --- |
 | Replicated transaction mutation | The Raft response's `TransactionMutationError` | The state machine's typed refusal, cloned from the report's current context when the response is built | The proposer creates a new report from the typed refusal |
-| Consensus append stream | The stream's wire records | A matching, conflicting or higher-vote answer, or the request error | The leader hands Raft an unreachable-peer error that names the target and the reason |
+| Consensus append stream and its initial prefix check | The stream's wire records and the management append answer | A matching, conflicting or higher-vote answer, or the request error | A rejected or incomplete prefix is returned as the typed Raft outcome before data admission; a failed management request crosses the foreign-error hook with its complete report before becoming an unreachable-peer error |
 | Interconnect remote operation | The failure's class and subject, with the answering node's description for an executed failure only | The classified result; the local chain is not serialized | The requester keeps the class beside its own target and placement context |
 | Interconnect connection handshake | The answer's refusal | The `PrerequisiteMismatch` the accepting node judged, seen from that node | The dialing node creates `TransportError::RefusedByPeer` from the mismatch, reversed to its own side |
 | Remote relay payload refused before admission | The refusal's reason text | The rendered chain | The forwarding node receives the reason as text |
@@ -680,6 +680,12 @@ remain beneath the connection failure. Its configured accept capability maps soc
 injector follows the same typed path. WebSocket signaling compilation and execution retain jaq,
 frame encoding and transport causes. The runtime's Syslog source-plan and signaling compilation
 errors keep those reports as typed fields while preserving their startup messages.
+
+A MySQL pool is kept at its `POOL SIZE MIN` by a task no caller waits on, so that task is the only
+witness of a pass that ends below the minimum. It reports `PoolMinimumError::NotRestored`, naming
+the minimum, above the failed checkout's `PoolMinimumError::CheckOut` and the driver's error, at
+`debug`, returns the connections the pass held, and passes again a second later. An emitter that
+needs a connection meanwhile reports its own failed checkout.
 
 An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP emitter: a timeout, a
 DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
@@ -1589,6 +1595,12 @@ warning instead of inventing per-record rejections. An OTLP/gRPC export the rece
 retries, whatever code tonic reports for it. An answered status other than `INVALID_ARGUMENT`,
 `RESOURCE_EXHAUSTED` or a code the OTLP specification lists as retryable is a misconfiguration
 failure, which the host does not retry.
+
+An HTTP polling request whose response exceeds `MAX BODY SIZE` fails that poll with a typed
+`ResponseTooLarge` cause. DNS, connection, TLS, response-body and timeout failures retain their
+typed transport causes with the request URL removed. A non-`2xx` answer reports its numeric status
+without target or header values. The ingestor host applies its general-error policy and may poll
+again on its next cadence.
 
 An HTTP emitter rejects a record at the first request field that fails, in the order it evaluates
 them: `METHOD`, `PATH`, and then each header write. A failed expression keeps the `evaluation`
