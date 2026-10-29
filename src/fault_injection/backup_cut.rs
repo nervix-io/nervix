@@ -180,6 +180,18 @@ impl FaultInjection {
         self.backup_cut_gate(domain, boundary).release();
     }
 
+    /// Releases every armed lease and capture gate before forgetting them. Cuts that already
+    /// borrowed a gate observe its release; cuts that arrive later find no gate to hold them.
+    /// Returns how many gates cleanup released.
+    pub fn release_all_backup_cut_pauses(&self) -> usize {
+        let released = self.inner.backup_cut_gates.len();
+        for gate in &self.inner.backup_cut_gates {
+            gate.release();
+        }
+        self.inner.backup_cut_gates.clear();
+        released
+    }
+
     pub(crate) async fn pause_backup_cut_if_armed(
         &self,
         domain: &DomainName,

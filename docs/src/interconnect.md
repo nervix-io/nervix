@@ -1290,20 +1290,27 @@ Consensus separates traffic according to the progress it protects:
 
 The ordered append stream can keep multiple batches in flight while preserving follower order. Its
 consensus-level window bounds a follower to 16 outstanding batches and 16 MiB of unacknowledged log
-data. Each batch stops at 256 entries or the 1 MiB byte target, so a newly elected leader can
-learn that a lagging follower rejects its previous-log boundary without first transferring a larger
-speculative entry batch over a slow link. Heartbeats and elections remain on management capacity,
-so a full append window does not block leadership traffic.
+data. Each batch stops at 256 entries or the 1 MiB byte target. The consensus adapter confirms an
+initial previous-log boundary through management before admitting its data, so a newly elected
+leader can locate a lagging follower's prefix without transferring rejected data batches over a
+slow link. Heartbeats and elections remain on management capacity, so a full append window does
+not block leadership traffic.
 
 The consensus adapter obtains its first append request before opening the duplex transport. This
 lets the caller's retry and cancellation gate pace a setup attempt even when the transport refuses
 it immediately because its target left or its quota is full. The transport still reports that typed
 failure without a retry loop of its own. Ended input opens no connection. Leading empty requests
 use the management heartbeat operation, including a finite probe that ends before data is ready;
-its answer preserves the previous-log match, conflict or higher vote. The first nonempty request
-opens replication and is submitted once after the follower accepts the stream headers. Empty
-commit updates following that data remain ordered on the same duplex stream. The five-second setup
-bound starts after the caller gate; the management probe retains its heartbeat-derived deadline.
+its answer preserves the previous-log match, conflict or higher vote. If the first nonempty
+request has a previous-log identity that a preceding empty request in this input has not confirmed,
+an empty management check verifies it before opening replication. Its commit position is capped
+at the checked prefix; the original data request retains its complete contents. A rejected or
+incompletely matched prefix returns its result without opening replication. The beginning of the
+log needs no preceding-entry check. After confirmation, the first data request is submitted once
+after the follower accepts the stream headers. Empty commit updates following that data remain
+ordered on the same duplex stream. The data request's one five-second setup bound starts after
+the caller gate and covers both its prefix check and stream admission. Caller-supplied leading
+empty probes retain their heartbeat-derived deadline; that soft TTL does not constrain data setup.
 
 Elections begin with a pre-vote exchange. A voter asks whether a quorum would accept its next term
 before it persists that term or becomes a candidate. A restarted voter whose log is stale, or whose

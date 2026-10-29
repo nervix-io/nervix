@@ -377,6 +377,11 @@ impl IngestorQuiescePublication {
 /// buffer owns these values and appends them into the group's builders on replay.
 #[derive(Debug, Clone)]
 pub(in crate::runtime) enum BufferedIngestMetadata {
+    Http {
+        status: u16,
+        polled_at: Timestamp,
+        headers: RetainedIngestHeaders,
+    },
     Websockets {
         frame_type: nervix_models::WebsocketsFrameType,
         // Retains the message's exact connection header snapshot without copying it per frame.
@@ -397,6 +402,15 @@ impl BufferedIngestMetadata {
 
     pub(super) fn row(&self) -> IngestMetadataRow<'_> {
         match self {
+            Self::Http {
+                status,
+                polled_at,
+                headers,
+            } => IngestMetadataRow::Http {
+                status: *status,
+                polled_at: *polled_at,
+                headers,
+            },
             Self::Websockets {
                 frame_type,
                 headers,

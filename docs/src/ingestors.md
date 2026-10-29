@@ -630,7 +630,6 @@ CREATE IF NOT EXISTS HTTP CLIENT http_tls
   MOUNT dev_tls VERSION 1
   CONFIG {
     'endpoint' = 'https://127.0.0.1:18443/http/notifications',
-    'method' = 'GET',
     'timeout_ms' = 5000,
     'tls_ca_file' = '{{ dev_tls }}/ca.pem'
   };
@@ -934,6 +933,9 @@ under the same head. `DECODE USING <codec>`, the timestamp, the filter, the rout
 ```plexus,ignore
 CREATE HTTP REQUEST INGESTOR <name>
   FROM <client>
+  (METHOD 'GET')
+  [HEADERS { 'accept' = 'application/json' }]
+  [MAX BODY SIZE 1MiB]
   (EVERY 1s)
   MODE <mode>
   ON QUIESCE <quiesce>
@@ -949,21 +951,31 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | HTTP client |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | `EVERY 1s` (duration); required |
+| Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
-| Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |
+| Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | the response body: unbounded |
-| Network waits | a request: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |
-| Driver limits | Response heads above 100 headers or 417,792 bytes are refused.<br>A request follows at most 10 redirects. |
+| Buffers | the response body: set by MAX BODY SIZE; when exceeded, fails the poll; the next poll reads again |
+| Network waits | a request: name resolution, connection, TLS and the response: `timeout_ms`; required |
+| Driver limits | Response heads above 100 headers or 417,792 bytes are refused.<br>Redirects and proxies require the client's explicit opt-in. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-ingest).
 <!-- connector-matrix:ingest-http-request:end -->
 
+- `METHOD '<token>'` is required on the ingestor. `HEADERS { '<name>' = '<value>', … }` writes
+  literal request fields; each value is visible in `SHOW CREATE`. `MAX BODY SIZE` bounds the
+  response body at its declared size, or 16 MiB where omitted. A response above that bound fails
+  its poll.
+- The HTTP client requires `endpoint` and `timeout_ms`. It also declares optional
+  `follow_redirects` and `proxy` settings, plus TLS trust and client identity files. The polling
+  client ignores proxy environment variables and follows no redirect unless opted in.
+- `metadata.status` is the successful response's `U16` status and `metadata.polled_at` is the
+  scheduled `DATETIME` instant of that poll. `read_header` and `read_headers` read the response's
+  headers; `204 No Content` emits no row.
 - polls a configured HTTP endpoint periodically
 - issues the first request immediately, then follows an anchored domain-clock cadence; slow
   responses coalesce missed occurrences into one request at the newest due instant
@@ -1454,9 +1466,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
-| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>admitted publishes or compact discard acknowledgements the connection reads ahead of the host: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
+| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
-| Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound. |
+| Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound.<br>ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow only. NO ACK retains backpressure. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-ingest).
@@ -1497,12 +1509,17 @@ In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 
 is written to the connection, within one keep-alive interval; the broker answers none. Its
 connection keeps writing those acknowledgements and sending its keep-alive while the ingestor
 waits on a batch's acknowledgement trees, however long a downstream emitter holds them, so the
-broker keeps the session connected and delivers nothing again. The connection reads as many
-publishes as its Receive Maximum admits ahead of the ingestor, 64 under `NO ACK`. A QoS 0 publish,
-which a QoS 1 subscription receives from a publisher that sends at QoS 0, is not held back by the
-broker; once those fill the read-ahead while a batch waits, the connection stops reading, the
-batch's acknowledgement fails and the ingestor reconnects, and the broker delivers the
-unacknowledged QoS 1 publishes again. See
+broker keeps the session connected and delivers nothing again. In an `ACK` mode the read-ahead
+reserves its full Receive Maximum for QoS 1/2 outcomes and holds up to 64 QoS 0 outcomes alongside
+them. A QoS 0 publisher is not held back by the broker, even through a QoS 1 subscription. Nervix
+drops and counts QoS 0 publishes that do not fit, keeping the connection polling and retaining the
+reserved capacity and acknowledgements of QoS 1 publishes. Admitted outcomes retain packet order.
+The per-node Prometheus counter `nervix_ingestor_read_ahead_dropped_payloads_total`, labeled by
+`domain`, `ingestor` and `physical_node_id`, counts each overflow immediately, including during an
+acknowledgement wait. It is separate from the transport-redelivery count in `DESCRIBE INGESTOR`.
+An oversized QoS 0 publish dropped at this boundary counts as overflow only. Under `NO ACK` the
+64-outcome read-ahead applies backpressure when full, which also stops its keep-alive until the
+ingestor reads again. See
 [MQTT source connections](connector-contract.md#mqtt-source-connections).
 
 Every MQTT connection advertises the full protocol framing limit of 268,435,460 bytes in its

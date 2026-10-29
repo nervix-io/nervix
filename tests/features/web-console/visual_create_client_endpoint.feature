@@ -131,6 +131,9 @@ Feature: Web console visual client, vhost and endpoint creation
     And selector ".create-client-config-add" is clicked
     And selector ".create-client-config-key" is filled with "endpoint"
     And selector ".create-client-config-value" is filled with "http://127.0.0.1:1"
+    And selector ".create-client-config-add" is clicked
+    And selector ".create-client-config-entry:nth-of-type(2) .create-client-config-key" is filled with "timeout_ms"
+    And selector ".create-client-config-entry:nth-of-type(2) .create-client-config-value" is filled with "5000"
     Then selector ".create-preview" contains "MOUNT visual_client_bundle VERSION 1"
     And selector ".create-preview" contains "CREATE HTTP CLIENT visual_http"
     When selector ".create-submit" is clicked

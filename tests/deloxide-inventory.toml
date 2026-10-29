@@ -152,6 +152,7 @@ tags = [
   "@emitter_finish_at_stop",
   "@nats_core_connection_loss",
   "@iceberg_commit_memory",
+  "@iceberg_batch_bounds",
   "@zeromq_emitter_open_deadline",
   "@metrics_checkpoint_handoff",
   "@forced_recovery_schedule",
@@ -726,6 +727,26 @@ id = "scenario.iceberg-commit-memory"
 invariant = "An Iceberg commit charges the bulk memory class every staged byte it loads before reading them, keeps its staged file and acknowledgements while the class has no room, and commits the row once the room is there, sending exactly the bytes it asked the class for."
 invocation = "scenarios"
 scenario = "An Iceberg commit the bulk memory class has no room for keeps its row and commits once the room is there"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "One- and three-node client batches stage four Iceberg rows under MAX MESSAGES 2, then the emitter writes two Parquet files and one catalog commit. The emitter host's tracked lifecycle state runs beside the connector's asynchronous object-store and catalog calls, which Deloxide does not inspect."
+examples = 2
+feature = "tests/features/runtime/iceberg_emission.feature"
+id = "scenario.iceberg-batch-rows"
+invariant = "The declared Iceberg BATCH row limit bounds each committed data file while all accepted rows remain in the table."
+invocation = "scenarios"
+scenario = "Iceberg BATCH MAX MESSAGES rolls one produced row batch into bounded data files"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "One- and three-node client batches stage two fitting Iceberg rows and reject an oversized third row. The emitter host's tracked error routing and commit lifecycle run beside the connector's CPU preflight and asynchronous catalog calls, which Deloxide does not inspect."
+examples = 2
+feature = "tests/features/runtime/iceberg_emission.feature"
+id = "scenario.iceberg-batch-bytes"
+invariant = "The declared Iceberg BATCH byte limit bounds every committed Parquet file, and an oversized single row follows ON MESSAGE ERROR."
+invocation = "scenarios"
+scenario = "Iceberg BATCH MAX SIZE rolls Parquet files and rejects an oversized row"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -2255,6 +2276,26 @@ scenario = "An Iceberg commit the bulk memory class has no room for keeps its ro
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: one- and three-node client batches stage four rows under the Iceberg MAX MESSAGES 2 file limit and publish both files in one catalog commit. The detector observes tracked host lifecycle locks, not Parquet encoding or external I/O."
+examples = 2
+feature = "tests/features/runtime/iceberg_emission.feature"
+id = "stress.iceberg-batch-rows"
+invariant = "The declared Iceberg BATCH row limit bounds each committed data file while all accepted rows remain in the table."
+invocation = "stress-scenarios"
+scenario = "Iceberg BATCH MAX MESSAGES rolls one produced row batch into bounded data files"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: one- and three-node client batches stage two fitting Iceberg rows, route a single oversized row through message error, and publish only bounded Parquet files. The detector observes tracked host error and commit lifetimes, not the external catalog or object store."
+examples = 2
+feature = "tests/features/runtime/iceberg_emission.feature"
+id = "stress.iceberg-batch-bytes"
+invariant = "The declared Iceberg BATCH byte limit bounds every committed Parquet file, and an oversized single row follows ON MESSAGE ERROR."
+invocation = "stress-scenarios"
+scenario = "Iceberg BATCH MAX SIZE rolls Parquet files and rejects an oversized row"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: STOP on one and three nodes reaches the Pulsar sink's finish while one NO ACK record or a full 100-record producer queue is held behind a paused broker connection. Source controls and domain teardown reach tracked locks; the receipt futures and asynchronous fault gate remain untracked."
 examples = 4
 feature = "tests/features/runtime/pulsar_delivery.feature"
@@ -3165,6 +3206,7 @@ workloads = [
 [[owner]]
 path = "src/registry/storage.rs"
 workloads = [
+  "parameters.request-header-cap",
   "parameters.live",
   "parameters.restart",
   "parameters.return",
@@ -3737,6 +3779,36 @@ scenario = "RabbitMQ ACK PARALLEL settles successful deliveries while another de
 selections = ["deloxide-stress"]
 
 # Parameter publication shares the existing runtime admission and storage owners in every mode.
+[[workload]]
+coverage = "The committed header-count range is checked against the request transport's representable distinct-field capacity before publication."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.header-count-range"
+invariant = "A cluster parameter cannot promise a header count its HTTP representation cannot hold."
+invocation = "cluster-parameters"
+scenario = "A parameter change refuses an unrepresentable HTTP header count on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Committed header caps validate literal HTTP polling headers at both parameter transition and model admission. The request transport is not opened by this configuration-only scenario."
+examples = 4
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.request-header-cap"
+invariant = "A cluster header cap protects existing and newly admitted HTTP polling ingestors."
+invocation = "cluster-parameters"
+scenario = "A lower HTTP request header <parameter> cap protects stored and new ingestors on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
 [[invocation]]
 bound_seconds = 900
 concurrency = 1

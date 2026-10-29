@@ -3703,14 +3703,20 @@ mod tests {
                 CreateClientHttp::<u64> {
                     name: named("http_main"),
                     mount: None,
-                    config: vec![HttpConfigEntry {
-                        key: "base_url".to_string(),
-                        value: "https://example.com".to_string(),
-                    }],
+                    config: vec![
+                        HttpConfigEntry {
+                            key: "endpoint".to_string(),
+                            value: "https://example.com".to_string(),
+                        },
+                        HttpConfigEntry {
+                            key: "timeout_ms".to_string(),
+                            value: "5000".to_string(),
+                        },
+                    ],
                 }
                 .to_canonical_plexus()
                 .expect("must render"),
-                "CREATE HTTP CLIENT http_main\n  CONFIG {\n    'base_url' = 'https://example.com'\n  };",
+                "CREATE HTTP CLIENT http_main\n  CONFIG {\n    'endpoint' = 'https://example.com',\n    'timeout_ms' = '5000'\n  };",
             ),
             (
                 CreateClientSentry::<u64> {
@@ -4826,13 +4832,16 @@ mod tests {
                     "http_ingestor",
                     decoded(HttpRequestIngestor {
                         client: named("http_main"),
+                        method: "GET".to_owned(),
+                        headers: Vec::new(),
+                        max_body_size: None,
                         every: every("30s"),
                         mode: HttpRequestIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
                 ),
-                "CREATE HTTP REQUEST INGESTOR http_ingestor\n  FROM http_main EVERY 30s MODE NO \
-                 ACK ON QUIESCE SUSPEND",
+                "CREATE HTTP REQUEST INGESTOR http_ingestor\n  FROM http_main METHOD 'GET' EVERY \
+                 30s MODE NO ACK ON QUIESCE SUSPEND",
             ),
             (
                 orders_ingestor(

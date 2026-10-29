@@ -45,7 +45,9 @@ impl Arbitrary<'_> {
             client_consumer_session_bytes: Some(entropy.boundary_biased(1..=u64::MAX)),
             udf_code_bytes: Some(entropy.boundary_biased(1..=u64::MAX)),
             http_header_bytes: Some(entropy.boundary_biased(1..=u64::MAX)),
-            http_header_fields: Some(entropy.boundary_biased(1..=u64::from(u32::MAX))),
+            http_header_fields: Some(
+                entropy.boundary_biased(1..=nervix_models::HttpHeaderFields::MAXIMUM),
+            ),
             client_batch_rows: Some(entropy.boundary_biased(1..=u64::from(u32::MAX))),
         })
         .assured("the generator constructs every parameter within its declared current bounds")

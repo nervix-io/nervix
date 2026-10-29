@@ -26,6 +26,9 @@ client key reference. `DESCRIBE CLIENT <name>` shows effective defaults and conf
 For delivery durations and direct-value mappings, follow the Ingestors delivery-mode and Emitters
 direct-value sections. Nervix validates the entity's declared limits and exact mapping types at
 `CREATE` and `ALTER`; correct a refused declaration before starting the domain.
+For MQTT sources, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt) before promising
+delivery during downstream stalls; it distinguishes QoS 0 overflow, acknowledged capacity and
+the counters that expose each outcome.
 
 For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
@@ -234,6 +237,8 @@ selected domain. Read `Node Settings` for the complete parameter set, positive d
 existing-model cap refusals, live installation and committed-versus-running inspection. Seed flags
 belong only to the first bootstrap, including when their value equals the default. Later starts,
 including the returning bootstrap node, omit them.
+`HTTP_HEADER_FIELDS` ranges from 1 to 24,576. Committed header byte and field caps also protect
+literal HTTP polling headers, at model creation and when a later cap is lowered.
 
 ## Preserve Plexus semantics
 
@@ -445,9 +450,10 @@ including the returning bootstrap node, omit them.
   bound emitter can keep failing after one failed publish; read `Ingestors` → `ZeroMQ` and
   `Emitters` → `ZeroMQ`. OTEL clients
   must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key. An OTEL
-  `grpc` endpoint may use a DNS hostname: the node's resolver is used when the first export opens
-  the lazy connection, and the configured hostname remains the HTTPS certificate name. A DNS
-  outage follows the emitter's declared retry policy.
+  endpoint may use a DNS hostname on either protocol: the emitter opens without contacting it, the
+  node's resolver answers when an export needs a connection, and the configured hostname remains
+  the HTTPS certificate name. An endpoint that does not resolve or answer is a publish failure
+  retried on the emitter's declared retry policy, never an initialization error.
 - For a ZeroMQ PULL/PUSH pair, use `MODE NO ACK` on both sides and the typed `ZEROMQ CLIENT`
   `addr` and `bind` keys. A PULL ingestor reads frame 0 only and skips messages with no frames;
   PUSH sends one payload frame without a receiver receipt. TCP hostnames use the ZeroMQ driver's
@@ -498,7 +504,8 @@ including the returning bootstrap node, omit them.
   rows from successive Arrow carriers in one flush may share a payload, but rows from different
   source relays or concrete branches cannot. For the database emitters, the clause bounds each insert
   or bulk write by row count and the exact size of what it carries; for OTEL, it bounds each
-  protobuf export request by successful source-record count and uncompressed encoded size; see
+  protobuf export request by successful source-record count and uncompressed encoded size, and an
+  OTEL request never combines records of two Arrow carriers; see
   [Emitters](../../../docs/src/emitters.md#batching).
   For SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
   queue name ends in `.fifo`; `FROM BRANCH` requires branched input.

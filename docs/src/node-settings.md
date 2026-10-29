@@ -360,8 +360,8 @@ an invalid value, or a cap that an existing model exceeds refuses the transition
 parameter and owning model identified. Timings that drive repeated work or retained validity
 must be greater than zero and no longer than `u32::MAX` whole seconds, with nanosecond precision
 within that range. Counts used by a wire or native count fit its current representation. HTTP application headers
-default to 128 distinct fields; `HTTP_HEADER_FIELDS` changes that count together with the other
-committed caps. A prerequisite cannot be assigned through this statement.
+default to 128 distinct fields; `HTTP_HEADER_FIELDS` changes that count up to 24,576, the native
+request map's distinct-field capacity. A prerequisite cannot be assigned through this statement.
 
 Validation and publication share a commit fence. A concurrent model change or parameter change
 invalidates a captured transition before it applies, and validation runs again against the
@@ -371,6 +371,12 @@ Known HTTP header names contribute their count and byte requirement even when th
 on input. Dynamic names may replace earlier values, so transition validation retains only guaranteed
 byte contributions; request preparation checks each complete evaluated envelope against its captured
 bounds.
+
+Literal headers on an HTTP polling ingestor use these same committed caps. Validation counts
+case-insensitive names once and retains the last value written for each name. Both a model's
+admission and a later parameter transition check the complete literal header requirements, so a
+lower cap cannot invalidate an existing polling request and a raised cap governs new requests.
+Each literal name/value write must fit the byte cap, as must the complete retained envelope.
 
 Each live node installs the committed record before reporting that revision ready. Runtime timing
 and resource-store owners publish a new immutable policy over the same storage. Snapshot tasks

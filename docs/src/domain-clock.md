@@ -652,6 +652,8 @@ Recurring domain cadence is anchored to its initial logical schedule. The source
 each HTTP or Prometheus polling occurrence and passes its scheduled logical instant into the
 connector's poll operation; connector crates never bind or wait on a domain clock. HTTP polling and
 generator cadence begin immediately, while Prometheus polling begins after one interval. When work
+returns an HTTP response, its `metadata.polled_at` is that scheduled logical instant, while the
+host's separate observed instant records when the response reached the ingestion boundary. When work
 misses multiple occurrences, the cadence returns the newest due instant once and advances directly
 to the first future boundary. Consumers that need both meanings keep the scheduled due instant
 separate from the fresh execution snapshot taken when work actually runs.

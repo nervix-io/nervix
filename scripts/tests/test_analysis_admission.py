@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import os
@@ -8,9 +9,9 @@ import random
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
+from typing import Callable
 from unittest import mock
 
 from scripts import analysis_admission
@@ -232,6 +233,48 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(self.decide([older, same_time], domains).ahead, 2)
 
 
+@dataclasses.dataclass
+class Due:
+    """An action a clock runs once, when a sleep first reaches its time."""
+
+    elapsed_ns: int
+    action: Callable[[], None]
+
+
+class AdmissionClock:
+    """The clocks an admission reads, which only its own sleeps and the test move.
+
+    An admission measures its wait on the monotonic clock and stamps its lease with the host's Unix
+    nanoseconds. Here both move together, the Unix one from `unix_ns`, so a recorded wait is exactly
+    the time this clock passed, however long the host took to run the admission. A sleep passes at
+    once, then runs each action that has come due before the admission decides again.
+    """
+
+    def __init__(self, unix_ns: int) -> None:
+        self.unix_ns = unix_ns
+        self.elapsed_ns = 0
+        self.due: list[Due] = []
+
+    def monotonic(self) -> float:
+        return self.elapsed_ns / 10**9
+
+    def time_ns(self) -> int:
+        return self.unix_ns + self.elapsed_ns
+
+    def advance(self, seconds: float) -> None:
+        self.elapsed_ns += round(seconds * 10**9)
+
+    def sleep(self, seconds: float) -> None:
+        self.advance(seconds)
+        while self.due and self.due[0].elapsed_ns <= self.elapsed_ns:
+            item = self.due.pop(0)
+            item.action()
+
+    def at(self, seconds: float, action: Callable[[], None]) -> None:
+        self.due.append(Due(round(seconds * 10**9), action))
+        self.due.sort(key=lambda item: item.elapsed_ns)
+
+
 class QueueTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -254,20 +297,28 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(process.stdout.readline(), "ready\n")
         return process
 
-    def holder(self, *, reservation: int, admitted: bool = True, polled_every: float | None = None) -> subprocess.Popen[str]:
+    def holder(self, *, reservation: int, admitted: bool = True) -> subprocess.Popen[str]:
         """A process holding one lease until its standard input closes."""
         current = lease("holder", reservation=reservation, enqueued=0, admitted=0 if admitted else None)
-        refresh = ""
-        if polled_every is not None:
-            refresh = f"import threading\ndef refresh():\n    while True:\n        time.sleep({polled_every})\n        with queue.deciding(time.monotonic() + 5):\n            current.polled_ns = time.time_ns()\n            analysis_admission.write(descriptor, current)\nthreading.Thread(target=refresh, daemon=True).start()\n"
         body = (
             f"queue = Queue(pathlib.Path(sys.argv[1]))\ncurrent = Lease.decode({current.encode()!r})\n"
             "current.enqueued_ns = current.polled_ns = time.time_ns()\n"
             "if current.admitted_ns is not None:\n    current.admitted_ns = current.enqueued_ns\n"
-            "descriptor, path = queue.enter(current)\n" + refresh +
+            "descriptor, path = queue.enter(current)\n"
             "print('ready', flush=True)\nsys.stdin.read()\npath.unlink()\n"
         )
         return self.child(body)
+
+    @staticmethod
+    def end(holder: subprocess.Popen[str]) -> None:
+        """Let a holder release its lease, and wait until it has."""
+        holder.stdin.close()
+        holder.wait(timeout=60)
+
+    def clock_after(self, identifier: str) -> AdmissionClock:
+        """A clock that starts just after the last poll of the lease `identifier`."""
+        polled = Lease.decode((self.directory / "leases" / f"{identifier}.json").read_bytes()).polled_ns
+        return AdmissionClock(polled + 1)
 
     def test_a_held_lease_is_live_and_a_released_one_leaves_the_queue(self) -> None:
         holder = self.holder(reservation=3 * GIB)
@@ -337,10 +388,13 @@ class QueueTests(unittest.TestCase):
             with queue.deciding(time.monotonic() + 0.05):
                 pass
 
-    def admit(self, reservation: int, *, wait_limit: float = 30.0, available: int = 10 * GIB, released: bool = True) -> analysis_admission.Admission:
+    def admit(self, reservation: int, *, wait_limit: float = 30.0, available: int = 10 * GIB, released: bool = True, clock: AdmissionClock | None = None) -> analysis_admission.Admission:
+        """Admit `reservation` on `clock`, a new one unless given, so every wait it records is exact."""
+        if clock is None:
+            clock = AdmissionClock(time.time_ns())
         policy = Policy(self.directory, GIB, wait_limit, {Compiled("nervix_server", "lib"): reservation})
         constants = {"POLL_SECONDS": 0.02, "REPORT_SECONDS": 0.2, "RESPONSIVE_NS": int(0.2 * 10**9)}
-        with mock.patch.multiple("scripts.analysis_admission", **constants), mock.patch("scripts.analysis_admission.memory_domains", return_value=[Domain(None, available)]):
+        with mock.patch.multiple("scripts.analysis_admission", **constants), mock.patch("scripts.analysis_admission.memory_domains", return_value=[Domain(None, available)]), mock.patch("scripts.analysis_admission.time", clock):
             admission = analysis_admission.admit(policy, Compiled("nervix_server", "lib"), reservation, configuration="testing", root="/work/ws-1", report=self.report)
         if released:
             self.addCleanup(admission.release)
@@ -359,13 +413,28 @@ class QueueTests(unittest.TestCase):
         self.assertFalse(admission.place.path.exists())
         self.assertEqual(list((self.directory / "leases").iterdir()), [])
 
+    def test_an_immediate_fit_waits_exactly_the_setup_its_clock_measured(self) -> None:
+        # A loaded host can take long to set the queue up before an immediate fit. The record's
+        # wait is the time on the admission's clock, which counts that setup, not the host's own.
+        clock = AdmissionClock(time.time_ns())
+        enter = Queue.enter
+
+        def slow_setup(queue: Queue, entered: Lease) -> tuple[int, pathlib.Path]:
+            time.sleep(0.2)
+            clock.advance(0.8)
+            return enter(queue, entered)
+
+        with mock.patch.object(Queue, "enter", autospec=True, side_effect=slow_setup):
+            admission = self.admit(4 * GIB, clock=clock)
+        self.assertEqual(admission.record, {"reservation_bytes": 4 * GIB, "outcome": "fit", "waited_seconds": 0.8, "left_bytes": 10 * GIB, "holders": 0, "error": None})
+        self.assertEqual(self.report.getvalue(), "")
+
     def test_a_compilation_that_does_not_fit_waits_for_an_admitted_one_to_end(self) -> None:
         holder = self.holder(reservation=8 * GIB)
-        threading.Timer(0.5, holder.stdin.close).start()
-        admission = self.admit(8 * GIB)
-        self.assertEqual(admission.record["outcome"], "fit")
-        self.assertGreaterEqual(admission.record["waited_seconds"], 0.4)
-        self.assertEqual(admission.record["holders"], 0)
+        clock = AdmissionClock(time.time_ns())
+        clock.at(0.5, lambda: self.end(holder))
+        admission = self.admit(8 * GIB, clock=clock)
+        self.assertEqual(admission.record, {"reservation_bytes": 8 * GIB, "outcome": "fit", "waited_seconds": 0.5, "left_bytes": 10 * GIB, "holders": 0, "error": None})
         output = self.report.getvalue()
         self.assertIn("nervix_server (lib) in the testing analysis waits for host memory admission of its 8.0 GiB reservation; admitted: nervix_server (lib) in the testing analysis of /work/ws-1, pid", output)
         self.assertIn("2.0 GiB left; waited 0 s of at most 30 s", output)
@@ -373,18 +442,22 @@ class QueueTests(unittest.TestCase):
         self.assertIn("its 8.0 GiB reservation fits in the 10.0 GiB left beside 0 admitted compilations", output)
 
     def test_a_younger_compilation_waits_behind_an_older_waiter(self) -> None:
-        older = self.holder(reservation=GIB, admitted=False, polled_every=0.02)
-        threading.Timer(0.5, older.stdin.close).start()
-        admission = self.admit(GIB)
-        self.assertEqual(admission.record["outcome"], "fit")
-        self.assertGreaterEqual(admission.record["waited_seconds"], 0.4)
+        older = self.holder(reservation=GIB, admitted=False)
+        # The older waiter last decided just before the younger one's clock starts, and it leaves
+        # within the responsive window that follows, so it holds the younger one back until then.
+        clock = self.clock_after("holder")
+        clock.at(0.1, lambda: self.end(older))
+        admission = self.admit(GIB, clock=clock)
+        self.assertEqual(admission.record, {"reservation_bytes": GIB, "outcome": "fit", "waited_seconds": 0.1, "left_bytes": 10 * GIB, "holders": 0, "error": None})
         self.assertIn("behind 1 older waiting compilation", self.report.getvalue())
 
     def test_a_stopped_older_waiter_does_not_hold_back_the_queue(self) -> None:
         self.holder(reservation=GIB, admitted=False)
-        admission = self.admit(GIB)
-        self.assertEqual(admission.record["outcome"], "fit")
-        self.assertGreaterEqual(admission.record["waited_seconds"], 0.1)
+        # The older waiter never decides again, so it stops holding the younger one back once the
+        # responsive window after its last poll has passed.
+        admission = self.admit(GIB, clock=self.clock_after("holder"))
+        self.assertEqual(admission.record, {"reservation_bytes": GIB, "outcome": "fit", "waited_seconds": 0.2, "left_bytes": 10 * GIB, "holders": 0, "error": None})
+        self.assertIn("behind 1 older waiting compilation", self.report.getvalue())
 
     def test_a_compilation_alone_is_admitted_although_it_does_not_fit(self) -> None:
         admission = self.admit(16 * GIB)
@@ -402,14 +475,13 @@ class QueueTests(unittest.TestCase):
     def test_the_wait_limit_bounds_every_wait(self) -> None:
         self.holder(reservation=8 * GIB)
         admission = self.admit(8 * GIB, wait_limit=0.3)
-        self.assertEqual((admission.record["outcome"], admission.record["holders"]), ("wait_limit", 1))
-        self.assertGreaterEqual(admission.record["waited_seconds"], 0.3)
+        self.assertEqual(admission.record, {"reservation_bytes": 8 * GIB, "outcome": "wait_limit", "waited_seconds": 0.3, "left_bytes": 2 * GIB, "holders": 1, "error": None})
         self.assertIn("starts at its wait limit after 0 s, although its 8.0 GiB reservation does not fit in the 2.0 GiB left beside 1 admitted compilation", self.report.getvalue())
 
     def test_a_queue_lock_held_through_the_wait_limit_starts_the_compilation(self) -> None:
         self.child("import fcntl\nqueue = Queue(pathlib.Path(sys.argv[1]))\nfcntl.flock(queue.lock, fcntl.LOCK_EX)\nprint('ready', flush=True)\nsys.stdin.read()\n")
         admission = self.admit(GIB, wait_limit=0.2)
-        self.assertEqual(admission.record, {"reservation_bytes": GIB, "outcome": "queue_locked", "waited_seconds": admission.record["waited_seconds"], "left_bytes": None, "holders": 0, "error": None})
+        self.assertEqual(admission.record, {"reservation_bytes": GIB, "outcome": "queue_locked", "waited_seconds": 0.2, "left_bytes": None, "holders": 0, "error": None})
         self.assertIn("without admission: the host's admission queue stayed locked", self.report.getvalue())
         self.assertIsNotNone(Lease.decode(admission.place.path.read_bytes()).admitted_ns)
 
@@ -426,7 +498,8 @@ class QueueTests(unittest.TestCase):
         elsewhere.mkdir()
         self.directory.symlink_to(elsewhere)
         policy = Policy(self.directory, GIB, 1.0, {})
-        admission = analysis_admission.admit(policy, Compiled("nervix_server", "lib"), GIB, configuration="testing", root="/work/ws-1", report=self.report)
+        with mock.patch("scripts.analysis_admission.time", AdmissionClock(time.time_ns())):
+            admission = analysis_admission.admit(policy, Compiled("nervix_server", "lib"), GIB, configuration="testing", root="/work/ws-1", report=self.report)
         self.assertIsNone(admission.place)
         self.assertEqual(admission.record, {"reservation_bytes": GIB, "outcome": "unavailable", "waited_seconds": 0.0, "left_bytes": None, "holders": 0, "error": f"[Errno 1] the admission queue is not a directory this user owns: '{self.directory}'"})
         self.assertIn(f"nervix_server (lib) in the testing analysis starts without host memory admission after 0 s: its queue in {self.directory} cannot be used:", self.report.getvalue())

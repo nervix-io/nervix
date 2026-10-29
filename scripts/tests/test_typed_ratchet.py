@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from typing import Callable
 from unittest import mock
 
 from scripts import analysis_admission, typed_ratchet
@@ -627,6 +628,41 @@ class WorkspaceWrapperTests(unittest.TestCase):
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signal.SIGKILL)
 
+    def lifetime(self) -> tuple[int, int]:
+        """A pipe whose reading end a driver blocks on until the test ends and closes its writing end."""
+        reading, writing = os.pipe()
+        self.addCleanup(os.close, reading)
+        self.addCleanup(os.close, writing)
+        return reading, writing
+
+    def start_wrapper(self, driver: pathlib.Path, lifetime: int) -> subprocess.Popen[bytes]:
+        """The wrapper running `driver`, which inherits `lifetime` through it as Cargo's jobserver does."""
+        environment = {**os.environ, **self.environment(driver)}
+        environment.pop("NERVIX_NATIVE_COVERAGE_ATTEMPT", None)
+        wrapper = subprocess.Popen([sys.executable, str(ROOT / "scripts/typed_lint_wrapper.py"), *self.arguments], env=environment, pass_fds=(lifetime,))
+        self.addCleanup(wrapper.wait)
+        # The wrapper is stopped before it is waited for, so no failure waits for its driver to end.
+        self.addCleanup(lambda: wrapper.poll() is None and wrapper.kill())
+        return wrapper
+
+    def driver_pid(self, started: pathlib.Path, wrapper: subprocess.Popen[bytes], incomplete: Callable[[], None] = lambda: None) -> int:
+        """The PID a running driver records in `started`, once its record is whole.
+
+        Creating a file and writing it are two steps, so a record that exists can still be empty or
+        partly written. The driver ends its record with a newline, which only a whole record has.
+        `incomplete` runs every time the record is missing or not whole yet.
+        """
+        deadline = time.monotonic() + 60
+        while True:
+            if started.exists():
+                record = started.read_text()
+                if record.endswith("\n"):
+                    return int(record)
+            self.assertIsNone(wrapper.poll(), "the wrapper ended before its driver started")
+            self.assertLess(time.monotonic(), deadline, "the driver never started")
+            incomplete()
+            time.sleep(0.01)
+
     def test_driver_cleanup_tolerates_exit_between_its_status_check_and_signal(self) -> None:
         with mock.patch("os.kill", side_effect=ProcessLookupError) as kill:
             self.stop_driver(12345)
@@ -654,20 +690,33 @@ class WorkspaceWrapperTests(unittest.TestCase):
         self.assertEqual((completed.returncode, completed.stderr), (0, ""))
         self.assertEqual(os.read(reading, 5), b"token")
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "a process's parent is read from Linux's /proc")
+    def test_the_driver_is_ready_only_once_its_pid_record_is_whole(self) -> None:
+        started = self.root / "started"
+        reading, writing = self.lifetime()
+        # The driver creates its record and writes its PID only once the test has seen the record without it.
+        driver = self.driver(f"import pathlib\nrecord = pathlib.Path({str(started)!r}).open('w')\nos.read({reading}, 1)\nrecord.write(f'{{os.getpid()}}\\n')\nrecord.close()\nos.read({reading}, 1)")
+        wrapper = self.start_wrapper(driver, reading)
+        seen: list[str] = []
+
+        def release_the_pid_once_the_record_exists() -> None:
+            if started.exists() and not seen:
+                seen.append(started.read_text())
+                os.write(writing, b"1")
+
+        pid = self.driver_pid(started, wrapper, release_the_pid_once_the_record_exists)
+        self.assertEqual(seen, [""])
+        parent = int(pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        self.assertEqual(parent, wrapper.pid)
+
     @unittest.skipUnless(sys.platform.startswith("linux"), "the parent-death signal is Linux's")
     def test_the_driver_ends_when_a_compiler_wrapper_stops_its_wrapper(self) -> None:
         started = self.root / "started"
-        driver = self.driver(f"import pathlib, time\npathlib.Path({str(started)!r}).write_text(str(os.getpid()))\ntime.sleep(600)")
-        environment = {**os.environ, **self.environment(driver)}
-        environment.pop("NERVIX_NATIVE_COVERAGE_ATTEMPT", None)
-        wrapper = subprocess.Popen([sys.executable, str(ROOT / "scripts/typed_lint_wrapper.py"), *self.arguments], env=environment)
-        self.addCleanup(wrapper.wait)
-        deadline = time.monotonic() + 60
-        while not started.exists():
-            self.assertIsNone(wrapper.poll(), "the wrapper ended before its driver started")
-            self.assertLess(time.monotonic(), deadline, "the driver never started")
-            time.sleep(0.01)
-        pid = int(started.read_text())
+        # The test holds the writing end until it ends, so only the wrapper's death can end the driver first.
+        reading, _writing = self.lifetime()
+        driver = self.driver(f"import pathlib\npathlib.Path({str(started)!r}).write_text(f'{{os.getpid()}}\\n')\nos.read({reading}, 1)")
+        wrapper = self.start_wrapper(driver, reading)
+        pid = self.driver_pid(started, wrapper)
 
         def running() -> bool:
             # An ended driver can briefly remain a zombie until whoever adopted it reaps it.

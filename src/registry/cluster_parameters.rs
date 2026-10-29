@@ -82,6 +82,47 @@ pub(crate) fn validate_model_parameters<'a>(
             }
         };
         match model {
+            Model::Ingestor(ingestor) => {
+                if let Some(nervix_models::IngestorEntity::Http(
+                    nervix_models::HttpIngestor::Request(source),
+                )) = ingestor.input.transport_entity()
+                {
+                    let mut headers = std::collections::BTreeMap::<String, u64>::new();
+                    for header in &source.headers {
+                        let bytes = header
+                            .name
+                            .len()
+                            .checked_add(header.value.len())
+                            .assured("literal header bytes fit the process address space");
+                        check(
+                            ClusterParameterKey::HttpHeaderBytes,
+                            bytes.arch_into(),
+                            parameters.http_header_bytes(),
+                        )?;
+                        headers.insert(
+                            header.name.to_ascii_lowercase(),
+                            header.value.len().arch_into(),
+                        );
+                    }
+                    check(
+                        ClusterParameterKey::HttpHeaderFields,
+                        headers.len().arch_into(),
+                        parameters.http_header_fields(),
+                    )?;
+                    let total = headers.iter().fold(0_u64, |total, (name, value_bytes)| {
+                        total
+                            .checked_add(name.len().arch_into())
+                            .assured("literal headers fit the process address space")
+                            .checked_add(*value_bytes)
+                            .assured("literal headers fit the process address space")
+                    });
+                    check(
+                        ClusterParameterKey::HttpHeaderBytes,
+                        total,
+                        parameters.http_header_bytes(),
+                    )?;
+                }
+            }
             Model::Udf(udf) => check(
                 ClusterParameterKey::UdfCodeBytes,
                 udf.code.len().arch_into(),
@@ -244,6 +285,108 @@ mod tests {
         ClusterParameterValues::default()
             .changed(&updates)
             .assured("the fixture header bounds are positive")
+    }
+
+    fn polling_headers(headers: Vec<nervix_models::HttpRequestHeader>) -> Model {
+        use nervix_models::{
+            CodecName, CreateIngestor, GeneralErrorPolicy, HttpIngestor, HttpRequestIngestMode,
+            HttpRequestIngestor, IngestQuiesceMode, IngestorEntity, IngestorInput, IngestorName,
+            TransportIngestorInput,
+        };
+
+        Model::Ingestor(CreateIngestor {
+            name: IngestorName::parse("polling").assured("the fixture name is valid"),
+            output_routes: crate::registry::test_fixtures::unbranched_transforming_outputs(
+                "events",
+            ),
+            input: IngestorInput::Transport(TransportIngestorInput {
+                source: IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
+                    client: ClientName::parse("api").assured("the fixture client is valid"),
+                    method: "GET".to_string(),
+                    headers,
+                    max_body_size: None,
+                    every: "1s".parse().assured("the fixture cadence is positive"),
+                    mode: HttpRequestIngestMode::NoAck,
+                    quiesce: IngestQuiesceMode::Suspend,
+                })),
+                codec: CodecName::parse("events").assured("the fixture codec is valid"),
+            }),
+            timestamp_source: None,
+            general_error_policy: GeneralErrorPolicy::Log,
+            filter_where: None,
+        })
+    }
+
+    #[test]
+    fn polling_header_requirements_use_the_committed_caps_and_final_literal_values() {
+        let domain = DomainName::parse("scope").assured("the fixture domain is valid");
+        let model = polling_headers(vec![
+            nervix_models::HttpRequestHeader {
+                name: "x-key".to_string(),
+                value: "a".to_string(),
+            },
+            nervix_models::HttpRequestHeader {
+                name: "X-KEY".to_string(),
+                value: "bb".to_string(),
+            },
+        ]);
+        validate_model_parameters(&domain, [&model], &parameters(1, 7))
+            .assured("case-insensitive replacement keeps one field and the final value");
+        let error = validate_model_parameters(&domain, [&model], &parameters(1, 6))
+            .expect_err("the complete retained header needs seven bytes");
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::ClusterParameterLimit {
+                parameter: ClusterParameterKey::HttpHeaderBytes,
+                actual: 7,
+                maximum: 6,
+                ..
+            }
+        ));
+        let model = polling_headers(
+            (0..129)
+                .map(|index| nervix_models::HttpRequestHeader {
+                    name: format!("x-key-{index}"),
+                    value: "a".to_string(),
+                })
+                .collect(),
+        );
+        validate_model_parameters(&domain, [&model], &parameters(129, 4096))
+            .assured("a raised committed cap admits every literal header");
+        let error = validate_model_parameters(&domain, [&model], &parameters(128, 4096))
+            .expect_err("the model needs its complete distinct-field count");
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::ClusterParameterLimit {
+                parameter: ClusterParameterKey::HttpHeaderFields,
+                actual: 129,
+                maximum: 128,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_maximum_header_count_fits_the_native_request_representation() {
+        let maximum = usize::try_from(nervix_models::HttpHeaderFields::MAXIMUM)
+            .assured("the native header maximum fits this target");
+        let mut headers = http::HeaderMap::with_capacity(maximum);
+        for index in 0..maximum {
+            let name = http::header::HeaderName::from_bytes(format!("x-limit-{index}").as_bytes())
+                .assured("the generated header name is valid");
+            headers
+                .try_insert(name, http::header::HeaderValue::from_static("v"))
+                .assured("each field up to the declared maximum fits the native map");
+        }
+        assert_eq!(headers.len(), maximum);
+        assert!(
+            headers
+                .try_insert(
+                    http::header::HeaderName::from_static("x-over-limit"),
+                    http::header::HeaderValue::from_static("v"),
+                )
+                .is_err()
+        );
     }
 
     #[test]

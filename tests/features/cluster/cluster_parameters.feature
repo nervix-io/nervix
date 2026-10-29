@@ -199,3 +199,68 @@ Feature: Committed cluster parameters
       | 3            | HTTP_HEADER_FIELDS | 1     | http-header-fields | 128     |
       | 1            | HTTP_HEADER_BYTES  | 10B   | http-header-bytes  | 32768B  |
       | 3            | HTTP_HEADER_BYTES  | 10B   | http-header-bytes  | 32768B  |
+
+  Scenario Outline: A lower HTTP request header <parameter> cap protects stored and new ingestors on a cluster of <cluster_size>
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event_schema (id STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (id string);
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event_schema;
+      CREATE RELAY incoming SCHEMA event_schema UNBRANCHED;
+      CREATE HTTP CLIENT api CONFIG {
+        'endpoint' = 'http://127.0.0.1:9', 'timeout_ms' = 60000
+      };
+      CREATE HTTP REQUEST INGESTOR two_headers FROM api
+        METHOD 'GET' HEADERS { 'x-first' = '1', 'x-second' = '2' }
+        EVERY 1s MODE NO ACK ON QUIESCE SUSPEND
+        DECODE USING event_codec TO incoming INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these Plexus statements fail with "<refusal>"
+      """
+      ALTER CLUSTER SET <parameter> = <limit>;
+      """
+    Then the last command error contains
+      """
+      two_headers
+      """
+    And node "node-1" eventually reports status containing "<refusal> committed=<initial>"
+    When these Plexus statements are executed on the leader node
+      """
+      DROP INGESTOR two_headers;
+      ALTER CLUSTER SET <parameter> = <limit>;
+      """
+    And these Plexus statements fail with "<refusal>"
+      """
+      CREATE HTTP REQUEST INGESTOR two_headers FROM api
+        METHOD 'GET' HEADERS { 'x-first' = '1', 'x-second' = '2' }
+        EVERY 1s MODE NO ACK ON QUIESCE SUSPEND
+        DECODE USING event_codec TO incoming INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+
+    Examples:
+      | cluster_size | parameter          | limit | refusal            | initial |
+      | 1            | HTTP_HEADER_FIELDS | 1     | http-header-fields | 128     |
+      | 3            | HTTP_HEADER_FIELDS | 1     | http-header-fields | 128     |
+      | 1            | HTTP_HEADER_BYTES  | 16B   | http-header-bytes  | 32768B  |
+      | 3            | HTTP_HEADER_BYTES  | 16B   | http-header-bytes  | 32768B  |
+
+  Scenario Outline: A parameter change refuses an unrepresentable HTTP header count on a cluster of <cluster_size>
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus statements fail with "http-header-fields"
+      """
+      ALTER CLUSTER SET HTTP_HEADER_FIELDS = 24577;
+      """
+    Then the last command error contains
+      """
+      24576
+      """
+    And node "node-1" eventually reports status containing "http-header-fields committed=128"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -24,7 +24,11 @@ within its explicit assertion bound. Every five seconds it records applied domai
 counters for each source, bytes forwarded by the pacer, and each node's applied revision and log,
 snapshot and purged indexes. On failure it also records a concise status for initialization,
 leader and voter membership. The opening count is a diagnostic observation of data streams;
-initial empty probes use the management path. An atomic maximum of bytes forwarded on one
+initial empty probes and unconfirmed-prefix checks use the management path. The rate-limited case
+also permits at most two data-stream openings: OpenRaft may complete a finite log-range input
+before supplying its moving pipeline input. Prefix conflicts must be resolved before data
+admission. The original 1,024 domains, 32,768-byte/s rate and 120-second assertion bound remain
+fixed. An atomic maximum of bytes forwarded on one
 connection proves that the paced path carried more than one production progress interval. The
 pacer also counts accepted, connected, failed, cancelled and completed connections, and total
 bytes. These observations do not inspect TLS or frame bytes or establish ordering the product
@@ -195,7 +199,7 @@ resubmitting an outcome that might already have produced output.
 | Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
 | Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
 | Syslog TLS publication and split-frame writes | One abort-on-drop task on the binary's runtime, owning TCP connection establishment, the TLS handshake and the complete prepared write. Publication closes the connection there; a split-frame write returns its sender for the later remainder | `tests/common/syslog_tls.rs`, using `tests/common/runner_observation.rs` |
-| Command outcome recovery | On the task awaiting the command, including backup setup through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
+| Command outcome recovery | On the task awaiting the command, including a backup or a backup's recovery a step sends through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
 | Publication-relative receipt timing | A runtime task owns the subscription read before publication and retains its receipt timestamp. The assertion bounds completion after the HTTP publishing step returns; scenario teardown cancels an unfinished reader before stopping nodes | `tests/common/runner_observation.rs`, `tests/common/raw_session.rs` and the timed subscription steps in `tests/scenarios.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
@@ -997,7 +1001,18 @@ The harness keeps these boundaries explicit.
   step, and so does a command that begins or ends a transaction, opens or deletes a subscription,
   attaches a clock or changes the domain on a session that cannot move. A request a step sends once
   under a scenario-chosen execution reference learns its outcome the same way before the step
-  records its disposition.
+  records its disposition. The backup steps that send a backup through the raw session learn each
+  outcome the same way before they assert what it carries: a cluster backup under a fresh
+  reference, its recovery to another local destination under that reference, and a kept archive's
+  recovery under the reference the CLI reported. A leader whose lease lapsed at admission
+  therefore costs such a step a repetition of the reference, not its assertions. A leadership move
+  a scenario arms holds the next persistent command of the node it moves leadership from, either
+  after the command's reference lookup and before its admission proposal, or after its durable
+  admission. It releases the command once the successor reports itself the leader and the node it
+  moved from reports the successor too, so that node knows it no longer leads when the command
+  goes on. A proposal held that way answers `OutcomeUnknown` with cause `LeadershipLost`, as a
+  lapsed lease's does, and the backup scenario that holds its first backup there requires the step
+  to learn the backup from the successor and recover it to another destination.
   The paced simulation's published graph is loaded through one native client so its
   BEGIN/COMMIT state and command references survive an interrupted finalization. Raw wire probes
   retain the protocol's received dispositions. A restore completion probe explicitly requesting
@@ -1872,8 +1887,8 @@ The after hook runs every scenario's cleanup through the phases above.
 ```text
 body complete
      |
-teardown started      release paused health responses, domain-clock progress pauses, and
-     |                command pauses; stop durable catch-up writers and domain write load
+teardown started      release paused health responses, domain-clock progress pauses,
+     |                command pauses and backup cut gates; stop durable catch-up writers and domain write load
      |                sessions, and clear consensus commit delays
 teardown diagnostics  every node's status at once within 10 s; the scenario's context
      |
@@ -1882,7 +1897,9 @@ stopping              abort CLI output readers and kill their child processes;
      |                and observers;
      |                stop HTTP and gRPC receivers within 6 s; close the browser and the
      |                session;
-     |                stop the cluster within 60 s;
+     |                finish retained background backups after releasing cut gates;
+     |                cancel and join any remaining background CLI before stopping the cluster,
+     |                sharing one absolute 60 s deadline;
      |                release proxies, silent peers, permits, and fixture ports
 finished
 ```
@@ -1907,7 +1924,12 @@ failures can collect the same snapshots.
 
 ### Cluster Teardown
 
-A cluster's nodes stop within one deadline of 60 seconds for all of them together.
+A cluster's nodes stop within one deadline of 60 seconds for all of them together. When cleanup
+released backup cut gates, it first joins retained background backup, Plexus and raw command tasks
+while every peer still serves the admitted work. That join and the node stops receive the same
+absolute deadline; finishing a backup consumes time from the node-stop budget instead of starting
+another timeout. A timed-out or failed background task remains visible in the cleanup log. The
+scenario body's result is preserved.
 
 1. Every node is asked to stop before any node is awaited.
 2. Every node's task is awaited concurrently under the one deadline. Each wait borrows its task from
@@ -1955,6 +1977,36 @@ compaction failed; see [Terminal Teardown](./shutdown.md#terminal-teardown).
 
 ### What Cleanup Releases
 
+Before diagnostics and node shutdown, the after hook releases every armed backup cut gate,
+including both lease and capture boundaries. The gate owner publishes release to existing
+waiters before clearing its registry, so a cut that already borrowed a gate continues and a
+later cut finds no hold. Cleanup applies after failed steps as well as successful bodies and is
+idempotent. It does not cancel an admitted backup or claim that releasing its gate completes it.
+
+After releasing gates, cleanup lets retained public backup work finish while its peers remain
+available. It then cancels and joins any remaining CLI task before stopping nodes or returning
+listener ports. The bounded CLI wait borrows its handle, keeping it owned for cancellation and join
+if the deadline passes. The explicit scenario cancellation step still kills and joins its own child.
+
+`just test-backup-cut-cleanup` qualifies that failed-step path through the real Cucumber after
+hook. Its fixture, outside the ordinary feature tree at `tests/fixtures/backup_cut_cleanup.feature`,
+starts a public backup, observes the armed boundary and deliberately fails the body. Both lease
+and capture cases run on one and three nodes, with four run slots and no retries. The supervisor
+requires Cucumber's six failures and failure exit, six completed after hooks, completed retained
+background work, and all twelve nodes stopped within the unchanged cleanup budget. The cases reach
+the Plexus, raw-command and CLI task owners. A passed body, missing case, retry, unfinished
+background operation or node, or teardown panic fails qualification. These deliberately failed
+bodies remain failed features; the supervision verdict is independent of ordinary coverage. Check
+runs it after the ordinary scenarios, reusing their instrumented build while directing qualification
+profiles to its own evidence directory without exporting them. It retains the child output, build
+manifest, executable hash, source snapshot, lifecycle log, node log and suite summary. The supervisor
+preserves the ordinary run's logs and summary separately.
+
+The cut gates' watch channels and test-only concurrent map are outside Deloxide's tracked
+thread-blocking locks. This change adds no product synchronization, memory-ordering claim or
+data-plane protocol; the focused gate-owner tests and supervised public interleavings establish
+the cleanup behavior.
+
 The resource-source-discovery fixture uses the existing node-scoped command-pause registry. Once
 reconciliation finds a usable source for an absent local copy, the fixture hides the source view
 and records that it was consumed. It leaves the node, transport and all other scenarios running.
@@ -1975,6 +2027,18 @@ Harness state goes back only after the tasks that used it have ended, so the nex
 finds a port, a fault, or a proxy taken. What a node left stopping still uses stays with its keeper
 until that node has ended.
 
+- Every asynchronous CLI command, including one-shot inspection, completion, clock, backup and
+  restore commands, starts with `kill_on_drop(true)`. Cancelling its step or expiring its timeout
+  therefore kills the child rather than leaving its redirects and reconnects running. The
+  background-backup step records its child's process id. Teardown aborts and joins its output
+  task before releasing command pauses or stopping the cluster, so the child is dropped before
+  the cluster's listener ports can return to the pool. The public one- and three-node outline
+  `Cancelling a paused background backup ends its CLI process` holds the cut, cancels that same
+  task and requires its exact process to disappear within a 30-second observation budget. A
+  surviving child fails the assertion and is killed to contain the failed regression. After
+  releasing the cut, the outline recovers that same durable backup by its caller-chosen execution
+  reference and collects its archive before stopping the cluster: ending the client does not
+  cancel the server's admitted backup.
 - CLI output readers, the terminal task of an interactive CLI among them, are aborted and their
   `kill_on_drop` child processes are dropped before node teardown, which also removes the REPL's
   working directory. Background HTTP load, held uploads, server processes and real-process

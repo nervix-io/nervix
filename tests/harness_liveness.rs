@@ -3614,7 +3614,11 @@ mod tests {
             let log = Arc::new(CleanupLog::default());
             let mut nodes = stand_in_cluster(&[("node-1", ending)], &log);
 
-            let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+            let teardown = ClusterTeardown::stop_all(
+                nodes.iter_mut(),
+                PhaseDeadline::after(TEST_TEARDOWN_BUDGET),
+            )
+            .await;
 
             assert!(log.stop_was_requested("node-1"));
             assert!(
@@ -3667,7 +3671,9 @@ mod tests {
             &log,
         );
 
-        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+        let teardown =
+            ClusterTeardown::stop_all(nodes.iter_mut(), PhaseDeadline::after(TEST_TEARDOWN_BUDGET))
+                .await;
 
         assert!(!teardown.left_nodes_stopping(), "{teardown}");
         let panicked = teardown
@@ -3704,7 +3710,11 @@ mod tests {
             let mut nodes = stand_in_cluster(&stuck, &log);
 
             let started = Instant::now();
-            let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+            let teardown = ClusterTeardown::stop_all(
+                nodes.iter_mut(),
+                PhaseDeadline::after(TEST_TEARDOWN_BUDGET),
+            )
+            .await;
             let spent = started.elapsed();
 
             assert!(spent >= TEST_TEARDOWN_BUDGET, "{teardown}");
@@ -3737,6 +3747,25 @@ mod tests {
     }
 
     #[nervix_primitives::test(start_paused = true)]
+    async fn finishing_background_work_does_not_restart_the_cluster_cleanup_budget() {
+        let log = Arc::new(CleanupLog::default());
+        let mut nodes = stand_in_cluster(&[("node-1", StandInEnding::OutlastsCleanup)], &log);
+        let deadline = PhaseDeadline::after(TEST_TEARDOWN_BUDGET);
+        let prestop = TEST_TEARDOWN_BUDGET
+            .checked_div(2)
+            .assured("the divisor is nonzero");
+        nervix_primitives::time::advance(prestop).await;
+
+        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), deadline).await;
+
+        assert_eq!(deadline.elapsed(), TEST_TEARDOWN_BUDGET);
+        assert_eq!(teardown.elapsed, TEST_TEARDOWN_BUDGET);
+        assert_eq!(teardown.budget, TEST_TEARDOWN_BUDGET);
+        assert!(log.stop_was_requested("node-1"));
+        assert_eq!(teardown.still_stopping().count(), 1);
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_node_left_stopping_keeps_what_it_holds_until_its_own_task_ends() {
         let log = Arc::new(CleanupLog::default());
         let mut nodes = stand_in_cluster(
@@ -3748,7 +3777,9 @@ mod tests {
             &log,
         );
 
-        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+        let teardown =
+            ClusterTeardown::stop_all(nodes.iter_mut(), PhaseDeadline::after(TEST_TEARDOWN_BUDGET))
+                .await;
 
         let still_stopping = teardown
             .still_stopping()
@@ -3863,7 +3894,11 @@ mod tests {
             )
             .await;
             let diagnostics_ended = started.elapsed();
-            let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+            let teardown = ClusterTeardown::stop_all(
+                nodes.iter_mut(),
+                PhaseDeadline::after(TEST_TEARDOWN_BUDGET),
+            )
+            .await;
 
             assert!(
                 diagnostics_ended >= STALLED_REQUEST_BUDGET,
@@ -3918,7 +3953,9 @@ mod tests {
                 StandInTeardownNode::new("node-3", StandInEnding::OutlastsCleanup, &log),
             ];
 
-        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+        let teardown =
+            ClusterTeardown::stop_all(nodes.iter_mut(), PhaseDeadline::after(TEST_TEARDOWN_BUDGET))
+                .await;
 
         let [ended, read, unread] = teardown.nodes.as_slice() else {
             panic!("a cluster of three reports three nodes: {teardown}");
@@ -4146,7 +4183,9 @@ mod tests {
         scenario.enter(ScenarioPhase::TeardownStarted);
         scenario.enter(ScenarioPhase::Diagnostics);
         scenario.enter(ScenarioPhase::Stopping);
-        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+        let teardown =
+            ClusterTeardown::stop_all(nodes.iter_mut(), PhaseDeadline::after(TEST_TEARDOWN_BUDGET))
+                .await;
         assert_eq!(published(&scenario).phase, ScenarioPhase::Stopping);
         scenario.enter(ScenarioPhase::Finished);
 

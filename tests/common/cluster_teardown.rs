@@ -2,7 +2,7 @@
 //!
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
-//! - **Owns.** The one deadline a whole cluster stops within, asking every node to stop before
+//! - **Owns.** The caller's one deadline a whole cluster stops within, asking every node to stop before
 //!   awaiting any of them, leaving whatever is still stopping when that deadline passes to end
 //!   itself, the release of what the ended nodes held, and the record of what each node did.
 //! - **Depends on.** The owned node task, the reading of a stopping node's own shutdown, and the
@@ -158,7 +158,7 @@ pub(crate) struct ClusterTeardown {
 }
 
 impl ClusterTeardown {
-    /// Stops every node of one cluster within one `budget` and gives back what each of them holds.
+    /// Stops every node of one cluster by `deadline` and gives back what each of them holds.
     ///
     /// Every node is asked to stop before any node is awaited, and the waits then run together
     /// under one deadline, so a cluster of three wedged nodes costs one budget rather than three.
@@ -168,17 +168,17 @@ impl ClusterTeardown {
     /// task ended gives back what it held once every wait is over.
     pub(crate) async fn stop_all<'node, Node>(
         nodes: impl IntoIterator<Item = &'node mut Node>,
-        budget: Duration,
+        deadline: PhaseDeadline,
     ) -> Self
     where
         Node: TeardownNode + 'node,
     {
+        let budget = deadline.budget();
         let mut nodes = nodes.into_iter().collect::<Vec<_>>();
         for node in &mut nodes {
             node.request_stop();
         }
 
-        let deadline = PhaseDeadline::after(budget);
         let waits = nodes
             .iter_mut()
             .map(|node| async { node.owned_task().wait(deadline).await });

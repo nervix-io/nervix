@@ -291,6 +291,11 @@ impl SettingDefinition for HttpHeaderBytes {
 /// The most distinct application header fields one HTTP request may contain.
 pub struct HttpHeaderFields;
 
+impl HttpHeaderFields {
+    /// Distinct fields that fit the native request map at its maximum allocation.
+    pub const MAXIMUM: u64 = 24_576;
+}
+
 impl SettingDefinition for HttpHeaderFields {
     type Class = ClusterParameters;
     type Value = u64;
@@ -302,7 +307,7 @@ impl SettingDefinition for HttpHeaderFields {
         128
     }
     fn validate(value: &u64, _: &()) -> Result<(), Report<ClusterParameterError>> {
-        ClusterParameterKey::HttpHeaderFields.validate_count(*value, 1, u64::from(u32::MAX))
+        ClusterParameterKey::HttpHeaderFields.validate_count(*value, 1, Self::MAXIMUM)
     }
 }
 

@@ -44,6 +44,7 @@ impl EmitterConnectorStarter {
                     table: connector.table.clone(),
                     location: connector.location.clone(),
                     mapped_schema,
+                    batch: connector.batch,
                     commit: connector.commit,
                     writer: context.emitter.as_str().to_string(),
                 },

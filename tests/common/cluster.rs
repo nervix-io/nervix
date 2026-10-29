@@ -789,6 +789,93 @@ pub(crate) enum RejoinAttempt {
     Stopped(String),
 }
 
+/// Where a leadership move holds the next persistent command of the node it moves leadership away
+/// from, until that node knows another node leads.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CommandHold {
+    /// After the command's execution reference is looked up and before its admission is proposed.
+    /// The proposal then reaches a node that no longer leads, which cannot tell whether the
+    /// cluster admitted the command.
+    BeforeAdmissionProposal,
+    /// After the command's applying record is committed and before its effect begins. The node
+    /// that admitted the command then cannot know its outcome.
+    AfterDurableAdmission,
+}
+
+impl CommandHold {
+    /// Holds the next persistent command `node` handles at this point.
+    fn arm(self, fault_injection: &FaultInjection, node: ClusterNodeName) {
+        match self {
+            Self::BeforeAdmissionProposal => {
+                fault_injection.pause_command_reference_lookup_on(node);
+            }
+            Self::AfterDurableAdmission => {
+                fault_injection.pause_command_after_durable_admission_on(node);
+            }
+        }
+    }
+
+    /// Waits until a command of `node` is held at this point.
+    async fn reached(self, fault_injection: &FaultInjection, node: &ClusterNodeName) {
+        match self {
+            Self::BeforeAdmissionProposal => {
+                fault_injection
+                    .wait_for_command_reference_lookup_pause(node)
+                    .await;
+            }
+            Self::AfterDurableAdmission => {
+                fault_injection
+                    .wait_for_command_durable_admission_pause(node)
+                    .await;
+            }
+        }
+    }
+
+    /// Lets the command `node` holds at this point continue.
+    fn release(self, fault_injection: &FaultInjection, node: &ClusterNodeName) {
+        match self {
+            Self::BeforeAdmissionProposal => {
+                fault_injection.release_command_reference_lookup_pause(node);
+            }
+            Self::AfterDurableAdmission => {
+                fault_injection.release_command_durable_admission_pause(node);
+            }
+        }
+    }
+}
+
+/// A node whose own status a leadership move waits on before the command it holds goes on.
+struct LeaderWitness {
+    node_id: String,
+    endpoint: StatusEndpoint,
+}
+
+impl LeaderWitness {
+    /// Waits within `deadline` until the node reports `leader` as the leader, and otherwise names
+    /// the status it last reported.
+    async fn reports_leader(&self, deadline: PhaseDeadline, leader: &str) -> io::Result<()> {
+        let reported = deadline
+            .poll_until(
+                POLL_INTERVAL,
+                |phase| async move {
+                    let status = self.endpoint.cluster_status(phase).await?;
+                    Ok::<_, Report<StatusRequestError>>(ClusterStatus::parse(status))
+                },
+                |status| status.current_leader.as_deref() == Some(leader),
+            )
+            .await;
+        match reported {
+            Ok(_) => Ok(()),
+            Err(expired) => Err(io::Error::other(format!(
+                "node '{}' did not report '{leader}' as the leader within {:?}; last status: {:?}",
+                self.node_id,
+                deadline.elapsed(),
+                expired.last_output.map(|status| status.raw)
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TestClusterConfig {
     pub replica_count: usize,
@@ -1008,7 +1095,8 @@ impl Cluster {
             // A construction that failed has no assertion left to serve, so the nodes it started
             // stop together under the one cleanup budget rather than one after another under the
             // product shutdown deadlines a scenario-driven stop observes.
-            let teardown = cluster.shutdown_for_teardown().await;
+            let deadline = PhaseDeadline::after(CLUSTER_TEARDOWN_BUDGET);
+            let teardown = cluster.shutdown_for_teardown(deadline).await;
             let Some(unclean) = teardown.unclean() else {
                 return Err(error);
             };
@@ -1811,8 +1899,11 @@ impl Cluster {
     /// Cleanup follows the scenario's assertions, so it uses the harness budget rather than the
     /// product shutdown deadlines a scenario configured: a scenario that asserts on shutdown,
     /// drain or deadline expiry stops its nodes itself, before it reaches here.
-    pub(crate) async fn shutdown_for_teardown(&mut self) -> ClusterTeardown {
-        ClusterTeardown::stop_all(self.nodes.values_mut(), CLUSTER_TEARDOWN_BUDGET).await
+    pub(crate) async fn shutdown_for_teardown(
+        &mut self,
+        deadline: PhaseDeadline,
+    ) -> ClusterTeardown {
+        ClusterTeardown::stop_all(self.nodes.values_mut(), deadline).await
     }
 
     pub(crate) async fn restart(&mut self) -> io::Result<()> {
@@ -3651,55 +3742,53 @@ impl Cluster {
             .request_leadership_transfer(node_name(from_node_id), node_name(to_node_id));
     }
 
-    /// Moves leadership from `from_node_id` to `to_node_id` underneath the next command that
-    /// `from_node_id` durably admits. The command stays paused after its durable admission until
-    /// `to_node_id` reports itself the leader, so the node that admitted it cannot know its
-    /// outcome. The returned task ends once the command is released.
-    pub(crate) fn move_leadership_after_next_durable_admission(
+    /// Moves leadership from `from_node_id` to `to_node_id` underneath the next persistent command
+    /// that `from_node_id` handles. `hold` keeps that command where it is until `to_node_id`
+    /// reports itself the leader and `from_node_id` reports `to_node_id` as its leader, so the node
+    /// handling the command knows it no longer leads when the command goes on. The returned task
+    /// ends once the command is released.
+    pub(crate) fn move_leadership_under_next_command(
         &self,
+        hold: CommandHold,
         from_node_id: &str,
         to_node_id: &str,
     ) -> AbortOnDropHandle<io::Result<()>> {
         let from = node_name(from_node_id);
         let to = node_name(to_node_id);
-        let successor_id = to_node_id.to_string();
-        let successor = self
-            .nodes
-            .get(to_node_id)
-            .unwrap_or_else(|| panic!("unknown node '{to_node_id}'"))
-            .status_endpoint();
+        let successor = self.leader_witness(to_node_id);
+        let predecessor = self.leader_witness(from_node_id);
         let fault_injection = self.fault_injection.clone();
-        fault_injection.pause_command_after_durable_admission_on(from.clone());
+        hold.arm(&fault_injection, from.clone());
         AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
-            fault_injection
-                .wait_for_command_durable_admission_pause(&from)
-                .await;
+            hold.reached(&fault_injection, &from).await;
             fault_injection.request_leadership_transfer(from.clone(), to);
             let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
-            let elected = deadline
-                .poll_until(
-                    POLL_INTERVAL,
-                    |phase| {
-                        let successor = &successor;
-                        async move {
-                            let status = successor.cluster_status(phase).await?;
-                            Ok::<_, Report<StatusRequestError>>(ClusterStatus::parse(status))
-                        }
-                    },
-                    |status| status.current_leader.as_deref() == Some(successor_id.as_str()),
-                )
-                .await;
-            fault_injection.release_command_durable_admission_pause(&from);
-            match elected {
-                Ok(_) => Ok(()),
-                Err(expired) => Err(io::Error::other(format!(
-                    "node '{successor_id}' did not report itself leader within {:?}; last status: \
-                     {:?}",
-                    deadline.elapsed(),
-                    expired.last_output.map(|status| status.raw)
-                ))),
-            }
+            let elected = successor.reports_leader(deadline, &successor.node_id).await;
+            let known = match elected {
+                Ok(()) => {
+                    predecessor
+                        .reports_leader(deadline, &successor.node_id)
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            hold.release(&fault_injection, &from);
+            known
         }))
+    }
+
+    /// The status of `node_id`, which a leadership move reads to learn whom the node reports as
+    /// the leader.
+    fn leader_witness(&self, node_id: &str) -> LeaderWitness {
+        let endpoint = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"))
+            .status_endpoint();
+        LeaderWitness {
+            node_id: node_id.to_string(),
+            endpoint,
+        }
     }
     async fn wait_until<F>(&self, node_id: &str, predicate: F) -> io::Result<()>
     where
