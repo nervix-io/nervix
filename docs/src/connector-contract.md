@@ -283,9 +283,16 @@ OpenDAL's credential providers through its accessor info. The object-store clien
 `timeout_ms`, read through `ConfiguredDeadline`, sets both the operation and I/O timeout of the
 OpenDAL operator, including credential HTTP calls, name resolution, connection and TLS. Without
 the key, metadata and delete operations allow 60 seconds and reads and writes allow 10 seconds.
-That HTTP client takes no CA file or client identity from the client's configuration. The
-Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled
-trust roots, including in an isolated Iceberg connector build. The three Iceberg backends keep their
+Each of the two Iceberg HTTP clients receives the rustls configuration that the shared
+`RustlsClientConfigProvider` builds from its own client's entries. It holds the bundled WebPKI roots and the
+platform's native roots with the client's `tls_ca_file` added, and the identity of its
+`tls_cert_file` and `tls_key_file`. The Reqwest 0.13 object-store client takes its configuration
+from the S3, GCS or Azure Blob client, and it serves both OpenDAL's object requests and its
+credential providers' HTTP calls. The Reqwest 0.12 catalog client takes its configuration from the
+ICEBERG_REST client. The emitter builds both configurations when it opens, under the rustls
+provider the host installed or AWS-LC when the host installed none. An unreadable or invalid file is
+therefore an open-time configuration failure, with the client it belongs to and the provider's
+typed TLS cause beneath it. The three Iceberg backends keep their
 S3, GCS, and Azure property mappings and commit boundary. One operator is initialized from the
 emitter's location and the initial table's effective storage properties. Table metadata refreshes
 retain that table's `FileIO` and its initialized storage, so later object calls reuse the operator;
@@ -893,19 +900,26 @@ namespace. Location validation compares the URL scheme with the resolved storage
 before activation. Commit size and batch size share the vocabulary's positive whole-byte value,
 so planning consumes the decided count instead of parsing a second size string.
 
-The storage clients declare their Nervix-owned addresses, credentials, booleans and deadlines
-separately from `s3.*`/`client.*`, `gcs.*` and `adls.*` driver properties. The REST client owns its
+The storage clients declare their Nervix-owned addresses, credentials, booleans, deadlines and TLS
+files separately from `s3.*`/`client.*`, `gcs.*` and `adls.*` driver properties. The REST client owns its
 catalog locator and warehouse and delegates its catalog headers and storage-property namespaces.
 Registry validation, completion, inspection and the generated key reference consume these shared
 schemas; they do not keep another Iceberg key table. The network-free composition hook checks
 the storage properties the connector can interpret before a table location exists. Building an
 OpenDAL operator, credentials and connectivity remain initialization checks.
 
-The REST catalog's file I/O property map starts with the normalized storage properties and then
-applies catalog properties. A catalog entry for the same Iceberg property key takes precedence
-in that map, which the table's file I/O supplies to the configured storage factory for object
-operations. The factory retains the selected backend, resolver, location and storage deadline; it
-does not replace the effective catalog properties with a second client map.
+The REST catalog's property map holds two sets of entries. The first is the storage client's file
+I/O properties: each Nervix-owned key under the Iceberg property the vocabulary declares for it,
+and each delegated property as written. The second is the catalog client's configuration without
+its TLS files. The vocabulary's `IcebergCatalogProperties` pairs the two clients under one rule.
+Registry validation refuses an emitter whose catalog client sets a property that its storage client
+supplies, and the connector builds the catalog's map through the same pairing, so neither client
+silently replaces the other's value. Deadline and TLS-file keys configure the clients' own
+transports and stay out of the map. The table's file I/O supplies that map to the configured
+storage factory for object operations. The factory retains the selected backend, resolver,
+location, storage deadline and object-store TLS configuration; it does not replace the effective
+catalog properties with a second client map. The storage reader holds each Boolean property to the
+value it states, so `gcs.no-auth` set to `false` keeps the GCS credential loader and signing.
 
 ### Capability inventory
 

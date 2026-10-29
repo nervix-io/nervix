@@ -1153,6 +1153,9 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `secret_access_key` | optional | string | Nervix; strict | yes | none |
 | `session_token` | optional | string | Nervix; strict | yes | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: s3.*, client.*. Reserved keys: none.
 
@@ -1174,6 +1177,9 @@ Delegated property namespaces: s3.*, client.*. Reserved keys: none.
 | `no_auth` | optional | boolean | Nervix; strict | no | none |
 | `service_path` | optional | URL (http or https) | Nervix; strict | no | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 | `token` | optional | string | Nervix; strict | yes | none |
 
 Delegated property namespaces: gcs.*. Reserved keys: none.
@@ -1197,6 +1203,9 @@ Delegated property namespaces: gcs.*. Reserved keys: none.
 | `sas_token` | optional | string | Nervix; strict | yes | none |
 | `tenant_id` | optional | string | Nervix; strict | no | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: adls.*. Reserved keys: none.
 

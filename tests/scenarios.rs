@@ -2207,6 +2207,24 @@ async fn then_http_receiver_requests_have_minimum_gap(
     );
 }
 
+/// Asserts that one captured request, counted from 1, sent `header` with exactly `value` among the
+/// values it sent under that name. Header names compare without case.
+#[then(expr = "HTTP receiver {string} request {int} has header {string} with value {string}")]
+async fn then_http_receiver_request_has_header_value(
+    world: &mut ScenarioWorld,
+    name: String,
+    position: usize,
+    header: String,
+    value: String,
+) {
+    let request = captured_http_request(world, &name, position);
+    let sent = request.header_values(&header);
+    assert!(
+        sent.contains(&value.as_bytes()),
+        "HTTP receiver '{name}' request {position} does not send '{header}: {value}':\n{request}"
+    );
+}
+
 #[then(expr = "HTTP receiver {string} request {int} has no header {string}")]
 async fn then_http_receiver_request_has_no_header(
     world: &mut ScenarioWorld,
