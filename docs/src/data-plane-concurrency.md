@@ -520,6 +520,12 @@ writers retry against the latest complete table, preserving unrelated domains an
 passive installation publishes no endpoint definitions. The listening socket remains present on
 every node independently of this table.
 
+The table also records whether a revision installed it since the node started or the runtime last
+cleared it. A revision application marks it installed once every domain of the revision has
+published its definitions. A request reads the route and that state from the same load. A
+published route is served whatever the state. A missing route is unrouted, answered with 404, only
+in an installed table; before installation it is uninstalled, answered with 503.
+
 An HTTP request resolves one route using borrowed host and path keys; only uppercase hosts need a
 normalization allocation. A WebSocket retains the resolved route and its signaling protocol from
 upgrade through all later frames, including signaling data frames. Readers share the route
