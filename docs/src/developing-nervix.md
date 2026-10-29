@@ -343,6 +343,25 @@ passed to the test binaries, so a test name filter narrows the run:
 just test-connectors <filter>
 ```
 
+### CI runners
+
+CI jobs run on [Ubicloud](https://www.ubicloud.com) machines, which Ubicloud's GitHub App starts for
+every job whose `runs-on` names a Ubicloud label. Each job gets a fresh virtual machine with GitHub's
+`ubuntu-24.04` runner image, deleted when the job ends. Every label pins Ubuntu 24.04, and
+`.github/actionlint.yaml` declares the labels to `just validate-workflows`. An x64 runner has 4 GB of
+memory per CPU, from `ubicloud-standard-2` with 8 GB to `ubicloud-standard-30` with 120 GB:
+
+- `ubicloud-standard-16` runs the unit tests, the scenarios, the Deloxide lane and the Bolero
+  sanitizer shards.
+- `ubicloud-standard-8` runs validation, the diagnostic evidence, client conformance, the extra
+  checks, Shuttle, Loom, the Bolero randomized properties, the image builds and the benchmarks.
+- `ubicloud-standard-4` runs Turmoil, the coverage reports, the book, the amd64 deployment check
+  and the chaos shards.
+- `ubicloud-standard-2` runs the jobs that only select, plan, gate or publish.
+
+The arm64 deployment check runs natively on `ubicloud-standard-8-arm`, whose 24 GB leave host
+headroom around minikube's 10 GiB; an arm64 runner has 3 GB of memory per CPU.
+
 ### Compiler architecture gate
 
 `just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler

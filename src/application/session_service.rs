@@ -289,6 +289,14 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             cluster.publish_cluster_parameters(parameters, false).await;
             runtime.install_cluster_parameters(parameters.values);
             registry.install_cluster_parameters(parameters.values);
+            #[cfg(feature = "testing")]
+            if runtime.take_runtime_installation_refusal(local_node_id) {
+                return Err(Report::new(
+                    crate::runtime::RuntimeError::RuntimeInstallationRefused {
+                        node: local_node_id.clone(),
+                    },
+                ));
+            }
             debug!(
                 %local_node_id,
                 revision = state.revision,

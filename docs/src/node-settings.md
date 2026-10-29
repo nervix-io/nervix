@@ -17,6 +17,11 @@ running service. A node publishes, carries and verifies its prerequisites as
 parameters have one committed Raft record, seeded at the first bootstrap and changed through
 `ALTER CLUSTER SET`. Capability records are not announced yet; those remain local claims.
 
+Runtime admission and failed committed-runtime installation share the existing half-second retry
+cadence owned by `RuntimeAdmission`. This remains an internal policy constant pending settings
+adoption; installation does not introduce another numeric policy or an operator option. Committed
+schedule and domain updates can wake an installation retry sooner, and success ends that cadence.
+
 Changes to the server's command line, startup settings and initialization contract keep the shipped
 Kubernetes operator's generated startup command, chart and example current in the same delivery.
 The server-image [deployment checks](installation-kubernetes.md#deployment-qualification) qualify
@@ -391,7 +396,9 @@ transition, even when a later command has changed another parameter.
 
 `DESCRIBE CLUSTER` reports committed values and each node's running revision and values. A node
 that has not applied the current record remains visibly behind. Sessions receive an informational
-notice when their node installs a parameter revision. A joining or returning node obtains the
+notice after their node successfully installs a parameter revision. The installation supervisor
+retries a failed graph installation; a retry of the same revision sends no additional parameter
+notice. A joining or returning node obtains the
 live cluster's published record before activating services that consume it and verifies that
 record against consensus as it catches up.
 Public session and observability listeners start before live-policy discovery. `SHOW CLUSTER

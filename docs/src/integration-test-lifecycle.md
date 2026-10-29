@@ -1049,6 +1049,18 @@ The harness keeps these boundaries explicit.
   scenario releases it. Each barrier is one-shot and uses the shared pause owner's reached and
   released observations. The scenario asserts the original execution reference's outcome and a
   dependent command through the public session protocol; it adds no setup delay or request retry.
+- **Restore client inspection capacity.** The public fixture pauses an accepted model batch,
+  arms its domain's observation, fills the registered executor's filesystem workers with parked
+  zero-byte jobs, and fills its queue with retained test jobs. It releases the model barrier and waits for the actual client
+  inspector's storage-admission future to be polled before releasing capacity. A testing-only
+  observation forwards that future's poll unchanged, then publishes through the existing domain
+  pause registry. An immediate refusal has already decided its result; an accepted wait remains
+  pending until release. The public stream must complete, every restore step must apply and the
+  configured client must remain present on one and three nodes. Teardown releases the parked
+  workers and queue holders before clearing command barriers or stopping nodes. The observation
+  injects no validation result or scheduling policy. Async semaphore waits and test worker parking
+  remain outside Deloxide's lock tracking; owner tests separately check Commands memory and
+  cancellation.
 - **Restore publication and staging failures.** A durable state publication failure armed for a
   restored domain fails every publication of that domain's restored state, on whichever node
   publishes and after the store has made the publication durable, until the scenario clears it. A

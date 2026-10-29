@@ -159,6 +159,15 @@ predecessor for a retry, including after a local WASM reset operation. A node st
 forced ending first establishes its committed-state catch-up fence before installing execution;
 an earlier owner's local state cannot make it act under an obsolete assignment.
 
+One background supervisor follows both committed schedule and domain changes. If installation fails,
+it reports the complete error chain and retries on the admission loop's half-second cadence even
+when neither committed value changes. A new schedule or domain update wakes it sooner. Each attempt
+reads the current coherent state through the same admission and installation sequence; it does not
+replay a captured failed revision or issue another configuration command. Successful installation
+waits for the next committed update without periodic application. The callback retains its local
+parameter-notice observation across awaits and announces each installed revision once, after
+successful application. Shutdown ends a pending retry wait.
+
 Forced-recovery preparation subscribes to domain installation before checking for its execution,
 and takes the runtime's application sequence while selecting that execution. This waits for a
 startup installation whose lifecycle is already visible but whose graph is still being built.

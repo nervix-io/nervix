@@ -24,6 +24,9 @@ pub enum RuntimeError {
         "the caught-up parameter revision {revision} differs from the live startup publication"
     )]
     ClusterParameterPublicationMismatch { revision: u64 },
+    #[cfg(feature = "testing")]
+    #[error("the armed test refused runtime installation on node '{node}'")]
+    RuntimeInstallationRefused { node: ClusterNodeName },
     #[error("failed to retire the source of ingestor '{ingestor}' in domain '{domain}'")]
     RetireIngestorEntity {
         domain: DomainName,

@@ -27,6 +27,7 @@ use nervix_consensus::{
     TransactionScheduleEligibility, TransactionState, TransactionStatementRequest,
     TransactionStepEffect, TransactionStepResult,
 };
+use nervix_execution::QueueAdmission;
 use nervix_models::{
     CanonicalImpactSet, CommandExecutionReference, DomainName, DomainSchedule, DomainState,
     DomainStatus, ExecutionStepImpactReport, ImpactNodeCoverage, ImpactPlanningBasis, Model,
@@ -1137,11 +1138,16 @@ impl SessionServiceImpl {
             let Some(planned) = &model_plan.planned else {
                 continue;
             };
-            self.validate_changed_model_bindings(domain, domain_state.config.pace, planned)
-                .await
-                .change_context(TransactionPlanningError::ExternalModelValidation {
-                    operation: step.impact.operations().first(),
-                })?;
+            self.validate_changed_model_bindings(
+                domain,
+                domain_state.config.pace,
+                planned,
+                QueueAdmission::RefuseWhenFull,
+            )
+            .await
+            .change_context(TransactionPlanningError::ExternalModelValidation {
+                operation: step.impact.operations().first(),
+            })?;
             self.prepare_planned_domain_udfs(planned)
                 .await
                 .change_context(TransactionPlanningError::UdfPreparation {

@@ -673,6 +673,13 @@ retirement and nothing cancels it, since a destruction cannot stop part way. It 
 client alone, never the ingestor's or emitter's host or its intake, and Nervix never hands a client to
 another ingestor or emitter, so a replacement opens a client of its own.
 
+An ingestor-open failure during graph construction propagates through the runtime installation
+report, before an ingestor host loop exists. The control-plane installation supervisor retries that
+failed application on the admission loop's half-second cadence, or on a committed schedule or domain
+update, using the current admitted state. An emitter initialization failure inside an already
+running host remains owned by that host's declared retry policy. Neither path requires a fresh
+configuration command.
+
 A joined consumer whose coordinator does not answer holds a connector worker for those five
 seconds, and a producer holds one for its polling thread's last poll and up to half a second of
 flushing. A broker that stops answering while its clients retire therefore delays the node's other
@@ -805,6 +812,11 @@ not disable verification or silently fall back when unavailable.
 The server composition root extends the existing changed-model binding boundary before standalone
 mutation or transaction commit. It renders mount templates using the resource resolver and checks
 the rendered schema and Nervix-owned file paths on an admitted filesystem worker, charged to command memory.
+Request preflight refuses inspection when command memory or the filesystem wait queue is full.
+Applying a model step under an accepted transaction or restore instead waits for those existing
+capacities with `QueueAdmission::WaitForPlace`; lack of room has not judged the configuration.
+The service task's existing shutdown cancellation ends the wait. A charge larger than the whole
+class or a closed executor still fails inspection, and no uncharged config copy is made while waiting.
 Rendered values also pass the existing WebSockets configuration and Prometheus API-root owners;
 an optional Redis subscription capacity passes the same range parser its ingestor plan uses.
 Ingestor-only presence requirements stay with that plan.
