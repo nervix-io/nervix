@@ -45,12 +45,13 @@ Options:
   --isolation-seconds N  former-owner-restart window in which the restarted former owner stays
                          isolated before startup admission, 20..600 (default: ${isolation_seconds}).
   --fault FAULT          stateful fault: none, owner-crash, owner-pause, owner-partition or
-                         cluster-restart; domain-time fault: none, voter-crash, voter-pause,
-                         voter-partition, voter-stop or cluster-restart. One node supports none and
-                         cluster-restart (default: ${fault}). backup-fault requires one of
-                         owner-crash, leader-crash, owner-partition or rolling-restart, and
-                         restore-fault one of leader-crash, leader-partition, owner-crash or
-                         reclamation-owner-crash.
+                         cluster-restart; endpoints and lifetimes fault: none, owner-crash,
+                         owner-partition or cluster-restart; domain-time fault: none,
+                         voter-crash, voter-pause, voter-partition, voter-stop or
+                         cluster-restart. One node supports none and cluster-restart (default:
+                         ${fault}). backup-fault requires one of owner-crash, leader-crash,
+                         owner-partition or rolling-restart, and restore-fault one of
+                         leader-crash, leader-partition, owner-crash or reclamation-owner-crash.
   --profile NAME         degraded-links profile: all, delay, jitter, random-loss,
                          burst-loss, rate-limit, combined (default: ${degradation_profile}).
   --load-interval-ms N   Fixed producer interval, 100..5000 (default: ${load_interval_ms}).
@@ -161,6 +162,12 @@ while [[ "$#" -gt 0 ]]; do
                 record_count=1000
                 overall_timeout=2400
             elif [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
+                record_count=1000
+                overall_timeout=2700
+            elif [[ "${scenario}" == endpoints ]]; then
+                record_count=1000
+                overall_timeout=1800
+            elif [[ "${scenario}" == lifetimes ]]; then
                 record_count=1000
                 overall_timeout=2700
             fi
@@ -397,16 +404,16 @@ fi
 
 [[ -n "${image_ref}" ]] || setup_error '--image is required and must name an already-built Nervix image'
 case "${scenario}" in
-    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | mixed-instability) ;;
+    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | mixed-instability) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
     || setup_error '--nodes must be 1 or 3'
-# The restart, recovery, stateful, domain-time, mixed-instability, backup fault and restore
-# scenarios share their traffic, findings and exit handling.
+# The restart, recovery, stateful, endpoints, lifetimes, domain-time, mixed-instability, backup
+# fault and restore scenarios share their traffic, findings and exit handling.
 recovery_scenario=false
 case "${scenario}" in
-    stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | mixed-instability | backup-fault | restore-fresh-cluster | restore-fault | restore-volume) recovery_scenario=true ;;
+    stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | mixed-instability | backup-fault | restore-fresh-cluster | restore-fault | restore-volume) recovery_scenario=true ;;
 esac
 # The backup scenarios install the backup form of the baseline graph, whose Kafka ingestor keeps
 # domain-owned offsets instead of a consumer group.
@@ -435,7 +442,7 @@ uses_pumba=true
 case "${scenario}" in
     baseline | backup | backup-cycles | restore-fresh-cluster | restore-volume) uses_pumba=false ;;
 esac
-if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != backup-cycles && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${scenario}" != stateful && "${scenario}" != domain-time && "${node_count}" != 3 ]]; then
+if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != backup-cycles && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${scenario}" != stateful && "${scenario}" != endpoints && "${scenario}" != lifetimes && "${scenario}" != domain-time && "${node_count}" != 3 ]]; then
     setup_error "${scenario} requires --nodes 3"
 fi
 case "${scenario}" in
@@ -443,6 +450,12 @@ case "${scenario}" in
         case "${fault}" in
             none | owner-crash | owner-pause | owner-partition | cluster-restart) ;;
             *) setup_error "--fault for stateful must be none, owner-crash, owner-pause, owner-partition or cluster-restart, not ${fault}" ;;
+        esac
+        ;;
+    endpoints | lifetimes)
+        case "${fault}" in
+            none | owner-crash | owner-partition | cluster-restart) ;;
+            *) setup_error "--fault for ${scenario} must be none, owner-crash, owner-partition or cluster-restart, not ${fault}" ;;
         esac
         ;;
     domain-time)
@@ -465,7 +478,7 @@ case "${scenario}" in
         ;;
     *)
         [[ "${fault_option_set}" != true ]] \
-            || setup_error '--fault applies only to stateful, domain-time, backup-fault and restore-fault'
+            || setup_error '--fault applies only to stateful, endpoints, lifetimes, domain-time, backup-fault and restore-fault'
         ;;
 esac
 if [[ "${node_count}" == 1 && "${fault}" != none && "${fault}" != cluster-restart ]]; then
@@ -669,6 +682,8 @@ export CHAOS_KCAT_IMAGE="${chaos_kcat_image}"
 export CHAOS_PROBE_IMAGE="${chaos_probe_image}"
 export CHAOS_PUMBA_IMAGE="${chaos_pumba_image}"
 export CHAOS_NETTOOLS_IMAGE="${chaos_nettools_image}"
+export CHAOS_PYTHON_IMAGE="${chaos_python_image}"
+export CHAOS_POSTGRES_IMAGE="${chaos_postgres_image}"
 export CHAOS_LOAD_FILE="${artifact_dir}/fixtures/input.ndjson"
 export CHAOS_TRAFFIC_DIR="${artifact_dir}/traffic"
 export CHAOS_SCRIPT_DIR="${script_dir}"
@@ -691,7 +706,7 @@ case "${scenario}" in
         # One record every two seconds keeps the bounded fixture flowing through all four cases.
         load_interval_ms=2000
         ;;
-    pause-resume | stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | backup-fault | restore-fresh-cluster | restore-fault | restore-volume)
+    pause-resume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | backup-fault | restore-fresh-cluster | restore-fault | restore-volume)
         # One record a second keeps the bounded fixture flowing through the slowest case.
         load_interval_ms=1000
         ;;
@@ -711,7 +726,7 @@ if [[ "${scenario}" == stale-follower ]]; then
     export CHAOS_RAFT_SNAPSHOT_ENTRY_THRESHOLD=64
     export CHAOS_RAFT_COVERED_LOG_ENTRIES_RETAINED=16
 fi
-if [[ "${scenario}" == stateful ]]; then
+if [[ "${scenario}" == stateful || "${scenario}" == lifetimes ]]; then
     # Ordinary state options: a one-second snapshot interval publishes runtime checkpoints several
     # times inside a held milestone, and on three nodes one state replica lets the loss of an owner
     # promote its replicated state instead of resetting it.
@@ -731,9 +746,16 @@ if [[ "${scenario}" == restore-fault && "${fault}" == reclamation-owner-crash ]]
 fi
 export CHAOS_STATE_LOAD_FILE="${artifact_dir}/fixtures/state-input.ndjson"
 export CHAOS_PACED_LOAD_FILE="${artifact_dir}/fixtures/paced-input.ndjson"
-# The stateful load produces one record a second and the paced load one every 250 ms.
+# The endpoint clients read their records and control files from this directory and write their
+# ledgers to their logs.
+export CHAOS_ENDPOINT_DIR="${artifact_dir}/endpoints"
+export CHAOS_LIFE_LOAD_FILE="${artifact_dir}/fixtures/life-input.ndjson"
+# The stateful load produces one record a second, the paced load one every 250 ms, the endpoint
+# client one HTTP record every 250 ms and the life load one record every 500 ms.
+export CHAOS_LIFE_LOAD_INTERVAL_MS=500
 export CHAOS_STATE_LOAD_INTERVAL_MS=1000
 export CHAOS_PACED_LOAD_INTERVAL_MS=250
+export CHAOS_ENDPOINT_INTERVAL_MS=250
 
 jq -n \
     --arg run_id "${run_id}" \
@@ -900,6 +922,10 @@ if [[ "${scenario}" != "baseline" ]]; then
 fi
 if [[ "${scenario}" == stateful ]]; then
     compose_args+=(--profile stateful)
+elif [[ "${scenario}" == endpoints ]]; then
+    compose_args+=(--profile endpoints)
+elif [[ "${scenario}" == lifetimes ]]; then
+    compose_args+=(--profile lifetimes)
 elif [[ "${scenario}" == domain-time ]]; then
     compose_args+=(--profile paced)
 fi
@@ -1394,7 +1420,7 @@ finish() {
         elif [[ "${scenario}" == former-owner-restart ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --records %q --isolation-seconds %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}" "${isolation_seconds}")"
-        elif [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
+        elif [[ "${scenario}" == stateful || "${scenario}" == endpoints || "${scenario}" == lifetimes || "${scenario}" == domain-time ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --nodes %q --fault %q --records %q' \
                 "${scenario}" "${reproducer_image}" "${node_count}" "${fault}" "${record_count}")"
             if [[ "${outage_option_set}" == true ]]; then
@@ -1536,7 +1562,7 @@ finish() {
                     -size +0c 2>/dev/null | sort)
             fi
             local case_directory
-            for case_directory in stale former-owner restart stateful domain-time mixed; do
+            for case_directory in stale former-owner restart stateful endpoints lifetimes domain-time mixed; do
                 [[ -d "${artifact_dir}/${case_directory}" ]] || continue
                 while IFS= read -r evidence_path; do
                     evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
@@ -1995,6 +2021,12 @@ if [[ "${uses_pumba}" == true ]]; then
     resolve_tool_image pumba "${CHAOS_PUMBA_IMAGE}"
     pumba_image_id="${tool_image_ids[pumba]}"
 fi
+if [[ "${scenario}" == endpoints ]]; then
+    resolve_tool_image python "${CHAOS_PYTHON_IMAGE}"
+fi
+if [[ "${scenario}" == lifetimes ]]; then
+    resolve_tool_image postgres "${CHAOS_POSTGRES_IMAGE}"
+fi
 if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition || "${scenario}" == mixed-instability || "${scenario}" == backup-fault || "${scenario}" == restore-fault ]]; then
     resolve_tool_image nettools "${CHAOS_NETTOOLS_IMAGE}"
 fi
@@ -2090,6 +2122,8 @@ if [[ "${scenario}" != baseline ]]; then
 fi
 if [[ "${scenario}" == stateful ]]; then
     manifest_load state-load chaos_state_input "${CHAOS_STATE_LOAD_INTERVAL_MS}"
+elif [[ "${scenario}" == lifetimes ]]; then
+    manifest_load life-load chaos_life_input "${CHAOS_LIFE_LOAD_INTERVAL_MS}"
 elif [[ "${scenario}" == domain-time ]]; then
     manifest_load paced-load chaos_paced_input "${CHAOS_PACED_LOAD_INTERVAL_MS}"
 fi
@@ -2110,7 +2144,7 @@ elif [[ "${scenario}" == former-owner-restart ]]; then
 elif [[ "${scenario}" == cluster-restart ]]; then
     # shellcheck disable=SC2016
     update_manifest '.recovery = {minimum_outage_seconds: $seconds}' --argjson seconds "${outage_seconds}"
-elif [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
+elif [[ "${scenario}" == stateful || "${scenario}" == endpoints || "${scenario}" == lifetimes || "${scenario}" == domain-time ]]; then
     # The dollars in this jq filter are jq variables, not shell expansion.
     # shellcheck disable=SC2016
     update_manifest '.fault = $fault | .deployment = {replica_count: ($replicas | tonumber), state_snapshot_interval: $interval}' \
@@ -2216,6 +2250,14 @@ scenario_topics=()
 if [[ "${scenario}" == stateful ]]; then
     scenario_topics=(chaos_state_input chaos_profile_input chaos_unique_output chaos_window_output
         chaos_enriched_output chaos_counted_output)
+elif [[ "${scenario}" == endpoints ]]; then
+    scenario_topics=(chaos_edge_primary_http chaos_edge_peer_http chaos_edge_frames)
+elif [[ "${scenario}" == lifetimes ]]; then
+    # chaos_life_late_output is missing on purpose until the scenario provisions it.
+    scenario_topics=(chaos_life_input chaos_life_profile_input chaos_life_expiring_input
+        chaos_life_expiring_profile_input chaos_life_late_input chaos_life_flush_input chaos_life_pool_input
+        chaos_life_enriched_output chaos_life_generated_output chaos_life_window_output
+        chaos_life_rotating_output chaos_life_buffered_output chaos_life_expiring_output)
 elif [[ "${scenario}" == domain-time ]]; then
     scenario_topics=(chaos_paced_input chaos_paced_output)
 elif [[ "${backup_state_graph}" == true ]]; then
@@ -2230,6 +2272,19 @@ for scenario_topic in ${scenario_topics[@]+"${scenario_topics[@]}"}; do
         --create --topic "${scenario_topic}" --partitions 1 --replication-factor 1 \
         >"${artifact_dir}/public/create-topic-${scenario_topic}.txt"
 done
+if [[ "${scenario}" == lifetimes ]]; then
+    # The pooled emitters' database and both of their tables exist before the graph starts, as
+    # Nervix creates no external entity.
+    compose up --detach --no-deps postgres
+    wait_for 'PostgreSQL accepting connections' 90 \
+        compose exec -T postgres pg_isready -U postgres -h 127.0.0.1 -q </dev/null \
+        || setup_error 'the PostgreSQL server did not accept connections'
+    compose exec -T postgres psql -U postgres -h 127.0.0.1 -v ON_ERROR_STOP=1 -q -c \
+        'CREATE TABLE chaos_life_pool_first (event_id text PRIMARY KEY, sequence bigint NOT NULL);
+         CREATE TABLE chaos_life_pool_second (event_id text PRIMARY KEY, sequence bigint NOT NULL);' \
+        </dev/null >"${artifact_dir}/public/create-postgres-tables.txt" 2>&1 \
+        || setup_error 'the pooled tables could not be created'
+fi
 
 phase "Nervix startup"
 compose up --detach nervix-1
@@ -2311,6 +2366,10 @@ if [[ "${scenario}" == stateful ]]; then
     domain_cli_command "$(<"${script_dir}/fixtures/stateful.plexus")" \
         >"${artifact_dir}/public/configure-stateful-plexus.txt" 2>&1
 fi
+if [[ "${scenario}" == lifetimes ]]; then
+    domain_cli_command "$(<"${script_dir}/fixtures/lifetimes.plexus")" \
+        >"${artifact_dir}/public/configure-lifetimes-plexus.txt" 2>&1
+fi
 if [[ "${backup_state_graph}" == true ]]; then
     domain_cli_command "$(<"${script_dir}/fixtures/backup-state.plexus")" \
         >"${artifact_dir}/public/configure-backup-state-plexus.txt" 2>&1
@@ -2343,6 +2402,23 @@ if [[ -n "${restore_guest_bytes}" ]]; then
         >"${artifact_dir}/public/configure-restore-state-plexus.txt" 2>&1
 fi
 domain_cli_command 'START;' >"${artifact_dir}/public/start-domain.txt" 2>&1
+if [[ "${scenario}" == endpoints ]]; then
+    # Two domains declare the same VHOST host and HTTP endpoint path, each with its own output
+    # topic: the peer installs the primary's fixture with its own topic name. The primary also
+    # serves the WebSocket endpoint.
+    for endpoint_domain in chaos_edge_primary chaos_edge_peer; do
+        cli_command "CREATE UNPACED DOMAIN ${endpoint_domain};" \
+            >"${artifact_dir}/public/create-domain-${endpoint_domain}.txt" 2>&1
+        endpoint_fixture="$(<"${script_dir}/fixtures/endpoints.plexus")"
+        run_cli "${endpoint_domain}" "${endpoint_fixture//chaos_edge_primary_http/${endpoint_domain}_http}" \
+            >"${artifact_dir}/public/configure-endpoints-${endpoint_domain}.txt" 2>&1
+    done
+    run_cli chaos_edge_primary "$(<"${script_dir}/fixtures/endpoints-websocket.plexus")" \
+        >"${artifact_dir}/public/configure-endpoints-websocket.txt" 2>&1
+    for endpoint_domain in chaos_edge_primary chaos_edge_peer; do
+        run_cli "${endpoint_domain}" 'START;' >"${artifact_dir}/public/start-domain-${endpoint_domain}.txt" 2>&1
+    done
+fi
 if [[ "${scenario}" == domain-time ]]; then
     cli_command 'CREATE PACED DOMAIN chaos_paced WITH PERIOD 1s SKEW 1s;' \
         >"${artifact_dir}/public/create-paced-domain.txt" 2>&1
@@ -2461,6 +2537,14 @@ if [[ "${scenario}" != "baseline" ]]; then
         # shellcheck source=stateful-scenario.sh
         source "${script_dir}/stateful-scenario.sh"
         run_stateful
+    elif [[ "${scenario}" == endpoints ]]; then
+        # shellcheck source=endpoints-scenario.sh
+        source "${script_dir}/endpoints-scenario.sh"
+        run_endpoints
+    elif [[ "${scenario}" == lifetimes ]]; then
+        # shellcheck source=lifetimes-scenario.sh
+        source "${script_dir}/lifetimes-scenario.sh"
+        run_lifetimes
     elif [[ "${scenario}" == domain-time ]]; then
         # shellcheck source=domain-time-scenario.sh
         source "${script_dir}/domain-time-scenario.sh"

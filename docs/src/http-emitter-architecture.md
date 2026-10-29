@@ -40,8 +40,8 @@ TO HTTP <client>
 window or `ACK TIMEOUT`; `NO ACK`, parallel publication, and the optional emitter `BATCH` clause
 are unavailable. The emitter still requires a route-local `FLUSH` policy. `COLLECT FOR` may gather
 input records before execution, while `FLUSH` governs when prepared work is released. Neither
-merges several records into one HTTP body. The `HTTP CLIENT`'s polling `method` setting has
-no effect on the emitter's required method expression.
+merges several records into one HTTP body. Polling declares its method in the ingestor statement;
+the emitter always evaluates its own required method expression.
 
 ### A request with a codec body
 

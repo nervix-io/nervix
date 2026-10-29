@@ -1252,8 +1252,8 @@ mod tests {
     #[test]
     fn client_statement_batch_ignores_semicolon_inside_strings() {
         let parsed = parse_client_statements(
-            "CREATE HTTP CLIENT http_main CONFIG { 'url' = 'http://localhost/a;b' }; CREATE \
-             DOMAIN prod;",
+            "CREATE HTTP CLIENT http_main CONFIG { 'endpoint' = 'http://localhost/a;b', \
+             'timeout_ms' = 5000 }; CREATE DOMAIN prod;",
         )
         .expect("parse should succeed");
         assert_eq!(parsed.len(), 2);
@@ -1589,7 +1589,7 @@ mod tests {
             "BACKUP CLUSTER TO '/tmp/c.nvxb' |",
             "DESCRIBE RESOURCE proto VERSION |",
             "CREATE USER alice WITH PASSWORD 'sec|",
-            "CREATE HTTP CLIENT http_main CONFIG { 'url' = 'http://lo|",
+            "CREATE HTTP CLIENT http_main CONFIG { 'endpoint' = 'http://lo|",
             "DESCRIBE TRANSACTION 'tx|",
             "BACKUP CLUSTER |",
             "RESTORE CLUSTER FROM '/tmp/c.nvxb' |",

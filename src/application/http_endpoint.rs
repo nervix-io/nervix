@@ -48,7 +48,8 @@ use tracing::warn;
 
 use super::{AppError, service_tasks::ServiceTasks, tls::HttpsListenerCertificates};
 use crate::runtime::{
-    EndpointDispatchOutcome, EndpointRequestOutcome, ResolvedEndpointRoute, Runtime,
+    EndpointDispatchOutcome, EndpointRequestOutcome, EndpointResolution, ResolvedEndpointRoute,
+    Runtime,
 };
 
 type EndpointResponseBody = Either<Empty<Bytes>, Full<Bytes>>;
@@ -243,8 +244,16 @@ async fn handle_http_request(
     }
     let path = request.uri().path().to_string();
 
-    let Some(route) = runtime.resolve_endpoint(&host, &path) else {
-        return Ok(response_with_status(StatusCode::NOT_FOUND).map(Either::Left));
+    let route = match runtime.resolve_endpoint(&host, &path) {
+        EndpointResolution::Routed(route) => route,
+        EndpointResolution::Unrouted => {
+            return Ok(response_with_status(StatusCode::NOT_FOUND).map(Either::Left));
+        }
+        // Before its first revision the node cannot tell a route the cluster binds from one no
+        // domain declares, so a missing route is temporarily unavailable rather than not found.
+        EndpointResolution::Uninstalled => {
+            return Ok(endpoint_rejection_response(None).map(Either::Left));
+        }
     };
     if route.endpoint_type() == EndpointType::Websockets {
         if !is_websocket_upgrade_request(&request) {

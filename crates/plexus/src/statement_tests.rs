@@ -1386,7 +1386,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
             CREATE HTTP CLIENT http_main
               CONFIG {
                 'endpoint' = 'https://api.example.com/events',
-                'method' = 'POST'
+                'timeout_ms' = 5000
               };
         "#,
         None,

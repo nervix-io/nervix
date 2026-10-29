@@ -17,21 +17,22 @@ use std::num::{NonZeroU16, NonZeroU64};
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
     ChoiceRequirement, ClientIngestorEntity, ClientName, DomainClockPeriod, EndpointIngestMode,
-    EndpointName, HttpEndpointIngestor, HttpIngestorEntity, HttpRequestIngestMode,
-    HttpRequestIngestor, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind, KafkaConsumerGroupName,
-    KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicIngestor, KafkaTopicName,
-    ModelName, MqttIngestMode, MqttIngestorEntity, MqttQos, MqttSession, MqttTopicFilter,
-    MqttTopicIngestor, NatsIngestMode, NatsIngestorEntity, NatsQueueGroupName, NatsSubjectIngestor,
-    NatsSubjectName, NodeRef, PayloadSizeLimit, PrometheusIngestMode, PrometheusIngestorEntity,
-    PrometheusQueryIngestor, PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName,
-    PulsarSubscriptionOwnership, PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode,
-    RabbitMqIngestorEntity, RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName,
-    RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SqsIngestMode,
-    SqsIngestorEntity, SqsQueueIngestor, SqsQueueName, SyslogIngestMode, SyslogIngestorEntity,
-    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
-    WebsocketsIngestMode, WebsocketsIngestorEntity, WebsocketsUpgradeHeader,
-    WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
+    EndpointName, HttpEndpointIngestor, HttpIngestorEntity, HttpRequestHeader,
+    HttpRequestIngestMode, HttpRequestIngestor, IngestDeliveryKind, IngestQuiesceKind,
+    IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind,
+    KafkaConsumerGroupName, KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode,
+    KafkaTopicIngestor, KafkaTopicName, ModelName, MqttIngestMode, MqttIngestorEntity, MqttQos,
+    MqttSession, MqttTopicFilter, MqttTopicIngestor, NatsIngestMode, NatsIngestorEntity,
+    NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectName, NodeRef, PayloadSizeLimit,
+    PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor, PulsarIngestorEntity,
+    PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership, PulsarTopicIngestor,
+    PulsarTopicName, RabbitMqIngestMode, RabbitMqIngestorEntity, RabbitMqQueueIngestor,
+    RabbitMqQueueName, RedisChannelName, RedisIngestorEntity, RedisPubSubIngestMode,
+    RedisPubSubIngestor, RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor,
+    SqsQueueName, SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor,
+    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
+    WebsocketsIngestorEntity, WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, ZeroMqIngestMode,
+    ZeroMqIngestorEntity, ZeroMqPullIngestor,
 };
 use strum::IntoEnumIterator as _;
 use thiserror::Error;
@@ -56,6 +57,8 @@ pub(super) struct IngestorEntityDraft {
     pub(super) subscription: String,
     pub(super) subscription_ownership: Option<PulsarSubscriptionOwnership>,
     pub(super) query: String,
+    pub(super) method: String,
+    pub(super) request_headers: Vec<HttpRequestHeader>,
     pub(super) max_body_size: String,
     pub(super) upgrade_headers: Vec<WebsocketsUpgradeHeader>,
     pub(super) every: String,
@@ -270,6 +273,9 @@ impl IngestorEntityDraft {
             }
             IngestorEntityKind::Http(HttpIngestorEntity::Request) => HttpRequestIngestor {
                 client: self.client()?,
+                method: self.required(&self.method, IngestorEntityDraftError::Method)?,
+                headers: self.request_headers.clone(),
+                max_body_size: self.max_body_size()?,
                 every: self.every()?,
                 mode: HttpRequestIngestMode::NoAck,
                 quiesce,
@@ -667,6 +673,8 @@ pub(super) enum IngestorEntityDraftError {
     SubscriptionOwnership,
     #[error("Enter a Prometheus query")]
     Query,
+    #[error("Enter an HTTP request method")]
+    Method,
     #[error("MAX BODY SIZE must be a positive supported byte size")]
     MaxBodySize,
     #[error("Enter valid literal upgrade headers")]
@@ -824,7 +832,13 @@ mod tests {
         }
         match source {
             IngestorEntity::Http(HttpIngestor::Request(entity)) => {
-                draft.every = entity.every.to_string()
+                draft.method = entity.method.clone();
+                draft.request_headers = entity.headers.clone();
+                draft.max_body_size = entity
+                    .max_body_size
+                    .map(|limit| limit.to_string())
+                    .unwrap_or_default();
+                draft.every = entity.every.to_string();
             }
             IngestorEntity::Websockets(WebsocketsIngestor::Connection(entity)) => {
                 draft.upgrade_headers = entity.headers.clone();
@@ -931,6 +945,7 @@ mod tests {
         draft.subscription = "workers".into();
         draft.subscription_ownership = Some(PulsarSubscriptionOwnership::Provisioned);
         draft.query = "up".into();
+        draft.method = "GET".into();
         draft.every = "1s".into();
         draft.instances = "1".into();
         draft.offset = Some(OffsetChoice::Domain);

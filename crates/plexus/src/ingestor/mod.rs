@@ -506,9 +506,9 @@ mod tests {
             "ZEROMQ PULL INGESTOR i FROM c MODE NO ACK ON QUIESCE SUSPEND",
             "ZEROMQ PULL INGESTOR i FROM c MODE NO ACK ON QUIESCE BUFFER MAX SIZE 64MiB ON \
              OVERFLOW DROP NEWEST",
-            "HTTP REQUEST INGESTOR i FROM c EVERY 1s MODE NO ACK ON QUIESCE SUSPEND",
-            "HTTP REQUEST INGESTOR i FROM c EVERY 1s MODE NO ACK ON QUIESCE BUFFER MAX SIZE 64MiB \
-             ON OVERFLOW DROP OLDEST",
+            "HTTP REQUEST INGESTOR i FROM c METHOD 'GET' EVERY 1s MODE NO ACK ON QUIESCE SUSPEND",
+            "HTTP REQUEST INGESTOR i FROM c METHOD 'GET' EVERY 1s MODE NO ACK ON QUIESCE BUFFER \
+             MAX SIZE 64MiB ON OVERFLOW DROP OLDEST",
             "PROMETHEUS QUERY INGESTOR i FROM c QUERY 'up' EVERY 1s MODE NO ACK ON QUIESCE SUSPEND",
             "HTTP ENDPOINT INGESTOR i FROM e MODE NO ACK ON QUIESCE REJECT RETRY AFTER 5s",
             "HTTP ENDPOINT INGESTOR i FROM e MODE NO ACK ON QUIESCE BUFFER MAX SIZE 64MiB",
@@ -654,7 +654,7 @@ mod tests {
             "KAFKA TOPIC INGESTOR i FROM c TOPIC 't' OFFSET BY DOMAIN MODE NO ACK ON QUIESCE \
              BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST",
             "HTTP ENDPOINT INGESTOR i FROM e MODE NO ACK ON QUIESCE SUSPEND",
-            "HTTP REQUEST INGESTOR i FROM c EVERY 1s MODE NO ACK ON QUIESCE DROP",
+            "HTTP REQUEST INGESTOR i FROM c METHOD 'GET' EVERY 1s MODE NO ACK ON QUIESCE DROP",
             "NATS SUBJECT INGESTOR i FROM c SUBJECT 's' QUEUE GROUP 'g' INSTANCES 1 MODE NO ACK \
              ON QUIESCE REJECT RETRY AFTER 1s",
         ];
@@ -1930,17 +1930,14 @@ mod tests {
 
         let http = "CREATE HTTP REQUEST INGESTOR i FROM c ";
         let suggestions = suggest_create_ingestor(http, http.len());
-        assert!(
-            !suggestions.contains(&"MAX BODY SIZE".to_string()),
-            "the HTTP polling body declares no response bound yet: {suggestions:?}"
-        );
+        assert_eq!(suggestions, vec!["METHOD".to_string()]);
     }
 
     #[test]
     fn parses_create_ingestor_http_poll() {
         let input = r#"
             CREATE HTTP REQUEST INGESTOR http_notifications
-              FROM http_main EVERY 1s
+              FROM http_main METHOD 'GET' EVERY 1s
               MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1955,6 +1952,9 @@ mod tests {
             IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
                 client: nervix_models::ClientName::try_from("http_main")
                     .expect("valid client identifier"),
+                method: "GET".to_owned(),
+                headers: Vec::new(),
+                max_body_size: None,
                 every: "1s"
                     .parse()
                     .assured("the fixture cadence is a positive duration"),
@@ -1968,7 +1968,7 @@ mod tests {
     fn parses_create_ingestor_with_timestamp_at_field() {
         let input = r#"
             CREATE HTTP REQUEST INGESTOR http_notifications
-              FROM http_main EVERY 1s
+              FROM http_main METHOD 'GET' EVERY 1s
               MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
               TIMESTAMP AT occurred_at
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
@@ -1990,7 +1990,7 @@ mod tests {
     fn parses_create_ingestor_with_timestamp_now() {
         let input = r#"
             CREATE HTTP REQUEST INGESTOR http_notifications
-              FROM http_main EVERY 1s
+              FROM http_main METHOD 'GET' EVERY 1s
               MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
               TIMESTAMP NOW
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id

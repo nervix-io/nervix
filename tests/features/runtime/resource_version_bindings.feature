@@ -68,7 +68,7 @@ Feature: Resource version bindings
       """
       CREATE HTTP CLIENT mounted_http
         MOUNT tls_bundle
-        CONFIG {'endpoint' = 'http://127.0.0.1:1'};
+        CONFIG {'endpoint' = 'http://127.0.0.1:1', 'timeout_ms' = 5000};
       """
 
     Examples:
@@ -196,7 +196,7 @@ Feature: Resource version bindings
       """
       CREATE HTTP CLIENT mounted_http
         MOUNT tls_bundle VERSION LATEST
-        CONFIG {'endpoint' = 'http://127.0.0.1:1'};
+        CONFIG {'endpoint' = 'http://127.0.0.1:1', 'timeout_ms' = 5000};
       """
     Then the last command output contains
       """
@@ -683,10 +683,10 @@ Feature: Resource version bindings
       CREATE RESOURCE other_bundle;
       UPLOAD RESOURCE other_bundle VERSION '{{tls_v1}}';
       CREATE VHOST edge select-{{test_id}}.example.com WITH TLS tls_bundle VERSION 1;
-      CREATE HTTP CLIENT primary MOUNT tls_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
-      CREATE HTTP CLIENT secondary MOUNT tls_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
-      CREATE HTTP CLIENT spare MOUNT tls_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
-      CREATE HTTP CLIENT foreign MOUNT other_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
+      CREATE HTTP CLIENT primary MOUNT tls_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1', 'timeout_ms' = 5000};
+      CREATE HTTP CLIENT secondary MOUNT tls_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1', 'timeout_ms' = 5000};
+      CREATE HTTP CLIENT spare MOUNT tls_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1', 'timeout_ms' = 5000};
+      CREATE HTTP CLIENT foreign MOUNT other_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1', 'timeout_ms' = 5000};
       """
     When these Plexus commands are executed on the leader node
       """

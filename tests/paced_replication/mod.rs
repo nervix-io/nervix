@@ -8,6 +8,7 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use cucumber::{given, then, when};
+use meticulous::OptionExt as _;
 use nervix_primitives::time::{Instant, sleep};
 
 use crate::{
@@ -116,6 +117,23 @@ async fn then_paced_follower_catches_up(
         }
         sleep(Duration::from_millis(200)).await;
     }
+}
+
+#[then("the paced catch-up uses at most two data streams")]
+fn then_paced_catch_up_stream_count(world: &mut ScenarioWorld) {
+    let observation = world
+        .moving_catch_up
+        .as_ref()
+        .assured("the preceding scenario step installed its catch-up observation");
+    let (opens, attempts, sources) = stream_totals(world, observation);
+    // OpenRaft can end a successful finite log-range input before supplying its pipeline input.
+    // Allow that completed data exchange beside the moving pipeline, but no speculative streams.
+    assert!(
+        (1..=2).contains(&opens),
+        "the finite log-range input and moving pipeline must stay bounded: {opens} data streams, \
+         {attempts} setup attempts; sources: {}",
+        sources.join("; ")
+    );
 }
 
 fn stream_totals(world: &ScenarioWorld, observation: &MovingCatchUp) -> (u64, u64, Vec<String>) {

@@ -596,7 +596,7 @@ mod tests {
             CREATE HTTP CLIENT http_main
               CONFIG {
                 'endpoint' = 'https://api.example.com/events',
-                'method' = 'POST'
+                'timeout_ms' = 5000
               };
         "#;
 
@@ -611,7 +611,7 @@ mod tests {
         assert_eq!(parsed.config.len(), 2);
         assert_eq!(parsed.config[0].key, "endpoint");
         assert_eq!(parsed.config[0].value, "https://api.example.com/events");
-        assert_eq!(parsed.config[1].key, "method");
+        assert_eq!(parsed.config[1].key, "timeout_ms");
     }
 
     #[test]

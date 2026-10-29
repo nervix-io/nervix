@@ -596,7 +596,7 @@ Transport-specific schemes and keys:
 - `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`. This is primarily useful for SQS-compatible local/test endpoints.
+- `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`, which is primarily useful for SQS-compatible local/test endpoints. An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
 - `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
   `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
 
@@ -630,7 +630,6 @@ CREATE IF NOT EXISTS HTTP CLIENT http_tls
   MOUNT dev_tls VERSION 1
   CONFIG {
     'endpoint' = 'https://127.0.0.1:18443/http/notifications',
-    'method' = 'GET',
     'timeout_ms' = 5000,
     'tls_ca_file' = '{{ dev_tls }}/ca.pem'
   };
@@ -934,6 +933,9 @@ under the same head. `DECODE USING <codec>`, the timestamp, the filter, the rout
 ```plexus,ignore
 CREATE HTTP REQUEST INGESTOR <name>
   FROM <client>
+  (METHOD 'GET')
+  [HEADERS { 'accept' = 'application/json' }]
+  [MAX BODY SIZE 1MiB]
   (EVERY 1s)
   MODE <mode>
   ON QUIESCE <quiesce>
@@ -949,21 +951,31 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | HTTP client |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | `EVERY 1s` (duration); required |
+| Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
-| Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |
+| Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | the response body: unbounded |
-| Network waits | a request: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |
-| Driver limits | Response heads above 100 headers or 417,792 bytes are refused.<br>A request follows at most 10 redirects. |
+| Buffers | the response body: set by MAX BODY SIZE; when exceeded, fails the poll; the next poll reads again |
+| Network waits | a request: name resolution, connection, TLS and the response: `timeout_ms`; required |
+| Driver limits | Response heads above 100 headers or 417,792 bytes are refused.<br>Redirects and proxies require the client's explicit opt-in. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-ingest).
 <!-- connector-matrix:ingest-http-request:end -->
 
+- `METHOD '<token>'` is required on the ingestor. `HEADERS { '<name>' = '<value>', … }` writes
+  literal request fields; each value is visible in `SHOW CREATE`. `MAX BODY SIZE` bounds the
+  response body at its declared size, or 16 MiB where omitted. A response above that bound fails
+  its poll.
+- The HTTP client requires `endpoint` and `timeout_ms`. It also declares optional
+  `follow_redirects` and `proxy` settings, plus TLS trust and client identity files. The polling
+  client ignores proxy environment variables and follows no redirect unless opted in.
+- `metadata.status` is the successful response's `U16` status and `metadata.polled_at` is the
+  scheduled `DATETIME` instant of that poll. `read_header` and `read_headers` read the response's
+  headers; `204 No Content` emits no row.
 - polls a configured HTTP endpoint periodically
 - issues the first request immediately, then follows an anchored domain-clock cadence; slow
   responses coalesce missed occurrences into one request at the newest due instant
@@ -1785,6 +1797,21 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sqs-queue-ingest).
 <!-- connector-matrix:ingest-sqs-queue:end -->
 
+`QUEUE` takes a string literal that SQS accepts as a queue name: 1 to 80 ASCII letters, digits,
+`-` and `_`, where a FIFO queue's name ends in `.fifo` and the suffix counts toward the 80. Nervix
+preserves its case in both directions, so `QUEUE 'Orders-EU_1.fifo'` reads exactly that queue. The
+ingestor reads a message's attributes through `read_header` and `read_headers`. It names
+`MODE ACK SEQUENTIAL` and `ON QUIESCE SUSPEND`, the only delivery and quiesce modes it declares: the
+queue keeps each message until the source deletes it, so suspending loses nothing.
+
+The `SQS CLIENT` an ingestor or emitter names declares `endpoint`, which is required, and the
+optional `region`, `access_key_id`, `secret_access_key`, `timeout_ms` and `tls_ca_file`, and
+`CREATE SQS CLIENT` refuses any other key. A client without `region` signs its requests for
+`us-east-1`, and one that omits `access_key_id` or `secret_access_key` signs with a placeholder in
+its place, which only an SQS-compatible endpoint that skips signature checks accepts. `timeout_ms`
+bounds an emitter's send; an ingestor's queue lookup, receives and deletions take the waits the
+table lists.
+
 Starting the ingestor sends no request to the service. Each source instance looks its queue up
 before its first poll and keeps the queue's URL from then on, suspensions included. The source
 resolves the host of its client's `endpoint` through the node's asynchronous resolver each time it
@@ -2066,6 +2093,13 @@ responses resolve with 503 (or the equivalent outcome frame) when intake stops o
 payload on a retained ended route closes with 1013. Open a new connection for a replacement source.
 Stopping a domain withdraws only its routes and intakes; other domains on the same host and path
 continue receiving requests. A withdrawn route returns HTTP 404.
+
+A node answers 404 only once it has installed a revision since it started. Before that, it cannot
+tell a route the cluster binds from one no domain declares. This happens, for example, when the
+node restarts while its cluster has no quorum to catch up through. Such a node refuses every
+request without a published route with HTTP 503 and no retry delay, and a WebSocket upgrade the
+same way. A route that is already published is served at once. Stopping the node clears its routes
+and returns it to that state.
 
 Server-side endpoints are hosted under a `VHOST`. A plain VHOST serves HTTP and WS on the HTTP listener. A TLS-enabled VHOST serves HTTPS and WSS on the separate HTTPS listener.
 

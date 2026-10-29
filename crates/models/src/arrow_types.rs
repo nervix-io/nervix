@@ -151,6 +151,17 @@ mod tests {
         };
         assert_eq!(described(IngestorMetadataScope::Headers), None);
         assert_eq!(
+            described(IngestorMetadataScope::Http),
+            Some(vec![
+                ("status".to_owned(), DataType::UInt16, true),
+                (
+                    "polled_at".to_owned(),
+                    DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+                    true
+                ),
+            ])
+        );
+        assert_eq!(
             described(IngestorMetadataScope::Kafka),
             Some(vec![
                 ("topic".to_owned(), DataType::Utf8, true),
@@ -171,6 +182,7 @@ mod tests {
     #[test]
     fn a_metadata_scope_s_columns_are_the_schema_fields_a_program_is_validated_against() {
         for scope in [
+            IngestorMetadataScope::Http,
             IngestorMetadataScope::Kafka,
             IngestorMetadataScope::Syslog,
             IngestorMetadataScope::Websockets,
