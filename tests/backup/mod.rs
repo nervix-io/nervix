@@ -27,6 +27,7 @@ use crate::common::{
 
 mod branch_keys;
 mod branch_state;
+mod cli_lifecycle;
 pub(crate) mod client_inspection;
 pub(crate) mod console;
 mod cut_diagnostics;
@@ -156,6 +157,7 @@ fn cli_command(
         TEST_AUTH_PASSWORD,
     ]);
     command.args(arguments);
+    command.kill_on_drop(true);
     command
 }
 
@@ -199,7 +201,7 @@ fn given_backup_cut_pauses(world: &mut ScenarioWorld, raw_domain: String) {
 #[when(
     expr = "the CLI begins backing up {string} from node {string} into {string} in the background"
 )]
-fn when_cli_backup_begins_in_background(
+async fn when_cli_backup_begins_in_background(
     world: &mut ScenarioWorld,
     scope: String,
     node: String,
@@ -214,26 +216,35 @@ fn when_cli_backup_begins_in_background(
     let grpc_uri = world.cluster().grpc_uri(&node).expect("the node exists");
     let selected_domain = world.domain.clone();
     let scope = expand_placeholders(world, &scope);
+    let mut command = tokio::process::Command::new(scenario_cli_binary());
+    command.args([
+        "--server",
+        &grpc_uri,
+        "--domain",
+        &selected_domain,
+        "--username",
+        TEST_AUTH_USERNAME,
+        "--password",
+        TEST_AUTH_PASSWORD,
+    ]);
+    command.arg("backup");
+    command.args(scope.split_whitespace());
+    command
+        .arg("--output")
+        .arg(&archive)
+        .args(["--format", "json"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let child = command.spawn().assured("the background CLI process starts");
+    let raw_pid = child.id().assured("the newly spawned CLI has a process id");
+    world.background_backup_pid = Some(nix::unistd::Pid::from_raw(
+        i32::try_from(raw_pid).assured("a process id fits the operating system pid type"),
+    ));
     world.background_backup = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
         async move {
-            let mut command = tokio::process::Command::new(scenario_cli_binary());
-            command.args([
-                "--server",
-                &grpc_uri,
-                "--domain",
-                &selected_domain,
-                "--username",
-                TEST_AUTH_USERNAME,
-                "--password",
-                TEST_AUTH_PASSWORD,
-            ]);
-            command.arg("backup");
-            command.args(scope.split_whitespace());
-            command
-                .arg("--output")
-                .arg(&archive)
-                .args(["--format", "json"]);
-            nervix_primitives::time::timeout(CLI_BACKUP_TIMEOUT, command.output())
+            nervix_primitives::time::timeout(CLI_BACKUP_TIMEOUT, child.wait_with_output())
                 .await
                 .expect("the background backup finishes within its budget")
                 .expect("the CLI process starts")

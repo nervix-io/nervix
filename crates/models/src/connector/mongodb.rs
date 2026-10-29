@@ -142,7 +142,7 @@ const MONGODB_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Driver("30 s"),
         },
         DeclaredWait {
-            wait: "the handshake, a pool wait and a write",
+            wait: "the handshake, a pool wait, the collection lookup and a write",
             bound: WaitBound::Unbounded,
         },
     ],
