@@ -486,14 +486,15 @@ pub(in crate::registry) fn validate_direct_value_mappings(
         match infer_set_expr_types_for_bindings_with_udfs(&program, bindings, udf_signatures) {
             Ok(inferred) => inferred,
             Err(error) => {
-                let mapping = program
+                let mappings_by_span = program
                     .inner
                     .set
                     .iter()
                     .zip(&mappings)
-                    .find(|((_, expression), _)| expression.span == error.current_context().span);
-                let context = match mapping {
-                    Some((_, mapping)) => RegistryError::InvalidConnectorDeclaration {
+                    .map(|((_, expression), mapping)| (expression.span, mapping))
+                    .collect::<HashMap<_, _>>();
+                let context = match mappings_by_span.get(&error.current_context().span) {
+                    Some(mapping) => RegistryError::InvalidConnectorDeclaration {
                         domain: domain.clone(),
                         node: nervix_models::NodeRef::new(
                             nervix_models::ModelKind::Emitter,
