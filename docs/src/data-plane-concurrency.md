@@ -1614,8 +1614,9 @@ application calls require a callable/trait contract or `nervix::dispatch(reason 
 owning callable; a cold module default is insufficient. A dispatch contract states the external
 driver or callback boundary; it does not exempt compiler-visible local callback bodies or acquisitions.
 
-The MySQL insert builder carries a dispatch contract for the vocabulary's opaque iterator over
-at most two immutable table-name parts, with at most 128 bytes across them. The boundary is
+The MySQL insert builder and the Postgres table name builder carry a dispatch contract for the
+vocabulary's opaque iterator over at most two immutable table-name parts, with at most 128 bytes
+across them. The boundary is
 borrowed string traversal; local SQL quoting callbacks retain their recurring-execution checks.
 Statement construction reaches no internal runtime acquisition.
 
@@ -2128,6 +2129,14 @@ state and the one-shot atomic claim; fault selection remains in the harness's ow
 These async observations introduce no tracked blocking-lock owner. Deloxide continues to measure
 the registered product locks, while the public scenarios and model checks exercise pause ordering
 at their applicable boundaries.
+
+The `@restore_client_inspection` one- and three-node examples fill the real filesystem execution
+class before an accepted restore applies its client configuration, then release capacity and require
+every restore step and the configured client to survive. Their active, order and restore-stress
+registrations reach the class-local FIFO admission and drain fence in `crates/execution/src/workers.rs`.
+That owner record names both workload identities. The asynchronous memory and queue-capacity waits,
+inspection observation and parked test workers remain outside the detector; the owner unit tests
+and public scenarios retain their admission, cancellation and completion assertions.
 
 The `@client_wire_standalone_preparation` scenario holds a coordinator after its standalone
 transaction lookup and after preflight, while two leadership transfers let another coordinator

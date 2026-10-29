@@ -271,6 +271,14 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             let Some(state) = admission.runtime_state(consensus, shutdown).await else {
                 return Ok(());
             };
+            #[cfg(feature = "testing")]
+            if runtime.take_runtime_installation_refusal(local_node_id) {
+                return Err(Report::new(
+                    crate::runtime::RuntimeError::RuntimeInstallationRefused {
+                        node: local_node_id.clone(),
+                    },
+                ));
+            }
             debug!(
                 %local_node_id,
                 revision = state.revision,

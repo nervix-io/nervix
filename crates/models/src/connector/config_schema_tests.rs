@@ -10,7 +10,7 @@
     nervix::layer(harness, reason = "owns declaration conformance evidence")
 )]
 
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::ResultExt as _;
 
 use super::*;
 use crate::{ClientConfigEntry, ConnectorKind, CreateClientHttp, DeadlineKey};
@@ -244,6 +244,152 @@ fn a_tls_identity_requires_its_matching_key_in_both_directions() {
         .assured("the complete identity satisfies the declared pair");
 }
 
+const OWNED_MODE: OwnedQueryOption = OwnedQueryOption {
+    name: "mode",
+    aliases: &["mode-alias"],
+    choices: &["plain", "verified"],
+};
+
+const OWNED_ADDRESS: ClientConfigValue = ClientConfigValue::DriverUrl(DriverUrl {
+    schemes: &["db", "dbs"],
+    owned: &[OWNED_MODE],
+});
+
+const OWNED_KEYS: [ClientConfigKey; 2] = [
+    ClientConfigKey::required("addr", OWNED_ADDRESS),
+    ClientConfigKey::TLS_CA.only_for_query("addr", "mode", "verified"),
+];
+
+const OWNED_URL: ClientConfigSchema = ClientConfigSchema::new(&OWNED_KEYS, &[], &[]);
+
+#[test]
+fn a_schema_is_built_only_when_its_address_offers_each_conditioning_choice() {
+    assert_eq!(ClientConfigSchema::new(&OWNED_KEYS, &[], &[]), OWNED_URL);
+}
+
+#[test]
+#[should_panic(expected = "owns_choice")]
+fn a_schema_refuses_a_key_conditioned_on_a_choice_its_address_does_not_offer() {
+    const UNOFFERED: [ClientConfigKey; 2] = [
+        ClientConfigKey::required("addr", OWNED_ADDRESS),
+        ClientConfigKey::TLS_CA.only_for_query("addr", "mode", "unverified"),
+    ];
+    ClientConfigSchema::new(&UNOFFERED, &[], &[]);
+}
+
+#[test]
+fn an_owned_query_option_is_set_once_to_a_declared_choice_by_any_spelling() {
+    for (address, choice) in [
+        ("db://host/x?mode=plain", "plain"),
+        (
+            "dbs://host/x?other=1&mode-alias=verified&driver=2",
+            "verified",
+        ),
+    ] {
+        let parsed = Url::parse(address).assured("a fixture URL");
+        assert_eq!(
+            OWNED_MODE
+                .value_in("addr", &parsed)
+                .assured("one declared choice"),
+            choice
+        );
+        OWNED_URL
+            .validate(&[entry("addr", address)])
+            .assured("the driver reads the other options");
+    }
+    for address in [
+        "db://host/x",
+        "db://host/x?mode=other",
+        "db://host/x?mode=Plain",
+        "db://host/x?mode=plain&mode=plain",
+        "db://host/x?mode=plain&mode-alias=verified",
+    ] {
+        let report = OWNED_URL
+            .validate(&[entry("addr", address)])
+            .expect_err("Nervix owns the option");
+        assert_eq!(
+            report.current_context(),
+            &ClientConfigSchemaError::QueryOption {
+                key: "addr".to_string(),
+                option: "mode",
+                choices: &["plain", "verified"],
+            },
+            "{address}"
+        );
+    }
+    let report = OWNED_URL
+        .validate(&[entry("addr", "http://host/x?mode=plain")])
+        .expect_err("Nervix owns the scheme");
+    assert_eq!(
+        report.current_context(),
+        &ClientConfigSchemaError::Scheme {
+            key: "addr".to_string(),
+            schemes: &["db", "dbs"],
+        }
+    );
+    assert_eq!(
+        OWNED_URL.ownership_label(),
+        "Nervix; address query delegated to driver"
+    );
+}
+
+#[test]
+fn a_key_conditioned_on_an_owned_choice_requires_its_address_to_set_it() {
+    for validate in [
+        ClientConfigSchema::validate,
+        ClientConfigSchema::validate_rendered,
+    ] {
+        validate(
+            OWNED_URL,
+            &[
+                entry("addr", "db://host/x?mode=verified"),
+                entry("tls_ca_file", "authority.pem"),
+            ],
+        )
+        .assured("the declared choice admits the key");
+        let report = validate(
+            OWNED_URL,
+            &[
+                entry("addr", "db://host/x?mode=plain"),
+                entry("tls_ca_file", "authority.pem"),
+            ],
+        )
+        .expect_err("the key requires the verified choice");
+        assert_eq!(
+            report.current_context(),
+            &ClientConfigSchemaError::RequiresQuery {
+                key: "tls_ca_file",
+                address: "addr",
+                option: "mode",
+                value: "verified",
+            }
+        );
+    }
+    OWNED_URL
+        .validate(&[
+            entry("addr", "{{ address }}"),
+            entry("tls_ca_file", "authority.pem"),
+        ])
+        .assured("a templated address is held to the choice once rendered");
+    let inspected = OWNED_URL.inspection_entries(&[entry("addr", "db://host/x?mode=plain")]);
+    assert_eq!(inspected, vec![entry("addr", CLIENT_CONFIG_REDACTION)]);
+
+    const OPTIONAL_ADDRESS: [ClientConfigKey; 2] = [
+        ClientConfigKey::optional("addr", OWNED_ADDRESS),
+        ClientConfigKey::TLS_CA.only_for_query("addr", "mode", "verified"),
+    ];
+    let report = ClientConfigSchema::new(&OPTIONAL_ADDRESS, &[], &[])
+        .validate(&[entry("tls_ca_file", "authority.pem")])
+        .expect_err("without its address the key has no choice to rely on");
+    assert!(matches!(
+        report.current_context(),
+        ClientConfigSchemaError::RequiresQuery {
+            key: "tls_ca_file",
+            ..
+        }
+    ));
+}
+
 #[test]
 fn a_tls_address_requires_its_declared_trust_file() {
     let address = entry("addr", "mqtts://broker.example.com:8883");
@@ -436,10 +582,29 @@ fn bolero_schema_checked_client_entries_round_trip() {
                 .entropy()
                 .index(NonZeroUsize::new(schemas.len()).assured("clients declare schemas"));
             let schema = schemas[index];
+            /// One Nervix-owned query option of one address key.
+            #[derive(PartialEq, Eq, PartialOrd, Ord)]
+            struct OwnedOptionOf {
+                address: &'static str,
+                option: &'static str,
+            }
             let mut address_schemes = BTreeMap::new();
+            let mut address_choices = BTreeMap::new();
             for key in schema.keys() {
-                if let ClientConfigPresence::OptionalForScheme { address, scheme } = key.presence {
-                    address_schemes.insert(address, scheme);
+                match key.presence {
+                    ClientConfigPresence::OptionalForScheme { address, scheme } => {
+                        address_schemes.insert(address, scheme);
+                    }
+                    // Every key is generated, so a key conditioned on an owned option's choice
+                    // fixes that choice in its address.
+                    ClientConfigPresence::OptionalForQuery {
+                        address,
+                        option,
+                        value,
+                    } => {
+                        address_choices.insert(OwnedOptionOf { address, option }, value);
+                    }
+                    _ => {}
                 }
             }
             let mut entries = Vec::new();
@@ -492,6 +657,39 @@ fn bolero_schema_checked_client_entries_round_trip() {
                         Some(scheme) => format!("{scheme}://user:password@example.com/0"),
                         None => "redis://user:password@example.com/0".to_string(),
                     },
+                    ClientConfigValue::DriverUrl(declared) => {
+                        let scheme = match address_schemes.get(key.name) {
+                            Some(scheme) => *scheme,
+                            None => {
+                                let index = arbitrary.entropy().index(
+                                    NonZeroUsize::new(declared.schemes.len())
+                                        .assured("a URL declares schemes"),
+                                );
+                                declared.schemes[index]
+                            }
+                        };
+                        let mut url = format!(
+                            "{scheme}://user:password@example.com/db?application_name=fixture"
+                        );
+                        for option in declared.owned {
+                            let owned_option = OwnedOptionOf {
+                                address: key.name,
+                                option: option.name,
+                            };
+                            let choice = match address_choices.get(&owned_option) {
+                                Some(choice) => *choice,
+                                None => {
+                                    let index = arbitrary.entropy().index(
+                                        NonZeroUsize::new(option.choices.len())
+                                            .assured("an owned option declares choices"),
+                                    );
+                                    option.choices[index]
+                                }
+                            };
+                            url.push_str(&format!("&{}={choice}", option.name));
+                        }
+                        url
+                    }
                     ClientConfigValue::Choice(choices) => {
                         let index = arbitrary.entropy().index(
                             NonZeroUsize::new(choices.len()).assured("a choice declares values"),

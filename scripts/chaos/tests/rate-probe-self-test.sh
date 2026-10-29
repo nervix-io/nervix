@@ -40,13 +40,15 @@ for image in "${CHAOS_PROBE_IMAGE}" "${chaos_nettools_image}"; do
     fi
 done
 docker network create --label "io.nervix.chaos.run=${run_id}" "${run_id}" >/dev/null
+# Namespace owners live until cleanup, independently of how long the controls take on this
+# worker. Each probe keeps its own bound; an owner must not expire between controls.
 test_sender_id="$(docker run --detach --label "io.nervix.chaos.run=${run_id}" \
-    --network "${run_id}" "${CHAOS_PROBE_IMAGE}" sleep 300)"
+    --network "${run_id}" "${CHAOS_PROBE_IMAGE}" tail -f /dev/null)"
 test_receiver_id="$(docker run --detach --label "io.nervix.chaos.run=${run_id}" \
-    --network "${run_id}" "${CHAOS_PROBE_IMAGE}" sleep 300)"
+    --network "${run_id}" "${CHAOS_PROBE_IMAGE}" tail -f /dev/null)"
 # A namespace owner Docker created but never started, whose namespace no helper can join.
 test_stopped_id="$(docker create --label "io.nervix.chaos.run=${run_id}" \
-    --network "${run_id}" "${CHAOS_PROBE_IMAGE}" sleep 300)"
+    --network "${run_id}" "${CHAOS_PROBE_IMAGE}" tail -f /dev/null)"
 
 owned_service_container() {
     case "$1" in

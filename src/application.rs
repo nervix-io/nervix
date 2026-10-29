@@ -183,6 +183,7 @@ mod relocation;
 mod resource;
 mod restore;
 mod runtime_admission;
+mod runtime_reconciliation;
 mod schedule_planning;
 mod scheduling;
 mod service_tasks;
@@ -1520,7 +1521,8 @@ impl Application {
         let certificates_for_schedule = certificates.clone();
         let runtime_for_schedule = runtime.clone();
         let registry_for_schedule = registry.clone();
-        let mut schedule_rx = consensus.observer().subscribe_schedule();
+        let schedule_rx = consensus.observer().subscribe_schedule();
+        let domains_rx = consensus.observer().subscribe_domains();
         let consensus_for_schedule = consensus.observer();
         let cluster_for_schedule = cluster.clone();
         let interconnect_for_schedule = interconnect.clone();
@@ -1537,23 +1539,13 @@ impl Application {
                 admission: &schedule_runtime_admission,
                 shutdown: &schedule_shutdown,
             };
-            if let Err(error) = apply_current_cluster_runtime_state(application).await {
-                warn!(error = format!("{error:#}"), "failed to apply initial cluster schedule");
-            }
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                nervix_primitives::select! {
-                    _ = schedule_shutdown.cancelled() => break,
-                    changed = schedule_rx.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        if let Err(error) = apply_current_cluster_runtime_state(application).await {
-                            warn!(error = format!("{error:#}"), "failed to apply updated cluster schedule");
-                        }
-                    }
-                }
-            }
+            runtime_reconciliation::RuntimeReconciliation::new(
+                schedule_rx,
+                domains_rx,
+                schedule_shutdown.clone(),
+            )
+            .run(|| apply_current_cluster_runtime_state(application))
+            .await;
         }));
         let events = SessionEvents::new(SESSION_EVENT_CAPACITY);
         let service = SessionServiceImpl {
@@ -2264,33 +2256,6 @@ impl Application {
                 nervix_primitives::select! {
                     _ = resource_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_secs(1)) => {}
-                }
-            }
-        }));
-
-        let domain_apply_service = service.clone();
-        let domain_apply_shutdown = shutdown.clone();
-        background_tasks.push(nervix_primitives::task::spawn(async move {
-            let mut domains_rx = domain_apply_service.inner.consensus.subscribe_domains();
-            if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
-                warn!(
-                    error = format!("{error:#}"),
-                    "failed to apply cluster schedule after initial domain sync"
-                );
-            }
-
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                nervix_primitives::select! {
-                    _ = domain_apply_shutdown.cancelled() => break,
-                    changed = domains_rx.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
-                            warn!(error = format!("{error:#}"), "failed to apply cluster schedule after domain sync");
-                        }
-                    }
                 }
             }
         }));
