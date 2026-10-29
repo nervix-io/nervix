@@ -88,6 +88,11 @@ pub(crate) enum ConnectorDeclarationIssue {
         section: nervix_models::MappedValueSection,
         key: String,
     },
+    #[error("{section} key '{key}' expression type inference failed")]
+    MappedExpressionInference {
+        section: nervix_models::MappedValueSection,
+        key: String,
+    },
     #[error("{section} key '{key}' requires {expected}, found {actual}")]
     MappedType {
         section: nervix_models::MappedValueSection,

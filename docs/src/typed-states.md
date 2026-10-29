@@ -26,6 +26,11 @@ refuses TLS file keys on HTTP. The case-preserving `ClickHouseTableName` is cons
 one or two nonempty locator parts; the connector receives that validated name and quotes its parts
 for SQL without reparsing a Plexus statement.
 
+A direct-value expression's inference refusal carries its declared section and destination key
+separately from the VM's typed compile cause. The registry associates that cause's operation span
+with the lowered mapping before reporting the refusal; a null-only mapping is refused at admission.
+[Errors And Diagnostics](errors-and-diagnostics.md#registry-validation-and-planning) owns the report.
+
 The MongoDB engine resolves a required nonempty database from its explicit key or the URL path
 into one private configuration value. It consumes the driver's optional default rather than
 carrying a second database identity. Collection names are validated vocabulary values that retain
