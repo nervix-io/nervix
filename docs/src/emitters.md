@@ -835,14 +835,14 @@ The rows around it are written.
 The destination's own limits bound every write too. A MySQL statement binds at most 65,535
 placeholders, so an insert carries at most as many rows as fit them: 13,107 rows of five mapped
 columns, whatever `MAX MESSAGES` allows. Postgres reads no protocol message above 1,073,741,822
-bytes, and a write's measured size is never smaller than the message that carries its arrays, so a
-Postgres write is kept within that size too; a row whose own insert exceeds it follows
-`ON MESSAGE ERROR` as an `external` `publish` error. A MongoDB document holds at most 16 MiB, so a
-row whose document exceeds it follows `ON MESSAGE ERROR` as an `external` `publish` error naming
-16777216 bytes before any write, and the rows around it are written. MongoDB takes 100,000 writes
-in one command, more than `MAX MESSAGES` allows, and its driver divides a write larger than the
-`maxMessageSizeBytes` the server reports into several commands whose documents it still answers
-for one by one.
+bytes, so a Postgres emitter accepts `MAX SIZE` up to `1073741822B` and is refused above it at
+`CREATE`; a write's measured size is never smaller than the message that carries its arrays, so
+every Postgres insert stays within the message the server reads. A MongoDB document holds at most
+16 MiB, so a row whose document exceeds it follows `ON MESSAGE ERROR` as an `external` `publish`
+error naming 16777216 bytes before any write, and the rows around it are written. MongoDB takes
+100,000 writes in one command, more than `MAX MESSAGES` allows, and its driver divides a write
+larger than the `maxMessageSizeBytes` the server reports into several commands whose documents it
+still answers for one by one.
 
 A write that fails for a reason specific to its rows — a constraint, a value its column cannot
 hold, a packet the server refuses as too large — is written again one row at a time, so the rows
@@ -1134,7 +1134,7 @@ Transport-specific expectations:
 - `CLICKHOUSE`: use an `https://...` `addr` with mounted `tls_ca_file` and required positive
   `timeout_ms`; HTTP addresses refuse TLS file keys.
 - `POSTGRES`: use `sslmode=verify-full` in the `addr` URL; Nervix honors `tls_ca_file`, `tls_cert_file`, and `tls_key_file`. `sslmode=disable` is the only other accepted policy.
-- `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file`.
+- `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file` and paired `tls_cert_file`/`tls_key_file` client identity files.
 - `MONGODB`: Nervix honors `tls_ca_file`, and `tls_cert_file` with `tls_key_file` as its client
   certificate; any of them enables TLS without `tls=true` in `addr`, and an `addr` with `tls=false`
   refuses them. See [MongoDB](#mongodb).
@@ -2489,13 +2489,37 @@ unnest(...)`. The [batching clause](#batching) is required: each insert carries 
 poison-isolation path, tables without an idempotent `ON CONFLICT` policy may observe duplicates when
 healthy records are re-executed.
 
+`TABLE` names a table, or a schema and its table, as one or two nonempty parts separated by `.`:
+`TABLE 'Orders'` or `TABLE 'sales.Orders'`, each part on the table identifier alphabet and the whole
+name within 128 bytes. Nervix sends each part as its own quoted identifier with its case kept, so
+`'sales.Orders'` is the relation `"sales"."Orders"`, and the insert and the lookup of the table's
+column types name that same relation. A one-part name resolves through the connection's
+`search_path`. An empty part or a third part is refused at `CREATE`.
+
+Each mapped value is bound as text, in the one text array its column binds, and the statement casts
+it to the column's declared type:
+
+| Plexus type | Bound text |
+| --- | --- |
+| `BOOL` | `true` or `false` |
+| `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64` | Decimal integer text, through the full `U64` range |
+| `F32`, `F64` | The shortest decimal text that reads back as the same `F64`, an `F32` widened first; a non-finite value binds `NULL` |
+| `STRING` | The UTF-8 text |
+| `BYTES` | `bytea` hex text: `\x`, then two hex digits per octet |
+| `DATETIME` | RFC 3339 timestamp text at UTC offset `+00:00` |
+| `ARRAY<T>`, `VEC<T>` | Recursive JSON text; `BYTES` elements are padded base64 and non-finite floats are `null` |
+
+A null binds as a `NULL` element. A mapping whose inferred type is none of these is refused at
+`CREATE`. A value the column's type cannot read from its text, such as `U64` above a `bigint`'s
+range, is a row Postgres rejects with its SQLSTATE.
+
 Postgres emitters may include an insert conflict policy after `VALUES`:
 
 <!-- connector-matrix:emit-postgres-table:start -->
 ```plexus,ignore
 CREATE POSTGRES TABLE EMITTER <name>
   FROM <relay>
-  TO <client> TABLE 'Orders'
+  TO <client> TABLE 'sales.Orders'
     MODE <mode>
     VALUES { '<field>' = <expression>, ... }
   [ON CONFLICT DO NOTHING | ON CONFLICT ('id') DO UPDATE]
@@ -2511,13 +2535,13 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Capability | Declaration |
 | --- | --- |
 | Reference | POSTGRES client |
-| Locator and validation rule | TABLE 'Orders' (postgres_table) |
+| Locator and validation rule | TABLE 'sales.Orders' (postgres_table) |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `ON CONFLICT DO NOTHING` (keyword choice); `ON CONFLICT ('id') DO UPDATE` (keyword choice); optional; omitted when unset |
+| Options in statement order | `ON CONFLICT DO NOTHING` (keyword choice); `ON CONFLICT ('id') DO UPDATE` (composed clause); optional; omitted when unset |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | required |
-| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Protocol batch maximum | 1073741822B |
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
@@ -2529,15 +2553,23 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [POSTGRES TABLE capability and mirror reference](connector-capabilities.md#postgres-table-emit).
 <!-- connector-matrix:emit-postgres-table:end -->
 
-`DO UPDATE` updates every mapped `VALUES` column except the conflict target columns, and requires a conflict target. `DO NOTHING` may be used with or without a target.
-Postgres refuses a `DO UPDATE` insert that carries one conflict key twice, so such an insert is
-written again one record at a time, and the later record updates the earlier one.
+`DO UPDATE` updates every mapped `VALUES` column except the conflict target columns, so it requires
+a conflict target and at least one mapped column outside it. `DO NOTHING` may be used with or
+without a target; without one, it skips a row that conflicts on any unique constraint. Target
+columns are nonempty names of the table's unique index columns, in written order, and need not be
+mapped. A clause that breaks these rules is refused at `CREATE`. Postgres refuses a `DO UPDATE`
+insert that carries one conflict key twice, so such an insert is written again one record at a time,
+and the later record updates the earlier one.
 
 Postgres clients declare their connection-pool bounds and connect with a `postgres://` or
-`postgresql://` URL. The URL must select one of two TLS policies: `sslmode=disable` for an
-unencrypted connection, or `sslmode=verify-full` for TLS with certificate-chain and hostname
+`postgresql://` URL. Nervix owns the URL's scheme and its TLS policy: the URL sets `sslmode`
+exactly once, under that name or the driver's `ssl-mode`, to one of two policies: `sslmode=disable`
+for an unencrypted connection, or `sslmode=verify-full` for TLS with certificate-chain and hostname
 verification. There is no opportunistic fallback and no encrypted connection without peer
-verification. See [Database Client Connection Pools](database-client-pools.md) for the accepted
+verification. `CREATE CLIENT` refuses another scheme, a missing, repeated or other `sslmode`, and
+TLS files without `sslmode=verify-full`, each naming the key and the rule rather than the URL. The
+driver reads the URL's other query options, and its parser checks them before the client is
+committed. See [Database Client Connection Pools](database-client-pools.md) for the accepted
 pool counts:
 
 ```plexus
@@ -2611,9 +2643,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | connection, its handshake and an insert: unbounded |
-| Driver limits | The driver has no connect, read or write timeout.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |
+| Network waits | pool checkout (including connection and handshake), initial validation, and each insert: `timeout_ms`; unbounded when omitted |
+| Driver limits | Without timeout_ms, pool checkout, connection validation and inserts have no deadline.<br>TLS identity keys use the driver's RSA PKCS#1 private-key format.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [MYSQL TABLE capability and mirror reference](connector-capabilities.md#mysql-table-emit).
 <!-- connector-matrix:emit-mysql-table:end -->
@@ -2660,13 +2692,28 @@ CREATE MYSQL CLIENT mysql
   };
 ```
 
-For TLS connections, include `require_ssl=true`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path.
+For TLS connections, include `require_ssl=true`, mount a TLS resource, and set `'tls_ca_file'` to
+the mounted CA path. Supplying the CA preserves the URL's certificate-verification, hostname and
+built-in-root options. For mutual TLS, also set `tls_cert_file` and `tls_key_file` together. The
+driver reads a PEM certificate chain and an RSA PKCS#1 private key; for a PEM key this is the
+`RSA PRIVATE KEY` form, which OpenSSL can produce with `openssl rsa -traditional`.
 
-The current client CONFIG keys are required `addr` and optional `tls_ca_file`. The address must
+The current client CONFIG keys are required `addr` and optional `timeout_ms`, `tls_ca_file`,
+`tls_cert_file` and `tls_key_file`. The address must
 be a `mysql://` URL accepted by the driver's offline parser. URL query options belong to the
 driver, except connection-pool sizing: declare that capacity with `POOL SIZE MIN ... MAX ...`.
 Pool-size query parameters such as `pool_min` and `pool_max` are refused before the client is
 committed. Unknown standalone CONFIG keys are refused rather than ignored.
+
+`timeout_ms` is a positive, schedulable whole number of milliseconds. It bounds opening and
+validating the pool's first connection, each subsequent pool checkout (including connection
+establishment and authentication), and each insert. The minimum keeper uses the same checkout
+bound. Each of these is a separate operation; an insert's bound starts after checkout, and an
+isolated row's insert receives its own bound. Omitting the key leaves these waits unbounded.
+An elapsed bound is an infrastructure failure, reported with `timeout_ms` and its duration, and
+the emitter retries its pending rows on its declared policy. The driver discards a connection
+whose in-flight command was cancelled. A timeout does not establish whether the server committed
+an insert; use a stable key and an appropriate `ON CONFLICT` action where retries must converge.
 
 ### MongoDB
 

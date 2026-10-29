@@ -267,3 +267,28 @@ pub(crate) fn external_identifier(text: &str) -> Result<(), ExternalNameError> {
     }
     Ok(())
 }
+
+/// A table, or a schema or database and its table: one or two nonempty parts separated by `.`,
+/// each on the external identifier alphabet, together within its 128-byte bound.
+pub(crate) fn qualified_table(text: &str) -> Result<(), ExternalNameError> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a Plexus table locator names a table or its schema and table"
+        )
+    )]
+    const MAX_PARTS: usize = 2;
+    external_identifier(text)?;
+    if text.split('.').any(str::is_empty) {
+        return Err(ExternalNameError::EmptyLevel { separator: '.' });
+    }
+    let parts = text.split('.').count();
+    if parts > MAX_PARTS {
+        return Err(ExternalNameError::TooManyLevels {
+            max: MAX_PARTS,
+            actual: parts,
+        });
+    }
+    Ok(())
+}
