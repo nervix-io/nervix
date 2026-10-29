@@ -126,8 +126,8 @@ jobs:
           KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
           KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       - name: Runner diagnostics before Run runner tests and every ordinary Bolero property
@@ -167,6 +167,10 @@ jobs:
     timeout-minutes: 240
     permissions:
       contents: read
+    env:
+      # Sixteen compilers of the sanitizer build exceeded the 32 GB of Boat's 16-CPU machine, half
+      # the memory these shards had, so the build runs eight.
+      CARGO_BUILD_JOBS: "8"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -235,8 +239,8 @@ jobs:
           KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
           KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       - name: Start runner load recorder

@@ -211,10 +211,12 @@ target = "test:scenarios"
 # Together with the paced-driver scenarios below and `stress-restore-scenarios`, the stressed
 # scenarios are every scenario of the active-only selection but the report tool's triage, which
 # drives no lifecycle path.
-# Run 39569675589 spent 19m49s here. A 45-minute invocation leaves 39 minutes of execution after
-# its six-minute teardown reserve, covering 1.5 times that measurement with nine minutes left.
+# On CI's Boat runner, Check run 40909456410 ran 153 of the 154 runs in 2342s before its suite
+# budget expired, so all of them take about 2357s; Ubicloud's run 40825862815 had run 153 in 1909s.
+# A 66-minute invocation leaves 60 minutes of execution after its six-minute teardown reserve, about
+# 1.5 times that measurement.
 [[invocation]]
-bound_seconds = 2700
+bound_seconds = 3960
 concurrency = 1
 evidence = true
 features = ["testing"]

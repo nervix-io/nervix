@@ -720,10 +720,11 @@ reports its actual write mode, which the start step prints and publication recor
 CI keeps its cache in a European R2 bucket, near the European data centers its runners execute in.
 It reads the bucket's name and S3 service URL from the required repository secrets
 `KACHE_EU_BUCKET` and `KACHE_EU_BUCKET_ENDPOINT`, its S3 region from the repository variable
-`KACHE_BUCKET_REGION`, and its credentials from the repository secrets `KACHE_BUCKET_ACCESS_KEY_ID`
-and `KACHE_BUCKET_SECRET_ACCESS_KEY`. Each kache-backed job passes them, as kache's `KACHE_S3_*`
-environment variables, to `python3 scripts/kache_remote.py start` right after the setup action.
-Docker image builds pass the same settings to their builder, whose build command runs
+`KACHE_BUCKET_REGION`, and its credentials from the repository secrets
+`KACHE_EU_BUCKET_ACCESS_KEY_ID` and `KACHE_EU_BUCKET_SECRET_ACCESS_KEY`, which hold an R2 API token
+with object read and write access to that bucket. Each kache-backed job passes them, as kache's
+`KACHE_S3_*` environment variables, to `python3 scripts/kache_remote.py start` right after the
+setup action. Docker image builds pass the same settings to their builder, whose build command runs
 `scripts/kache_remote.py configure` before it starts the daemon. Either way the service URL is
 written into the daemon's TOML configuration before startup.
 
@@ -3026,10 +3027,14 @@ that a plain diagnostic build of the same scenarios met.
 [Two Stressed Scenarios In One Process](#two-stressed-scenarios-in-one-process) records what made
 them miss. `deloxide-stress` runs the active-only selection's probes, conformance checks and
 owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of
-the inventory's lifecycle scenario runs tagged `@deloxide_stress`, bounded at 45 minutes, and the
+the inventory's lifecycle scenario runs tagged `@deloxide_stress`, bounded at 66 minutes, and the
 `stress-paced-simulation` invocation of the 36 paced-driver runs with the stressed Rust driver,
 bounded at 40. The six transaction-retention and ten endpoint ACK examples run in separate serial
-invocations, each bounded at 15 minutes, within the same selection workload budget.
+invocations, each bounded at 15 minutes, within the same selection workload budget. On CI's Boat
+runner the 154 `stress-scenarios` runs take about 39 minutes one at a time: Check run
+40909456410 completed 153 of them in 2,342 seconds, about 22 percent longer than the same 153
+took on the previous runner. The 66-minute bound leaves 60 minutes of suite time after the
+teardown reserve, about 1.5 times that measurement.
 `deloxide-stress-restore` runs the build's probes and the `stress-restore-scenarios`
 invocation of the inventory's capture, restore and checkpoint-transfer runs tagged
 `@deloxide_stress_restore`, bounded at 70 minutes. Each selection has the inventory's 80-minute

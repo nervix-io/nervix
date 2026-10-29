@@ -170,8 +170,8 @@ class KacheWorkflowTests(unittest.TestCase):
                             "KACHE_S3_BUCKET": "${{ secrets.KACHE_EU_BUCKET }}",
                             "KACHE_S3_REGION": "${{ vars.KACHE_BUCKET_REGION }}",
                             "KACHE_S3_ENDPOINT": "${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}",
-                            "KACHE_S3_ACCESS_KEY": "${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}",
-                            "KACHE_S3_SECRET_KEY": "${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}",
+                            "KACHE_S3_ACCESS_KEY": "${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}",
+                            "KACHE_S3_SECRET_KEY": "${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}",
                         },
                     )
                     for earlier in steps[:setup]:
@@ -234,8 +234,8 @@ class KacheWorkflowTests(unittest.TestCase):
             ("KACHE_S3_BUCKET", "${{ secrets.KACHE_EU_BUCKET }}"),
             ("KACHE_S3_REGION", "${{ vars.KACHE_BUCKET_REGION }}"),
             ("KACHE_S3_ENDPOINT", "${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}"),
-            ("KACHE_S3_ACCESS_KEY", "${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}"),
-            ("KACHE_S3_SECRET_KEY", "${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}"),
+            ("KACHE_S3_ACCESS_KEY", "${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}"),
+            ("KACHE_S3_SECRET_KEY", "${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}"),
         ):
             self.assertIn(f"{name}: {value}", workflow)
             self.assertIn(f'--build-arg "{name}=${{{name}}}"', justfile)
