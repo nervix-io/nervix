@@ -1586,6 +1586,14 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-emit).
 <!-- connector-matrix:emit-nats-subject:end -->
 
+`SUBJECT` names one literal subject, published to exactly as written, letter case included. It
+follows the [ingestion subject rule](ingestors.md#external-names) without the `*` and `>`
+wildcards, so `SUBJECT 'orders.*'` is refused when the emitter is created. A message carries its
+subject, the written headers and the payload; the emitter sets no reply subject or JetStream
+message id of its own. `BATCH` is optional. The NATS protocol sets no message size of its own:
+each server announces its `max_payload`, and the client refuses a batch message above it before
+writing it, as [Broker and message emitters](#broker-and-message-emitters) describes.
+
 `NO ACK` publishes through Core NATS. A write delivers its records only after the client's queued
 bytes have drained and their connection has flushed. The flush is local: the server answers
 nothing, so a delivered record can still be lost if its connection fails before the server reads
