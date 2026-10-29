@@ -35,6 +35,13 @@ jobs:
       tests-required: ${{ steps.selection.outputs.tests-required }}
       bolero-required: ${{ steps.selection.outputs.bolero-required }}
     steps:
+      # Boat's base image has Ubuntu's git 2.43, and the test selection passes `--no-lazy-fetch`,
+      # which git 2.44 added. GitHub's runner image takes the current git from this PPA too.
+      - name: Install the current git
+        run: |
+          sudo add-apt-repository --yes ppa:git-core/ppa
+          sudo apt-get install --yes --no-install-recommends git
+
       - name: Checkout tested merge
         uses: actions/checkout@v4
         with:
@@ -151,6 +158,13 @@ jobs:
 
       - name: Install ghokin
         run: python3 scripts/install_go_ci_tool.py ghokin "${RUNNER_TEMP}/go-tool-bootstrap"
+
+      # Boat's base image has Ubuntu's git 2.43, and the test selection passes `--no-lazy-fetch`,
+      # which git 2.44 added. GitHub's runner image takes the current git from this PPA too.
+      - name: Install the current git
+        run: |
+          sudo add-apt-repository --yes ppa:git-core/ppa
+          sudo apt-get install --yes --no-install-recommends git
 
       - name: Install apt deps and current GitHub CLI
         run: |
@@ -1483,6 +1497,13 @@ jobs:
           curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
+
+      # Boat's base image has Ubuntu's git 2.43, and the test selection passes `--no-lazy-fetch`,
+      # which git 2.44 added. GitHub's runner image takes the current git from this PPA too.
+      - name: Install the current git
+        run: |
+          sudo add-apt-repository --yes ppa:git-core/ppa
+          sudo apt-get install --yes --no-install-recommends git
 
       - name: Install apt deps
         run: |

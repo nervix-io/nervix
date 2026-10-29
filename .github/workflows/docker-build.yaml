@@ -792,6 +792,13 @@ jobs:
         with:
           tool: just@latest,trunk
 
+      # Boat's base image has Ubuntu's git 2.43, and the test selection passes `--no-lazy-fetch`,
+      # which git 2.44 added. GitHub's runner image takes the current git from this PPA too.
+      - name: Install the current git
+        run: |
+          sudo add-apt-repository --yes ppa:git-core/ppa
+          sudo apt-get install --yes --no-install-recommends git
+
       # The book build compiles nervix-server and nervix-cli: the screenshot tool
       # drives a real server, and the nervix-cli reference is rendered from the
       # binary's own --help.
