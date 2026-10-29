@@ -2070,7 +2070,7 @@ What the measurements show:
   second rather than the hundred million of fixed-width arithmetic.
 
 The workloads, commands, allocation observations, and hardware are recorded in the
-[VM functions measurement report](https://github.com/nervix-io/nervix/blob/main/benches/reports/vm-functions-18.md).
+[VM functions measurement report](https://app.clickup.com/t/86bc202hj).
 
 ## Catalog
 

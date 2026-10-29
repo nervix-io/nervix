@@ -513,6 +513,11 @@ properties appear as `********`. Complete canonical configuration remains in bac
 inspection text is not a complete configuration export. See the
 [Connector Contract](connector-contract.md) for the validation boundary and initialization limits.
 
+Inspection preflight can refuse a request when local capacity is full. After a transaction or
+restore has been accepted, its model application waits for client-inspection command memory and a
+filesystem worker-queue place. Temporary pressure supplies no failed configuration verdict; the
+existing execution identity, outcome recovery and node-shutdown rules continue to govern the command.
+
 A command's reply is a `CommandOutcome`: the execution reference it answers, whether the outcome was
 produced now or recovered from the durable record of an earlier attempt, one typed disposition, a
 message for display, diagnostics with optional source spans, and, for a request of several
@@ -1501,6 +1506,12 @@ revision the serving node read. An open that finds no endpoint there is therefor
 `NotClientIngestor`. A restored producer whose open reaches a restarted executing node before that
 node installs its domain retries instead of requiring an explicit new open, and a removed or
 stopped endpoint is still classified, by the serving node, on the next attempt.
+
+A transient failure while reconstructing the executing node's graph does not require a client to
+submit another configuration command. The node's background installation supervisor retries the
+current admitted revision on the admission loop's half-second cadence, or sooner on a committed
+schedule or domain update. Until installation completes, the endpoint's existing
+temporary-unavailability behavior and the client's restoration backoff continue to apply.
 
 ## Emitter Consumers
 

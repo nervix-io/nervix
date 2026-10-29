@@ -490,6 +490,11 @@ fn client_key(key: &ClientConfigKey) -> Value {
         ClientConfigPresence::OptionalForScheme { address, scheme } => {
             format!("optional; requires `{address}` to use `{scheme}`")
         }
+        ClientConfigPresence::OptionalForQuery {
+            address,
+            option,
+            value,
+        } => format!("optional; requires `{address}` to set `{option}={value}`"),
     };
     let owner = match owner {
         ClientConfigOwner::Nervix => "Nervix; strict",
@@ -497,6 +502,21 @@ fn client_key(key: &ClientConfigKey) -> Value {
     };
     let value = match declared_value {
         ClientConfigValue::Url(schemes) => format!("URL ({})", schemes.join(" or ")),
+        ClientConfigValue::DriverUrl(url) => {
+            let mut owned_options = Vec::with_capacity(url.owned.len());
+            for option in url.owned {
+                owned_options.push(format!(
+                    "`{}` set once to {}",
+                    option.name,
+                    option.choices.join(" or ")
+                ));
+            }
+            format!(
+                "driver URL ({}); Nervix owns {}; the driver reads its other query options",
+                url.schemes.join(" or "),
+                owned_options.join(", ")
+            )
+        }
         ClientConfigValue::Choice(choices) => choices.join(" or "),
         value => value.label().to_owned(),
     };

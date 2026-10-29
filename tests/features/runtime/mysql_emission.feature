@@ -132,7 +132,7 @@ Feature: MySQL emission
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
-    And these Plexus commands are executed
+    And these Plexus commands are executed on the active session
       """
       SHOW CLUSTER STATUS;
       """
