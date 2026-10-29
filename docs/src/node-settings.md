@@ -359,9 +359,10 @@ form one transition: either every assignment is committed or none is. A duplicat
 an invalid value, or a cap that an existing model exceeds refuses the transition with the
 parameter and owning model identified. Timings that drive repeated work or retained validity
 must be greater than zero and no longer than `u32::MAX` whole seconds, with nanosecond precision
-within that range. Counts used by a wire or native count fit its current representation. HTTP application headers
-default to 128 distinct fields; `HTTP_HEADER_FIELDS` changes that count up to 24,576, the native
-request map's distinct-field capacity. A prerequisite cannot be assigned through this statement.
+within that range. Counts used by a wire or native count fit its current representation. HTTP
+application headers default to 128 distinct fields; `HTTP_HEADER_FIELDS` changes that count up to
+16,384. This limit leaves 8,192 distinct-field slots in the native request map for client and
+transport headers. A prerequisite cannot be assigned through this statement.
 
 Validation and publication share a commit fence. A concurrent model change or parameter change
 invalidates a captured transition before it applies, and validation runs again against the

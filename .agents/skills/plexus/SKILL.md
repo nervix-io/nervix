@@ -237,7 +237,7 @@ selected domain. Read `Node Settings` for the complete parameter set, positive d
 existing-model cap refusals, live installation and committed-versus-running inspection. Seed flags
 belong only to the first bootstrap, including when their value equals the default. Later starts,
 including the returning bootstrap node, omit them.
-`HTTP_HEADER_FIELDS` ranges from 1 to 24,576. Committed header byte and field caps also protect
+`HTTP_HEADER_FIELDS` ranges from 1 to 16,384, leaving capacity for client and transport headers. Committed header byte and field caps also protect
 literal HTTP polling headers, at model creation and when a later cap is lowered.
 
 ## Preserve Plexus semantics

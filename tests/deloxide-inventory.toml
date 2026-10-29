@@ -3786,7 +3786,7 @@ feature = "tests/features/cluster/cluster_parameters.feature"
 id = "parameters.header-count-range"
 invariant = "A cluster parameter cannot promise a header count its HTTP representation cannot hold."
 invocation = "cluster-parameters"
-scenario = "A parameter change refuses an unrepresentable HTTP header count on a cluster of <cluster_size>"
+scenario = "A parameter change reserves transport capacity in the HTTP header count on a cluster of <cluster_size>"
 selections = [
   "deloxide",
   "deloxide-order",

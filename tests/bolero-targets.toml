@@ -12,7 +12,7 @@ sanitizer = "address"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/cluster_parameters/__fuzz__/cluster_parameters__tests__bolero_cluster_parameter_records_preserve_every_value/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "cluster-parameters"
 invariant = "Every class-typed cluster parameter, including all duration nanoseconds, byte limits and counts, survives complete validated archive and JSON round trips without defaulting or losing a field."
@@ -2037,7 +2037,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_consensus_state_records_recover_every_stored_value/corpus"
-domain_version = 17
+domain_version = 18
 features = []
 id = "consensus-state-records"
 invariant = "A generated replicated state holding records of every family, stored by the consensus state writer into a real keyspace, and a second revision stored as the changes from it each recover with complete equality of every record, index and metadata field."
@@ -2052,7 +2052,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_corrupt_consensus_state_records_fail_typed_or_recover_canonically/corpus"
-domain_version = 17
+domain_version = 18
 features = []
 id = "consensus-state-corruption"
 invariant = "Flipped, truncated, extended, rekeyed, copied, unknown and missing consensus state records free every decoding allocation and either fail recovery with the typed invalid-state failure or recover a state stored under its own canonical keys whose readers' invariants hold and which recovers again unchanged."
@@ -2067,7 +2067,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_consensus_raft_records_round_trip_through_the_storage_codec/corpus"
-domain_version = 15
+domain_version = 16
 features = []
 id = "consensus-raft-records"
 invariant = "Votes, log positions, log entries of every consensus command, state metadata, snapshot manifests and sections restore with complete equality through the storage codec, and every log and section key names exactly the position or section it was built for."
@@ -2082,7 +2082,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_malformed_consensus_raft_records_fail_typed/corpus"
-domain_version = 9
+domain_version = 10
 features = []
 id = "consensus-raft-records-malformed"
 invariant = "Arbitrary bytes read as any Raft record, log key or section key free every decoding allocation and fail with the typed storage failure or name a value that stores back to the same record."

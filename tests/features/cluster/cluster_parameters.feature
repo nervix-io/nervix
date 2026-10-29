@@ -248,15 +248,15 @@ Feature: Committed cluster parameters
       | 1            | HTTP_HEADER_BYTES  | 16B   | http-header-bytes  | 32768B  |
       | 3            | HTTP_HEADER_BYTES  | 16B   | http-header-bytes  | 32768B  |
 
-  Scenario Outline: A parameter change refuses an unrepresentable HTTP header count on a cluster of <cluster_size>
+  Scenario Outline: A parameter change reserves transport capacity in the HTTP header count on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started
     When these Plexus statements fail with "http-header-fields"
       """
-      ALTER CLUSTER SET HTTP_HEADER_FIELDS = 24577;
+      ALTER CLUSTER SET HTTP_HEADER_FIELDS = 16385;
       """
     Then the last command error contains
       """
-      24576
+      16384
       """
     And node "node-1" eventually reports status containing "http-header-fields committed=128"
 

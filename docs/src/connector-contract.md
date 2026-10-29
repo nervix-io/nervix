@@ -2686,6 +2686,7 @@ transport ownership and per-record acknowledgement boundaries are unchanged.
 HTTP polling headers are literal plan inputs. Their complete count and byte requirements are
 checked against that same committed policy at model admission and parameter transitions, with
 case-insensitive replacement and the last written value retained. A lowering cannot invalidate
-an existing request. The field-count setting ends at the native request map's 24,576 distinct
-fields; the connector receives the validated literal fields without a second fixed default.
+an existing request. The field-count setting ends at 16,384 application fields, leaving native
+capacity for client and transport fields. The connector receives the validated literal fields
+without a second fixed default.
 Each literal name/value write and the final retained envelope must fit the byte cap.

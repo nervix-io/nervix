@@ -292,8 +292,8 @@ impl SettingDefinition for HttpHeaderBytes {
 pub struct HttpHeaderFields;
 
 impl HttpHeaderFields {
-    /// Distinct fields that fit the native request map at its maximum allocation.
-    pub const MAXIMUM: u64 = 24_576;
+    /// Application fields, leaving native request capacity for client and transport headers.
+    pub const MAXIMUM: u64 = 16_384;
 }
 
 impl SettingDefinition for HttpHeaderFields {

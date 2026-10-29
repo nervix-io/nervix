@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn the_maximum_header_count_fits_the_native_request_representation() {
+    fn the_maximum_application_header_count_leaves_transport_capacity() {
         let maximum = usize::try_from(nervix_models::HttpHeaderFields::MAXIMUM)
             .assured("the native header maximum fits this target");
         let mut headers = http::HeaderMap::with_capacity(maximum);
@@ -379,14 +379,25 @@ mod tests {
                 .assured("each field up to the declared maximum fits the native map");
         }
         assert_eq!(headers.len(), maximum);
-        assert!(
+        let transport_names = [
+            http::header::ACCEPT,
+            http::header::ACCEPT_ENCODING,
+            http::header::AUTHORIZATION,
+            http::header::CONTENT_LENGTH,
+            http::header::CONTENT_TYPE,
+            http::header::HOST,
+            http::header::PROXY_AUTHORIZATION,
+            http::header::REFERER,
+            http::header::TRANSFER_ENCODING,
+            http::header::USER_AGENT,
+        ];
+        let transport_fields = transport_names.len();
+        for name in transport_names {
             headers
-                .try_insert(
-                    http::header::HeaderName::from_static("x-over-limit"),
-                    http::header::HeaderValue::from_static("v"),
-                )
-                .is_err()
-        );
+                .try_insert(name, http::header::HeaderValue::from_static("v"))
+                .assured("the application maximum leaves room for transport-owned fields");
+        }
+        assert_eq!(headers.len(), maximum + transport_fields);
     }
 
     #[test]
