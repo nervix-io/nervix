@@ -29,7 +29,9 @@ use crate::{
     runtime::{Runtime, RuntimeError},
 };
 
-const ADMISSION_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+/// The node's retry cadence for admitting and installing committed runtime state.
+pub(in crate::application) const RUNTIME_STATE_RETRY_INTERVAL: Duration =
+    Duration::from_millis(500);
 
 /// The process-start barrier and runtime-installation sequencer shared by every installation path.
 pub(in crate::application) struct RuntimeAdmission {
@@ -161,7 +163,7 @@ impl RuntimeAdmission {
                     nervix_primitives::select! {
                         biased;
                         _ = shutdown.cancelled() => return None,
-                        _ = nervix_primitives::time::sleep(ADMISSION_RETRY_INTERVAL) => {}
+                        _ = nervix_primitives::time::sleep(RUNTIME_STATE_RETRY_INTERVAL) => {}
                     }
                 }
             }

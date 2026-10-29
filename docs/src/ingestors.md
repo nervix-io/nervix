@@ -1359,8 +1359,10 @@ PKCS #1 or SEC1, to a broker that asks for a client certificate. A file that can
 holds no PEM certificate or no private key, fails the connection as a configuration error. A broker
 that requires a client certificate and receives none, or one it does not accept, ends the TLS
 session with an alert: `DESCRIBE INGESTOR` shows that the broker refused the TLS session, naming the
-alert, as the transient error, and the instance tries again on its `RETRY POLICY` cadence. An `amqp`
-address carries no TLS, so the client's TLS keys do not apply to it.
+alert, as the transient error, and the instance tries again on its `RETRY POLICY` cadence.
+`tls_ca_file`, `tls_cert_file` and `tls_key_file` require an `amqps` address, and certificate and
+key must be supplied together. A client that violates either rule is refused before commit,
+naming the key and its required constraint without repeating the address or file path.
 
 ### Redis Pub/Sub
 
@@ -1608,6 +1610,12 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-ingest).
 <!-- connector-matrix:ingest-nats-subject:end -->
+
+`SUBJECT` and `QUEUE GROUP` are string literals Nervix subscribes with exactly as written, letter
+case included, within the [external name rules](#external-names). A subscription subject may use
+the NATS wildcards as whole tokens: `SUBJECT 'orders.*.EU'` matches one token in the middle, and
+`SUBJECT 'orders.>'` every remaining token, so `>` comes last. A message's subject and reply
+subject are not exposed as typed metadata; programs read its payload and headers.
 
 NATS ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
 are mandatory; use `INSTANCES 1` for a single queue member.
