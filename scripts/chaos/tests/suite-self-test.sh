@@ -740,6 +740,88 @@ grep -Fq 'chaos suite slow interrupted' "${tmp_dir}/group.txt" \
 grep -Fq 'slow run ends' "${tmp_dir}/runs/group-1/logs/slow.log" \
     || fail 'the tee of the run log did not outlive the hangup'
 
+# Hold each part of the atomic record publication while the terminal hangs up. The writer must
+# finish publishing the child identity before the controller forwards its one TERM and records
+# the interrupted entry. The rename case holds after the real rename and before its command exits.
+real_jq="$(command -v jq)"
+real_mv="$(command -v mv)"
+printf '%s\n' "${real_jq}" >"${bundle}/bin/jq.binary"
+printf '%s\n' "${real_mv}" >"${bundle}/bin/mv.binary"
+cat >"${bundle}/bin/record-command" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+command_name="${0##*/}"
+IFS= read -r command_binary <"${0%/*}/${command_name}.binary"
+gate="${CHAOS_SUITE_RECORD_GATE:-}"
+hold_record_command() {
+    printf '%s\n' "$$" >"${gate}/ready"
+    while [[ ! -e "${gate}/release" ]]; do
+        sleep 0.01
+    done
+}
+last_argument="${@: -1}"
+case "${command_name}" in
+    jq)
+        if [[ -n "${gate}" && ! -e "${gate}/release"
+            && "${last_argument}" == */record-jq/suite.json
+            && "$*" == *'.entries[$index].process'* ]]; then
+            hold_record_command
+        fi
+        exec "${command_binary}" "$@"
+        ;;
+    mv)
+        "${command_binary}" "$@"
+        if [[ -n "${gate}" && ! -e "${gate}/release"
+            && "${last_argument}" == */record-mv/suite.json ]]; then
+            IFS= read -r jq_binary <"${0%/*}/jq.binary"
+            if "${jq_binary}" -e '.entries[0].process.pid != null' "${last_argument}" >/dev/null; then
+                hold_record_command
+            fi
+        fi
+        ;;
+esac
+EOF
+chmod +x "${bundle}/bin/record-command"
+ln -s record-command "${bundle}/bin/jq"
+ln -s record-command "${bundle}/bin/mv"
+for publication_command in jq mv; do
+    record_id="record-${publication_command}"
+    record_gate="${tmp_dir}/publication-${publication_command}"
+    mkdir -p "${record_gate}"
+    setsid env PATH="${bundle}/bin:${PATH}" CHAOS_SUITE_RECORD_GATE="${record_gate}" \
+        "${bundle}/suite.sh" slow --image nervix:local --artifacts "${tmp_dir}/runs" \
+        --suite-id "${record_id}" >"${tmp_dir}/${record_id}.txt" 2>&1 &
+    suite_pid=$!
+    background_pids+=("${suite_pid}")
+    wait_for_file "${tmp_dir}/runs/${record_id}/${record_id}-slow.pid"
+    wait_for_file "${record_gate}/ready"
+    kill -HUP -- "-${suite_pid}"
+    printf 'release\n' >"${record_gate}/release"
+    status=0
+    wait "${suite_pid}" || status=$?
+    if [[ "${status}" -ne 129 ]]; then
+        cat "${tmp_dir}/${record_id}.txt" >&2
+        jq . "${tmp_dir}/runs/${record_id}/suite.json" >&2
+        fail "a hangup during ${publication_command} publication returned ${status}, expected 129"
+    fi
+    expect_json "${tmp_dir}/runs/${record_id}/suite.json" '.status == "interrupted" and .signal == "HUP"
+        and .entries[0].status == "interrupted" and .entries[0].exit_code == 143
+        and (.entries[0].process.pid | type) == "number"
+        and (.entries[0].process.start_ticks | type) == "number"
+        and .entries[1].status == "not-started"' \
+        "a hangup during ${publication_command} publication did not retain the interrupted record"
+    [[ "$(cat "${tmp_dir}/runs/${record_id}/${record_id}-slow.signals")" == TERM ]] \
+        || fail "a hangup during ${publication_command} publication did not send the run one TERM"
+    grep -Fq 'chaos suite slow interrupted' "${tmp_dir}/${record_id}.txt" \
+        || fail "the console tee did not outlive the ${publication_command} publication hangup"
+    grep -Fq 'slow run ends' "${tmp_dir}/runs/${record_id}/logs/slow.log" \
+        || fail "the run tee did not outlive the ${publication_command} publication hangup"
+    printf 'record publication %s self-test passed\n' "${publication_command}"
+done
+rm "${bundle}/bin/jq" "${bundle}/bin/mv" "${bundle}/bin/jq.binary" "${bundle}/bin/mv.binary" \
+    "${bundle}/bin/record-command"
+
+
 # A suite whose caller stops reading its console, as a CI runner does once it has killed the step
 # that started it, still runs every entry and records its verdict, and suite.log keeps the console.
 status=0

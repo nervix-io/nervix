@@ -429,6 +429,8 @@ struct ScenarioWorld {
     last_restore_end: Option<crate::common::raw_session::TestRestoreEnd>,
     /// A restore stream a scenario sent in the background.
     background_restore: Option<crate::backup::restore::BackgroundRestore>,
+    /// Real filesystem capacity held while an accepted restore tries its client inspection.
+    restore_inspection_capacity: Option<backup::client_inspection::FilesystemHold>,
     /// A leadership move a scenario armed underneath the next durably admitted command.
     leadership_move: Option<AbortOnDropHandle<std::io::Result<()>>>,
     /// The restore step pause a scenario armed and has not released.
@@ -11783,6 +11785,30 @@ async fn when_runtime_installation_is_paused(world: &mut ScenarioWorld, node_id:
     world
         .fault_injection
         .pause_runtime_installation_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[given(expr = "the next {int} runtime installations on node {string} are refused")]
+fn given_runtime_installations_are_refused(
+    world: &mut ScenarioWorld,
+    count: usize,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let count = std::num::NonZeroUsize::new(count)
+        .expect("the scenario arms a positive number of installation refusals");
+    world
+        .fault_injection
+        .refuse_runtime_installations_on(crate::common::cluster::node_name(&node_id), count);
+}
+
+#[then(expr = "all runtime installation refusals on node {string} were delivered")]
+fn then_runtime_installation_refusals_were_delivered(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    assert!(
+        world
+            .fault_injection
+            .runtime_installation_refusals_delivered(&crate::common::cluster::node_name(&node_id))
+    );
 }
 
 #[then(expr = "node {string} reaches its runtime installation pause")]
@@ -25803,6 +25829,33 @@ async fn given_postgres_table_exists(world: &mut ScenarioWorld, table: String) {
     prepare_postgres_table(world, table, false).await;
 }
 
+/// Provisions a case-preserving table in its own schema, each part quoted as one identifier, which
+/// is how a `TABLE 'schema.Table'` locator names the relation it writes.
+#[given(expr = "Postgres table {string} exists in schema {string}")]
+async fn given_postgres_table_exists_in_schema(
+    world: &mut ScenarioWorld,
+    table: String,
+    schema: String,
+) {
+    let quote = |identifier: &str| format!("\"{}\"", identifier.replace('"', "\"\""));
+    let schema = quote(&expand_placeholders(world, &schema));
+    let table = format!("{schema}.{}", quote(&expand_placeholders(world, &table)));
+    let client = world
+        .dependencies
+        .postgres_client(false)
+        .expect("failed to connect to Postgres");
+    sqlx::raw_sql(SqlxAssertSqlSafe(format!(
+        "CREATE SCHEMA IF NOT EXISTS {schema};
+         DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (postgres_user_id integer, postgres_now text, postgres_action text);"
+    )))
+    .execute(&client)
+    .await
+    .expect("failed to create the schema-qualified Postgres table");
+    world.postgres_table = Some(table);
+    world.postgres_tls = false;
+}
+
 #[given(expr = "Postgres table {string} with primary key exists")]
 async fn given_postgres_table_with_primary_key_exists(world: &mut ScenarioWorld, table: String) {
     prepare_postgres_table_with_primary_key(world, table, false).await;
@@ -33580,6 +33633,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
 
                 world.enter_phase(ScenarioPhase::TeardownStarted, "");
                 world.stop_consensus_load();
+                world.restore_inspection_capacity = None;
                 world.fault_injection.release_all_health_responses();
                 world.fault_injection.release_all_domain_clock_progress();
                 world.fault_injection.release_all_command_pauses();

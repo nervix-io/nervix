@@ -271,15 +271,11 @@ mod tests {
                     emitter.connector
                 );
             };
-            if let nervix_models::PostgresConflictAction::DoUpdate { target } = conflict_action {
-                assert!(!target.is_empty(), "{values:?}");
-                assert!(
-                    values
-                        .iter()
-                        .any(|mapping| !target.contains(&mapping.column)),
-                    "{values:?} {target:?}"
-                );
-            }
+            assert_eq!(
+                conflict_action.validate(values),
+                Ok(()),
+                "{values:?} {conflict_action:?}"
+            );
         }
     }
 
