@@ -856,6 +856,20 @@ own bulk-length refusal stays a record outcome; the emitter declares optional ba
 a learned size ceiling. The Redis-specific declaration tests, generated grammar conformance and
 one-/three-node public declaration scenarios qualify these facts together.
 
+`SQS QUEUE` shares one queue-name rule between ingestion and emission: 1 to 80 ASCII letters,
+digits, `-` and `_`, where a FIFO queue's name ends in `.fifo` within those 80 characters, passed
+through exactly as written. Its declaration permits `ACK SEQUENTIAL` and `SUSPEND` for intake,
+since the queue keeps a message until the source deletes it, and `SINGLE` or `BATCH` for emission,
+where a `.fifo` queue requires `FIFO GROUP` and a standard queue refuses it. Message attributes are
+its headers in both directions, as `last_wins` exact names; the emitter declares no envelope and
+optional batching up to the 256 KiB SQS admits in one message. An SQS client declares only the keys
+its connections read: `endpoint`, `region`, `access_key_id`, `secret_access_key` and `tls_ca_file`
+in both directions, and `timeout_ms`, which bounds an emitter's send. An SQS connection trusts
+`tls_ca_file`, or the platform's roots without it, and presents no client certificate, so the
+client declares neither client-identity key.
+The SQS-specific declaration tests, generated grammar conformance and one-/three-node public
+declaration scenarios qualify these facts together.
+
 Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
 endpoint ingestors reference endpoints, while a Syslog listener references a client; all three
 declare every-node execution. Scheduling and placement-reference completion read that capability,
