@@ -482,21 +482,35 @@ pub(in crate::registry) fn validate_direct_value_mappings(
         readonly_binding_for_internal_schema("message", input_schema),
     ];
     let udf_signatures = udf_compile_options(models, CompileOptions::default()).udf_signatures;
-    let inferred = {
-        let mapping_input =
-            infer_set_expr_types_for_bindings_with_udfs(&program, bindings, udf_signatures);
-        match mapping_input {
-            Ok(mapped_value) => Ok(mapped_value),
-            Err(error) => Err({
-                let message = error.current_context().message.clone();
-                error.change_context(RegistryError::InvalidModel {
+    let inferred = infer_set_expr_types_for_bindings_with_udfs(&program, bindings, udf_signatures)
+        .map_err(|error| {
+            let context = program
+                .inner
+                .set
+                .iter()
+                .zip(&mappings)
+                .find(|((_, expression), _)| expression.span == error.current_context().span)
+                .map(|(_, mapping)| RegistryError::InvalidConnectorDeclaration {
+                    domain: domain.clone(),
+                    node: nervix_models::NodeRef::new(
+                        nervix_models::ModelKind::Emitter,
+                        identifier.clone(),
+                    ),
+                    issue: ConnectorDeclarationIssue::MappedExpressionInference {
+                        section: mapping.section,
+                        key: mapping.mapping.column.clone(),
+                    },
+                })
+                .unwrap_or_else(|| RegistryError::InvalidModel {
                     domain: domain.as_str().to_string(),
                     identifier: identifier.as_str().to_string(),
-                    reason: format!("emitter VALUES type inference failed: {}", message),
-                })
-            }),
-        }
-    }?;
+                    reason: format!(
+                        "emitter VALUES type inference failed: {}",
+                        error.current_context().message
+                    ),
+                });
+            error.change_context(context)
+        })?;
     let invalid = |issue| {
         Report::new(RegistryError::InvalidConnectorDeclaration {
             domain: domain.clone(),

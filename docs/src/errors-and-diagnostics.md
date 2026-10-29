@@ -1128,7 +1128,12 @@ typed node identity, and a `ConnectorDeclarationIssue` naming the refused clause
 Duration failures retain the duration reader's typed cause; an unschedulable duration and an
 inverted retry range are distinct issues. A mapped-value type failure reports the declared type
 and the expression's inferred Arrow type, such as `VALUES key 'severity_number' requires I32,
-found Int64`. An envelope clause or `PROPERTIES` key the entity does not declare is
+found Int64`. If expression inference fails before a type exists, `MappedExpressionInference`
+names the declared section and destination key while retaining the VM's typed `CompileError`
+beneath it. The registry associates the compile error's operation span with the lowered mapping;
+it does not recover a key from diagnostic text or expose a generated assignment name. A null-only
+mapping is refused at this boundary during both `CREATE` and `ALTER`.
+An envelope clause or `PROPERTIES` key the entity does not declare is
 `ConnectorDeclarationIssue::Envelope`, carrying the vocabulary's typed
 `EnvelopeDeclarationError` that names the entity and the clause or key; an envelope duration
 reuses the duration issues under `DELIVER AFTER` or `DELAY`, and an envelope expression that is
