@@ -167,6 +167,10 @@ jobs:
     timeout-minutes: 240
     permissions:
       contents: read
+    env:
+      # Sixteen compilers of the sanitizer build exceeded the 32 GB of Boat's 16-CPU machine, half
+      # the memory these shards had, so the build runs eight.
+      CARGO_BUILD_JOBS: "8"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
