@@ -4,9 +4,6 @@ on:
   workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
-  # The nightly chaos soak runs against the image this build makes from main.
-  schedule:
-    - cron: "0 2 * * *"
 
 concurrency:
   # A label that builds no image runs in a group of its own: adding it beside `chaos` in one request
@@ -156,11 +153,10 @@ jobs:
     name: build-diagnostic-deloxide-order-amd64
     needs: meta
     if: >-
-      github.event_name == 'schedule' ||
-      (github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        (contains(github.event.pull_request.labels.*.name, 'chaos') ||
-          contains(github.event.pull_request.labels.*.name, 'chaos-soak')))
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (contains(github.event.pull_request.labels.*.name, 'chaos') ||
+        contains(github.event.pull_request.labels.*.name, 'chaos-soak'))
     # The diagnostic server's workspace crates compile with the detector's features, which the
     # release image's cache does not hold. Like the release builds, it takes the 32 GB machine.
     runs-on: boat-xlarge
@@ -498,8 +494,7 @@ jobs:
   # The external chaos runner against the images built above, through the same `just chaos suite`
   # command a developer runs: the release image and the Deloxide diagnostic image of the same
   # revision, each refused by the suite unless its labels name that kind and revision. A pull
-  # request runs the smoke suite with the `chaos` label and the soak suite with `chaos-soak`; the
-  # nightly build of main runs the soak.
+  # request runs the smoke suite with the `chaos` label and the soak suite with `chaos-soak`.
   chaos-smoke:
     name: chaos-smoke
     needs: [meta, build-arch]
@@ -538,10 +533,9 @@ jobs:
     name: chaos-soak
     needs: [meta, build-arch]
     if: >-
-      github.event_name == 'schedule' ||
-      (github.event_name == 'pull_request' &&
-        contains(github.event.pull_request.labels.*.name, 'chaos-soak') &&
-        github.event.pull_request.head.repo.full_name == github.repository)
+      github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'chaos-soak') &&
+      github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
       packages: read
@@ -556,10 +550,9 @@ jobs:
     name: chaos-soak-diagnostic
     needs: [meta, build-diagnostic]
     if: >-
-      github.event_name == 'schedule' ||
-      (github.event_name == 'pull_request' &&
-        contains(github.event.pull_request.labels.*.name, 'chaos-soak') &&
-        github.event.pull_request.head.repo.full_name == github.repository)
+      github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'chaos-soak') &&
+      github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
       packages: read
@@ -656,7 +649,6 @@ jobs:
     needs: [meta, build-arch, operator-deployment]
     if: >-
       github.event.action != 'labeled' &&
-      github.event_name != 'schedule' &&
       (github.event_name != 'pull_request' ||
         github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
@@ -708,11 +700,10 @@ jobs:
       group: build-book-${{ github.ref }}
       cancel-in-progress: true
     if: >-
-      github.event_name != 'schedule' &&
-      (github.event_name != 'pull_request' ||
-        (github.event.pull_request.head.repo.full_name == github.repository &&
-          contains(github.event.pull_request.labels.*.name, 'book') &&
-          (github.event.action != 'labeled' || github.event.label.name == 'book')))
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(github.event.pull_request.labels.*.name, 'book') &&
+        (github.event.action != 'labeled' || github.event.label.name == 'book'))
     steps:
       - name: Checkout
         uses: actions/checkout@v4

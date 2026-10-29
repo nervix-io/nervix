@@ -648,9 +648,8 @@ The external smoke and soak suites use a fresh ordinary image built from that re
 resolves the image once and gives every scenario the same image identity; its `suite.json` and each
 run's manifest prove which image, fault action, accepted events and recovery outcome were observed.
 For pull-request CI, select both `chaos` and `chaos-soak` when qualifying the complete matrix; the
-labels run the suites against that pull request's own image. A nightly run of a different commit
-does not qualify the candidate. A recorded replay reproduces the external action plan, not the
-operating system's thread schedule.
+labels run the suites against that pull request's own image. A recorded replay reproduces the
+external action plan, not the operating system's thread schedule.
 
 Measure the ordinary, uninstrumented build on the same host and profile as its baseline:
 
@@ -804,8 +803,8 @@ just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest>
 The smoke suite runs a baseline, a leader crash with its restart and a partition with its recovery;
 the soak suite runs every delivered scenario with fixed and rotating mixed-instability seeds. CI
 runs the smoke suite against a pull request's own images only for a pull request labeled `chaos`,
-and the soak suite for one labeled `chaos-soak`. The nightly build of `main` runs the soak suite,
-and a manual run of the `Chaos` workflow takes a suite, an immutable image digest and its kind.
+and the soak suite for one labeled `chaos-soak`. A manual run of the `Chaos` workflow takes a
+suite, an immutable image digest and its kind.
 Label a pull request that changes the chaos runner, or the membership, failover, recovery or
 delivery behavior its scenarios verify, with `chaos`.
 

@@ -1430,14 +1430,14 @@ build and the existing tests, and nothing in it changes behavior.
   `client-conformance`; a pull request that changes the client protocol, the shared binding or a
   probe carries that label.
 - `just chaos suite smoke|soak --image IMAGE` runs the external chaos suites against an already
-  built image; [External Cluster Chaos](docs/src/cluster-chaos.md) documents them. CI runs the
-  smoke suite against a pull request's own images only for a pull request labeled `chaos`, and the
-  soak suite for one labeled `chaos-soak` and nightly on `main`; a pull request that changes the
-  chaos runner, or the membership, failover, recovery or delivery behavior its scenarios verify,
-  carries the `chaos` label. Each suite runs against the release image and against the Deloxide
-  diagnostic image of the same revision, whose label makes every run fail unless the deadlock
-  evidence of each process its nodes started qualifies; a change to the diagnostic image, its
-  evidence collection or a path its scenarios exercise under tracked locks keeps both green.
+  built image; [External Cluster Chaos](docs/src/cluster-chaos.md) documents them. CI runs the smoke
+  suite against a pull request's own images only for a pull request labeled `chaos`, and the soak
+  suite for one labeled `chaos-soak`; a pull request that changes the chaos runner, or the
+  membership, failover, recovery or delivery behavior its scenarios verify, carries the `chaos`
+  label. Each suite runs against the release image and against the Deloxide diagnostic image of the
+  same revision, whose label makes every run fail unless the deadlock evidence of each process its
+  nodes started qualifies; a change to the diagnostic image, its evidence collection or a path its
+  scenarios exercise under tracked locks keeps both green.
 - Directed-link loss proof, for random, burst and combined loss, samples 400 packets at 10 ms
   intervals within the same approximately four-second observation window and 30-second sample
   bound; the probe helper's Docker launch has a separate bound. A loss floor judged over 40

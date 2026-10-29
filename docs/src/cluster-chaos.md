@@ -2771,7 +2771,6 @@ The triggers are:
 | --- | --- |
 | A pull request from a branch of this repository, labeled `chaos` | Smoke, against both images built from it |
 | A pull request from a branch of this repository, labeled `chaos-soak` | Soak, against both images |
-| The nightly build of `main`, at 02:00 UTC | Soak, against both images. That build publishes neither a manifest nor the book |
 | A manual run of the `Chaos` workflow | The named suite against a named immutable image `REPOSITORY@sha256:DIGEST`, of a named kind and optionally a revision. It builds nothing |
 
 A pull request labeled `no-docker` builds no image and so runs no suite. A label that builds no
@@ -2856,8 +2855,7 @@ Label a pull request `chaos` when it changes either of these:
 
 Use `chaos-soak` to run the whole matrix against the pull request's own images, and select both
 labels when qualifying the complete matrix. A change to the diagnostic image, its evidence
-collection, or a path its scenarios exercise under tracked locks keeps both kinds of image green. A
-nightly run of another commit does not qualify a candidate revision.
+collection, or a path its scenarios exercise under tracked locks keeps both kinds of image green.
 
 `tests/release-evidence.toml` lists the smoke and soak suites against both images as release
 evidence, and `just release-evidence <pull-request>` holds a pull request's head revision to it; see
@@ -3066,7 +3064,8 @@ owner crash found the defect in which a Kafka ingestor kept through a replica mo
 committing its domain offsets. The task records each entry's ledger, outcome and timings, and the
 staging volume's samples.
 
-**The current suites.** The current suites run nightly against both images of `main`:
+**The current suites.** The current suites ran nightly against both images of `main` until CI
+stopped scheduling runs on 29 October 2026:
 
 - In Docker Build run [38861733263](https://github.com/nervix-io/nervix/actions/runs/38861733263),
   of revision `8bc67c9a`, every shard of the soak suite passed on both the release and the
