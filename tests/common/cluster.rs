@@ -16,6 +16,7 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_sqs::{
     Client as SqsClient,
+    operation::get_queue_attributes::GetQueueAttributesOutput,
     types::{MessageSystemAttributeName, QueueAttributeName, SendMessageBatchRequestEntry},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -6344,28 +6345,35 @@ impl SqsQueueHeld {
             .send()
             .await
             .map_err(io::Error::other)?;
-        let Some(attributes) = response.attributes() else {
-            return Err(io::Error::other(format!(
-                "SQS answered no attributes for queue {queue_url}"
-            )));
-        };
         Ok(Self {
-            visible: Self::count(attributes, QueueAttributeName::ApproximateNumberOfMessages)?,
+            visible: Self::count(
+                &response,
+                queue_url,
+                QueueAttributeName::ApproximateNumberOfMessages,
+            )?,
             in_flight: Self::count(
-                attributes,
+                &response,
+                queue_url,
                 QueueAttributeName::ApproximateNumberOfMessagesNotVisible,
             )?,
             delayed: Self::count(
-                attributes,
+                &response,
+                queue_url,
                 QueueAttributeName::ApproximateNumberOfMessagesDelayed,
             )?,
         })
     }
 
     fn count(
-        attributes: &std::collections::HashMap<QueueAttributeName, String>,
+        response: &GetQueueAttributesOutput,
+        queue_url: &str,
         name: QueueAttributeName,
     ) -> io::Result<u64> {
+        let Some(attributes) = response.attributes() else {
+            return Err(io::Error::other(format!(
+                "SQS answered no attributes for queue {queue_url}"
+            )));
+        };
         let Some(value) = attributes.get(&name) else {
             return Err(io::Error::other(format!(
                 "SQS answered no {name} attribute"
