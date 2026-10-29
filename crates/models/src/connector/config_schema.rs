@@ -1,7 +1,8 @@
 //! Declared connector client configuration and its validation and inspection boundaries.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** Key names, presence, types, confidentiality, file roles and delegated namespaces.
+//! - **Owns.** Key names, presence, types, confidentiality, file roles, the entities that read each
+//!   key and delegated namespaces.
 //! - **Depends on.** Configuration entries, the shared deadline contract and URL values.
 //! - **Must not know.** Driver implementations, resource installation or network operations.
 
@@ -50,6 +51,38 @@ pub enum ClientConfigPresence {
         address: &'static str,
         scheme: &'static str,
     },
+}
+
+/// The entities of a client's connector that read a declared key.
+///
+/// A connector whose ingestors and emitters read different keys from one client declares which
+/// side reads each; a key every entity reads means the same thing wherever the client is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientConfigReaders {
+    /// Every ingestor and emitter that references the client.
+    Every,
+    /// Only the ingestors that read through the client.
+    Ingestors,
+    /// Only the emitters that write through the client.
+    Emitters,
+}
+
+impl ClientConfigReaders {
+    /// Whether an ingestor that reads through the client reads the key.
+    pub const fn include_ingestors(self) -> bool {
+        match self {
+            Self::Every | Self::Ingestors => true,
+            Self::Emitters => false,
+        }
+    }
+
+    /// Whether an emitter that writes through the client reads the key.
+    pub const fn include_emitters(self) -> bool {
+        match self {
+            Self::Every | Self::Emitters => true,
+            Self::Ingestors => false,
+        }
+    }
 }
 
 /// A file's role, including the two halves of a TLS client identity.
@@ -187,6 +220,7 @@ pub struct ClientConfigKey {
     pub value: ClientConfigValue,
     pub owner: ClientConfigOwner,
     pub confidential: bool,
+    pub readers: ClientConfigReaders,
 }
 
 impl ClientConfigKey {
@@ -215,6 +249,7 @@ impl ClientConfigKey {
             value,
             owner: ClientConfigOwner::Nervix,
             confidential: false,
+            readers: ClientConfigReaders::Every,
         }
     }
 
@@ -267,6 +302,22 @@ impl ClientConfigKey {
     pub const fn driver(self) -> Self {
         Self {
             owner: ClientConfigOwner::Driver,
+            ..self
+        }
+    }
+
+    /// Declare that only the client's ingestors read this key.
+    pub const fn read_by_ingestors(self) -> Self {
+        Self {
+            readers: ClientConfigReaders::Ingestors,
+            ..self
+        }
+    }
+
+    /// Declare that only the client's emitters read this key.
+    pub const fn read_by_emitters(self) -> Self {
+        Self {
+            readers: ClientConfigReaders::Emitters,
             ..self
         }
     }

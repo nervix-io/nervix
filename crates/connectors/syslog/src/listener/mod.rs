@@ -33,7 +33,7 @@ use nervix_connector::{
     IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
     IngestorReadCancellation, IngestorResult, IngestorResume, NoIngestHeaders,
 };
-use nervix_models::ClientConfigEntry;
+use nervix_models::{ClientConfigEntry, SYSLOG_FRAME_LIMITS};
 use nervix_primitives::{
     net::{TcpListener, TcpStream, UdpSocket},
     sync::{mpsc, watch},
@@ -89,7 +89,6 @@ impl ConfiguredStreamAccept {
 
 const SYSLOG: &str = "syslog";
 const STREAM_INTAKE_QUEUE_CAPACITY: usize = 64;
-const MAX_OCTET_COUNT_DIGITS: usize = 10;
 /// The most bytes one read appends to a connection's frame buffer, so a buffer grows with the
 /// frames a connection actually sends rather than to its frame bound on the first read.
 const STREAM_READ_CHUNK: usize = 8_192;
@@ -759,7 +758,7 @@ impl StreamFrameDecoder {
         let cap = self
             .max_message_size
             .get()
-            .checked_add(MAX_OCTET_COUNT_DIGITS + 1)
+            .checked_add(SYSLOG_FRAME_LIMITS.octet_count_prefix())
             .ok_or_else(|| {
                 Report::new(SyslogFrameError::OversizedBufferedFrame {
                     maximum: self.max_message_size,
@@ -805,9 +804,9 @@ impl StreamFrameDecoder {
     /// the search for the space looks no further.
     fn read_octet_count(&mut self) -> error_stack::Result<Option<Vec<u8>>, SyslogFrameError> {
         let pending = &self.buffer[self.cursor..];
-        let window = &pending[..pending.len().min(MAX_OCTET_COUNT_DIGITS + 1)];
+        let window = &pending[..pending.len().min(SYSLOG_FRAME_LIMITS.octet_count_prefix())];
         let Some(delimiter) = memchr::memchr(b' ', window) else {
-            if pending.len() > MAX_OCTET_COUNT_DIGITS
+            if pending.len() > SYSLOG_FRAME_LIMITS.octet_count_digits()
                 || pending.iter().any(|byte| !byte.is_ascii_digit())
             {
                 return Err(Report::new(SyslogFrameError::MalformedOctetCount));
@@ -861,7 +860,8 @@ impl StreamFrameDecoder {
         searched: usize,
     ) -> error_stack::Result<Option<Vec<u8>>, SyslogFrameError> {
         let pending = &self.buffer[self.cursor..];
-        let Some(offset) = memchr::memchr(b'\n', &pending[searched..]) else {
+        let trailer = SYSLOG_FRAME_LIMITS.non_transparent_trailer();
+        let Some(offset) = memchr::memchr(trailer, &pending[searched..]) else {
             let pending_payload_size = pending
                 .len()
                 .checked_sub(usize::from(pending.last() == Some(&b'\r')))

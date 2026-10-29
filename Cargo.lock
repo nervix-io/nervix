@@ -7297,6 +7297,7 @@ name = "nervix-connector-syslog"
 version = "0.1.0-dev"
 dependencies = [
  "ahash",
+ "arch-into",
  "async-trait",
  "bolero",
  "bytes",
