@@ -3,9 +3,10 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The Pulsar client Model, the topic source and emitter Models with their delivery
-//!   mode, the topic and subscription names a source reads with the rules Pulsar holds them to,
-//!   who owns a source's subscription, and what each entity declares.
-//!   Client declarations also own public configuration keys, types and confidentiality.
+//!   modes, the topic and subscription names a source reads with the rules Pulsar holds them to,
+//!   the namespace that qualifies a local topic name, who owns a source's subscription, and what
+//!   each entity declares.
+//!   Client declarations also own public configuration keys, types, defaults and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The Pulsar driver, or how a topic is consumed or
 //!   produced to.
@@ -35,22 +36,31 @@ use crate::{
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
     IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
-    IngestorReferenceKind, KafkaIngestMode, LocatorDeclaration, LocatorName, OptionChoice,
-    OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, PositionClass, RetryPolicy,
 };
 
 configured_client!(Pulsar: unpooled, config CLIENT_CONFIG, CreateClientPulsar => PulsarConfigEntry);
 
+/// The address scheme of a TLS connection to a Pulsar broker.
+const PULSAR_TLS_SCHEME: &str = "pulsar+ssl";
+
 /// The current keys this connector reads, shared by validation, completion and inspection.
+///
+/// A local topic name is placed in `namespace`, so the namespace is exactly a tenant and a
+/// namespace, the two levels a qualified topic names before the topic. A plaintext connection uses
+/// no TLS setting, so every TLS key requires a `pulsar+ssl` address.
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
     use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
     ClientConfigSchema::new(
         &[
-            K::required("addr", V::Url(&["pulsar", "pulsar+ssl"])),
-            K::optional("namespace", V::String),
-            K::optional("tls_allow_insecure_connection", V::Boolean),
-            K::TLS_CA,
-            K::optional("tls_hostname_verification_enabled", V::Boolean),
+            K::required("addr", V::Url(&["pulsar", PULSAR_TLS_SCHEME])),
+            K::defaulted("namespace", V::Levels("tenant/namespace"), "public/default"),
+            K::optional("tls_allow_insecure_connection", V::Boolean)
+                .only_for_scheme("addr", PULSAR_TLS_SCHEME),
+            K::TLS_CA.only_for_scheme("addr", PULSAR_TLS_SCHEME),
+            K::optional("tls_hostname_verification_enabled", V::Boolean)
+                .only_for_scheme("addr", PULSAR_TLS_SCHEME),
         ],
         &[],
         &[],
@@ -179,8 +189,52 @@ impl PulsarSubscriptionOwnership {
     }
 }
 
-/// A Pulsar subscription acknowledges exactly as a Kafka consumer does.
-pub type PulsarIngestMode = KafkaIngestMode;
+/// How a Pulsar source acknowledges what its subscription delivers.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum PulsarIngestMode {
+    /// `ACK PARALLEL`: up to `max` messages wait on their acknowledgements together.
+    AckParallel {
+        max: NonZeroU64,
+        batch_timeout: String,
+        timeout: String,
+        retry_policy: RetryPolicy,
+    },
+    /// `ACK SEQUENTIAL`: one message at a time waits on its acknowledgement.
+    AckSequential {
+        timeout: String,
+        retry_policy: RetryPolicy,
+    },
+    /// `NO ACK`: each message is acknowledged without waiting for the broker's answer.
+    NoAck,
+}
+
+impl PulsarIngestMode {
+    pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::AckParallel {
+                max,
+                batch_timeout,
+                timeout,
+                retry_policy,
+            } => IngestAcknowledgement::Parallel {
+                max: *max,
+                batch_timeout,
+                timeout,
+                retry: retry_policy,
+            },
+            Self::AckSequential {
+                timeout,
+                retry_policy,
+            } => IngestAcknowledgement::Sequential {
+                timeout,
+                retry: retry_policy,
+            },
+            Self::NoAck => IngestAcknowledgement::Unacknowledged,
+        }
+    }
+}
 
 /// What the connector of a PULSAR TOPIC ingestor holds and how long it waits.
 const PULSAR_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
@@ -399,3 +453,7 @@ super::publishing::emitter_modes! {
         Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck,
     }
 }
+
+#[cfg(test)]
+#[path = "pulsar_tests.rs"]
+mod tests;

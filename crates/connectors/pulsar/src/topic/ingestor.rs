@@ -34,8 +34,7 @@ use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestorBatch,
     IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
     IngestorReadCancellation, IngestorResult, IngestorResume, client_config_value,
-    client_tls_paths, optional_bool_client_config_value, optional_client_config_value,
-    read_tls_file,
+    client_tls_paths, optional_bool_client_config_value, read_tls_file,
 };
 use nervix_models::{
     ClientConfigEntry, ConnectorKind, PulsarSubscription, PulsarSubscriptionName,
@@ -293,12 +292,8 @@ impl PulsarTopicIngestorSettings<'_> {
             == next.host_str().map(str::to_ascii_lowercase);
         let same_broker =
             previous.scheme() == next.scheme() && same_host && previous.port() == next.port();
-        let previous_topic =
-            PulsarTopicIngestorPlan::topic_from_config(self.config, self.topic.as_str());
-        let next_topic = PulsarTopicIngestorPlan::topic_from_config(
-            replacement.config,
-            replacement.topic.as_str(),
-        );
+        let previous_topic = super::qualified_topic(self.config, self.topic);
+        let next_topic = super::qualified_topic(replacement.config, replacement.topic);
         Ok(same_broker
             && previous_topic == next_topic
             && self.subscription.name == replacement.subscription.name)
@@ -350,7 +345,7 @@ impl PulsarTopicIngestorPlan {
         let client = Self::client_from_config(config).await?;
         Ok(Self {
             client,
-            topic: Self::topic_from_config(config, topic.as_str()),
+            topic: super::qualified_topic(config, topic),
             subscription,
             consumer_name,
             ack_receipts,
@@ -376,16 +371,6 @@ impl PulsarTopicIngestorPlan {
         builder.build().await.map_err(|source| {
             Report::new(PulsarTopicIngestorError::Connect).attach_printable(source.to_string())
         })
-    }
-
-    fn topic_from_config(config: &[ClientConfigEntry], topic: &str) -> String {
-        if topic.contains("://") {
-            return topic.to_string();
-        }
-
-        let namespace =
-            optional_client_config_value(config, "namespace").unwrap_or("public/default");
-        format!("persistent://{namespace}/{topic}")
     }
 
     fn tls_options_from_config(
@@ -549,7 +534,7 @@ impl PulsarTopicIngestorPlan {
     ) -> PulsarTopicIngestorResult<()> {
         let removal = PulsarTopicIngestorError::RemoveSubscription {
             subscription: settings.subscription.name.clone(),
-            topic: Self::topic_from_config(settings.config, settings.topic.as_str()),
+            topic: super::qualified_topic(settings.config, settings.topic),
         };
         let removed = timeout(budget, async {
             let plan = Self::connect(settings).await?;
@@ -874,25 +859,6 @@ mod tests {
             key: key.to_string(),
             value: value.to_string(),
         }
-    }
-
-    #[test]
-    fn short_topic_names_are_qualified_by_the_configured_namespace() {
-        assert_eq!(
-            PulsarTopicIngestorPlan::topic_from_config(&[], "events"),
-            "persistent://public/default/events"
-        );
-        assert_eq!(
-            PulsarTopicIngestorPlan::topic_from_config(
-                &[entry("namespace", "tenant/ns")],
-                "events"
-            ),
-            "persistent://tenant/ns/events"
-        );
-        assert_eq!(
-            PulsarTopicIngestorPlan::topic_from_config(&[], "non-persistent://tenant/ns/events"),
-            "non-persistent://tenant/ns/events"
-        );
     }
 
     #[test]

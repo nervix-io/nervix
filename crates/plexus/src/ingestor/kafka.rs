@@ -59,9 +59,8 @@ pub(super) fn topic_body<'src>()
         .boxed()
 }
 
-/// The delivery modes of a Kafka consumer: `NO ACK`, `ACK SEQUENTIAL …` or `ACK PARALLEL …`. A
-/// Pulsar subscription acknowledges exactly as one does, so its grammar reads these too.
-pub(super) fn mode<'src>()
+/// The delivery modes of a Kafka consumer: `NO ACK`, `ACK SEQUENTIAL …` or `ACK PARALLEL …`.
+fn mode<'src>()
 -> impl Parser<'src, &'src [Token], KafkaIngestMode, extra::Err<ParseError<'src>>> + Clone {
     choice((
         ack_parallel().map(
