@@ -301,10 +301,10 @@ before the campaign starts.
 
 The sanitizer shards budget instrumented builds separately from each target's bounded campaign.
 Each shard job has a four-hour limit; per-build, per-case and per-campaign deadlines remain
-enforced by the shared runner. Validation uses an 8-CPU runner and a two-hour limit
+enforced by the shared runner. Validation uses a 16-CPU runner and a two-hour limit
 to complete Clippy and the declared compiler synchronization matrix from a cold cache. Bolero
 inventory and compiled discovery run through the dedicated Bolero commands and workflow.
-The native extra-checks job retains its 8-CPU allocation and the same two-hour limit for ordinary
+The native extra-checks job has a 16-CPU runner too and the same two-hour limit for ordinary
 instrumentation and per-mode primitive conformance; the Shuttle and Loom suites run in jobs of
 their own.
 

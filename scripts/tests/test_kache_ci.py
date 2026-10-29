@@ -167,9 +167,9 @@ class KacheWorkflowTests(unittest.TestCase):
                     self.assertEqual(
                         environment,
                         {
-                            "KACHE_S3_BUCKET": "${{ vars.KACHE_BUCKET }}",
+                            "KACHE_S3_BUCKET": "${{ secrets.KACHE_EU_BUCKET }}",
                             "KACHE_S3_REGION": "${{ vars.KACHE_BUCKET_REGION }}",
-                            "KACHE_S3_ENDPOINT": "${{ vars.KACHE_BUCKET_ENDPOINT }}",
+                            "KACHE_S3_ENDPOINT": "${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}",
                             "KACHE_S3_ACCESS_KEY": "${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}",
                             "KACHE_S3_SECRET_KEY": "${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}",
                         },
@@ -231,9 +231,9 @@ class KacheWorkflowTests(unittest.TestCase):
 
         self.assertIn("uses: docker/setup-buildx-action@v3", workflow)
         for name, value in (
-            ("KACHE_S3_BUCKET", "${{ vars.KACHE_BUCKET }}"),
+            ("KACHE_S3_BUCKET", "${{ secrets.KACHE_EU_BUCKET }}"),
             ("KACHE_S3_REGION", "${{ vars.KACHE_BUCKET_REGION }}"),
-            ("KACHE_S3_ENDPOINT", "${{ vars.KACHE_BUCKET_ENDPOINT }}"),
+            ("KACHE_S3_ENDPOINT", "${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}"),
             ("KACHE_S3_ACCESS_KEY", "${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}"),
             ("KACHE_S3_SECRET_KEY", "${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}"),
         ):

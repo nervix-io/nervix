@@ -240,9 +240,8 @@ A run needs a Linux Docker host with the following.
   [Network Preflight](#network-preflight).
   - GitHub-hosted `ubuntu-24.04` workers qualify once the job has loaded `sch_prio`, `sch_sfq` and
     `sch_netem`.
-  - The repository's CI shards run on Ubicloud `ubicloud-standard-4` workers, whose job loads the
-    same modules before it pulls the image and stops the shard there when the kernel cannot
-    provide one.
+  - The repository's CI shards run on Boat `boat-large` workers, whose job loads the same modules
+    before it pulls the image and stops the shard there when the kernel cannot provide one.
 
 A host may run several runs and suites at once. Each run owns its Compose project, network, volumes
 and labels, and runs share nothing but the Docker daemon and the host's capacity. Concurrent runs
@@ -2791,9 +2790,9 @@ other methods, which a chaos run never substitutes for:
 The `plan` job reads the shards and their budgets from `just chaos suite shards`. It resolves the
 image to its digest, so every shard runs the same immutable image. A manual run must name a digest.
 
-Each shard then runs on its own Ubicloud `ubicloud-standard-4` Docker worker: a virtual machine
-with GitHub's `ubuntu-24.04` runner image and the 4 CPUs and 16 GB of the GitHub-hosted workers
-the suite was qualified on. The job works in this order:
+Each shard then runs on its own Boat `boat-large` Docker worker: an Ubuntu 24.04 virtual machine
+with 8 CPUs and the 16 GB of the GitHub-hosted workers the suite was qualified on. The job works
+in this order:
 
 1. It loads the `sch_prio`, `sch_sfq` and `sch_netem` modules, and fails when the kernel cannot
    provide one.
@@ -2801,7 +2800,8 @@ the suite was qualified on. The job works in this order:
    because the worker's own jq is Ubuntu's 1.7.
 3. It removes every Rust toolchain directory from the `PATH` the suite runs with, and fails if
    `cargo`, `rustc` or `rustup` is still reachable.
-4. It pulls the image and logs out of the registry.
+4. It waits up to two minutes for the Docker daemon, which a Boat worker can start a few seconds
+   after the job, then pulls the image and logs out of the registry.
 5. It runs the real network refusal controls once, with `just test-chaos-network-preflight`, under
    their 600-second cap in an 11-minute step, outside every scenario's budget. Their raw evidence is
    kept beside the suite's.
