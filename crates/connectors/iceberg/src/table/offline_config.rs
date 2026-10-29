@@ -14,12 +14,13 @@
     nervix::input(plans, reason = "the host supplies resolved client entries")
 )]
 
+use ahash::HashMap;
 use error_stack::Report;
 use iceberg::io::{ADLS_CONNECTION_STRING, S3_SSE_TYPE};
 use nervix_connector::OfflineClientConfigError;
 use nervix_models::{ClientConfigEntry, IcebergStorageBackend};
 
-use super::{IcebergObjectStoreProperties, storage};
+use super::storage;
 
 /// Interpret the properties that do not require a table location or an initialized operator.
 /// This opens no transport, credential provider or OpenDAL operator.
@@ -27,25 +28,15 @@ pub fn validate_client_configuration(
     backend: IcebergStorageBackend,
     config: &[ClientConfigEntry],
 ) -> error_stack::Result<(), OfflineClientConfigError> {
-    let properties = IcebergObjectStoreProperties::from_entries(backend, config);
-    match backend {
-        IcebergStorageBackend::S3 => {
-            storage::s3_config(&properties.props).map_err(|source| {
-                Report::new(source).change_context(OfflineClientConfigError::key(S3_SSE_TYPE))
-            })?;
-        }
-        IcebergStorageBackend::Gcs => {}
-        IcebergStorageBackend::AzureBlob => {
-            storage::azure_config(&properties.props).map_err(|source| {
-                Report::new(source)
-                    .change_context(OfflineClientConfigError::key(ADLS_CONNECTION_STRING))
-            })?;
-        }
+    let mut properties = HashMap::default();
+    for entry in backend.file_io_entries(config) {
+        properties.insert(entry.property.to_string(), entry.value.to_string());
     }
-    Ok(())
+    validate_storage_properties(backend, &properties)
 }
 
-/// A catalog can supply storage properties for any supported backend to its table's file I/O.
+/// A catalog can supply storage properties for any supported backend to its table's file I/O:
+/// the keys of each backend's delegated namespaces, as written.
 pub fn validate_catalog_configuration(
     config: &[ClientConfigEntry],
 ) -> error_stack::Result<(), OfflineClientConfigError> {
@@ -54,7 +45,35 @@ pub fn validate_catalog_configuration(
         IcebergStorageBackend::Gcs,
         IcebergStorageBackend::AzureBlob,
     ] {
-        validate_client_configuration(backend, config)?;
+        let mut properties = HashMap::default();
+        for entry in config {
+            if backend.delegates(&entry.key) {
+                properties.insert(entry.key.clone(), entry.value.clone());
+            }
+        }
+        validate_storage_properties(backend, &properties)?;
+    }
+    Ok(())
+}
+
+/// Runs the storage reader of `backend` over file I/O properties without building an operator.
+fn validate_storage_properties(
+    backend: IcebergStorageBackend,
+    properties: &HashMap<String, String>,
+) -> error_stack::Result<(), OfflineClientConfigError> {
+    match backend {
+        IcebergStorageBackend::S3 => {
+            storage::s3_config(properties).map_err(|source| {
+                Report::new(source).change_context(OfflineClientConfigError::key(S3_SSE_TYPE))
+            })?;
+        }
+        IcebergStorageBackend::Gcs => {}
+        IcebergStorageBackend::AzureBlob => {
+            storage::azure_config(properties).map_err(|source| {
+                Report::new(source)
+                    .change_context(OfflineClientConfigError::key(ADLS_CONNECTION_STRING))
+            })?;
+        }
     }
     Ok(())
 }

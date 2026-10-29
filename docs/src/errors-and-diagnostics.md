@@ -14,6 +14,11 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+RabbitMQ's TLS file keys declare `amqps` as their permitted address scheme. The shared schema's
+`ClientConfigSchemaError::RequiresScheme` refuses TLS files with `amqp` before file inspection
+and commit, naming the key, `addr` and `amqps` without the configured values. The existing
+certificate/key pairing refusal remains independent of the scheme check.
+
 An OTEL literal outside its declared field domain is a typed registry mapping issue that names
 the signal, key and required constraint. It carries no literal value. A TLS file key with a
 plaintext endpoint is a typed client-schema scheme refusal before file inspection, for either
@@ -1182,6 +1187,16 @@ projects the offending driver property key through `OfflineClientConfigError`, r
 Iceberg storage reader's typed error beneath it. The public refusal does not print the property's
 value. Properties requiring a table or an initialized OpenDAL operator remain initialization
 checks.
+An Iceberg emitter whose catalog client sets a file I/O property that its storage client supplies
+is refused with `RegistryError::EmitterClientPairing`. That context names the domain, the emitter,
+its entity kind and both clients. Beneath it, the vocabulary's `IcebergPropertyCollision` names the
+property and the storage key that supplies it, as in `ICEBERG TABLE emitter 'output' in domain
+'shop' cannot pair storage client 'storage' with catalog client 'catalog': Iceberg property
+'s3.endpoint' is set by the storage client as 'endpoint' and by the catalog client`. Neither
+client's value is printed. A TLS file that either Iceberg client cannot use stops the emitter at
+open with `EmitterOpenError::InvalidConfiguration`. Beneath it, `IcebergClientTlsError` names the
+catalog or the object-store client, and the shared `TlsClientConfigError` beneath that names the
+file and the step that failed.
 An emitter whose connector keeps one value per header name and whose `INVOKE` clause writes one literal
 header name twice is refused with `RegistryError::ReplacedHeaderWrite`, which names the domain, the
 emitter, the emitter's connector and entity, the header as the emitter's
