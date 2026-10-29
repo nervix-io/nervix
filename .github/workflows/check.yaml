@@ -5,6 +5,9 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
 env:
+  # Boat machines set en_US.UTF-8, whose collation orders `sort` output differently. Keep the
+  # C.UTF-8 locale of GitHub's runner image, which the scripts and their tests expect.
+  LC_ALL: C.UTF-8
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   # Kache sizes its local store from the cache volume (5%, rounded and bounded).
   # Keep the default so a runner disk change also changes its cache budget.
@@ -26,12 +29,19 @@ jobs:
   # rerun retains this decision; cancellation is never interpreted as completed test evidence.
   test-selection:
     name: test-selection
-    runs-on: ubicloud-standard-2-ubuntu-2404
+    runs-on: boat-small
     timeout-minutes: 5
     outputs:
       tests-required: ${{ steps.selection.outputs.tests-required }}
       bolero-required: ${{ steps.selection.outputs.bolero-required }}
     steps:
+      # Boat's base image has Ubuntu's git 2.43, and the test selection passes `--no-lazy-fetch`,
+      # which git 2.44 added. GitHub's runner image takes the current git from this PPA too.
+      - name: Install the current git
+        run: |
+          sudo add-apt-repository --yes ppa:git-core/ppa
+          sudo apt-get install --yes --no-install-recommends git
+
       - name: Checkout tested merge
         uses: actions/checkout@v4
         with:
@@ -65,7 +75,7 @@ jobs:
 
   conventional-pr-title:
     if: github.event_name == 'pull_request'
-    runs-on: ubicloud-standard-2-ubuntu-2404
+    runs-on: boat-small
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
@@ -81,7 +91,7 @@ jobs:
 
   checks:
     name: checks
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    runs-on: boat-xlarge
     # Cold validation includes Clippy and the complete compiler matrix.
     timeout-minutes: 120
     steps:
@@ -102,8 +112,8 @@ jobs:
         with:
           components: rustfmt
 
-      # GitHub's runner image, which Ubicloud runs, has no ripgrep, and `just validate-dns-dependencies`
-      # needs it. install-action has no package of its own for ripgrep, so cargo-binstall installs it.
+      # `just validate-dns-dependencies` needs ripgrep, which a runner image need not provide.
+      # install-action has no package of its own for ripgrep, so cargo-binstall installs it.
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
@@ -118,6 +128,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -146,6 +158,13 @@ jobs:
 
       - name: Install ghokin
         run: python3 scripts/install_go_ci_tool.py ghokin "${RUNNER_TEMP}/go-tool-bootstrap"
+
+      # Boat's base image has Ubuntu's git 2.43, and the test selection passes `--no-lazy-fetch`,
+      # which git 2.44 added. GitHub's runner image takes the current git from this PPA too.
+      - name: Install the current git
+        run: |
+          sudo add-apt-repository --yes ppa:git-core/ppa
+          sudo apt-get install --yes --no-install-recommends git
 
       - name: Install apt deps and current GitHub CLI
         run: |
@@ -178,9 +197,9 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
@@ -201,6 +220,13 @@ jobs:
       # the book build that also runs them runs only for a pull request labeled `book`.
       - name: Setup uv for the script tests
         uses: astral-sh/setup-uv@v6
+
+      # The docs worker's tests run under Node.js. Boat's own Node.js comes from nvm, which a job's
+      # shell may not load.
+      - name: Setup Node.js for the docs worker's tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
 
       - name: Script tests
         run: just test-docs
@@ -247,7 +273,7 @@ jobs:
     name: diagnostic-evidence
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    runs-on: boat-xlarge
     timeout-minutes: 45
     permissions:
       contents: read
@@ -281,6 +307,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -298,9 +326,9 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
@@ -363,7 +391,7 @@ jobs:
   deloxide:
     name: deloxide (${{ matrix.selection }})
     if: contains(github.event.pull_request.labels.*.name, 'deloxide')
-    runs-on: ubicloud-standard-16-ubuntu-2404
+    runs-on: boat-xlarge
     # Setup, then at most the lane's bound, the qualification's bound and the reserve the uploads
     # and the kache report keep after them.
     timeout-minutes: 200
@@ -399,6 +427,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -450,9 +480,9 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ matrix.selection }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
@@ -535,7 +565,7 @@ jobs:
     name: tests
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
-    runs-on: ubicloud-standard-16-ubuntu-2404
+    runs-on: boat-xlarge
     timeout-minutes: 60
     permissions:
       contents: read
@@ -568,6 +598,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -593,6 +625,13 @@ jobs:
 
       - name: Install dockerfmt
         run: python3 scripts/install_go_ci_tool.py dockerfmt "${RUNNER_TEMP}/go-tool-bootstrap"
+
+      # Boat's own Node.js comes from nvm, which a job's shell may not load, so a global install
+      # goes into the Node.js this step pins instead.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
 
       - name: Install playwright
         run: |
@@ -621,9 +660,9 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
@@ -727,7 +766,7 @@ jobs:
     name: scenarios
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
-    runs-on: ubicloud-standard-16-ubuntu-2404
+    runs-on: boat-xlarge
     # The harness derives 105 minutes of scenarios from this limit, with 35 for setup/builds and
     # 15 for cleanup/export/uploads. Keep tests/common/suite_watchdog.rs in step.
     timeout-minutes: 155
@@ -766,6 +805,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -791,6 +832,13 @@ jobs:
 
       - name: Install dockerfmt
         run: python3 scripts/install_go_ci_tool.py dockerfmt "${RUNNER_TEMP}/go-tool-bootstrap"
+
+      # Boat's own Node.js comes from nvm, which a job's shell may not load, so a global install
+      # goes into the Node.js this step pins instead.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
 
       - name: Install playwright
         run: |
@@ -819,9 +867,9 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
@@ -952,7 +1000,7 @@ jobs:
   coverage:
     name: coverage
     needs: [tests, scenarios, extra-tests]
-    runs-on: ubicloud-standard-4-ubuntu-2404
+    runs-on: boat-large
     timeout-minutes: 20
     permissions:
       contents: read
@@ -984,9 +1032,9 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
@@ -1099,7 +1147,7 @@ jobs:
     name: coverage-full
     needs: [test-selection, bolero, coverage, extra-tests, diagnostic-evidence, shuttle, loom, turmoil, deloxide]
     if: ${{ !cancelled() && (needs.test-selection.result != 'success' || needs.test-selection.outputs.tests-required == 'true') }}
-    runs-on: ubicloud-standard-4-ubuntu-2404
+    runs-on: boat-large
     timeout-minutes: 15
     permissions:
       contents: read
@@ -1205,7 +1253,7 @@ jobs:
   client-conformance:
     name: client-conformance
     if: contains(github.event.pull_request.labels.*.name, 'client-conformance')
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    runs-on: boat-xlarge
     # The suite budget below is derived from this limit: builds before the scenarios, then at most
     # the budget, then the reserve the harness keeps for its own cleanup and the log upload.
     timeout-minutes: 60
@@ -1241,6 +1289,8 @@ jobs:
       # interchangeable in the shared cache rather than a second set of artifacts.
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -1276,6 +1326,11 @@ jobs:
         with:
           node-version: "24"
 
+      # setup-ruby extracts its prebuilt Ruby to /opt/hostedtoolcache, the prefix the build embeds,
+      # without sudo. A Boat machine has no such directory.
+      - name: Create the hosted tool cache
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" /opt/hostedtoolcache
+
       # Fiddle's boolean type, which the Ruby probe's signatures use, ships with Ruby 3.3.
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
@@ -1310,9 +1365,9 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
@@ -1381,9 +1436,9 @@ jobs:
     name: extra-tests
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
-    # Half the suite job's cores saves capacity. Budget cold ordinary instrumentation,
-    # compiler checks and modeled primitive builds.
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    # Its builds fill about 95 GiB of disk, which only Boat's largest machine holds with room to
+    # spare. Budget cold ordinary instrumentation, compiler checks and modeled primitive builds.
+    runs-on: boat-xlarge
     timeout-minutes: 120
     permissions:
       contents: read
@@ -1418,6 +1473,8 @@ jobs:
       # interchangeable in the shared cache rather than a second set of artifacts.
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -1440,6 +1497,13 @@ jobs:
           curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
+
+      # Boat's base image has Ubuntu's git 2.43, and the test selection passes `--no-lazy-fetch`,
+      # which git 2.44 added. GitHub's runner image takes the current git from this PPA too.
+      - name: Install the current git
+        run: |
+          sudo add-apt-repository --yes ppa:git-core/ppa
+          sudo apt-get install --yes --no-install-recommends git
 
       - name: Install apt deps
         run: |
@@ -1469,9 +1533,9 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
@@ -1699,7 +1763,7 @@ jobs:
   shuttle:
     name: shuttle
     if: contains(github.event.pull_request.labels.*.name, 'shuttle')
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    runs-on: boat-xlarge
     timeout-minutes: 240
     permissions:
       contents: read
@@ -1727,6 +1791,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -1778,9 +1844,9 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
@@ -1877,7 +1943,7 @@ jobs:
   loom:
     name: loom
     if: contains(github.event.pull_request.labels.*.name, 'loom')
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    runs-on: boat-xlarge
     # The models took 10 to 11 minutes on a warm cache. The limit leaves room for a cold
     # instrumented build and for the models the inventory adds.
     timeout-minutes: 60
@@ -1907,6 +1973,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -1941,9 +2009,9 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
@@ -2032,7 +2100,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2]
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    runs-on: boat-xlarge
     timeout-minutes: 120
     permissions:
       contents: read
@@ -2060,6 +2128,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -2111,9 +2181,9 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
@@ -2184,7 +2254,7 @@ jobs:
   turmoil:
     name: turmoil
     if: contains(github.event.pull_request.labels.*.name, 'turmoil')
-    runs-on: ubicloud-standard-4-ubuntu-2404
+    runs-on: boat-large
     # The emergency guard around the build, the tests and the upload. The tests end themselves
     # first: every run has its own real-time bound, and `just test-turmoil` gives all of them
     # together an 8-minute budget, which ends a wedged run with status 124 and leaves the record
@@ -2226,6 +2296,8 @@ jobs:
       # shares with them compile identically.
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -2248,9 +2320,9 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start

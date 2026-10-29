@@ -345,22 +345,35 @@ just test-connectors <filter>
 
 ### CI runners
 
-CI jobs run on [Ubicloud](https://www.ubicloud.com) machines, which Ubicloud's GitHub App starts for
-every job whose `runs-on` names a Ubicloud label. Each job gets a fresh virtual machine with GitHub's
-`ubuntu-24.04` runner image, deleted when the job ends. Every label pins Ubuntu 24.04, and
-`.github/actionlint.yaml` declares the labels to `just validate-workflows`. An x64 runner has 4 GB of
-memory per CPU, from `ubicloud-standard-2` with 8 GB to `ubicloud-standard-30` with 120 GB:
+CI jobs run on [Boat](https://boat.dev) machines, which the boat CI GitHub App starts for every job
+whose `runs-on` names a Boat size. Each job gets a fresh x86_64 Ubuntu 24.04 virtual machine with
+Docker, deleted when the job ends. `.github/actionlint.yaml` declares the Boat labels to
+`just validate-workflows`. Boat runs a public repository's jobs only for the GitHub users its
+account setting lists, and only when both a run's author and the user who started it are on that
+list, so it refuses any other run, such as one for a pull request from a fork. A job's size follows
+the memory and disk its builds use rather than its CPUs, since a Boat machine has only 2 GB of
+memory per CPU, with 4 GB of swap beside it:
 
-- `ubicloud-standard-16` runs the unit tests, the scenarios, the Deloxide lane and the Bolero
-  sanitizer shards.
-- `ubicloud-standard-8` runs validation, the diagnostic evidence, client conformance, the extra
-  checks, Shuttle, Loom, the Bolero randomized properties, the image builds and the benchmarks.
-- `ubicloud-standard-4` runs Turmoil, the coverage reports, the book, the amd64 deployment check
-  and the chaos shards.
-- `ubicloud-standard-2` runs the jobs that only select, plan, gate or publish.
+- `boat-xlarge`, with 16 CPUs, 32 GB and 251 GB of disk, runs validation, the diagnostic evidence,
+  the unit tests, the scenarios, client conformance, the extra checks, Shuttle, Loom, the Deloxide
+  lane, Bolero, the image builds and the benchmarks. In runs of October 2026 the Loom jobs used
+  about 20 GiB of memory, the scenarios up to 28 GiB and the extra checks about 95 GiB of disk, and
+  the amd64 image build lost its runner on a 16 GB machine.
+- `boat-large`, with 8 CPUs, 16 GB and 111 GB, runs the coverage reports, Turmoil, the book, both
+  deployment checks and the chaos shards.
+- `boat-small`, with 2 CPUs and 4 GB, runs the jobs that only select, plan, gate or publish.
 
-The arm64 deployment check runs natively on `ubicloud-standard-8-arm`, whose 24 GB leave host
-headroom around minikube's 10 GiB; an arm64 runner has 3 GB of memory per CPU.
+Boat has no arm64 machine, so the arm64 deployment check runs the arm64 image on an amd64 machine
+under QEMU, which `just docker-prepare-qemu` registers. A Boat machine sets the `en_US.UTF-8`
+locale, whose collation orders `sort` output differently from the `C.UTF-8` of GitHub's runner
+image, so every workflow sets `LC_ALL=C.UTF-8`. Its Docker daemon can start a few seconds after a
+job begins, so a job whose first steps use Docker waits for it. Its own Node.js comes from nvm,
+which a job's shell may not load, so a job that runs Node.js or npm pins it with
+`actions/setup-node`. Its Rust toolchain is installed system-wide under `/usr/local/cargo`, so a
+job creates `~/.cargo` before it writes its Cargo configuration there, and the chaos shards drop
+that directory from the PATH their suite runs with. Its git is Ubuntu's 2.43, older than the 2.44
+whose `--no-lazy-fetch` the test selection passes, so the jobs that run the selection or its tests
+install the current git from the git-core PPA, as GitHub's runner image does.
 
 ### Compiler architecture gate
 
