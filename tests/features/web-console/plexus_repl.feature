@@ -157,9 +157,9 @@ Feature: Web console Plexus REPL
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "created domain 'production'"
     And selector ".prompt-row" contains "production"
-    When selector ".prompt-row input" is filled with "BEGIN; CREATE HTTP CLIENT http_main CONFIG { 'endpoint' = 'http://example.com/a;b' }; CREATE SCHEMA notification ( user_id I64 ); COMMIT"
+    When selector ".prompt-row input" is filled with "BEGIN; CREATE HTTP CLIENT http_main CONFIG { 'endpoint' = 'http://example.com/a;b', 'timeout_ms' = 5000}; CREATE SCHEMA notification ( user_id I64 ); COMMIT"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "BEGIN; CREATE HTTP CLIENT http_main CONFIG { 'endpoint' = 'http://example.com/a;b' }; CREATE SCHEMA notification ( user_id I64 ); COMMIT"
+    Then selector ".terminal" contains "BEGIN; CREATE HTTP CLIENT http_main CONFIG { 'endpoint' = 'http://example.com/a;b', 'timeout_ms' = 5000}; CREATE SCHEMA notification ( user_id I64 ); COMMIT"
     And selector ".terminal" contains "quiesce level: DYNAMIC"
     When selector ".prompt-row input" is filled with "SHOW CREATE SCHEMA notification"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -668,7 +668,7 @@ Feature: Web console Plexus REPL
     Given the leader node is configured with these Plexus commands
       """
       CREATE HASH MAP lookup_by_id KEY id FROM RESOURCE lookup_bundle VERSION 1 PATH 'lookup.jsonl' DECODE USING lookup_codec;
-      CREATE HTTP CLIENT lookup_store MOUNT lookup_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
+      CREATE HTTP CLIENT lookup_store MOUNT lookup_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1', 'timeout_ms' = 5000};
       """
     When selector ".resource-dialog .file-upload-input" uploads resource directory "lookup_v2"
     Then selector ".resource-upload-status" contains "uploaded resource version 2"
@@ -1635,7 +1635,7 @@ Feature: Web console Plexus REPL
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
-      CREATE HTTP CLIENT http_main CONFIG { 'endpoint' = 'http://example.com/ingest' };
+      CREATE HTTP CLIENT http_main CONFIG { 'endpoint' = 'http://example.com/ingest', 'timeout_ms' = 5000};
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;

@@ -94,6 +94,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("timestamp", "'2026-01-01T00:00:00Z'"),
     // Server-issued identities are quoted literals rather than Plexus names.
     ("transaction_id", "'nx_transaction'"),
+    ("request_header_name", "'x-nx-header'"),
     ("upgrade_header_name", "'x-nx-header'"),
     ("word", "nx_word"),
 ];

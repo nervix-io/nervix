@@ -2,7 +2,7 @@
   "ci_reserve_minutes": 21,
   "suites": {
     "smoke": {
-      "description": "Three-node baseline, a leader crash with its restart, and the recovery from an isolated follower's partition",
+      "description": "Three-node baseline, a leader crash with its restart, the recovery from an isolated follower's partition, endpoint intake on one node and through a three-node owner crash, and the lifetimes workloads through a three-node owner crash",
       "entries": [
         {
           "id": "baseline-3",
@@ -21,6 +21,24 @@
           "shard": 1,
           "budget_minutes": 9,
           "run": ["partition-recovery", "--case", "follower"]
+        },
+        {
+          "id": "endpoints-1",
+          "shard": 2,
+          "budget_minutes": 10,
+          "run": ["endpoints", "--nodes", "1"]
+        },
+        {
+          "id": "endpoints-3-owner-crash",
+          "shard": 2,
+          "budget_minutes": 12,
+          "run": ["endpoints", "--nodes", "3", "--fault", "owner-crash"]
+        },
+        {
+          "id": "lifetimes-3-owner-crash",
+          "shard": 3,
+          "budget_minutes": 25,
+          "run": ["lifetimes", "--nodes", "3", "--fault", "owner-crash"]
         }
       ]
     },
@@ -384,6 +402,78 @@
           "shard": 11,
           "budget_minutes": 19,
           "run": ["restore-fault", "--fault", "reclamation-owner-crash"]
+        },
+        {
+          "id": "endpoints-1",
+          "shard": 12,
+          "budget_minutes": 10,
+          "run": ["endpoints", "--nodes", "1"]
+        },
+        {
+          "id": "endpoints-1-cluster-restart",
+          "shard": 12,
+          "budget_minutes": 12,
+          "run": ["endpoints", "--nodes", "1", "--fault", "cluster-restart"]
+        },
+        {
+          "id": "endpoints-3",
+          "shard": 12,
+          "budget_minutes": 10,
+          "run": ["endpoints", "--nodes", "3"]
+        },
+        {
+          "id": "endpoints-3-owner-crash",
+          "shard": 12,
+          "budget_minutes": 12,
+          "run": ["endpoints", "--nodes", "3", "--fault", "owner-crash"]
+        },
+        {
+          "id": "endpoints-3-owner-partition",
+          "shard": 12,
+          "budget_minutes": 12,
+          "run": ["endpoints", "--nodes", "3", "--fault", "owner-partition"]
+        },
+        {
+          "id": "endpoints-3-cluster-restart",
+          "shard": 12,
+          "budget_minutes": 12,
+          "run": ["endpoints", "--nodes", "3", "--fault", "cluster-restart"]
+        },
+        {
+          "id": "lifetimes-1",
+          "shard": 13,
+          "budget_minutes": 20,
+          "run": ["lifetimes", "--nodes", "1"]
+        },
+        {
+          "id": "lifetimes-1-cluster-restart",
+          "shard": 13,
+          "budget_minutes": 22,
+          "run": ["lifetimes", "--nodes", "1", "--fault", "cluster-restart"]
+        },
+        {
+          "id": "lifetimes-3",
+          "shard": 13,
+          "budget_minutes": 22,
+          "run": ["lifetimes", "--nodes", "3"]
+        },
+        {
+          "id": "lifetimes-3-owner-crash",
+          "shard": 14,
+          "budget_minutes": 25,
+          "run": ["lifetimes", "--nodes", "3", "--fault", "owner-crash"]
+        },
+        {
+          "id": "lifetimes-3-owner-partition",
+          "shard": 14,
+          "budget_minutes": 25,
+          "run": ["lifetimes", "--nodes", "3", "--fault", "owner-partition"]
+        },
+        {
+          "id": "lifetimes-3-cluster-restart",
+          "shard": 14,
+          "budget_minutes": 25,
+          "run": ["lifetimes", "--nodes", "3", "--fault", "cluster-restart"]
         }
       ]
     }

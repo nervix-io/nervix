@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use arch_into::ArchInto as _;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -25,6 +28,30 @@ fn statements_starting_with(source: &str, prefix: &str) -> usize {
         .iter()
         .filter(|statement| statement.starts_with(prefix))
         .count()
+}
+
+/// Vector refuses a configuration with a top-level table it does not define, and its container
+/// then never becomes ready. These are Vector's own names, which no Nervix vocabulary change
+/// renames.
+fn is_vector_table(table: &str) -> bool {
+    matches!(
+        table,
+        "api" | "acknowledgements" | "healthchecks" | "sources" | "transforms" | "sinks"
+    )
+}
+
+fn vector_tables(rendered: &str) -> BTreeSet<&str> {
+    let mut tables = BTreeSet::new();
+    for line in rendered.lines() {
+        if line.is_empty() || line.starts_with([' ', '#']) {
+            continue;
+        }
+        let Some((table, _)) = line.split_once(':') else {
+            continue;
+        };
+        tables.insert(table);
+    }
+    tables
 }
 
 #[test]
@@ -72,6 +99,21 @@ fn every_end_to_end_workload_renders_all_three_implementations() {
             assert!(rendered.contains("benchmark_output"));
             assert!(!rendered.contains("{{"));
             assert!(!rendered.contains("{%"));
+            if implementation == "vector" {
+                let slug = benchmark.slug();
+                let tables = vector_tables(&rendered);
+                for table in &tables {
+                    assert!(
+                        is_vector_table(table),
+                        "{slug}: Vector defines no top-level `{table}` table"
+                    );
+                }
+                assert!(
+                    tables.contains("sources"),
+                    "{slug}: Vector reads no sources"
+                );
+                assert!(tables.contains("sinks"), "{slug}: Vector writes no sinks");
+            }
         }
     }
 }

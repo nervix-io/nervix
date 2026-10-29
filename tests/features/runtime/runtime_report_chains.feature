@@ -14,10 +14,10 @@ Feature: Runtime report chains
       CREATE RELAY cadence_records SCHEMA cadence_record UNBRANCHED;
       CREATE HTTP CLIENT cadence_http CONFIG {
         'endpoint' = 'http://127.0.0.1:1/events',
-        'method' = 'GET'
+        'timeout_ms' = 5000
       };
       CREATE HTTP REQUEST INGESTOR cadence_reader
-        FROM cadence_http EVERY 1d
+        FROM cadence_http METHOD 'GET' EVERY 1d
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING cadence_codec
         TIMESTAMP NOW
         TO cadence_records

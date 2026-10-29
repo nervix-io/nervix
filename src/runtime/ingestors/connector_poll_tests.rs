@@ -33,6 +33,7 @@ fn messages_of_users(count: i64) -> Vec<IngestorPollMessage> {
         messages.push(IngestorPollMessage {
             payload: format!(r#"{{"user_id":{user_id}}}"#).into_bytes(),
             headers: RetainedIngestHeaders::none(),
+            metadata: nervix_connector::IngestorPollMetadata::Headers,
         });
     }
     messages

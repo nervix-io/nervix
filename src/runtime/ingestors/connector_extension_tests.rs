@@ -248,6 +248,7 @@ fn poll_of(user_id: i64) -> IngestorPoll {
         messages: vec![IngestorPollMessage {
             payload: format!(r#"{{"user_id":{user_id}}}"#).into_bytes(),
             headers: RetainedIngestHeaders::none(),
+            metadata: nervix_connector::IngestorPollMetadata::Headers,
         }],
         failures: Vec::new(),
         observed_at: Timestamp::from_unix_nanos(1),

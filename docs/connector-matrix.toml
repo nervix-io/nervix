@@ -11,7 +11,6 @@ mirror = "Native Arrow batches cross an application session; producers submit ba
 emit_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
 envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
 ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
-metadata = "HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields."
 mirror = "Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
