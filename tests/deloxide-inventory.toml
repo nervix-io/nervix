@@ -106,6 +106,8 @@ kind = "cucumber"
 package = "nervix-server"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@restore_client_inspection",
+  "@runtime_installation_retry",
   "@execution_class_drain",
   "@kafka_start_generation",
   "@kafka_start_generation_restore",
@@ -2716,6 +2718,46 @@ scenario = "A model command whose publication met a lapsed leader lease releases
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "A persisted running domain is installed after bounded construction refusals, with no new configuration or lifecycle command."
+examples = 1
+feature = "tests/features/runtime/runtime_installation_retry.feature"
+id = "scenario.runtime-installation-retry"
+invariant = "A restarted node retries refused installations of its committed runtime, forwards new Syslog traffic through the recovered graph, and retains its original relay owner."
+invocation = "scenarios"
+scenario = "A restarted node retries refused installations of its committed runtime"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: installation of a persisted running domain after bounded construction refusals without another committed change."
+examples = 1
+feature = "tests/features/runtime/runtime_installation_retry.feature"
+id = "stress.runtime-installation-retry"
+invariant = "A restarted node retries refused installations of its committed runtime, forwards new Syslog traffic through the recovered graph, and retains its original relay owner."
+invocation = "stress-scenarios"
+scenario = "A restarted node retries refused installations of its committed runtime"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Accepted restore model application reaches a full real filesystem queue before its first-poll observation; after capacity is released every step and the configured client are preserved. Queue submission and draining reach the executor class-local tracked FIFO fence; async capacity waits and test worker parking are untracked."
+examples = 2
+feature = "tests/features/cluster/restore_client_inspection.feature"
+id = "scenario.restore-client-inspection"
+invariant = "An accepted restore waits for client-inspection capacity, then applies every step and preserves the configured client on one and three nodes."
+invocation = "scenarios"
+scenario = "An accepted restore waits for client inspection capacity on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Accepted restore model application reaches a full real filesystem queue before its first-poll observation; after capacity is released every step and the configured client are preserved. Queue submission and draining reach the executor class-local tracked FIFO fence; async capacity waits and test worker parking are untracked."
+examples = 2
+feature = "tests/features/cluster/restore_client_inspection.feature"
+id = "stress.restore-client-inspection"
+invariant = "An accepted restore waits for client-inspection capacity, then applies every step and preserves the configured client on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "An accepted restore waits for client inspection capacity on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Class-local executor FIFO admission and drain fences while every node's bulk workers are held and a prepared production client completes six sequential management mutations on one and three nodes. Cleanup releases the tracked holds before diagnostics and node stop. Callbacks execute outside the fence; async admission and network waits remain untracked."
 examples = 2
 feature = "tests/features/cluster/bounded_execution.feature"
@@ -2760,6 +2802,8 @@ selections = ["deloxide-stress"]
 gap = "CPU-worker interruption between simulated callbacks belongs to the mutually exclusive Turmoil mode. Native blocking-task teardown before its first callback is not deterministically reached by these public scenarios. Native workloads reach normal FIFO admission, cancellation and draining; the ordinary interrupted-worker regression covers selected and queued destructor cleanup without claiming tracked-lock interleavings."
 path = "crates/execution/src/workers.rs"
 workloads = [
+  "scenario.restore-client-inspection",
+  "stress.restore-client-inspection",
   "scenario.execution-class-drain",
   "stress.execution-class-drain",
   "scenario.materialized-bulk-generations",
@@ -3160,6 +3204,8 @@ workloads = [
 gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. Ordinary branch-state-room scenarios retain their broader capture and restore coverage outside these workloads."
 path = "src/fault_injection.rs"
 workloads = [
+  "scenario.runtime-installation-retry",
+  "stress.runtime-installation-retry",
   "scenario.inferencer-inspection-admission",
   "stress.inferencer-inspection-admission",
   "scenario.shutdown-flush-before-freeze",

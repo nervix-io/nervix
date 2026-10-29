@@ -1162,6 +1162,13 @@ placement, state identities, passive recovery, and ownership handoff. The handof
 the committed schedule's exact bytes. If an installation fails, the next attempt is planned from
 the last successfully applied schedule; the failed revision is not recorded as applied.
 
+The background installation supervisor retries a failed application on the admission loop's
+half-second cadence without requiring another committed change. Schedule and domain updates wake
+that wait immediately, and each attempt reads the current admitted state. This also recovers from a
+transient construction refusal after catch-up. A successful application waits for the next update;
+shutdown cancels a pending retry wait. The retry does not advance the domain's start generation or
+reissue its commands.
+
 Until admission succeeds, the node is live but inert with respect to ownership. Its public listeners and
 its interconnect answer requests, which keeps configured listening entities available on every live
 node, but no runtime routes exist, so a payload it accepts cannot reach recovered graph execution.

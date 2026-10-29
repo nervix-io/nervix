@@ -458,6 +458,18 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn observe_client_inspection_admission<F: Future>(
+        &self,
+        domain: &DomainName,
+        future: F,
+    ) -> F::Output {
+        self.inner
+            .fault_injection
+            .observe_client_inspection_admission(domain, future)
+            .await
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_restore_step_if_armed(
         &self,
         node_id: &ClusterNodeName,
@@ -549,6 +561,13 @@ impl Runtime {
             .fault_injection
             .pause_runtime_installation_if_armed(node_id)
             .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_runtime_installation_refusal(&self, node_id: &ClusterNodeName) -> bool {
+        self.inner
+            .fault_injection
+            .take_runtime_installation_refusal(node_id)
     }
 
     #[cfg(feature = "testing")]

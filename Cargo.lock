@@ -6958,7 +6958,6 @@ dependencies = [
  "ubyte",
  "url",
  "uuid",
- "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -7135,7 +7134,6 @@ dependencies = [
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
- "nonzero_ext",
  "serde_json",
  "sqlx",
  "thiserror 2.0.21",

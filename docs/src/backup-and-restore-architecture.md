@@ -551,6 +551,13 @@ A step that fails ends the restore. The steps recorded before it stay applied, a
 restore created stays stopped with what it committed; when the domain was created but did not become
 usable on every live node, the create step itself stays applied and is reported as failed.
 
+Client configuration inspection within the accepted apply-models step waits for command-memory
+capacity and a filesystem worker-queue place. Temporary admission pressure does not fail a step
+after its earlier effects have committed. The node retains the restore's archive and domain lease
+through this wait; it holds no inspection copy before its memory charge is admitted. The service
+task's shutdown cancellation drops the wait, and a worker already running retains its charge until
+it exits. Oversized charges, a closed executor and actual configuration failures still fail the step.
+
 Only the leader the archive was streamed to holds it. When leadership moves while a restore applies,
 the restore stays applying. A leader that holds the restore's archive resumes it at its first step
 not recorded; otherwise a client that sends the archive again under the same execution reference

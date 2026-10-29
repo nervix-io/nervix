@@ -20,7 +20,9 @@ use std::time::Duration;
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{Cancellation, Cancelled, CpuClass, ExecutionError, MemoryClass};
+use nervix_execution::{
+    Cancellation, Cancelled, CpuClass, ExecutionError, MemoryClass, QueueAdmission,
+};
 use nervix_models::{
     CreateInferencer, CreateLookup, DomainName, DomainPace, InferencerName,
     InferencerTensorDimension, InferencerTensorSchema, IngestorName, LookupName, Model, ModelKind,
@@ -365,11 +367,13 @@ impl SessionServiceImpl {
         domain: &DomainName,
         pace: DomainPace,
         planned: &crate::registry::PlannedMutations,
+        client_admission: QueueAdmission,
     ) -> error_stack::Result<(), ModelBindingValidationError> {
         for model in planned.changed_models() {
             nervix_primitives::task::consume_budget().await;
             if let Some(client) = model.configured_client() {
-                self.validate_client_configuration(domain, client).await?;
+                self.validate_client_configuration(domain, client, client_admission)
+                    .await?;
             }
             match model {
                 Model::Ingestor(ingestor) => {

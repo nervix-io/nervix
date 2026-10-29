@@ -36,7 +36,7 @@ use arrow_array::{
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::DateTime;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle, EmitterOpenError,
@@ -45,9 +45,11 @@ use nervix_connector::{
     RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits, client_tls_paths,
     optional_client_config_value,
 };
-use nervix_models::{ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, PostgresTableName};
+use nervix_models::{
+    ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, POSTGRES_MESSAGE_SIZE_MAXIMUM,
+    PostgresSslMode, PostgresTableName,
+};
 use nervix_primitives::time::Instant;
-use nonzero_ext::nonzero;
 use sqlx::{
     AssertSqlSafe, Executor as _, Row as _,
     pool::PoolConnection,
@@ -61,15 +63,16 @@ const POSTGRES: &str = "postgres";
 /// What `MAX SIZE` measures on a Postgres write, which an oversized row's rejection names.
 const MEASURED_REQUEST: &str = "Postgres insert";
 
-/// The longest protocol message the Postgres server reads, `PQ_LARGE_MESSAGE_LIMIT`: one byte
-/// below the largest allocation it makes. A Bind message above it closes the connection.
+/// The longest protocol message the Postgres server reads, which the vocabulary declares as the
+/// largest `BATCH MAX SIZE` a Postgres emitter accepts. A Bind message above it closes the
+/// connection.
 ///
 /// A write's measured size — its statement text and the arrays it binds — is never smaller than
 /// the Bind message that carries those arrays: the statement names every column several times,
 /// while the message adds a few bytes per parameter around them. Keeping the measured size within
 /// this limit therefore keeps every message within it, and every bound array within the 1 GB a
 /// single value may hold.
-const MESSAGE_LIMIT: NonZeroU64 = nonzero!(1_073_741_822_u64);
+const MESSAGE_LIMIT: NonZeroU64 = POSTGRES_MESSAGE_SIZE_MAXIMUM.bytes();
 
 /// The binary header of a one-dimensional array parameter: its dimension count, flags, element
 /// type, length and lower bound, four bytes each.
@@ -288,29 +291,17 @@ pub(crate) fn connect_options(
         .parse()
         .map_err(|source| invalid(format!("invalid addr: {source}")))?;
 
-    let ssl_mode = url
-        .query_pairs()
-        .find(|(key, _)| key == "sslmode")
-        .map(|(_, value)| value.to_string());
-    let verify_full = match ssl_mode.as_deref() {
-        Some("verify-full") => true,
-        Some("disable") => false,
-        Some(other) => {
-            return Err(invalid(format!(
-                "sslmode must be 'disable' or 'verify-full', found '{other}'"
-            )));
-        }
-        None => {
-            return Err(invalid(
-                "addr must select sslmode=disable or sslmode=verify-full".to_string(),
-            ));
-        }
+    let ssl_mode = PostgresSslMode::of_address(&url).change_context(
+        EmitterOpenError::InvalidConfiguration {
+            connector: POSTGRES,
+        },
+    )?;
+    let verify_full = ssl_mode == PostgresSslMode::VerifyFull;
+    let driver_mode = match ssl_mode {
+        PostgresSslMode::Disable => PgSslMode::Disable,
+        PostgresSslMode::VerifyFull => PgSslMode::VerifyFull,
     };
-    options = options.ssl_mode(if verify_full {
-        PgSslMode::VerifyFull
-    } else {
-        PgSslMode::Disable
-    });
+    options = options.ssl_mode(driver_mode);
 
     let tls = client_tls_paths(config);
     if !tls.is_empty() && !verify_full {
@@ -365,6 +356,19 @@ impl PostgresTableEmitter {
         format!("\"{}\"", identifier.replace('"', "\"\""))
     }
 
+    /// The table as one SQL name, each declared part quoted as its own identifier, so the insert
+    /// and its catalog lookup name the same case-preserved relation.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "visits the vocabulary's opaque iterator over at most two \
+                                   immutable table parts bounded to 128 bytes total; local \
+                                   quoting callbacks remain analyzed")
+    )]
+    fn table_sql(&self) -> String {
+        let parts: Vec<String> = self.table.parts().map(Self::quote_ident).collect();
+        parts.join(".")
+    }
+
     /// One connection from the node's pool, returned to it when the borrow is dropped.
     #[cfg_attr(
         nervix_lint,
@@ -393,7 +397,7 @@ impl PostgresTableEmitter {
         connection: &mut PostgresConnection,
         columns: &[String],
     ) -> error_stack::Result<Vec<String>, PostgresWriteError> {
-        let table_name = self.table.as_str().to_string();
+        let table_name = self.table_sql();
         let column_refs = columns.to_vec();
         let rows = sqlx::query(
             "SELECT a.attname, a.atttypid::regtype::text FROM pg_attribute a WHERE a.attrelid = \
@@ -454,7 +458,7 @@ impl PostgresTableEmitter {
         Ok(format!(
             "INSERT INTO {} ({insert_columns}) SELECT {select_columns} FROM unnest({param_refs}) \
              AS t({unnest_columns}){conflict_clause}",
-            Self::quote_ident(self.table.as_str()),
+            self.table_sql(),
         ))
     }
 
@@ -1249,6 +1253,126 @@ mod tests {
                 Some(r"\x00ff5c".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn every_mapped_type_binds_the_text_its_declared_encoding_names() {
+        use nervix_models::{ParseAsType, PostgresValueEncoding};
+
+        struct BindingCase {
+            ty: ParseAsType,
+            array: ArrayRef,
+            text: Option<&'static str>,
+            encoding: PostgresValueEncoding,
+        }
+        macro_rules! binding {
+            ($ty:ident, $array:ident, $value:expr, $text:expr, $encoding:ident) => {
+                BindingCase {
+                    ty: ParseAsType::$ty,
+                    array: StdArc::new($array::from(vec![$value])),
+                    text: $text,
+                    encoding: PostgresValueEncoding::$encoding,
+                }
+            };
+        }
+        let cases = [
+            binding!(Bool, BooleanArray, true, Some("true"), BooleanText),
+            binding!(U8, UInt8Array, u8::MAX, Some("255"), DecimalInteger),
+            binding!(I8, Int8Array, i8::MIN, Some("-128"), DecimalInteger),
+            binding!(U16, UInt16Array, u16::MAX, Some("65535"), DecimalInteger),
+            binding!(I16, Int16Array, i16::MIN, Some("-32768"), DecimalInteger),
+            binding!(
+                U32,
+                UInt32Array,
+                u32::MAX,
+                Some("4294967295"),
+                DecimalInteger
+            ),
+            binding!(
+                I32,
+                Int32Array,
+                i32::MIN,
+                Some("-2147483648"),
+                DecimalInteger
+            ),
+            binding!(
+                U64,
+                UInt64Array,
+                u64::MAX,
+                Some("18446744073709551615"),
+                DecimalInteger
+            ),
+            binding!(
+                I64,
+                Int64Array,
+                i64::MIN,
+                Some("-9223372036854775808"),
+                DecimalInteger
+            ),
+            binding!(
+                F32,
+                Float32Array,
+                0.1_f32,
+                Some("0.10000000149011612"),
+                DecimalFloat
+            ),
+            binding!(F64, Float64Array, f64::NAN, None, DecimalFloat),
+            binding!(F64, Float64Array, f64::NEG_INFINITY, None, DecimalFloat),
+            binding!(String, StringArray, "é", Some("é"), Text),
+            binding!(
+                Bytes,
+                BinaryArray,
+                b"\x00\xff".as_slice(),
+                Some(r"\x00ff"),
+                ByteaHex
+            ),
+            binding!(
+                Datetime,
+                TimestampNanosecondArray,
+                0_i64,
+                Some("1970-01-01T00:00:00+00:00"),
+                TimestampText
+            ),
+        ];
+        for case in cases {
+            assert_eq!(
+                PostgresValueEncoding::for_type(&case.ty),
+                case.encoding,
+                "{}",
+                case.ty
+            );
+            let column = MappedTextColumn::new(&case.array).expect("the declared type binds");
+            assert_eq!(column.text(0).as_deref(), case.text, "{}", case.ty);
+        }
+    }
+
+    #[test]
+    fn an_insert_and_its_catalog_lookup_quote_each_declared_table_part() {
+        let mut connector = emitter_without_connections();
+        for (table, quoted) in [
+            ("events", r#""events""#),
+            ("Sales.Orders", r#""Sales"."Orders""#),
+        ] {
+            connector.table = PostgresTableName::parse(table).expect("a current table path");
+            assert_eq!(connector.table_sql(), quoted);
+            let sql = connector
+                .insert_sql(&["id".to_string()], &["bigint".to_string()])
+                .expect("an insert without a conflict action renders");
+            assert!(sql.starts_with(&format!("INSERT INTO {quoted} (")), "{sql}");
+        }
+    }
+
+    #[test]
+    fn connection_options_read_the_declared_tls_policy() {
+        let refusal = connect_options("postgres://127.0.0.1/nervix?sslmode=require", &[])
+            .expect_err("only a declared policy connects");
+        assert!(matches!(
+            refusal.current_context(),
+            EmitterOpenError::InvalidConfiguration { .. }
+        ));
+        assert!(refusal.contains::<nervix_models::ClientConfigSchemaError>());
+        connect_options("postgres://127.0.0.1/nervix?ssl-mode=verify-full", &[])
+            .expect("the driver's alias spells the same declared option");
     }
 
     /// The measured size is the statement text and every array exactly as the driver encodes

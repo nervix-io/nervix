@@ -251,6 +251,8 @@ Client types that currently support TLS-oriented configuration through mounted r
 
 - Kafka
 - HTTP
+- Iceberg REST catalog, S3, GCS and Azure Blob, the catalog and object-store clients of an
+  Iceberg emitter
 - Sentry
 - OTEL
 - Prometheus
