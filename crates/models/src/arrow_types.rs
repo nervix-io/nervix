@@ -144,7 +144,6 @@ mod tests {
     }
 
     fn declared_metadata(kind: crate::IngestorEntityKind) -> IngestorMetadataDeclaration {
-        use crate::IngestorEntityMetadata as _;
         kind.capabilities().metadata
     }
 
