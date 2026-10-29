@@ -9,7 +9,7 @@ Feature: Postgres emission
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    And Postgres table "notifications_pg_out_{{test_id}}" exists
+    And Postgres table "Notifications_pg_out_{{test_id}}" exists in schema "Sales_{{test_id}}"
     When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
@@ -47,7 +47,7 @@ Feature: Postgres emission
         CONFIG {
           'addr' = '{{postgres_addr}}'
         };
-        CREATE POSTGRES TABLE EMITTER to_pg FROM notifications TO postgres_client TABLE 'notifications_pg_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+        CREATE POSTGRES TABLE EMITTER to_pg FROM notifications TO postgres_client TABLE 'Sales_{{test_id}}.Notifications_pg_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
