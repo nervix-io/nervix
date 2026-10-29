@@ -222,7 +222,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus"
-domain_version = 23
+domain_version = 24
 features = []
 id = "plexus-model"
 invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -237,7 +237,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 24
+domain_version = 25
 features = []
 id = "plexus-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
@@ -432,7 +432,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus"
-domain_version = 22
+domain_version = 23
 features = []
 id = "plexus-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -462,7 +462,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 22
+domain_version = 23
 features = []
 id = "plexus-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -477,7 +477,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 22
+domain_version = 23
 features = []
 id = "plexus-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -492,7 +492,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 21
+domain_version = 22
 features = []
 id = "plexus-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -567,7 +567,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/connectors/__fuzz__/surface__bolero_generated_entities_state_only_what_their_entity_declares/corpus"
-domain_version = 14
+domain_version = 15
 features = []
 id = "models-connector-declarations"
 invariant = "A generated ingestor and emitter of every entity state only what their entity declares: a declared delivery or publishing mode whose required option choices they make, a quiesce mode their entity honors, a body of the declared form, batching the declared legality admits, a type contract exactly for direct-value bodies and a client of a declared connector."
@@ -3206,6 +3206,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/kafka/src/topic/__fuzz__/topic__create_time_tests__bolero_create_times_are_the_millisecond_containing_their_timestamp/corpus"
+domain_version = 1
+features = []
+id = "kafka-record-create-times"
+invariant = "A Unix-nanosecond timestamp whose millisecond is after the Unix epoch becomes the Kafka create time of exactly that millisecond, which reads back as the timestamp floored to it; every millisecond after the epoch round-trips unchanged; and every earlier timestamp is refused, naming that timestamp."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-connector-kafka"
+random_iterations = 256
+source = "crates/connectors/kafka/src/topic/create_time_tests.rs"
+test = "topic::create_time_tests::bolero_create_times_are_the_millisecond_containing_their_timestamp"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/sentry/src/event/__fuzz__/event__envelope_properties__bolero_prepared_envelopes_preserve_complete_events_across_attempts/corpus"
 domain_version = 2
 features = []
@@ -3387,7 +3402,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_entity_presentations_keep_declared_rows_and_complete_configuration/corpus"
-domain_version = 9
+domain_version = 10
 features = []
 id = "connector-entity-presentation"
 invariant = "Every generated source and sink entity uses its declared phrase and ordered inspection rows, while the canonical Plexus built from that shared presentation reparses to its complete Model including all options, modes, payload mappings, flush and error policies."

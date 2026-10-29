@@ -20,7 +20,6 @@ metadata = "HTTP headers are available through header functions; this implementa
 mirror = "Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position."
 
 [entity."KAFKA TOPIC"]
-envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
 mirror = "Consumption tracks replayable log offsets and consumer groups; publication uses a producer queue or delivery report. Both directions use the same quoted, case-preserving Kafka topic names."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 

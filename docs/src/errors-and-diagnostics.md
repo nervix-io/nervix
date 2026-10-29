@@ -896,7 +896,10 @@ drops without a delivery report keeps the report channel's cancellation the same
 the connector's description of the failure for the emitter's transient error, and a missed `ACK
 TIMEOUT` is again the confirmation window's `ConfirmationWindowError`. A delivery error about the
 record itself, an invalid or oversized message, timestamp or record, rejects that record through
-`ON MESSAGE ERROR` instead. A producer that librdkafka cannot create keeps its `KafkaError` beneath
+`ON MESSAGE ERROR` instead. A record whose `TIMESTAMP` falls before the Unix epoch's first
+millisecond, which a Kafka record cannot carry, is a record rejection in either mode before the
+producer takes it, rendered from `KafkaCreateTimeError::BeforeFirstMillisecond` with the timestamp.
+A producer that librdkafka cannot create keeps its `KafkaError` beneath
 `EmitterOpenError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `message.timeout.ms` can
 hold is `KafkaMessageTimeoutError::TooLong` beneath `EmitterOpenError::InvalidConfiguration`. A
 finish whose producer queue does not empty before its deadline keeps librdkafka's `KafkaError`

@@ -212,11 +212,13 @@ fn every_source_pair_declares_its_modes_quiesce_modes_locator_and_options() {
     }
 }
 
-/// The publishing modes, reference, locator and options one emitter pair declares.
+/// The publishing modes, reference, locator, options and envelope clauses one emitter pair
+/// declares.
 struct EmitterSurface {
     reference: EmitterReferenceKind,
     locator: Option<(&'static str, &'static str)>,
     options: &'static [(&'static str, bool)],
+    envelope: &'static [EnvelopeClauseKind],
 }
 
 fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
@@ -225,11 +227,13 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
         reference: client(connector),
         locator: Some((keywords, label)),
         options,
+        envelope: &[],
     };
     let unlocated = |connector, options| EmitterSurface {
         reference: client(connector),
         locator: None,
         options,
+        envelope: &[],
     };
     let otel = &[("ATTRIBUTES", false), ("RESOURCE", false), ("SCOPE", false)];
     let conflict = &[("ON CONFLICT", false)];
@@ -238,13 +242,15 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
             reference: EmitterReferenceKind::Schema,
             locator: None,
             options: &[],
+            envelope: &[],
         },
         EmitterEntityKind::Http(HttpEmitterEntity::Request) => {
             unlocated(ConnectorKind::Http, &[("METHOD", true), ("PATH", true)])
         }
-        EmitterEntityKind::Kafka(KafkaEmitterEntity::Topic) => {
-            located(ConnectorKind::Kafka, "TOPIC", "kafka_topic", &[])
-        }
+        EmitterEntityKind::Kafka(KafkaEmitterEntity::Topic) => EmitterSurface {
+            envelope: &[EnvelopeClauseKind::Timestamp],
+            ..located(ConnectorKind::Kafka, "TOPIC", "kafka_topic", &[])
+        },
         EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => {
             located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
         }
@@ -315,19 +321,20 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
                 ("CATALOG", true),
                 ("COMMIT EACH", true),
             ],
+            envelope: &[],
         },
     }
 }
 
 #[test]
-fn every_emitter_pair_declares_its_reference_locator_and_options_and_no_envelope_yet() {
+fn every_emitter_pair_declares_its_reference_locator_options_and_envelope_and_no_properties() {
     for kind in EmitterEntityKind::all() {
         let expected = emitter_surface(kind);
         let declared = kind.capabilities();
         assert_eq!(declared.reference, expected.reference, "{kind}");
         assert_eq!(locator_shape(declared.locator), expected.locator, "{kind}");
         assert_eq!(option_shapes(declared.options), expected.options, "{kind}");
-        assert!(declared.envelope.is_empty(), "{kind}");
+        assert_eq!(declared.envelope, expected.envelope, "{kind}");
         assert!(declared.properties.is_empty(), "{kind}");
     }
 }

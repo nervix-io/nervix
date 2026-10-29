@@ -368,6 +368,7 @@ class InventoryTests(unittest.TestCase):
             "console-client-drafts",
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
+            "kafka-record-create-times",
             "ingestor-describe-envelope",
             "dns-operation-budget",
         })
