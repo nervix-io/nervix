@@ -1984,14 +1984,13 @@ inherits its transport contract:
 - The DSN's host is resolved through the node's DNS resolver, and `timeout_ms` covers that lookup,
   connection setup, TLS, sending the envelope and the response headers. The response body is
   never read.
-- The proxy environment variables `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` are
-  honored, as [Connection Identity](name-resolution.md#connection-identity) describes.
-- Up to ten redirects are followed, each new host resolved like the first, and every followed
-  request carries the `X-Sentry-Auth` header. A `307` or `308` answer sends the envelope again to
-  its `Location`, but a `301`, `302` or `303` answer is followed with a `GET` that carries no
-  envelope. The answer at the end of the chain decides the event, so an endpoint that redirects
-  can acknowledge an event that Sentry never received: set `dsn` to the host that accepts
-  envelopes.
+- No proxy is used. A `SENTRY CLIENT` declares no `proxy`, and the proxy environment variables
+  `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and their lowercase forms are never read,
+  as [Connection Identity](name-resolution.md#connection-identity) describes.
+- No redirect is followed, so the envelope and its `X-Sentry-Auth` header go only to the DSN's
+  host. A `3xx` answer is the answer to its envelope and is retried, as the table below retries
+  every status it does not list, so a `dsn` whose host redirects holds the emitter in retry until
+  it names the host that accepts envelopes.
 
 #### Sentry events
 
@@ -2050,7 +2049,7 @@ A write sends its envelopes one at a time, in order, and the answer to each deci
 | A `2xx` status | The event is delivered and its records are acknowledged. |
 | `400`, `413` or `422` | Sentry rejected the event. Its records follow `ON MESSAGE ERROR` with an `external` message error of the `publish` operation naming the status, and the write continues with the next envelope. |
 | Any other status, such as `401`, `403`, `404`, `408`, `429` or a `5xx` | The write stops. This event and every later one stay retained and are sent again on the mode's `RETRY POLICY`, while the events delivered before it stay delivered. |
-| No answer within `timeout_ms`, or a failed lookup, connection, TLS handshake or redirect | As for a retried status. |
+| No answer within `timeout_ms`, or a failed lookup, connection or TLS handshake | As for a retried status. |
 
 Such an event is sent again until Sentry delivers or rejects it, so a revoked key or a deleted
 project holds the emitter in retry until an operator repairs its client. On every retried status,
@@ -3287,7 +3286,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
 | Redis Pub/Sub | Retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |
-| Sentry | Retry after an ambiguous HTTP result, which sends the same envelope and `event_id` again; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; a `301`, `302` or `303` redirect whose final answer is `2xx` acknowledges an event that was never sent; an accepted event can still be subject to Sentry service policy | None |
+| Sentry | Retry after an ambiguous HTTP result, which sends the same envelope and `event_id` again; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; an accepted event can still be subject to Sentry service policy | None |
 | OTEL | Retry after an ambiguous Export result, which resends the same request bytes; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; `partial_success` acknowledges the whole request, so receiver-rejected records in that response are lost | None |
 | HTTP | Retry after a lost response, failed connection, or timeout following an endpoint that applied the request; a lost ACK or attached sibling failure | Any failure after detached relay acceptance; a `2xx` delivers on its headers, so an endpoint that later fails its own processing loses the record | None; the endpoint can deduplicate by a stable key the emitter writes with `write_header` |
 | ClickHouse | Retry after an ambiguous insert result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a crash after insert but before acknowledgement can also leave an inserted batch that later retries | None |
