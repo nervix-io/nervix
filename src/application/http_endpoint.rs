@@ -239,11 +239,20 @@ async fn handle_http_request(
     initialization: Arc<NodeInitialization>,
     request_tasks: ServiceTasks,
     shutdown: CancellationToken,
-    mut request: HyperRequest<HyperIncoming>,
+    request: HyperRequest<HyperIncoming>,
 ) -> Result<HyperResponse<EndpointResponseBody>, Infallible> {
     if shutdown.is_cancelled() || !initialization.is_ready() {
         return Ok(endpoint_rejection_response(None).map(Either::Left));
     }
+    dispatch_http_request(runtime, request_tasks, shutdown, request).await
+}
+
+async fn dispatch_http_request(
+    runtime: Runtime,
+    request_tasks: ServiceTasks,
+    shutdown: CancellationToken,
+    mut request: HyperRequest<HyperIncoming>,
+) -> Result<HyperResponse<EndpointResponseBody>, Infallible> {
     let mut host = String::new();
     if let Some(value) = request.headers().get(HOST)
         && let Ok(value) = value.to_str()
