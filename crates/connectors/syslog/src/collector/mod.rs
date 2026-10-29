@@ -1036,6 +1036,12 @@ mod tests {
         assert!(tcp.validate_payload(b"one line").is_ok());
     }
 
+    #[nervix_primitives::test]
+    async fn octet_counting_carries_a_payload_that_contains_lf() {
+        let tcp = connector(config("tcp", Some("octet-counting"))).await;
+        assert!(tcp.validate_payload(b"line one\nline two").is_ok());
+    }
+
     #[test]
     fn octet_count_prefix_has_at_most_ten_digits() {
         assert!(SyslogCollectorEmitter::validate_octet_count_size(9_999_999_999).is_ok());

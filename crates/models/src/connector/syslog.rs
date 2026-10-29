@@ -393,6 +393,7 @@ mod tests {
     //! - **Must not know.** Socket I/O, frame decoding or host execution.
 
     use meticulous::OptionExt as _;
+    use rstest::rstest;
 
     use super::*;
     use crate::{ClientConfigReaders, CreateClientSyslog};
@@ -446,6 +447,31 @@ mod tests {
                 .checked_add(1)
                 .assured("ten digits and one more fit a usize")
         );
+    }
+
+    #[rstest]
+    #[case(1, 9)]
+    #[case(3, 999)]
+    #[case(10, 9_999_999_999)]
+    #[case(19, 9_999_999_999_999_999_999)]
+    fn frame_limits_derive_the_largest_count_and_its_prefix_from_the_digits(
+        #[case] digits: usize,
+        #[case] largest: u64,
+    ) {
+        let limits = SyslogFrameLimits::new(65_507, digits, b'\n');
+        assert_eq!(limits.largest_octet_count(), largest);
+        assert_eq!(
+            limits.octet_count_prefix(),
+            digits
+                .checked_add(1)
+                .assured("a case's digits are far below usize::MAX")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "an octet count's digits must fit a 64-bit count")]
+    fn frame_limits_refuse_more_digits_than_a_64_bit_count_holds() {
+        SyslogFrameLimits::new(65_507, 20, b'\n');
     }
 
     #[test]
