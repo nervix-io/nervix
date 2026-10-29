@@ -1917,8 +1917,8 @@ value. From the DSN, Nervix derives the envelope endpoint,
 `<scheme>://<host>[:<port>]/[<path>/]api/<project-id>/envelope/`, and the `X-Sentry-Auth` header,
 which carries the DSN's keys and names the client `nervix/<version>`.
 
-The emitter sends through the HTTP client Nervix shares with HTTP polling, Prometheus and OTEL over
-HTTP, and inherits its transport contract:
+The emitter sends through the HTTP client Nervix shares with Prometheus and OTEL over HTTP, and
+inherits its transport contract:
 
 - The DSN's host is resolved through the node's DNS resolver, and `timeout_ms` covers that lookup,
   connection setup, TLS, sending the envelope and the response headers. The response body is
