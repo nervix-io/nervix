@@ -76,6 +76,16 @@ both named branches, source headers, both count and byte limits, one- and three-
 the twenty-second flush and the forty-five-second exact-payload assertion. The receipt waits end
 when their condition holds and do not serialize other scenarios.
 
+The RabbitMQ parallel lost-rejection outline pauses its own dependency endpoint before resetting
+the connection. It observes all four original source ACK failures while recovery remains paused,
+then clears the terminal emitter fault before resuming the endpoint. This prevents the fault from
+rejecting only part of the replayed window into a further `MAX 4 BATCH TIMEOUT 1h` read. The
+downstream MQTT emitter uses QoS 1 with a four-record confirmation window; its sent counter and the
+RabbitMQ unacknowledged count distinguish output receipt from source settlement. The outline
+retains both sets of four payloads, one- and three-node coverage, the source's batching and ACK
+deadlines, and the forty-second payload assertions. The pause is scenario-local and adds no suite
+serialization or readiness sleep.
+
 The orphaned-transaction expiry scenario holds finished-transaction cleanup for its domain on each
 node before it begins the transaction. Expiry and the leadership transfer proceed normally. The
 successor reaches its cleanup barrier only after it observes the replicated terminal transaction;
