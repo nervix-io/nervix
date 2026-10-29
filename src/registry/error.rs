@@ -17,10 +17,34 @@ use std::fmt;
 use error_stack::{Context, Report};
 use nervix_models::{
     BranchSelection, ClientName, ConnectorKind, DomainName, EmitterEntityKind, EndpointName,
-    EndpointType, FieldName, IngestorEntityKind, ModelKind, ModelName, RelayName,
-    WebsocketsClientConfigError, WebsocketsUpgradeHeadersError,
+    EndpointType, FieldName, IngestorEntityKind, IngestorMetadataType, ModelKind, ModelName,
+    RelayName, WebsocketsClientConfigError, WebsocketsUpgradeHeadersError,
 };
 use thiserror::Error;
+
+/// The metadata fields an ingestor entity declares, as a refusal names them after the entity's
+/// phrase: "declare only metadata.status and metadata.polled_at", or "declare no metadata field".
+struct DeclaredIngestorMetadata(IngestorEntityKind);
+
+impl fmt::Display for DeclaredIngestorMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let declared = self.0.capabilities().metadata;
+        let Some((last, earlier)) = declared.fields().split_last() else {
+            return formatter.write_str("declare no metadata field");
+        };
+        formatter.write_str("declare only ")?;
+        for (index, field) in earlier.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(", ")?;
+            }
+            write!(formatter, "metadata.{}", field.name())?;
+        }
+        if !earlier.is_empty() {
+            formatter.write_str(" and ")?;
+        }
+        write!(formatter, "metadata.{}", last.name())
+    }
+}
 
 /// A duration clause whose declared value must fit a scheduled connector wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -219,6 +243,45 @@ pub(crate) enum RegistryError {
     DeserializeValue,
     #[error("stored model has an invalid archive header; recreate the stored data")]
     InvalidModelArchive,
+    /// An ingestor's route reads a metadata field the entity of its input does not declare.
+    #[error(
+        "ingestor '{ingestor}' in domain '{domain}' reads metadata.{field} in its route to \
+         '{relay}', but {kind} ingestors {}",
+        DeclaredIngestorMetadata(*.kind)
+    )]
+    UndeclaredIngestorMetadata {
+        domain: DomainName,
+        ingestor: ModelName,
+        relay: RelayName,
+        field: FieldName,
+        kind: IngestorEntityKind,
+    },
+    /// An ingestor's `TIMESTAMP AT metadata.<field>` names a field the entity of its input does not
+    /// declare.
+    #[error(
+        "ingestor '{ingestor}' in domain '{domain}' takes its TIMESTAMP AT metadata.{field}, but \
+         {kind} ingestors {}",
+        DeclaredIngestorMetadata(*.kind)
+    )]
+    UndeclaredIngestorTimestampMetadata {
+        domain: DomainName,
+        ingestor: ModelName,
+        field: FieldName,
+        kind: IngestorEntityKind,
+    },
+    /// An ingestor's `TIMESTAMP AT metadata.<field>` names a field the entity of its input declares
+    /// as another type than `DATETIME`.
+    #[error(
+        "ingestor '{ingestor}' in domain '{domain}' takes its TIMESTAMP AT metadata.{field}, but \
+         {kind} ingestors declare metadata.{field} as {declared}, not DATETIME"
+    )]
+    IngestorTimestampMetadataType {
+        domain: DomainName,
+        ingestor: ModelName,
+        field: FieldName,
+        kind: IngestorEntityKind,
+        declared: IngestorMetadataType,
+    },
     #[error(
         "{kind} ingestor '{ingestor}' in domain '{domain}' requires a {required} client, but \
          client '{client}' is a {found} client"

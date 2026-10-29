@@ -40,7 +40,8 @@ use control::{CommitTask, ControlBudget, KafkaControl};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestorAckPolicy,
+    BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow,
+    IngestMetadataValues, IngestRowHeaders, IngestTransportPosition, IngestorAckPolicy,
     IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
     IngestorReadCancellation, IngestorResult, IngestorResume,
 };
@@ -551,12 +552,25 @@ impl IngestorMessage for KafkaTopicIngestorMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::Kafka {
-            topic: self.message.topic(),
-            partition: self.message.partition(),
-            offset: self.message.offset(),
-            headers: self,
+        IngestMetadataRow {
+            fields: self,
+            headers: IngestRowHeaders::Borrowed(self),
+            position: Some(IngestTransportPosition::Kafka {
+                topic: self.message.topic(),
+                partition: self.message.partition(),
+                offset: self.message.offset(),
+            }),
         }
+    }
+}
+
+/// The values of the metadata `KAFKA TOPIC` declares, in its order: the record's topic, partition
+/// and offset.
+impl IngestMessageMetadata for KafkaTopicIngestorMessage {
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+        values.string(self.message.topic());
+        values.i32(self.message.partition());
+        values.i64(self.message.offset());
     }
 }
 
@@ -1678,6 +1692,55 @@ mod tests {
         let mut visited = Vec::new();
         message.visit(&mut |name, value| visited.push(format!("{name}={value}")));
         assert_eq!(visited, ["trace=a", "Tenant=x", "trace=b", "tenant=y"]);
+    }
+
+    /// A record hands over the values of the metadata KAFKA TOPIC declares, of the declared types
+    /// and in the declared order, and names its topic, partition and offset as its position.
+    #[test]
+    fn a_record_hands_over_its_declared_metadata_and_names_its_position() {
+        use nervix_connector::{RetainedIngestMetadata, RetainedIngestMetadataValue as Value};
+        use nervix_models::{IngestorEntityKind, KafkaIngestorEntity};
+
+        let message = rdkafka::message::OwnedMessage::new(
+            Some(b"{}".to_vec()),
+            None,
+            "orders".to_string(),
+            rdkafka::Timestamp::NotAvailable,
+            3,
+            42,
+            None,
+        );
+        let message =
+            KafkaTopicIngestorMessage::from_message(message).assured("offset 42 has a next offset");
+        let metadata = message.metadata();
+
+        let retained = RetainedIngestMetadata::capture(metadata.fields);
+        assert_eq!(
+            retained.values(),
+            [
+                Value::String("orders".to_string()),
+                Value::I32(3),
+                Value::I64(42)
+            ]
+        );
+        let declared = IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic)
+            .capabilities()
+            .metadata;
+        let declared_types = declared
+            .fields()
+            .iter()
+            .map(|field| Some(field.ty()))
+            .collect::<Vec<_>>();
+        let handed_types = retained.values().iter().map(Value::ty).collect::<Vec<_>>();
+        assert_eq!(handed_types, declared_types);
+        assert_eq!(
+            metadata.position,
+            Some(IngestTransportPosition::Kafka {
+                topic: "orders",
+                partition: 3,
+                offset: 42,
+            })
+        );
     }
 
     #[test]

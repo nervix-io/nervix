@@ -34,7 +34,7 @@ use crate::{
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
     IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm,
     OptionPresence, OptionValue, PositionClass,
 };
@@ -193,7 +193,7 @@ impl IngestorDeclaration for NatsSubjectIngestor {
         // A NATS message's header map keeps every value of a name together under it, and its names
         // in no order.
         headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
-        metadata: IngestorMetadataScope::Headers,
+        metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Nats),
         position_class: PositionClass::None,

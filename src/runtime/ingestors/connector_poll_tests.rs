@@ -13,7 +13,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use nervix_connector::IngestorPollMessage;
+use nervix_connector::{IngestorPollMessage, RetainedIngestHeaders};
 
 use super::{
     extension_tests::{PACED_INTAKE, UnfoldingDomain},
@@ -33,7 +33,7 @@ fn messages_of_users(count: i64) -> Vec<IngestorPollMessage> {
         messages.push(IngestorPollMessage {
             payload: format!(r#"{{"user_id":{user_id}}}"#).into_bytes(),
             headers: RetainedIngestHeaders::none(),
-            metadata: nervix_connector::IngestorPollMetadata::Headers,
+            metadata: nervix_connector::RetainedIngestMetadata::none(),
         });
     }
     messages

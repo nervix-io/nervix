@@ -1,9 +1,11 @@
 //! Typed ingestion metadata projection.
 //!
 //! Layer: data plane.
-//! - **Owns.** Connector metadata columns and VM namespaces for accepted input batches.
-//! - **Depends on.** Arrow arrays, the connector contract's metadata rows and header trait, and
-//!   explicit execution timestamps.
+//! - **Owns.** Which declared metadata fields an ingestor's programs read, the metadata columns of
+//!   those fields and the transport header columns for accepted input batches, and the VM
+//!   namespaces programs read them through.
+//! - **Depends on.** Arrow arrays, the vocabulary's metadata declarations, the connector contract's
+//!   metadata rows, value sink and header trait, and explicit execution timestamps.
 //! - **Must not know.** Plexus parsing, source-client lifecycle or persisted control state.
 
 #![cfg_attr(
@@ -11,10 +13,12 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use std::fmt;
+
+use arrow_array::builder::BinaryBuilder;
 use arrow_buffer::BooleanBuffer;
-use nervix_connector::{IngestMetadataRow, NoIngestHeaders};
-use nervix_models::WebsocketsFrameType;
-use strum::IntoEnumIterator as _;
+use nervix_connector::{IngestMetadataRow, IngestMetadataValues};
+use nervix_models::{IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType};
 
 use super::*;
 
@@ -75,18 +79,24 @@ pub(super) type IngestMetadataResult<T> = Result<T, Report<IngestMetadataError>>
 #[derive(Debug, Error)]
 pub(super) enum IngestMetadataError {
     #[error(
-        "WebSockets metadata capacity for {row_bound} rows with {label_bytes} bytes per frame \
-         label exceeds the address space"
+        "the ingestor's programs read metadata field '{field}', which its entity does not declare"
     )]
-    WebsocketsCapacityOverflow {
-        row_bound: usize,
-        label_bytes: usize,
+    UndeclaredField { field: String },
+    #[error(
+        "a message handed metadata field '{field}' a {found} value, but its entity declares it \
+         {declared}"
+    )]
+    ValueType {
+        field: &'static str,
+        declared: IngestorMetadataType,
+        found: IngestorMetadataType,
     },
-    #[error("ingest metadata builders for {builders:?} cannot append a {row:?} row")]
-    BuilderScopeMismatch {
-        builders: IngestorMetadataScope,
-        row: IngestorMetadataScope,
-    },
+    #[error("a message handed more metadata values than the {declared} fields its entity declares")]
+    ExcessValues { declared: usize },
+    #[error(
+        "a message handed {visited} metadata values for the {declared} fields its entity declares"
+    )]
+    MissingValues { declared: usize, visited: usize },
     #[error("failed to build ingest metadata integration columns")]
     BuildIntegrationColumns,
     #[error(
@@ -111,40 +121,340 @@ pub(super) enum IngestMetadataError {
     },
 }
 
-/// The `topic`, `partition` and `offset` builders of one Kafka ingest group.
-pub(super) struct KafkaIntegrationBuilders {
-    pub(super) topic: StringBuilder,
-    pub(super) partition: Int32Builder,
-    pub(super) offset: Int64Builder,
+/// Which of an ingestor's declared metadata fields its programs read, so that its ingest groups
+/// build the columns of those fields and of no other.
+///
+/// The ingestor's route programs and its `TIMESTAMP AT metadata.<field>` decide it once, when the
+/// ingestor binds them, and every group of the ingestor shares it. A group of an ingestor that
+/// reads no field visits no metadata value and builds no metadata column.
+#[derive(Debug)]
+pub(super) struct IngestMetadataProjection {
+    /// One entry for every field the ingestor's entity declares, in declared order: the index of
+    /// the column the field is built into, or `None` where no program reads it.
+    columns: Box<[Option<usize>]>,
+    /// The fields that are read, in declared order, which is the order of their columns.
+    read: Vec<IngestorMetadataField>,
+    /// The Arrow schema of the read fields, built once for every group.
+    schema: arrow_schema::SchemaRef,
 }
 
-/// The integration-field builders of one ingest group, one variant per metadata scope.
-///
-/// The Kafka columns live behind one allocation taken when the group opens, so the variants
-/// stay comparable in size.
-pub(super) enum IngestIntegrationBuilders {
-    Http {
-        status: UInt16Builder,
-        polled_at: TimestampNanosecondBuilder,
+impl IngestMetadataProjection {
+    /// The projection of an ingestor whose programs read no metadata field.
+    pub(super) fn none() -> Arc<Self> {
+        Arc::new(Self {
+            columns: Box::default(),
+            read: Vec::new(),
+            schema: StdArc::new(arrow_schema::Schema::empty()),
+        })
+    }
+
+    /// The projection of `declared` that builds the columns of the fields `read` names, each once
+    /// whatever order and repetition `read` names it in.
+    ///
+    /// A name `declared` does not declare is refused. The registry refuses a program that reads
+    /// one, so it means the programs and the declaration they were validated against disagree.
+    pub(super) fn reading<'name>(
+        declared: IngestorMetadataDeclaration,
+        read: impl IntoIterator<Item = &'name str>,
+    ) -> IngestMetadataResult<Arc<Self>> {
+        let fields = declared.fields();
+        let mut is_read = vec![false; fields.len()];
+        for name in read {
+            let Some(position) = declared.position(name) else {
+                return Err(Report::new(IngestMetadataError::UndeclaredField {
+                    field: name.to_string(),
+                }));
+            };
+            let slot = is_read
+                .get_mut(position)
+                .assured("a declared position is below the declaration's field count");
+            *slot = true;
+        }
+        let mut columns = Vec::with_capacity(fields.len());
+        let mut read = Vec::new();
+        for (field, is_read) in fields.iter().zip(is_read) {
+            if is_read {
+                columns.push(Some(read.len()));
+                read.push(*field);
+            } else {
+                columns.push(None);
+            }
+        }
+        let schema = arrow_schema::Schema::new(
+            read.iter()
+                .map(|field| field.arrow_field())
+                .collect::<Vec<_>>(),
+        );
+        Ok(Arc::new(Self {
+            columns: columns.into_boxed_slice(),
+            read,
+            schema: StdArc::new(schema),
+        }))
+    }
+
+    /// Whether a program reads any metadata field, which is whether a group visits its messages'
+    /// metadata values at all.
+    pub(super) fn reads_any(&self) -> bool {
+        !self.read.is_empty()
+    }
+}
+
+/// The Arrow builder of one read metadata field, of the field's declared type.
+enum IngestMetadataColumnBuilder {
+    String(StringBuilder),
+    Bytes(BinaryBuilder),
+    Bool(BooleanBuilder),
+    U16(UInt16Builder),
+    I32(Int32Builder),
+    I64(Int64Builder),
+    Datetime(TimestampNanosecondBuilder),
+}
+
+impl IngestMetadataColumnBuilder {
+    /// A builder for `row_bound` values of `ty`. Text and bytes start without value capacity,
+    /// because a value is as long as its message makes it.
+    fn new(ty: IngestorMetadataType, row_bound: usize) -> Self {
+        match ty {
+            IngestorMetadataType::String => {
+                Self::String(StringBuilder::with_capacity(row_bound, 0))
+            }
+            IngestorMetadataType::Bytes => Self::Bytes(BinaryBuilder::with_capacity(row_bound, 0)),
+            IngestorMetadataType::Bool => Self::Bool(BooleanBuilder::with_capacity(row_bound)),
+            IngestorMetadataType::U16 => Self::U16(UInt16Builder::with_capacity(row_bound)),
+            IngestorMetadataType::I32 => Self::I32(Int32Builder::with_capacity(row_bound)),
+            IngestorMetadataType::I64 => Self::I64(Int64Builder::with_capacity(row_bound)),
+            IngestorMetadataType::Datetime => {
+                Self::Datetime(TimestampNanosecondBuilder::with_capacity(row_bound))
+            }
+        }
+    }
+
+    /// The declared type of the values this builder holds.
+    fn ty(&self) -> IngestorMetadataType {
+        match self {
+            Self::String(_) => IngestorMetadataType::String,
+            Self::Bytes(_) => IngestorMetadataType::Bytes,
+            Self::Bool(_) => IngestorMetadataType::Bool,
+            Self::U16(_) => IngestorMetadataType::U16,
+            Self::I32(_) => IngestorMetadataType::I32,
+            Self::I64(_) => IngestorMetadataType::I64,
+            Self::Datetime(_) => IngestorMetadataType::Datetime,
+        }
+    }
+
+    fn append_null(&mut self) {
+        match self {
+            Self::String(builder) => builder.append_null(),
+            Self::Bytes(builder) => builder.append_null(),
+            Self::Bool(builder) => builder.append_null(),
+            Self::U16(builder) => builder.append_null(),
+            Self::I32(builder) => builder.append_null(),
+            Self::I64(builder) => builder.append_null(),
+            Self::Datetime(builder) => builder.append_null(),
+        }
+    }
+
+    fn finish(&mut self) -> ArrayRef {
+        match self {
+            Self::String(builder) => StdArc::new(builder.finish()),
+            Self::Bytes(builder) => StdArc::new(builder.finish()),
+            Self::Bool(builder) => StdArc::new(builder.finish()),
+            Self::U16(builder) => StdArc::new(builder.finish()),
+            Self::I32(builder) => StdArc::new(builder.finish()),
+            Self::I64(builder) => StdArc::new(builder.finish()),
+            Self::Datetime(builder) => StdArc::new(builder.finish().with_timezone("+00:00")),
+        }
+    }
+}
+
+/// What was wrong with the values one message handed over, kept until its visit returns.
+#[derive(Debug, Clone, Copy)]
+enum MetadataVisitFault {
+    /// The value of a read field was not of the field's declared type.
+    Type {
+        field: IngestorMetadataField,
+        found: IngestorMetadataType,
     },
-    Websockets {
-        frame_type: StringBuilder,
-    },
-    Kafka(Box<KafkaIntegrationBuilders>),
-    Syslog {
-        peer_addr: StringBuilder,
-    },
-    Headers,
+    /// The message handed over a value beyond its entity's last declared field.
+    Excess,
+}
+
+/// Appends each value one message hands over into the column of its field where a program reads
+/// that field, and counts the values, so that a message handing over another number than its
+/// entity declares is refused.
+struct ProjectedMetadataValues<'a> {
+    projection: &'a IngestMetadataProjection,
+    columns: &'a mut [IngestMetadataColumnBuilder],
+    /// How many values the message has handed over, which is the declared position of the next.
+    /// It never exceeds the declared field count: a value beyond it is recorded as a fault.
+    visited: usize,
+    fault: Option<MetadataVisitFault>,
+}
+
+impl ProjectedMetadataValues<'_> {
+    /// The column the next value goes into, typed `ty`, or `None` where no program reads its field
+    /// or the visit already went wrong.
+    fn next_column(
+        &mut self,
+        ty: IngestorMetadataType,
+    ) -> Option<&mut IngestMetadataColumnBuilder> {
+        if self.fault.is_some() {
+            return None;
+        }
+        let Some(column) = self.projection.columns.get(self.visited).copied() else {
+            self.fault = Some(MetadataVisitFault::Excess);
+            return None;
+        };
+        let position = self.visited;
+        self.visited = position
+            .checked_add(1)
+            .assured("a declared position is below the declaration's bounded field count");
+        let column = column?;
+        let builder = self
+            .columns
+            .get_mut(column)
+            .assured("the projection builds one column for every field it reads");
+        if builder.ty() != ty {
+            let field = self
+                .projection
+                .read
+                .get(column)
+                .copied()
+                .assured("the projection reads one field for every column it builds");
+            self.fault = Some(MetadataVisitFault::Type { field, found: ty });
+            return None;
+        }
+        Some(builder)
+    }
+
+    /// The outcome of the visit once the message handed over its last value.
+    fn finish(self) -> IngestMetadataResult<()> {
+        match self.fault {
+            Some(MetadataVisitFault::Type { field, found }) => {
+                Err(Report::new(IngestMetadataError::ValueType {
+                    field: field.name(),
+                    declared: field.ty(),
+                    found,
+                }))
+            }
+            Some(MetadataVisitFault::Excess) => {
+                Err(Report::new(IngestMetadataError::ExcessValues {
+                    declared: self.projection.columns.len(),
+                }))
+            }
+            None if self.visited != self.projection.columns.len() => {
+                Err(Report::new(IngestMetadataError::MissingValues {
+                    declared: self.projection.columns.len(),
+                    visited: self.visited,
+                }))
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+impl IngestMetadataValues for ProjectedMetadataValues<'_> {
+    fn string(&mut self, value: &str) {
+        if let Some(IngestMetadataColumnBuilder::String(builder)) =
+            self.next_column(IngestorMetadataType::String)
+        {
+            builder.append_value(value);
+        }
+    }
+
+    fn rendered(&mut self, value: &dyn fmt::Display) {
+        if let Some(IngestMetadataColumnBuilder::String(builder)) =
+            self.next_column(IngestorMetadataType::String)
+        {
+            // The value renders straight into the builder's value buffer, so it does not allocate a
+            // string per message.
+            use std::fmt::Write as _;
+            write!(builder, "{value}").assured(
+                "an in-memory string builder never fails a write, and a Display implementation \
+                 fails only when its writer does",
+            );
+            builder.append_value("");
+        }
+    }
+
+    fn bytes(&mut self, value: &[u8]) {
+        if let Some(IngestMetadataColumnBuilder::Bytes(builder)) =
+            self.next_column(IngestorMetadataType::Bytes)
+        {
+            builder.append_value(value);
+        }
+    }
+
+    fn bool(&mut self, value: bool) {
+        if let Some(IngestMetadataColumnBuilder::Bool(builder)) =
+            self.next_column(IngestorMetadataType::Bool)
+        {
+            builder.append_value(value);
+        }
+    }
+
+    fn u16(&mut self, value: u16) {
+        if let Some(IngestMetadataColumnBuilder::U16(builder)) =
+            self.next_column(IngestorMetadataType::U16)
+        {
+            builder.append_value(value);
+        }
+    }
+
+    fn i32(&mut self, value: i32) {
+        if let Some(IngestMetadataColumnBuilder::I32(builder)) =
+            self.next_column(IngestorMetadataType::I32)
+        {
+            builder.append_value(value);
+        }
+    }
+
+    fn i64(&mut self, value: i64) {
+        if let Some(IngestMetadataColumnBuilder::I64(builder)) =
+            self.next_column(IngestorMetadataType::I64)
+        {
+            builder.append_value(value);
+        }
+    }
+
+    fn datetime(&mut self, value: Timestamp) {
+        if let Some(IngestMetadataColumnBuilder::Datetime(builder)) =
+            self.next_column(IngestorMetadataType::Datetime)
+        {
+            builder.append_value(value.unix_nanos());
+        }
+    }
+
+    fn absent(&mut self) {
+        if self.fault.is_some() {
+            return;
+        }
+        let Some(column) = self.projection.columns.get(self.visited).copied() else {
+            self.fault = Some(MetadataVisitFault::Excess);
+            return;
+        };
+        self.visited = self
+            .visited
+            .checked_add(1)
+            .assured("a declared position is below the declaration's bounded field count");
+        if let Some(column) = column {
+            self.columns
+                .get_mut(column)
+                .assured("the projection builds one column for every field it reads")
+                .append_null();
+        }
+    }
 }
 
 /// Arrow builders for one ingest group's metadata columns.
 ///
 /// A group opens one set with its first row, appends one row per decoded message, and
 /// finishes it once when the group closes. No Arrow array, batch or builder is created per
-/// message, and no one-row batch is ever concatenated.
+/// message, and no one-row batch is ever concatenated. Only the fields the ingestor's programs read
+/// have a builder.
 pub(super) struct IngestMetadataBuilders {
-    pub(super) scope: IngestorMetadataScope,
-    pub(super) integration: IngestIntegrationBuilders,
+    pub(super) projection: Arc<IngestMetadataProjection>,
+    columns: Vec<IngestMetadataColumnBuilder>,
     pub(super) header_names: ListBuilder<StringBuilder>,
     pub(super) header_values: ListBuilder<StringBuilder>,
     pub(super) rows: usize,
@@ -161,59 +471,27 @@ nervix_primitives::thread_local! {
 }
 
 impl IngestMetadataBuilders {
-    /// Opens a builder set for `scope`, sizing the integration fields for `row_bound` rows.
+    /// Opens a builder set for `projection`, sizing the read fields' columns for `row_bound` rows.
     ///
     /// Header builders start empty because most sources carry no headers at all.
-    /// A frame-label capacity outside the address space returns a typed error before allocation.
     #[inline(never)]
-    pub(super) fn new(
-        scope: IngestorMetadataScope,
-        row_bound: usize,
-    ) -> IngestMetadataResult<Self> {
-        let integration = match scope {
-            IngestorMetadataScope::Http => IngestIntegrationBuilders::Http {
-                status: UInt16Builder::with_capacity(row_bound),
-                polled_at: TimestampNanosecondBuilder::with_capacity(row_bound),
-            },
-            IngestorMetadataScope::Websockets => {
-                let mut maximum_label_bytes = 0;
-                for kind in WebsocketsFrameType::iter() {
-                    maximum_label_bytes = maximum_label_bytes.max(kind.as_ref().len());
-                }
-                let label_capacity =
-                    row_bound.checked_mul(maximum_label_bytes).ok_or_else(|| {
-                        Report::new(IngestMetadataError::WebsocketsCapacityOverflow {
-                            row_bound,
-                            label_bytes: maximum_label_bytes,
-                        })
-                    })?;
-                IngestIntegrationBuilders::Websockets {
-                    frame_type: StringBuilder::with_capacity(row_bound, label_capacity),
-                }
-            }
-            IngestorMetadataScope::Kafka => {
-                IngestIntegrationBuilders::Kafka(Box::new(KafkaIntegrationBuilders {
-                    topic: StringBuilder::with_capacity(row_bound, 0),
-                    partition: Int32Builder::with_capacity(row_bound),
-                    offset: Int64Builder::with_capacity(row_bound),
-                }))
-            }
-            IngestorMetadataScope::Syslog => IngestIntegrationBuilders::Syslog {
-                peer_addr: StringBuilder::with_capacity(row_bound, 0),
-            },
-            IngestorMetadataScope::Headers => IngestIntegrationBuilders::Headers,
-        };
+    pub(super) fn new(projection: Arc<IngestMetadataProjection>, row_bound: usize) -> Self {
+        let columns = projection
+            .read
+            .iter()
+            .map(|field| IngestMetadataColumnBuilder::new(field.ty(), row_bound))
+            .collect();
         let item_field =
             || StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
         #[cfg(test)]
         INGEST_METADATA_BUILDER_SETS_OPENED.with(|count| count.set(count.get() + 1));
-        Ok(Self {
-            scope,
-            integration,
+        Self {
+            projection,
+            columns,
             header_names: ListBuilder::new(StringBuilder::new()).with_field(item_field()),
             header_values: ListBuilder::new(StringBuilder::new()).with_field(item_field()),
             rows: 0,
-        })
+        }
     }
 
     // Keep Arrow's builder machinery behind this boundary. Inlining it into the source collector
@@ -221,79 +499,27 @@ impl IngestMetadataBuilders {
     #[inline(never)]
     #[cfg_attr(
         nervix_lint,
-        nervix::dispatch(reason = "the source supplies a transport header visitor; this host \
-                                   appends the bounded row metadata")
+        nervix::dispatch(
+            reason = "the source supplies its metadata values and transport header visitor; this \
+                      host appends the bounded row metadata"
+        )
     )]
     pub(super) fn append(&mut self, row: &IngestMetadataRow<'_>) -> IngestMetadataResult<()> {
-        let headers: Option<&dyn nervix_connector::IngestMessageHeaders> =
-            match (&mut self.integration, row) {
-                (
-                    IngestIntegrationBuilders::Http { status, polled_at },
-                    IngestMetadataRow::Http {
-                        status: response_status,
-                        polled_at: scheduled_at,
-                        headers,
-                    },
-                ) => {
-                    status.append_value(*response_status);
-                    polled_at.append_value(scheduled_at.unix_nanos());
-                    Some(*headers)
-                }
-                (
-                    IngestIntegrationBuilders::Websockets { frame_type },
-                    IngestMetadataRow::Websockets {
-                        frame_type: kind,
-                        headers,
-                    },
-                ) => {
-                    frame_type.append_value(kind.as_ref());
-                    Some(headers.as_ref())
-                }
-                (
-                    IngestIntegrationBuilders::Kafka(kafka),
-                    IngestMetadataRow::Kafka {
-                        topic,
-                        partition,
-                        offset,
-                        headers,
-                    },
-                ) => {
-                    kafka.topic.append_value(topic);
-                    kafka.partition.append_value(*partition);
-                    kafka.offset.append_value(*offset);
-                    Some(*headers)
-                }
-                (
-                    IngestIntegrationBuilders::Syslog { peer_addr },
-                    IngestMetadataRow::Syslog {
-                        peer_addr: source_peer_addr,
-                    },
-                ) => {
-                    // The address renders straight into the builder's value buffer, so a peer
-                    // address does not allocate a string per message.
-                    use std::fmt::Write as _;
-                    write!(peer_addr, "{source_peer_addr}")
-                        .assured("fmt::Write over an in-memory string builder has no failure mode");
-                    peer_addr.append_value("");
-                    None
-                }
-                (IngestIntegrationBuilders::Headers, IngestMetadataRow::Headers { headers }) => {
-                    Some(*headers)
-                }
-                (_, row) => {
-                    return Err(Report::new(IngestMetadataError::BuilderScopeMismatch {
-                        builders: self.scope,
-                        row: row.scope(),
-                    }));
-                }
+        if self.projection.reads_any() {
+            let mut values = ProjectedMetadataValues {
+                projection: &self.projection,
+                columns: &mut self.columns,
+                visited: 0,
+                fault: None,
             };
-        if let Some(headers) = headers {
-            let (names, values) = (&mut self.header_names, &mut self.header_values);
-            headers.visit(&mut |name, value| {
-                names.values().append_value(name);
-                values.values().append_value(value);
-            });
+            row.fields.visit_metadata(&mut values);
+            values.finish()?;
         }
+        let (names, values) = (&mut self.header_names, &mut self.header_values);
+        row.headers.headers().visit(&mut |name, value| {
+            names.values().append_value(name);
+            values.values().append_value(value);
+        });
         self.header_names.append(true);
         self.header_values.append(true);
         self.rows += 1;
@@ -305,34 +531,13 @@ impl IngestMetadataBuilders {
         #[cfg(test)]
         INGEST_METADATA_COLUMN_SETS_BUILT.with(|count| count.set(count.get() + 1));
         let rows = self.rows;
-        let integration_columns = match &mut self.integration {
-            IngestIntegrationBuilders::Http { status, polled_at } => {
-                let status: ArrayRef = StdArc::new(status.finish());
-                let polled_at: ArrayRef = StdArc::new(polled_at.finish().with_timezone("+00:00"));
-                vec![status, polled_at]
-            }
-            IngestIntegrationBuilders::Websockets { frame_type } => {
-                let frame_type: ArrayRef = StdArc::new(frame_type.finish());
-                vec![frame_type]
-            }
-            IngestIntegrationBuilders::Kafka(kafka) => {
-                let topic: ArrayRef = StdArc::new(kafka.topic.finish());
-                let partition: ArrayRef = StdArc::new(kafka.partition.finish());
-                let offset: ArrayRef = StdArc::new(kafka.offset.finish());
-                vec![topic, partition, offset]
-            }
-            IngestIntegrationBuilders::Syslog { peer_addr } => {
-                let peer_addr: ArrayRef = StdArc::new(peer_addr.finish());
-                vec![peer_addr]
-            }
-            IngestIntegrationBuilders::Headers => Vec::new(),
-        };
-        let schema = match self.scope.arrow_schema() {
-            Some(schema) => StdArc::new(schema),
-            None => StdArc::new(arrow_schema::Schema::empty()),
-        };
+        let integration_columns = self
+            .columns
+            .iter_mut()
+            .map(IngestMetadataColumnBuilder::finish)
+            .collect::<Vec<_>>();
         let integration_fields = RecordBatch::try_new_with_options(
-            schema,
+            self.projection.schema.clone(),
             integration_columns,
             &RecordBatchOptions::new().with_row_count(Some(rows)),
         )
@@ -364,10 +569,8 @@ impl IngestFilterMapMetadata {
     /// The metadata of `rows` messages that arrived without transport headers or integration
     /// fields, as every row of a client batch does.
     pub(super) fn headerless(rows: usize) -> IngestMetadataResult<Self> {
-        let mut builders = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, rows)?;
-        let row = IngestMetadataRow::Headers {
-            headers: &NoIngestHeaders,
-        };
+        let mut builders = IngestMetadataBuilders::new(IngestMetadataProjection::none(), rows);
+        let row = IngestMetadataRow::headers(&nervix_connector::NoIngestHeaders);
         for _ in 0..rows {
             builders.append(&row)?;
         }
@@ -582,36 +785,66 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
 mod tests {
     use ahash::HashMap;
     use arrow_array::{Array, TimestampNanosecondArray, UInt16Array};
-    use nervix_connector::NoIngestHeaders;
+    use nervix_connector::{
+        IngestMessageHeaders, IngestMessageMetadata, IngestRowHeaders, NoIngestHeaders,
+        RetainedIngestMetadata, RetainedIngestMetadataValue as Value,
+    };
     use nervix_models::{
-        CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, IngestorEntity, JsonType,
-        KafkaIngestor, KafkaTopicIngestor, MessageErrorOperation, ModelName, ParseAsType,
-        ResolvedCodecWireFormat, RetryPolicy, SchemaField, Timestamp, WireSchemaField,
+        CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, HttpIngestorEntity,
+        IngestorEntity, IngestorEntityKind, JsonType, KafkaIngestor, KafkaIngestorEntity,
+        KafkaTopicIngestor, MessageErrorOperation, ModelName, ParseAsType, ResolvedCodecWireFormat,
+        RetryPolicy, SchemaField, Timestamp, WireSchemaField,
     };
     use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
 
     use super::*;
     use crate::{
-        runtime::ingest_group::PendingIngestGroup,
+        runtime::{ingest_group::PendingIngestGroup, test_fixtures::reading_all_metadata},
         runtime_ack::AckSet,
         runtime_schema::{
             RuntimeRecordBatch, RuntimeValue, compile_codec, compile_schema, test_runtime_row,
         },
     };
 
+    fn kafka_declared() -> IngestorMetadataDeclaration {
+        IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic)
+            .capabilities()
+            .metadata
+    }
+
+    /// The values a Kafka record hands over, in the order KAFKA TOPIC declares them.
+    fn kafka_metadata(topic: &str, partition: i32, offset: i64) -> RetainedIngestMetadata {
+        RetainedIngestMetadata::from_values(vec![
+            Value::String(topic.to_string()),
+            Value::I32(partition),
+            Value::I64(offset),
+        ])
+    }
+
+    fn row<'a>(
+        fields: &'a dyn IngestMessageMetadata,
+        headers: &'a dyn IngestMessageHeaders,
+    ) -> IngestMetadataRow<'a> {
+        IngestMetadataRow {
+            fields,
+            headers: IngestRowHeaders::Borrowed(headers),
+            position: None,
+        }
+    }
+
     #[test]
     fn http_poll_metadata_keeps_status_and_scheduled_instant_in_typed_columns() {
         let instant = Timestamp::from_unix_nanos(1_234_567_890);
-        let mut builders = IngestMetadataBuilders::new(IngestorMetadataScope::Http, 1)
-            .expect("HTTP metadata builders open");
+        let declared = IngestorEntityKind::Http(HttpIngestorEntity::Request)
+            .capabilities()
+            .metadata;
+        let mut builders = IngestMetadataBuilders::new(reading_all_metadata(declared), 1);
+        let polled =
+            RetainedIngestMetadata::from_values(vec![Value::U16(206), Value::Datetime(instant)]);
         builders
-            .append(&IngestMetadataRow::Http {
-                status: 206,
-                polled_at: instant,
-                headers: &NoIngestHeaders,
-            })
-            .expect("the HTTP row matches its builders");
+            .append(&row(&polled, &NoIngestHeaders))
+            .expect("the HTTP poll hands over the values its entity declares");
         let metadata = builders.finish().expect("HTTP columns finish");
         let fields = &metadata.columns.integration_fields;
         let status = fields
@@ -662,39 +895,127 @@ mod tests {
         .expect("the metering value codec should compile")
     }
 
+    /// A message whose metadata must not be visited at all.
+    struct Unvisited;
+
+    impl IngestMessageMetadata for Unvisited {
+        fn visit_metadata(&self, _values: &mut dyn nervix_connector::IngestMetadataValues) {
+            panic!("a group of an ingestor that reads no metadata field visits no value");
+        }
+    }
+
     #[test]
-    fn websockets_metadata_refuses_an_unaddressable_capacity() {
-        let error = match IngestMetadataBuilders::new(IngestorMetadataScope::Websockets, usize::MAX)
-        {
-            Ok(_) => panic!("an unaddressable frame-label capacity must fail before allocation"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            error.current_context(),
-            IngestMetadataError::WebsocketsCapacityOverflow {
-                row_bound: usize::MAX,
-                ..
-            }
-        ));
+    fn an_ingestor_that_reads_no_metadata_field_visits_no_value_and_builds_no_column() {
+        let unread = IngestMetadataProjection::reading(kafka_declared(), std::iter::empty())
+            .expect("reading nothing is a projection of any declaration");
+        assert!(!unread.reads_any());
+        let mut builders = IngestMetadataBuilders::new(unread, 2);
+        for _ in 0..2 {
+            builders
+                .append(&row(&Unvisited, &NoIngestHeaders))
+                .expect("a row of an unread declaration appends its headers alone");
+        }
+        let metadata = builders.finish().expect("the group closes");
+
+        assert_eq!(metadata.len(), 2);
+        assert_eq!(metadata.columns.integration_fields.num_columns(), 0);
+        assert!(
+            metadata
+                .field_column("offset")
+                .expect("a field lookup of built metadata succeeds")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn only_the_fields_a_program_reads_become_columns_in_declared_order() {
+        let offsets_only =
+            IngestMetadataProjection::reading(kafka_declared(), ["offset", "offset"])
+                .expect("KAFKA TOPIC declares offset");
+        let mut builders = IngestMetadataBuilders::new(offsets_only, 2);
+        let first = kafka_metadata("orders", 0, 42);
+        let second = kafka_metadata("orders", 1, 43);
+        builders
+            .append(&row(&first, &NoIngestHeaders))
+            .expect("a record hands over the values KAFKA TOPIC declares");
+        builders
+            .append(&row(&second, &NoIngestHeaders))
+            .expect("a record hands over the values KAFKA TOPIC declares");
+        let metadata = builders.finish().expect("the group closes");
+
+        let schema = metadata.columns.integration_fields.schema();
+        let names = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["offset"]);
+        let offsets = metadata
+            .field_column("offset")
+            .expect("a field lookup of built metadata succeeds")
+            .expect("the read field has its column");
+        let offsets = offsets
+            .as_any()
+            .downcast_ref::<arrow_array::Int64Array>()
+            .expect("offsets stay I64");
+        assert_eq!(offsets.values(), &[42, 43]);
+        assert!(
+            metadata
+                .field_column("topic")
+                .expect("a field lookup of built metadata succeeds")
+                .is_none(),
+            "a field no program reads has no column"
+        );
     }
 
     #[test]
     fn metadata_shape_failures_keep_their_typed_context() {
-        let mut kafka_builders = IngestMetadataBuilders::new(IngestorMetadataScope::Kafka, 1)
-            .expect("one Kafka metadata row fits");
-        let mismatch = kafka_builders
-            .append(&IngestMetadataRow::Headers {
-                headers: &NoIngestHeaders,
-            })
-            .expect_err("a header row cannot be appended to Kafka metadata builders");
+        let mut refusing = IngestMetadataBuilders::new(reading_all_metadata(kafka_declared()), 1);
+        let missing = refusing
+            .append(&IngestMetadataRow::headers(&NoIngestHeaders))
+            .expect_err("a row without its entity's declared values cannot be appended");
         assert!(matches!(
-            mismatch.current_context(),
-            IngestMetadataError::BuilderScopeMismatch {
-                builders: IngestorMetadataScope::Kafka,
-                row: IngestorMetadataScope::Headers,
+            missing.current_context(),
+            IngestMetadataError::MissingValues {
+                declared: 3,
+                visited: 0,
             }
         ));
+        let mistyped =
+            RetainedIngestMetadata::from_values(vec![Value::I64(1), Value::I32(2), Value::I64(3)]);
+        let wrong_type = refusing
+            .append(&row(&mistyped, &NoIngestHeaders))
+            .expect_err("a value of another type than its field's declaration is refused");
+        assert!(matches!(
+            wrong_type.current_context(),
+            IngestMetadataError::ValueType {
+                field: "topic",
+                declared: IngestorMetadataType::String,
+                found: IngestorMetadataType::I64,
+            }
+        ));
+        let excess = RetainedIngestMetadata::from_values(vec![
+            Value::String("orders".to_string()),
+            Value::I32(2),
+            Value::I64(3),
+            Value::I64(4),
+        ]);
+        let beyond = refusing
+            .append(&row(&excess, &NoIngestHeaders))
+            .expect_err("a value beyond the last declared field is refused");
+        assert!(matches!(
+            beyond.current_context(),
+            IngestMetadataError::ExcessValues { declared: 3 }
+        ));
+        let undeclared = IngestMetadataProjection::reading(kafka_declared(), ["key"])
+            .expect_err("a projection reads only declared fields");
+        assert!(matches!(
+            undeclared.current_context(),
+            IngestMetadataError::UndeclaredField { field } if field == "key"
+        ));
 
+        let mut kafka_builders =
+            IngestMetadataBuilders::new(reading_all_metadata(kafka_declared()), 1);
         kafka_builders.rows = 1;
         let integration = kafka_builders
             .finish()
@@ -704,12 +1025,9 @@ mod tests {
             IngestMetadataError::BuildIntegrationColumns
         ));
 
-        let mut header_builders = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
-            .expect("one header metadata row fits");
+        let mut header_builders = IngestMetadataBuilders::new(IngestMetadataProjection::none(), 1);
         header_builders
-            .append(&IngestMetadataRow::Headers {
-                headers: &NoIngestHeaders,
-            })
+            .append(&IngestMetadataRow::headers(&NoIngestHeaders))
             .expect("the matching metadata row should append");
         header_builders.rows = 2;
         let headers = header_builders
@@ -724,12 +1042,9 @@ mod tests {
             }
         ));
 
-        let mut builders = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
-            .expect("one header metadata row fits");
+        let mut builders = IngestMetadataBuilders::new(IngestMetadataProjection::none(), 1);
         builders
-            .append(&IngestMetadataRow::Headers {
-                headers: &NoIngestHeaders,
-            })
+            .append(&IngestMetadataRow::headers(&NoIngestHeaders))
             .expect("the matching metadata row should append");
         let metadata = builders.finish().expect("valid metadata should finish");
         let array: ArrayRef = StdArc::new(StringArray::from(vec!["value"]));
@@ -764,7 +1079,7 @@ mod tests {
         let topic = "metering_events";
         let headers = TestIngestHeaders(&[("route", "primary")]);
         let codec = metering_value_codec();
-        let mut group = PendingIngestGroup::new(IngestorMetadataScope::Kafka, 8);
+        let mut group = PendingIngestGroup::new(reading_all_metadata(kafka_declared()), 8);
 
         INGEST_METADATA_BUILDER_SETS_OPENED.with(|count| count.set(0));
         INGEST_METADATA_COLUMN_SETS_BUILT.with(|count| count.set(0));
@@ -782,12 +1097,7 @@ mod tests {
                 .expect("each payload must decode into the group's record builder");
             group
                 .append(
-                    &[IngestMetadataRow::Kafka {
-                        topic,
-                        partition: 1,
-                        offset,
-                        headers: &headers,
-                    }],
+                    &[row(&kafka_metadata(topic, 1, offset), &headers)],
                     vec![AckSet::empty()],
                     Timestamp::from_unix_nanos(1),
                 )
@@ -836,7 +1146,7 @@ mod tests {
         ]);
         let program = bind_ingestor_route_for_test(
             &named::<ModelName>("logic_ingestor"),
-            IngestorMetadataScope::Kafka,
+            kafka_declared(),
             true,
             &construction(
                 "INHERIT tenant SET topic = metadata.topic, partition = metadata.partition, \
@@ -896,13 +1206,11 @@ mod tests {
             ("raw".to_string(), RuntimeValue::String("meta".to_string())),
         ]);
         let metadata = ingest_metadata_for_test(
-            IngestorMetadataScope::Kafka,
-            &[IngestMetadataRow::Kafka {
-                topic: "logic_notifications_t123",
-                partition: 2,
-                offset: 42,
-                headers: &NoIngestHeaders,
-            }],
+            reading_all_metadata(kafka_declared()),
+            &[row(
+                &kafka_metadata("logic_notifications_t123", 2, 42),
+                &NoIngestHeaders,
+            )],
         );
 
         let output = execute_filter_map_for_test(
@@ -931,20 +1239,16 @@ mod tests {
         assert!(row_value(&output, "raw").is_none());
 
         let grouped_metadata = ingest_metadata_for_test(
-            IngestorMetadataScope::Kafka,
+            reading_all_metadata(kafka_declared()),
             &[
-                IngestMetadataRow::Kafka {
-                    topic: "logic_notifications_t123",
-                    partition: 2,
-                    offset: 42,
-                    headers: &NoIngestHeaders,
-                },
-                IngestMetadataRow::Kafka {
-                    topic: "logic_notifications_t123",
-                    partition: 3,
-                    offset: 43,
-                    headers: &NoIngestHeaders,
-                },
+                row(
+                    &kafka_metadata("logic_notifications_t123", 2, 42),
+                    &NoIngestHeaders,
+                ),
+                row(
+                    &kafka_metadata("logic_notifications_t123", 3, 43),
+                    &NoIngestHeaders,
+                ),
             ],
         );
         let offsets = grouped_metadata
@@ -975,14 +1279,10 @@ mod tests {
         let first_headers = TestIngestHeaders(&[("route", "primary")]);
         let second_headers = TestIngestHeaders(&[("route", "secondary")]);
         let metadata = ingest_metadata_for_test(
-            IngestorMetadataScope::Headers,
+            IngestMetadataProjection::none(),
             &[
-                IngestMetadataRow::Headers {
-                    headers: &first_headers,
-                },
-                IngestMetadataRow::Headers {
-                    headers: &second_headers,
-                },
+                IngestMetadataRow::headers(&first_headers),
+                IngestMetadataRow::headers(&second_headers),
             ],
         );
         let injector = IngestHeaderFunctionInjector::from_metadata(Some(&metadata), 2);
@@ -1079,7 +1379,7 @@ mod tests {
         }));
         let program = bind_ingestor_route_for_test(
             &named::<ModelName>("header_ingestor"),
-            IngestorMetadataScope::Kafka,
+            kafka_declared(),
             source.reads_headers(),
             &construction(
                 "INHERIT tenant SET first = read_header(lower(input.header_name)), total = \
@@ -1117,10 +1417,8 @@ mod tests {
             ("route", "secondary"),
         ]);
         let metadata = ingest_metadata_for_test(
-            IngestorMetadataScope::Headers,
-            &[IngestMetadataRow::Headers {
-                headers: &first_headers,
-            }],
+            IngestMetadataProjection::none(),
+            &[IngestMetadataRow::headers(&first_headers)],
         );
 
         let output = execute_filter_map_for_test(
@@ -1159,14 +1457,10 @@ mod tests {
                 .expect("grouped carrier must concatenate");
         let second_headers = TestIngestHeaders(&[("tenant", "acme"), ("route", "backup")]);
         let grouped_metadata = ingest_metadata_for_test(
-            IngestorMetadataScope::Headers,
+            IngestMetadataProjection::none(),
             &[
-                IngestMetadataRow::Headers {
-                    headers: &first_headers,
-                },
-                IngestMetadataRow::Headers {
-                    headers: &second_headers,
-                },
+                IngestMetadataRow::headers(&first_headers),
+                IngestMetadataRow::headers(&second_headers),
             ],
         );
         let grouped_runtime_metadata = RecordMetadataColumns::from_rows([
@@ -1256,3 +1550,10 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(
+    test,
+    not(any(feature = "shuttle", feature = "loom", feature = "deloxide"))
+))]
+#[path = "ingest_metadata_properties.rs"]
+mod properties;
