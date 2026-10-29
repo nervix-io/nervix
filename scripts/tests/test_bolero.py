@@ -686,6 +686,8 @@ class DiscoveryTests(unittest.TestCase):
         cases = (
             ("bolero::check!();", "no owning function"),
             ("fn ordinary() { bolero::check!(); }", "must start with bolero_"),
+            ("fn bolero_one() { fn helper() { bolero::check!(); } }",
+             "property helper must start with bolero_"),
             ("fn bolero_one() { check!(); }", "qualify bolero::check!"),
             ("fn bolero_one() { bolero::check!(); }\n"
              "fn bolero_one() { bolero::check!(); }", "duplicate Bolero function"),
@@ -697,6 +699,26 @@ class DiscoveryTests(unittest.TestCase):
                 (manifest.parent / "lib.rs").write_text(content)
                 with self.assertRaisesRegex(bolero.BoleroError, message):
                     bolero.static_targets(manifest)
+
+    def test_source_scan_names_the_function_whose_body_holds_the_macro(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = pathlib.Path(directory) / "Cargo.toml"
+            manifest.write_text("[package]\nname = 'scan'\n")
+            source = manifest.parent / "lib.rs"
+            source.write_text(
+                "fn bolero_nested_helper() {\n"
+                "    fn helper(bytes: &[u8]) -> [u8; 2] { let _ = \"}\"; [0; 2] }\n"
+                "    // fn commented() {\n"
+                "    bolero::check!().for_each(|bytes: &[u8]| { helper(bytes); });\n"
+                "}\n"
+                "fn bolero_declaration() {\n"
+                "    trait Declared { fn declared(&self); }\n"
+                "    { bolero::check!(); }\n"
+                "}\n")
+            self.assertEqual(
+                bolero.static_targets(manifest),
+                {"bolero_nested_helper": source, "bolero_declaration": source},
+            )
 
     def test_source_scan_obeys_package_ownership_and_excludes_generated_trees(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

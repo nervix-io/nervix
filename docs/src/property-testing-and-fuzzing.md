@@ -671,8 +671,10 @@ just combine-bolero-fuzz <shard-evidence> <output>
 Bolero, scans their property macros within each owning Cargo package, and queries compiled targets
 through filtered library and integration-test discovery with the inventory's declared features.
 Source scanning stops at nested Cargo manifests and excludes Cargo build output; an authored module
-named `target` remains part of its package. It rejects missing, unregistered, duplicate, ignored and
-zero-selected targets, plus
+named `target` remains part of its package. A property macro belongs to the innermost function
+whose body holds it, read without comments and literal contents, so a helper function nested
+before the macro is not taken for the property. It rejects missing, unregistered, duplicate,
+ignored and zero-selected targets, plus
 corpus paths different from Bolero's actual work directory. Discovery executes only
 `bolero_` tests of the registered library and integration-test targets under Bolero's selection
 mode; it cannot start the server's scenario harness. It reports discovered, selected, executed and
