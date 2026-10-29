@@ -7134,7 +7134,6 @@ dependencies = [
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
- "nonzero_ext",
  "serde_json",
  "sqlx",
  "thiserror 2.0.21",
