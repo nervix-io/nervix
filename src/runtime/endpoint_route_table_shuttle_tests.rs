@@ -100,6 +100,7 @@ fn unbind_fences_retained_requests_and_preserves_a_concurrent_replacement() {
     let preceding = routes.bind(identity(), 1, &keys);
     let retained = routes
         .resolve("edge.example.com", "/events")
+        .into_route()
         .assured("the initial route is installed");
     let ending_routes = routes.clone();
     let ending_keys = keys.clone();
@@ -128,6 +129,7 @@ fn unbind_fences_retained_requests_and_preserves_a_concurrent_replacement() {
     assert_eq!(replacement.intake().as_deref(), Some(&2));
     let current = routes
         .resolve("edge.example.com", "/events")
+        .into_route()
         .assured("the configured route remains installed");
     let live: Vec<_> = current
         .bindings()
@@ -153,15 +155,19 @@ fn domain_teardown_ends_intake_even_when_a_request_retains_the_table() {
         &domain(),
         vec![(keys[0].clone(), endpoint(EndpointType::Http))],
     );
+    routes.mark_installed();
     routes.bind(identity(), 1, &keys);
     let ending_routes = routes.clone();
     let ending = thread::spawn(move || ending_routes.withdraw_domain(&domain()));
     let retained = routes.resolve("edge.example.com", "/events");
     ending.join().assured(JOINS);
-    if let Some(retained) = retained {
+    if let EndpointResolution::Routed(retained) = retained {
         assert!(retained.bindings()[0].intake().is_none());
     }
-    assert!(routes.resolve("edge.example.com", "/events").is_none());
+    assert!(matches!(
+        routes.resolve("edge.example.com", "/events"),
+        EndpointResolution::Unrouted
+    ));
 }
 
 #[test]

@@ -1426,6 +1426,7 @@ mod tests {
         assert!(
             runtime
                 .resolve_endpoint("events.example.com", "/ingest")
+                .into_route()
                 .is_none()
         );
 
@@ -1434,6 +1435,7 @@ mod tests {
         assert!(
             runtime
                 .resolve_endpoint("events.example.com", "/ingest")
+                .into_route()
                 .is_some()
         );
         execution.routing.deactivate();
@@ -1444,6 +1446,7 @@ mod tests {
         assert!(
             runtime
                 .resolve_endpoint("events.example.com", "/ingest")
+                .into_route()
                 .is_none()
         );
     }

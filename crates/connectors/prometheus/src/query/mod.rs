@@ -149,6 +149,7 @@ impl PacedIngestorConnector for PrometheusQueryIngestor {
                 Ok(payload) => messages.push(IngestorPollMessage {
                     payload,
                     headers: RetainedIngestHeaders::none(),
+                    metadata: nervix_connector::IngestorPollMetadata::Headers,
                 }),
                 Err(error) => failures.push(error.change_context(IngestorError::Read {
                     connector: PROMETHEUS,

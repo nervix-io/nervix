@@ -307,6 +307,9 @@ impl Runtime {
             }
         }
         self.retain_assigned_wasm_modules(local_node_id, &revision_plan);
+        // Every domain of the revision now publishes its routes, so the endpoint listener answers
+        // a route none of them publishes as missing rather than as not yet installed.
+        self.inner.endpoint_intake_routes.mark_installed();
 
         Ok(recovery_expansions)
     }

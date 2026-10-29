@@ -428,8 +428,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   replacement attempt. Design
   application effects for duplicates and uncertain ACK confirmation. Read `Emitters` → `Client emitters`,
   `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
-- Request/response emitters do not take `ACK TIMEOUT`. ClickHouse and OTEL clients require a positive
-  `timeout_ms`; SQS, Sentry, or Iceberg object-store clients use it when a request
+- Request/response emitters do not take `ACK TIMEOUT`. ClickHouse, OTEL and Sentry clients require a
+  positive `timeout_ms`; SQS or Iceberg object-store clients use it when a request
   needs an explicit bound. A ClickHouse HTTPS address also requires `tls_ca_file` from a mounted
   resource, while HTTP refuses TLS file keys. Its table locator has one or two case-preserving
   dot-separated parts, each quoted by the connector when sent. The emitter's declared retry
@@ -593,8 +593,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - A server endpoint WebSocket keeps its route and signaling protocol for the connection. After
   its source stops or is replaced, reconnect to use the new source; after signaling, the next
   refused payload on the preceding connection closes with 1013. Configured routes without a live
-  intake reject with HTTP 503, while withdrawn routes return 404. Another domain sharing the host
-  and path retains its own intake when a domain is stopped.
+  intake reject with HTTP 503, while withdrawn routes return 404. A node that has not installed a
+  revision since it started answers 503 for every unpublished route, never 404. Another domain
+  sharing the host and path retains its own intake when a domain is stopped.
 - Declare both required WASM limits immediately after `FILE`, in order: `MAX FUEL <positive_u64>
   MAX MEMORY <positive_byte_size>`. Fuel is reset per logical guest operation; memory caps each
   branch guest's Wasmtime linear memory.
@@ -633,8 +634,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   singleton wire schema directly with `FROM SYSLOG`, keep the format independent of the UDP/TCP/TLS
   client transport, and use only the documented `SYSLOG LISTENER INGESTOR ... MODE NO ACK` source
   and `NO ACK` emitter forms.
-- For a Sentry emitter, reference a `SENTRY CLIENT` containing the project DSN and use a codec
-  that emits one Sentry event JSON object per record. Do not add header writes to the Sentry route.
+- For a Sentry emitter, reference a `SENTRY CLIENT` containing the project DSN and a positive
+  `timeout_ms`, and use a codec that emits one Sentry event JSON object per record. Do not add header
+  writes to the Sentry route.
 - List topics, queues, streams, tables, buckets, catalogs, namespaces, collections, and other
   external prerequisites separately. Nervix does not create them as a side effect of starting a
   node.

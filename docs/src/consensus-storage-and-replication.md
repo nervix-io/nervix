@@ -210,16 +210,28 @@ applies its retry delay and cancellation while producing that input; even an imm
 admission rejection therefore passes through the caller's gate. An ended input opens no transport.
 Leading empty requests, including finite catch-up probes, use the management heartbeat operation
 and its deadline. Each answer confirms that request's previous-log boundary; a conflict, higher
-vote or incomplete acceptance ends that input before any data stream opens. The first request that
-carries entries remains charged while stream setup runs and joins the remaining requests exactly
-once after setup succeeds. Subsequent empty commit updates stay on that ordered stream alongside
-data batches. Setup retains its five-second deadline; waiting for the caller's next request belongs
-to the caller's lifecycle, rather than to connection setup.
+vote or incomplete acceptance ends that input before any data stream opens. Before a first data
+request whose previous-log boundary has not been confirmed by a preceding empty request in the
+same input, the adapter checks that boundary with an empty management request. It carries the same
+vote and previous-log identity, with the commit position capped at that boundary. A conflict,
+higher vote or incomplete match is returned to Raft before data-stream admission. A request that
+starts at the beginning of the log has no preceding entry to check.
 
-One replication batch targets 1 MiB and stops at 256 entries. The entry cap also bounds how many
-speculative entries cross a slow link before a new leader learns that its previous-log boundary
-conflicts with a lagging follower. Commands remain whole, so the first command may take a batch
-past the target; the encoded replication operation is bounded at 2 MiB.
+The first data request remains charged during prefix verification and stream setup. Once its
+prefix matches, its complete original vote, entries, previous-log identity and commit position
+join the remaining requests exactly once on the ordered stream. Subsequent empty commit updates
+stay on that stream alongside data batches. A data request's prefix check and stream admission
+share its one five-second setup deadline. The caller's leading empty probes retain their
+heartbeat-derived deadline; their soft TTL does not constrain a data request's prefix check.
+Waiting for the caller's next request belongs to the caller's lifecycle, rather than to connection
+setup. Prefix confirmation is local to one input; it is not cached across stream generations.
+A finite probing input and a subsequent pipeline input have distinct stream lifetimes even when
+both complete successfully.
+
+One replication batch targets 1 MiB and stops at 256 entries. Prefix verification lets a new leader
+find a lagging follower's matching boundary without transferring rejected data batches over a slow
+link. The entry and byte caps still bound each admitted batch. Commands remain whole, so the first
+command may take a batch past the target; the encoded replication operation is bounded at 2 MiB.
 Submissions and answers stay in log order. A conflict, higher vote, partial acceptance, stream
 failure, or liveness failure ends that stream generation after its first result. Raft resumes from
 the last progress the follower confirmed.
@@ -249,7 +261,8 @@ The native writer checks both a moving and a stalled receiver. The public rate-l
 scenario sends opaque TLS bytes through a bounded test proxy at 32768 bytes per second and checks
 the applied domain backlog within its assertion bound and the bytes carried by the paced path.
 Append stream openings observe actual data-stream setup; initial empty probes do not open those
-streams. Native transport regressions cover finite probes, the transition to data, ordered empty
+streams. A data-setup attempt includes its prefix check, even when that check fails before a stream
+can open. Native transport regressions cover finite probes, the transition to data, ordered empty
 commit updates and rejected probes. The public catch-up scenarios retain their stream-count and
 time assertions and change no product deadline.
 

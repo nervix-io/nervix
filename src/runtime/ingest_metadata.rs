@@ -123,9 +123,17 @@ pub(super) struct KafkaIntegrationBuilders {
 /// The Kafka columns live behind one allocation taken when the group opens, so the variants
 /// stay comparable in size.
 pub(super) enum IngestIntegrationBuilders {
-    Websockets { frame_type: StringBuilder },
+    Http {
+        status: UInt16Builder,
+        polled_at: TimestampNanosecondBuilder,
+    },
+    Websockets {
+        frame_type: StringBuilder,
+    },
     Kafka(Box<KafkaIntegrationBuilders>),
-    Syslog { peer_addr: StringBuilder },
+    Syslog {
+        peer_addr: StringBuilder,
+    },
     Headers,
 }
 
@@ -163,6 +171,10 @@ impl IngestMetadataBuilders {
         row_bound: usize,
     ) -> IngestMetadataResult<Self> {
         let integration = match scope {
+            IngestorMetadataScope::Http => IngestIntegrationBuilders::Http {
+                status: UInt16Builder::with_capacity(row_bound),
+                polled_at: TimestampNanosecondBuilder::with_capacity(row_bound),
+            },
             IngestorMetadataScope::Websockets => {
                 let mut maximum_label_bytes = 0;
                 for kind in WebsocketsFrameType::iter() {
@@ -215,6 +227,18 @@ impl IngestMetadataBuilders {
     pub(super) fn append(&mut self, row: &IngestMetadataRow<'_>) -> IngestMetadataResult<()> {
         let headers: Option<&dyn nervix_connector::IngestMessageHeaders> =
             match (&mut self.integration, row) {
+                (
+                    IngestIntegrationBuilders::Http { status, polled_at },
+                    IngestMetadataRow::Http {
+                        status: response_status,
+                        polled_at: scheduled_at,
+                        headers,
+                    },
+                ) => {
+                    status.append_value(*response_status);
+                    polled_at.append_value(scheduled_at.unix_nanos());
+                    Some(*headers)
+                }
                 (
                     IngestIntegrationBuilders::Websockets { frame_type },
                     IngestMetadataRow::Websockets {
@@ -282,6 +306,11 @@ impl IngestMetadataBuilders {
         INGEST_METADATA_COLUMN_SETS_BUILT.with(|count| count.set(count.get() + 1));
         let rows = self.rows;
         let integration_columns = match &mut self.integration {
+            IngestIntegrationBuilders::Http { status, polled_at } => {
+                let status: ArrayRef = StdArc::new(status.finish());
+                let polled_at: ArrayRef = StdArc::new(polled_at.finish().with_timezone("+00:00"));
+                vec![status, polled_at]
+            }
             IngestIntegrationBuilders::Websockets { frame_type } => {
                 let frame_type: ArrayRef = StdArc::new(frame_type.finish());
                 vec![frame_type]
@@ -552,7 +581,7 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
 )]
 mod tests {
     use ahash::HashMap;
-    use arrow_array::Array;
+    use arrow_array::{Array, TimestampNanosecondArray, UInt16Array};
     use nervix_connector::NoIngestHeaders;
     use nervix_models::{
         CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, IngestorEntity, JsonType,
@@ -570,6 +599,34 @@ mod tests {
             RuntimeRecordBatch, RuntimeValue, compile_codec, compile_schema, test_runtime_row,
         },
     };
+
+    #[test]
+    fn http_poll_metadata_keeps_status_and_scheduled_instant_in_typed_columns() {
+        let instant = Timestamp::from_unix_nanos(1_234_567_890);
+        let mut builders = IngestMetadataBuilders::new(IngestorMetadataScope::Http, 1)
+            .expect("HTTP metadata builders open");
+        builders
+            .append(&IngestMetadataRow::Http {
+                status: 206,
+                polled_at: instant,
+                headers: &NoIngestHeaders,
+            })
+            .expect("the HTTP row matches its builders");
+        let metadata = builders.finish().expect("HTTP columns finish");
+        let fields = &metadata.columns.integration_fields;
+        let status = fields
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt16Array>()
+            .expect("status is U16");
+        let polled_at = fields
+            .column(1)
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .expect("poll time is DATETIME");
+        assert_eq!(status.value(0), 206);
+        assert_eq!(polled_at.value(0), instant.unix_nanos());
+    }
 
     /// A JSON codec over a one-field `value` schema, for tests that decode payloads into a group.
     fn metering_value_codec() -> Arc<CompiledCodec> {

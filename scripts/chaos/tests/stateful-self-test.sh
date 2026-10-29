@@ -61,7 +61,7 @@ expect_setup_rejection 'one node supports only restart faults' 'owner-crash requ
     "${chaos_dir}/run-baseline.sh" --scenario stateful --image fixture --nodes 1 --fault owner-crash
 expect_setup_rejection 'one node rejects voter rotations' 'voter-stop requires --nodes 3' \
     "${chaos_dir}/run-baseline.sh" --scenario domain-time --image fixture --nodes 1 --fault voter-stop
-expect_setup_rejection 'other scenarios reject --fault' '--fault applies only to stateful, domain-time, backup-fault and restore-fault' \
+expect_setup_rejection 'other scenarios reject --fault' '--fault applies only to stateful, endpoints, lifetimes, domain-time, backup-fault and restore-fault' \
     "${chaos_dir}/run-baseline.sh" --scenario baseline --image fixture --fault none
 
 # One hundred and twenty stateful records: sequences below 52 precede the milestone, 52 through 59
