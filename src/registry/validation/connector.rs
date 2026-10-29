@@ -482,35 +482,40 @@ pub(in crate::registry) fn validate_direct_value_mappings(
         readonly_binding_for_internal_schema("message", input_schema),
     ];
     let udf_signatures = udf_compile_options(models, CompileOptions::default()).udf_signatures;
-    let inferred = infer_set_expr_types_for_bindings_with_udfs(&program, bindings, udf_signatures)
-        .map_err(|error| {
-            let context = program
-                .inner
-                .set
-                .iter()
-                .zip(&mappings)
-                .find(|((_, expression), _)| expression.span == error.current_context().span)
-                .map(|(_, mapping)| RegistryError::InvalidConnectorDeclaration {
-                    domain: domain.clone(),
-                    node: nervix_models::NodeRef::new(
-                        nervix_models::ModelKind::Emitter,
-                        identifier.clone(),
-                    ),
-                    issue: ConnectorDeclarationIssue::MappedExpressionInference {
-                        section: mapping.section,
-                        key: mapping.mapping.column.clone(),
+    let inferred =
+        match infer_set_expr_types_for_bindings_with_udfs(&program, bindings, udf_signatures) {
+            Ok(inferred) => inferred,
+            Err(error) => {
+                let mapping = program
+                    .inner
+                    .set
+                    .iter()
+                    .zip(&mappings)
+                    .find(|((_, expression), _)| expression.span == error.current_context().span);
+                let context = match mapping {
+                    Some((_, mapping)) => RegistryError::InvalidConnectorDeclaration {
+                        domain: domain.clone(),
+                        node: nervix_models::NodeRef::new(
+                            nervix_models::ModelKind::Emitter,
+                            identifier.clone(),
+                        ),
+                        issue: ConnectorDeclarationIssue::MappedExpressionInference {
+                            section: mapping.section,
+                            key: mapping.mapping.column.clone(),
+                        },
                     },
-                })
-                .unwrap_or_else(|| RegistryError::InvalidModel {
-                    domain: domain.as_str().to_string(),
-                    identifier: identifier.as_str().to_string(),
-                    reason: format!(
-                        "emitter VALUES type inference failed: {}",
-                        error.current_context().message
-                    ),
-                });
-            error.change_context(context)
-        })?;
+                    None => RegistryError::InvalidModel {
+                        domain: domain.as_str().to_string(),
+                        identifier: identifier.as_str().to_string(),
+                        reason: format!(
+                            "emitter VALUES type inference failed: {}",
+                            error.current_context().message
+                        ),
+                    },
+                };
+                return Err(error.change_context(context));
+            }
+        };
     let invalid = |issue| {
         Report::new(RegistryError::InvalidConnectorDeclaration {
             domain: domain.clone(),
