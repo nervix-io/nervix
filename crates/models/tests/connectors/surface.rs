@@ -264,7 +264,7 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
             ConnectorKind::Sqs,
             "QUEUE",
             "sqs_queue",
-            &[("FIFO GROUP", false)],
+            &[("FIFO GROUP", false), ("SEND", true)],
         ),
         EmitterEntityKind::ZeroMq(ZeroMqEmitterEntity::Push) => {
             unlocated(ConnectorKind::ZeroMq, &[])
@@ -319,15 +319,27 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
     }
 }
 
+/// The envelope clauses each emitter pair declares: SQS QUEUE's delay and deduplication id, and none
+/// for every other pair yet.
+fn emitter_envelope(kind: EmitterEntityKind) -> &'static [EnvelopeClauseKind] {
+    match kind {
+        EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => &[
+            EnvelopeClauseKind::Delay,
+            EnvelopeClauseKind::DeduplicationId,
+        ],
+        _ => &[],
+    }
+}
+
 #[test]
-fn every_emitter_pair_declares_its_reference_locator_and_options_and_no_envelope_yet() {
+fn every_emitter_pair_declares_its_reference_locator_options_and_envelope() {
     for kind in EmitterEntityKind::all() {
         let expected = emitter_surface(kind);
         let declared = kind.capabilities();
         assert_eq!(declared.reference, expected.reference, "{kind}");
         assert_eq!(locator_shape(declared.locator), expected.locator, "{kind}");
         assert_eq!(option_shapes(declared.options), expected.options, "{kind}");
-        assert!(declared.envelope.is_empty(), "{kind}");
+        assert_eq!(declared.envelope, emitter_envelope(kind), "{kind}");
         assert!(declared.properties.is_empty(), "{kind}");
     }
 }
@@ -588,11 +600,14 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
                 .runtime_capabilities()
         ),
         [
-            "MODE SINGLE",
-            "MODE BATCH",
+            "MODE ACK",
             "FIFO GROUP <expression>",
             "FIFO GROUP FROM BRANCH",
+            "SEND SINGLE",
+            "SEND BATCH",
             "BATCH",
+            "DELAY",
+            "DEDUPLICATION ID",
             "STALLED PEER timeout_ms",
         ]
     );

@@ -634,15 +634,19 @@ mod tests {
             ("trace", "b"),
             ("tenant", "y"),
         ] {
-            written.push((name.to_string(), value.to_string()));
+            written.push(nervix_connector::TypedRecordHeader {
+                name: name.to_string(),
+                value: nervix_connector::PropertyValue::String(value.to_string()),
+            });
         }
         let record = nervix_connector::EmitterRecord::new(
             nervix_connector::EmitterRecordId::new(0),
             None,
             b"{}".to_vec(),
-            written,
+            Vec::new(),
             nervix_models::Timestamp::from_unix_nanos(0),
-        );
+        )
+        .with_typed_headers(written);
         let prepared = crate::queue::PreparedSqsRecord::new(record)
             .expect("four writes of three valid names make a valid message");
         // The message carries the attributes the request sent, one entry per name.

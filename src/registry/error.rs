@@ -79,6 +79,22 @@ pub(crate) enum ConnectorDeclarationIssue {
     DuplicateValue { key: String },
     #[error("{} VALUES key {key:?} contains a NUL byte", ConnectorKind::MongoDb)]
     MongoDbFieldName { key: String },
+    #[error(
+        "{} FIFO queue '{queue}' takes no per-message DELAY",
+        ConnectorKind::Sqs
+    )]
+    SqsFifoQueueDelay { queue: nervix_models::SqsQueueName },
+    #[error(
+        "{} DELAY must be whole seconds from 1s to {}s, found '{value}'",
+        ConnectorKind::Sqs,
+        nervix_models::SQS_DELAY_MAXIMUM.as_secs()
+    )]
+    SqsDelay { value: String },
+    #[error(
+        "{} DEDUPLICATION ID requires a queue name ending in .fifo, found '{queue}'",
+        ConnectorKind::Sqs
+    )]
+    SqsStandardQueueDeduplication { queue: nervix_models::SqsQueueName },
     #[error("VALUES requires at least one mapping")]
     EmptyValues,
     #[error("{entity} declares no direct value type contract")]

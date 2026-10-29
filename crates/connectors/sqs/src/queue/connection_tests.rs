@@ -30,8 +30,8 @@ use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::queue::{
-    SQS, SqsPublishingMode, SqsQueueEmitter, SqsQueueIngestor, SqsQueueIngestorError,
-    SqsQueueIngestorPlan, connection::FailedRequest,
+    SQS, SqsQueueEmitter, SqsQueueIngestor, SqsQueueIngestorError, SqsQueueIngestorPlan,
+    connection::FailedRequest,
 };
 
 /// The fixture name every check resolves.
@@ -462,13 +462,13 @@ async fn a_send_that_cannot_connect_fails_the_publish_without_answering_a_record
     let fixture = Fixture::start().await;
     let endpoint = RefusedEndpoint::reserve();
     let port = endpoint.port();
-    for (mode, operation) in [
+    for (send, operation) in [
         (
-            SqsPublishingMode::Single,
+            nervix_models::SqsSend::Single,
             "SQS SendMessage failed: dispatch failure: ",
         ),
         (
-            SqsPublishingMode::Batch,
+            nervix_models::SqsSend::Batch,
             "SQS SendMessageBatch failed: dispatch failure: ",
         ),
     ] {
@@ -481,7 +481,7 @@ async fn a_send_that_cannot_connect_fails_the_publish_without_answering_a_record
         let mut connector = SqsQueueEmitter {
             client,
             queue_url: format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"),
-            mode,
+            send,
         };
         let record = EmitterRecord::new(
             EmitterRecordId::new(0),

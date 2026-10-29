@@ -146,7 +146,7 @@ use super::{
     suite_watchdog::{LiveClusterRegistration, NodeStop, SUITE_BUDGET},
 };
 pub(crate) use super::{
-    broker_observer::{BrokerMessage, BrokerObserver},
+    broker_observer::{BrokerMessage, BrokerObserver, TypedBrokerHeader},
     raw_session::{TestSession, open_raw_session},
 };
 
@@ -2963,6 +2963,23 @@ impl Cluster {
 
     pub(crate) async fn observe_sqs(&self, queue: &str) -> io::Result<BrokerObserver> {
         observe_sqs(&self.dependencies, queue).await
+    }
+
+    /// Observes FIFO `queue`, created without content-based deduplication, so a message the
+    /// service accepts names its deduplication id.
+    pub(crate) async fn observe_sqs_fifo_without_content_deduplication(
+        &self,
+        queue: &str,
+    ) -> io::Result<BrokerObserver> {
+        let client = sqs_client(&self.dependencies).await?;
+        client
+            .create_queue()
+            .queue_name(queue)
+            .attributes(QueueAttributeName::FifoQueue, "true")
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        observe_created_sqs(&self.dependencies, queue).await
     }
 
     pub(crate) async fn observe_nats(&self, subject: &str) -> io::Result<BrokerObserver> {
@@ -6712,6 +6729,14 @@ async fn observe_sqs(
     queue: &str,
 ) -> io::Result<BrokerObserver> {
     ensure_sqs_queue(dependencies, queue).await?;
+    observe_created_sqs(dependencies, queue).await
+}
+
+/// Observes `queue`, which already exists as the scenario created it.
+async fn observe_created_sqs(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<BrokerObserver> {
     let client = sqs_client(dependencies).await?;
     let queue_url = sqs_queue_url(&client, queue).await?;
     let (payload_tx, payload_rx) = mpsc::channel(16);
@@ -6735,13 +6760,24 @@ async fn observe_sqs(
             // SQS keeps message attributes as an unordered map, so they are compared in name
             // order.
             let mut attributes = Vec::new();
+            let mut typed_attributes = Vec::new();
             if let Some(message_attributes) = message.message_attributes() {
                 for (name, value) in message_attributes {
-                    let value = value.string_value().unwrap_or_default().to_string();
-                    attributes.push((name.clone(), value));
+                    let text = value.string_value().unwrap_or_default().to_string();
+                    attributes.push((name.clone(), text.clone()));
+                    let typed_value = match value.binary_value() {
+                        Some(bytes) => sqs_binary_attribute_hex(bytes.as_ref()),
+                        None => text,
+                    };
+                    typed_attributes.push(TypedBrokerHeader {
+                        name: name.clone(),
+                        data_type: value.data_type().to_string(),
+                        value: typed_value,
+                    });
                 }
             }
             attributes.sort();
+            typed_attributes.sort();
             let group = match message.attributes() {
                 Some(system) => system
                     .get(&MessageSystemAttributeName::MessageGroupId)
@@ -6756,8 +6792,9 @@ async fn observe_sqs(
                     .send()
                     .await;
             }
-            let observed =
-                BrokerMessage::from_bytes(payload.as_bytes(), attributes).with_group(group);
+            let observed = BrokerMessage::from_bytes(payload.as_bytes(), attributes)
+                .with_group(group)
+                .with_typed_headers(typed_attributes);
             if payload_tx.send(observed).await.is_err() {
                 break;
             }
@@ -6765,6 +6802,15 @@ async fn observe_sqs(
     });
 
     Ok(BrokerObserver::forwarded(payload_rx, task))
+}
+
+/// A binary SQS attribute value as its bytes in lowercase hex, the way a scenario writes it.
+fn sqs_binary_attribute_hex(bytes: &[u8]) -> String {
+    let mut hex = String::new();
+    for byte in bytes {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
 }
 
 async fn observe_nats(

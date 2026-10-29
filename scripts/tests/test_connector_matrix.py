@@ -21,7 +21,7 @@ def declarations():
             "quiesce": ["SUSPEND"], "metadata": ["metadata.offset: I64 OPTIONAL"],
             "headers": {"layout": "ordered_repeats", "names": "exact",
                         "layout_meaning": "every header in the order it was written",
-                        "names_meaning": "a name matches only itself"},
+                        "names_meaning": "a name matches only itself", "values": None},
             "every_node": False, "position": "replayable",
             "confirmation": "answered",
             "bounds": {
@@ -38,7 +38,7 @@ def declarations():
             "modes": ["NO_ACK RETRY POLICY BACKOFF 1s MAX 30s"],
             "headers": {"layout": "ordered_repeats", "names": "exact",
                         "layout_meaning": "every header in the order it was written",
-                        "names_meaning": "a name matches only itself"},
+                        "names_meaning": "a name matches only itself", "values": None},
             "batch": "optional", "batch_maximum": None,
             "body": "ENCODE USING <codec>", "batch_transformation": False,
             "envelope": [], "properties": [], "value_contract": None,
@@ -123,7 +123,8 @@ class ConnectorMatrixTests(unittest.TestCase):
         surface = declarations()
         surface["emit"][0]["headers"] = {
             "layout": "last_wins", "names": "lowercase",
-            "layout_meaning": "one value per name", "names_meaning": "names are lowercased"}
+            "layout_meaning": "one value per name", "names_meaning": "names are lowercased",
+            "values": None}
         headers = matrix.header_models_table(surface)
         self.assertIn("| `last_wins`, lowercase names | None | `KAFKA TOPIC` | one value per name; "
                       "names are lowercased |", headers)
@@ -138,6 +139,23 @@ class ConnectorMatrixTests(unittest.TestCase):
         notes["KAFKA TOPIC"]["emit_headers"] = "This emitter writes no transport headers."
         text = matrix.render_matrix(surface, notes)
         self.assertIn("Not offered: This emitter writes no transport headers.", text)
+
+    def test_typed_header_values_name_what_carries_each_type_and_group_apart_from_text(self):
+        surface = declarations()
+        surface["ingest"][0]["headers"]["layout"] = "last_wins"
+        surface["emit"][0]["headers"] = {
+            "layout": "last_wins", "names": "exact",
+            "layout_meaning": "every header in the order it was written",
+            "names_meaning": "a name matches only itself",
+            "values": "STRING as String; I64 as Number; BYTES as Binary"}
+        headers = matrix.header_models_table(surface)
+        self.assertIn("| `last_wins`, exact names | `KAFKA TOPIC` | None |", headers)
+        self.assertIn("| `last_wins`, exact names; STRING as String; I64 as Number; BYTES as Binary "
+                      "| None | `KAFKA TOPIC` | every header in the order it was written; a name "
+                      "matches only itself; a value's exact type decides the type it travels as |",
+                      headers)
+        self.assertIn("| `KAFKA TOPIC` | `last_wins`, exact names; STRING as String; I64 as Number; "
+                      "BYTES as Binary |", matrix.side_headers(surface, "emit"))
 
     def test_each_absence_and_mirror_requires_a_nonempty_reason(self):
         for field in reasons()["KAFKA TOPIC"]:

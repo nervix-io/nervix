@@ -154,17 +154,17 @@ Feature: Emitter publishing modes
 
       CREATE SQS QUEUE EMITTER sqs_single FROM outgoing
         TO sqs_main QUEUE 'sqs_single'
-          MODE SINGLE RETRY POLICY BACKOFF 150ms MAX 15s
+          SEND SINGLE MODE ACK RETRY POLICY BACKOFF 150ms MAX 15s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SQS QUEUE EMITTER sqs_batch FROM outgoing
         TO sqs_main QUEUE 'sqs_batch'
-          MODE BATCH RETRY POLICY BACKOFF 160ms MAX 16s
+          SEND BATCH MODE ACK RETRY POLICY BACKOFF 160ms MAX 16s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SQS QUEUE EMITTER sqs_fifo FROM tenant_outgoing
         TO sqs_main QUEUE 'sqs_fifo.fifo' FIFO GROUP FROM BRANCH
-          MODE SINGLE RETRY POLICY BACKOFF 165ms MAX 16s
+          SEND SINGLE MODE ACK RETRY POLICY BACKOFF 165ms MAX 16s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SENTRY EVENT EMITTER sentry_ack FROM outgoing
@@ -321,7 +321,8 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE SINGLE RETRY POLICY BACKOFF 150ms MAX 15s
+      SEND SINGLE
+          MODE ACK RETRY POLICY BACKOFF 150ms MAX 15s
       """
     When these Plexus commands are executed on the leader node
       """
@@ -329,7 +330,8 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE BATCH RETRY POLICY BACKOFF 160ms MAX 16s
+      SEND BATCH
+          MODE ACK RETRY POLICY BACKOFF 160ms MAX 16s
       """
     When these Plexus commands are executed on the leader node
       """
@@ -338,8 +340,8 @@ Feature: Emitter publishing modes
     Then the last command output contains
       """
       to: SQS QUEUE sqs_main QUEUE 'sqs_fifo.fifo'
-      options: FIFO GROUP FROM BRANCH
-      mode: SINGLE RETRY POLICY BACKOFF 165ms MAX 16s
+      options: FIFO GROUP FROM BRANCH SEND SINGLE
+      mode: ACK RETRY POLICY BACKOFF 165ms MAX 16s
       quiesce: none
       envelope: none
       batch: none
@@ -471,7 +473,7 @@ Feature: Emitter publishing modes
       };
       CREATE SQS QUEUE EMITTER alter_fifo_group FROM tenant_outgoing
         TO sqs_main QUEUE 'alter_orders.fifo' FIFO GROUP FROM BRANCH
-          MODE SINGLE RETRY POLICY BACKOFF 10ms MAX 1s
+          SEND SINGLE MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -531,7 +533,7 @@ Feature: Emitter publishing modes
       """
       CREATE SQS QUEUE EMITTER fifo_without_group FROM tenant_outgoing
         TO sqs_main QUEUE 'orders.fifo'
-          MODE SINGLE RETRY POLICY BACKOFF 10ms MAX 1s
+          SEND SINGLE MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -539,7 +541,7 @@ Feature: Emitter publishing modes
       """
       CREATE SQS QUEUE EMITTER group_on_standard_queue FROM tenant_outgoing
         TO sqs_main QUEUE 'orders' FIFO GROUP FROM BRANCH
-          MODE SINGLE RETRY POLICY BACKOFF 10ms MAX 1s
+          SEND SINGLE MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -547,7 +549,7 @@ Feature: Emitter publishing modes
       """
       CREATE SQS QUEUE EMITTER unbranched_fifo_group FROM outgoing
         TO sqs_main QUEUE 'orders.fifo' FIFO GROUP FROM BRANCH
-          MODE SINGLE RETRY POLICY BACKOFF 10ms MAX 1s
+          SEND SINGLE MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -555,7 +557,7 @@ Feature: Emitter publishing modes
       """
       CREATE SQS QUEUE EMITTER mixed_fifo_group FROM tenant_outgoing, outgoing
         TO sqs_main QUEUE 'mixed_orders.fifo' FIFO GROUP FROM BRANCH
-          MODE SINGLE RETRY POLICY BACKOFF 10ms MAX 1s
+          SEND SINGLE MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -567,7 +569,7 @@ Feature: Emitter publishing modes
       """
       CREATE SQS QUEUE EMITTER invalid_fifo_expression FROM tenant_outgoing
         TO sqs_main QUEUE 'orders.fifo' FIFO GROUP input.seq
-          MODE BATCH RETRY POLICY BACKOFF 10ms MAX 1s
+          SEND BATCH MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """

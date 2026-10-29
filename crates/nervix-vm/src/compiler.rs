@@ -8,6 +8,7 @@ use arrow_array::{BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::{HeaderValues, ParseAsType};
 use nervix_primitives::sync::StdArc;
 
 use crate::{
@@ -195,7 +196,7 @@ struct Compiler {
     /// that scan instead of parsing them again.
     json_scans: HashMap<JsonScanKey, JsonScanSite>,
     allow_header_reads: bool,
-    allow_header_writes: bool,
+    header_writes: Option<HeaderValues>,
     udf_signatures: UdfSignatures,
     injector: Option<nervix_primitives::sync::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
@@ -340,7 +341,9 @@ pub struct CompileOptions {
     pub output_mode: OutputMode,
     pub allow_sensitive_output: bool,
     pub allow_header_reads: bool,
-    pub allow_header_writes: bool,
+    /// The values an emitter's `write_header` calls may write, as its entity declares them, or
+    /// `None` where the program runs outside an emitter and makes no header writes.
+    pub header_writes: Option<HeaderValues>,
     pub udf_signatures: UdfSignatures,
     pub injector: Option<nervix_primitives::sync::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
@@ -352,7 +355,7 @@ impl Default for CompileOptions {
             output_mode: OutputMode::PassthroughByName,
             allow_sensitive_output: false,
             allow_header_reads: false,
-            allow_header_writes: false,
+            header_writes: None,
             udf_signatures: UdfSignatures::default(),
             injector: None,
         }
@@ -820,7 +823,7 @@ impl Compiler {
                 json_scans: HashMap::new(),
                 current_selection: None,
                 allow_header_reads: false,
-                allow_header_writes: false,
+                header_writes: None,
                 udf_signatures: UdfSignatures::default(),
                 injector: None,
             },
@@ -952,7 +955,7 @@ impl Compiler {
 
     fn apply_options(&mut self, options: &CompileOptions) {
         self.allow_header_reads = options.allow_header_reads;
-        self.allow_header_writes = options.allow_header_writes;
+        self.header_writes = options.header_writes;
         self.udf_signatures.clone_from(&options.udf_signatures);
         self.injector.clone_from(&options.injector);
     }
@@ -2553,13 +2556,13 @@ impl Compiler {
         &mut self,
         invocation: &crate::program::SpannedInvocation,
     ) -> error_stack::Result<InvocationBinding, CompileError> {
-        if !self.allow_header_writes {
+        let Some(header_values) = self.header_writes else {
             return Err(Report::new(CompileError {
                 code: CompileErrorCode::UnsupportedInvokeContext,
                 message: "INVOKE is only available to emitters".to_string(),
                 span: invocation.span,
             }));
-        }
+        };
         if invocation.inner.function != FunctionName::WriteHeader {
             return Err(Report::new(CompileError {
                 code: CompileErrorCode::UnsupportedInvocation,
@@ -2580,42 +2583,69 @@ impl Compiler {
                 span: invocation.span,
             }));
         };
-        let mut inputs = Vec::with_capacity(2);
-        for (label, arg) in [("name", name), ("value", value)] {
-            let data_type = self.infer_expr_type(arg)?;
-            if data_type != DataType::Utf8 {
-                return Err(Report::new(CompileError {
-                    code: CompileErrorCode::TypeMismatch,
-                    message: format!("write_header {label} must be STRING, found {data_type:?}"),
-                    span: arg.span,
-                }));
-            }
-            if self.expr_may_be_null(arg)? {
-                return Err(Report::new(CompileError {
-                    code: CompileErrorCode::NullableHeaderArgument,
-                    message: format!("write_header {label} must not be nullable"),
-                    span: arg.span,
-                }));
-            }
-            if self.expr_is_sensitive(arg)? {
-                return Err(Report::new(CompileError {
-                    code: CompileErrorCode::SensitiveLeak,
-                    message: format!(
-                        "write_header {label} requires leak_sensitive(...) for sensitive data"
-                    ),
-                    span: arg.span,
-                }));
-            }
-            let compiled = self.compile_expr(arg)?;
-            let input = self.alloc_condition(RegisterType::Utf8);
-            self.emit_move(input, compiled, arg.span);
-            inputs.push(input);
-        }
+        // A header name is text on every transport; its value has a type the emitter's entity
+        // declares.
+        let name_input = self.compile_header_argument(name, "name", HeaderValues::Text)?;
+        let value_input = self.compile_header_argument(value, "value", header_values)?;
         Ok(InvocationBinding {
             function: invocation.inner.function.clone(),
-            inputs,
+            inputs: vec![name_input, value_input],
             span: invocation.span,
         })
+    }
+
+    /// Compiles one `write_header` argument, which must be a non-null, non-sensitive value of an
+    /// exact type `values` holds, into a register of that type.
+    fn compile_header_argument(
+        &mut self,
+        arg: &SpannedExpr,
+        label: &str,
+        values: HeaderValues,
+    ) -> error_stack::Result<RegisterRef, CompileError> {
+        let data_type = self.infer_expr_type(arg)?;
+        if !Self::header_values_hold(values, &data_type) {
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::TypeMismatch,
+                message: format!(
+                    "write_header {label} must be {}, found {data_type:?}",
+                    values.listed()
+                ),
+                span: arg.span,
+            }));
+        }
+        if self.expr_may_be_null(arg)? {
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::NullableHeaderArgument,
+                message: format!("write_header {label} must not be nullable"),
+                span: arg.span,
+            }));
+        }
+        if self.expr_is_sensitive(arg)? {
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::SensitiveLeak,
+                message: format!(
+                    "write_header {label} requires leak_sensitive(...) for sensitive data"
+                ),
+                span: arg.span,
+            }));
+        }
+        let register =
+            Self::register_type_for_data_type(&data_type, arg.span, "write_header argument")?;
+        let compiled = self.compile_expr(arg)?;
+        let input = self.alloc_condition(register);
+        self.emit_move(input, compiled, arg.span);
+        Ok(input)
+    }
+
+    /// Whether `values` holds a value of the Arrow type `data_type`, as the vocabulary maps each
+    /// of its exact types to Arrow.
+    fn header_values_hold(values: HeaderValues, data_type: &DataType) -> bool {
+        for ty in values.types() {
+            if ParseAsType::from(ty).arrow_data_type() == *data_type {
+                return true;
+            }
+        }
+        false
     }
 
     fn emit_move(&mut self, dst: RegisterRef, input: RegisterRef, span: Span) {
@@ -3553,7 +3583,7 @@ pub fn compile_predicate_with_options_for_bindings(
             output_mode: OutputMode::PassthroughByName,
             allow_sensitive_output: false,
             allow_header_reads: options.allow_header_reads,
-            allow_header_writes: false,
+            header_writes: None,
             udf_signatures: options.udf_signatures,
             injector: options.injector,
         },
@@ -4951,7 +4981,7 @@ mod tests {
             schema.clone(),
             [CompileBinding::writable("input", schema.clone())],
             CompileOptions {
-                allow_header_writes: true,
+                header_writes: Some(HeaderValues::Text),
                 ..CompileOptions::default()
             },
         )
@@ -4977,6 +5007,93 @@ mod tests {
     }
 
     #[test]
+    fn write_header_values_take_exactly_the_types_the_emitter_declares() {
+        const TYPED: &[nervix_models::HeaderValueType] = &[
+            nervix_models::HeaderValueType {
+                ty: nervix_models::PropertyType::String,
+                carried_as: "String",
+            },
+            nervix_models::HeaderValueType {
+                ty: nervix_models::PropertyType::I64,
+                carried_as: "Number",
+            },
+            nervix_models::HeaderValueType {
+                ty: nervix_models::PropertyType::Bytes,
+                carried_as: "Binary",
+            },
+        ];
+        let input_schema = schema(vec![
+            Field::new("count", DataType::Int64, false),
+            Field::new("flag", DataType::Boolean, false),
+            Field::new("maybe", DataType::Int64, true),
+        ]);
+        let output_schema = schema(Vec::<Field>::new());
+        let compile = |source: &str, values: HeaderValues| {
+            let program = parse_program(source).assured("each test invocation parses");
+            compile_program_with_options_for_bindings(
+                &program,
+                output_schema.clone(),
+                [
+                    CompileBinding::readonly("input", input_schema.clone()),
+                    CompileBinding::writable("output", output_schema.clone()),
+                ],
+                CompileOptions {
+                    header_writes: Some(values),
+                    ..CompileOptions::default()
+                },
+            )
+        };
+
+        compile(
+            "INVOKE write_header('count', input.count), write_header('digest', hex_decode('00'))",
+            HeaderValues::Typed(TYPED),
+        )
+        .assured("an emitter that declares I64 and BYTES values accepts both");
+
+        let text = compile(
+            "INVOKE write_header('count', input.count)",
+            HeaderValues::Text,
+        )
+        .expect_err("an emitter with text values refuses an integer value");
+        assert_eq!(text.current_context().code(), "type_mismatch");
+        assert_eq!(
+            text.current_context().message,
+            "write_header value must be STRING, found Int64"
+        );
+
+        let flag = compile(
+            "INVOKE write_header('flag', input.flag)",
+            HeaderValues::Typed(TYPED),
+        )
+        .expect_err("a value of an undeclared type is refused");
+        assert_eq!(
+            flag.current_context().message,
+            "write_header value must be STRING, I64 or BYTES, found Boolean"
+        );
+
+        let name = compile(
+            "INVOKE write_header(input.count, 'value')",
+            HeaderValues::Typed(TYPED),
+        )
+        .expect_err("a header name is text whatever its values are");
+        assert_eq!(
+            name.current_context().message,
+            "write_header name must be STRING, found Int64"
+        );
+
+        let nullable = compile(
+            "INVOKE write_header('maybe', input.maybe)",
+            HeaderValues::Typed(TYPED),
+        )
+        .expect_err("a header value of a declared type must be present for every row");
+        assert_eq!(nullable.current_context().code(), "nullable_header_argument");
+        assert_eq!(
+            nullable.current_context().message,
+            "write_header value must not be nullable"
+        );
+    }
+
+    #[test]
     fn write_header_requires_explicit_leakage_for_sensitive_arguments() {
         let input_schema = schema(vec![Field::new("secret", DataType::Utf8, false)]);
         let output_schema = schema(Vec::<Field>::new());
@@ -4996,7 +5113,7 @@ mod tests {
                     CompileBinding::writable("output", output_schema.clone()),
                 ],
                 CompileOptions {
-                    allow_header_writes: true,
+                    header_writes: Some(HeaderValues::Text),
                     ..CompileOptions::default()
                 },
             )
@@ -5018,7 +5135,7 @@ mod tests {
                 CompileBinding::writable("output", schema(Vec::<Field>::new())),
             ],
             CompileOptions {
-                allow_header_writes: true,
+                header_writes: Some(HeaderValues::Text),
                 ..CompileOptions::default()
             },
         )

@@ -632,15 +632,14 @@ fn emitter_declaration(kind: EmitterEntityKind) -> EmitterDeclaration {
         ),
         EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => EmitterDeclaration {
             batch: EmitterBatchLegality::Optional {
-                maximum: Some(
-                    "256KiB"
-                        .parse()
-                        .assured("256 KiB is a whole number of bytes"),
-                ),
+                maximum: Some("1MiB".parse().assured("1 MiB is a whole number of bytes")),
             },
             ..codec(
-                Some(HeaderModel::exact(HeaderLayout::LastWins)),
-                &["SqsSingle", "SqsBatch"],
+                Some(
+                    HeaderModel::exact(HeaderLayout::LastWins)
+                        .with_typed_values(nervix_models::SQS_ATTRIBUTE_VALUES),
+                ),
+                &["RequestAck"],
             )
         },
         EmitterEntityKind::Sentry(SentryEmitterEntity::Event) => EmitterDeclaration {
@@ -695,7 +694,7 @@ fn the_sqs_emitter_admits_at_most_the_message_size_sqs_does() {
     else {
         panic!("SQS batches optionally, up to the message size it fixes");
     };
-    assert_eq!(maximum.bytes().get(), 256 * 1024);
+    assert_eq!(maximum.bytes().get(), 1024 * 1024);
 }
 
 #[test]

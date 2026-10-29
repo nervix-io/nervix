@@ -1139,9 +1139,12 @@ found Int64`. An envelope clause or `PROPERTIES` key the entity does not declare
 `EnvelopeDeclarationError` that names the entity and the clause or key; an envelope duration
 reuses the duration issues under `DELIVER AFTER` or `DELAY`, and an envelope expression that is
 not an exact, non-null, non-sensitive value of its type is `EnvelopeValue`, naming the clause or
-key and the expected type with the VM's compile failure beneath it. These are command refusals
-before publication, including during `ALTER`, rather than retried source or sink initialization
-failures. They never include a record's values.
+key and the expected type with the VM's compile failure beneath it. An `SQS QUEUE` emitter that
+writes `DELAY` for a FIFO queue, a `DELAY` other than whole seconds up to 900s, or a
+`DEDUPLICATION ID` for a standard queue is refused with `SqsFifoQueueDelay`, `SqsDelay` or
+`SqsStandardQueueDeduplication`, naming the queue or the duration as written. These are command
+refusals before publication, including during `ALTER`, rather than retried source or sink
+initialization failures. They never include a record's values.
 
 MySQL table-name construction refuses empty path parts and more than two parts with typed
 `ExternalNameError` outcomes. Its offline client check refuses pool-sizing URL parameters through

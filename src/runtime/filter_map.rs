@@ -12,6 +12,8 @@
 
 use arrow_buffer::BooleanBufferBuilder;
 use error_stack::ResultExt as _;
+use nervix_connector::{PropertyValue, TypedRecordHeader};
+use nervix_models::HeaderValues;
 
 use super::*;
 
@@ -666,39 +668,42 @@ pub(super) async fn plan_emitter_filter_map_batch(
             ));
             continue;
         }
-        let message_headers =
-            match emitter_headers_from_invocations(&body_result.invocations, output_row) {
-                Ok(headers) => headers,
-                Err(error) => {
-                    let source_record = source_record()?;
-                    let partial_output = program
-                        .codec_route
-                        .then(|| captured_partial_output(&body_result.batch, output_row))
-                        .flatten();
-                    message_errors.push(planned_structured_message_error(
-                        RelayMessage {
-                            key: input.keys[input_row].clone(),
-                            record: source_record,
-                            acks: std::mem::take(&mut acks[input_row]),
-                        },
-                        structured_message_error(
-                            execution_now,
-                            MessageErrorCode::Evaluation,
-                            format!(
-                                "emitter '{}' failed to materialize FILTER-MAP headers: {error:#}",
-                                emitter.as_str(),
-                            ),
-                            MessageErrorOperation::Invoke,
-                            None,
-                            std::iter::empty(),
-                        ),
-                        partial_output,
-                        state_snapshot.clone(),
+        let message_headers = match emitter_headers_from_invocations(
+            &body_result.invocations,
+            output_row,
+            program.header_writes,
+        ) {
+            Ok(headers) => headers,
+            Err(error) => {
+                let source_record = source_record()?;
+                let partial_output = program
+                    .codec_route
+                    .then(|| captured_partial_output(&body_result.batch, output_row))
+                    .flatten();
+                message_errors.push(planned_structured_message_error(
+                    RelayMessage {
+                        key: input.keys[input_row].clone(),
+                        record: source_record,
+                        acks: std::mem::take(&mut acks[input_row]),
+                    },
+                    structured_message_error(
                         execution_now,
-                    ));
-                    continue;
-                }
-            };
+                        MessageErrorCode::Evaluation,
+                        format!(
+                            "emitter '{}' failed to materialize FILTER-MAP headers: {error:#}",
+                            emitter.as_str(),
+                        ),
+                        MessageErrorOperation::Invoke,
+                        None,
+                        std::iter::empty(),
+                    ),
+                    partial_output,
+                    state_snapshot.clone(),
+                    execution_now,
+                ));
+                continue;
+            }
+        };
         let invalid_fields = invalid_outputs.fields(output_row);
         if !invalid_fields.is_empty() {
             let source_record = source_record()?;
@@ -1124,7 +1129,7 @@ impl BranchKeyColumns {
 pub(super) enum EmitterHeaderError {
     #[error("unsupported invocation '{}'", .function.as_str())]
     UnsupportedInvocation { function: FunctionName },
-    #[error("write_header arguments must both be STRING")]
+    #[error("write_header arguments must be a STRING name and a value of a declared type")]
     ArgumentTypes,
     #[error("write_header result does not contain output row {row}")]
     MissingRow { row: usize },
@@ -1132,31 +1137,105 @@ pub(super) enum EmitterHeaderError {
     NullArgument,
 }
 
+/// The headers one output row's `write_header` invocations write, in the form `values` declares:
+/// text, or values of the declared types. An emitter whose entity declares no header model makes
+/// no invocation, so its rows have no headers.
 pub(super) fn emitter_headers_from_invocations(
     invocations: &[nervix_vm::FunctionInvocation],
     row: usize,
+    values: Option<HeaderValues>,
 ) -> error_stack::Result<EmitterHeaders, EmitterHeaderError> {
-    let mut headers = Vec::new();
+    match values {
+        Some(HeaderValues::Typed(_)) => typed_emitter_headers(invocations, row),
+        Some(HeaderValues::Text) | None => text_emitter_headers(invocations, row),
+    }
+}
+
+/// The name one `write_header` invocation writes for `row`, and the column of the values it
+/// writes, checked to be a `write_header` call that holds the row under a non-null name.
+fn header_write_arguments(
+    invocation: &nervix_vm::FunctionInvocation,
+    row: usize,
+) -> error_stack::Result<(&str, &VmTypedArray), EmitterHeaderError> {
+    if invocation.function != FunctionName::WriteHeader {
+        return Err(Report::new(EmitterHeaderError::UnsupportedInvocation {
+            function: invocation.function.clone(),
+        }));
+    }
+    let [VmTypedArray::Utf8(names), values] = invocation.arguments.as_slice() else {
+        return Err(Report::new(EmitterHeaderError::ArgumentTypes));
+    };
+    if row >= names.len() || row >= values.len() {
+        return Err(Report::new(EmitterHeaderError::MissingRow { row }));
+    }
+    if names.is_null(row) {
+        return Err(Report::new(EmitterHeaderError::NullArgument));
+    }
+    Ok((names.value(row), values))
+}
+
+fn text_emitter_headers(
+    invocations: &[nervix_vm::FunctionInvocation],
+    row: usize,
+) -> error_stack::Result<EmitterHeaders, EmitterHeaderError> {
+    let mut headers = Vec::with_capacity(invocations.len());
     for invocation in invocations {
-        if invocation.function != FunctionName::WriteHeader {
-            return Err(Report::new(EmitterHeaderError::UnsupportedInvocation {
-                function: invocation.function.clone(),
-            }));
-        }
-        let [VmTypedArray::Utf8(names), VmTypedArray::Utf8(values)] =
-            invocation.arguments.as_slice()
-        else {
+        let (name, values) = header_write_arguments(invocation, row)?;
+        let VmTypedArray::Utf8(values) = values else {
             return Err(Report::new(EmitterHeaderError::ArgumentTypes));
         };
-        if row >= names.len() || row >= values.len() {
-            return Err(Report::new(EmitterHeaderError::MissingRow { row }));
-        }
-        if names.is_null(row) || values.is_null(row) {
+        if values.is_null(row) {
             return Err(Report::new(EmitterHeaderError::NullArgument));
         }
-        headers.push((names.value(row).to_string(), values.value(row).to_string()));
+        headers.push((name.to_string(), values.value(row).to_string()));
     }
-    Ok(headers)
+    Ok(EmitterHeaders::Text(headers))
+}
+
+fn typed_emitter_headers(
+    invocations: &[nervix_vm::FunctionInvocation],
+    row: usize,
+) -> error_stack::Result<EmitterHeaders, EmitterHeaderError> {
+    // The value a column holds for the row, which the compiled program holds non-null.
+    macro_rules! non_null {
+        ($values:expr) => {{
+            if $values.is_null(row) {
+                return Err(Report::new(EmitterHeaderError::NullArgument));
+            }
+            $values.value(row)
+        }};
+    }
+    let mut headers = Vec::with_capacity(invocations.len());
+    for invocation in invocations {
+        let (name, values) = header_write_arguments(invocation, row)?;
+        let value = match values {
+            VmTypedArray::Utf8(values) => PropertyValue::String(non_null!(values).to_string()),
+            VmTypedArray::UInt8(values) => PropertyValue::U8(non_null!(values)),
+            VmTypedArray::Int8(values) => PropertyValue::I8(non_null!(values)),
+            VmTypedArray::UInt16(values) => PropertyValue::U16(non_null!(values)),
+            VmTypedArray::Int16(values) => PropertyValue::I16(non_null!(values)),
+            VmTypedArray::UInt32(values) => PropertyValue::U32(non_null!(values)),
+            VmTypedArray::Int32(values) => PropertyValue::I32(non_null!(values)),
+            VmTypedArray::UInt64(values) => PropertyValue::U64(non_null!(values)),
+            VmTypedArray::Int64(values) => PropertyValue::I64(non_null!(values)),
+            VmTypedArray::Boolean(values) => PropertyValue::Bool(non_null!(values)),
+            VmTypedArray::Binary(values) => PropertyValue::Bytes(non_null!(values).to_vec()),
+            VmTypedArray::Datetime(values) => {
+                PropertyValue::Datetime(Timestamp::from_unix_nanos(non_null!(values)))
+            }
+            VmTypedArray::Float32(_)
+            | VmTypedArray::Float64(_)
+            | VmTypedArray::Generic(_)
+            | VmTypedArray::Uninitialized { .. } => {
+                return Err(Report::new(EmitterHeaderError::ArgumentTypes));
+            }
+        };
+        headers.push(TypedRecordHeader {
+            name: name.to_string(),
+            value,
+        });
+    }
+    Ok(EmitterHeaders::Typed(headers))
 }
 
 macro_rules! append_filter_map_numeric_list_value {
@@ -2403,11 +2482,11 @@ mod tests {
         );
         assert_eq!(
             plan.headers,
-            Some(vec![vec![
+            Some(vec![EmitterHeaders::Text(vec![
                 ("tenant".to_string(), "acme".to_string()),
                 ("route".to_string(), "fast-lane".to_string()),
                 ("route".to_string(), "second".to_string()),
-            ]])
+            ])])
         );
     }
 

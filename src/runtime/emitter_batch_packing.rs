@@ -416,7 +416,7 @@ mod tests {
                 },
                 envelope: BatchEnvelope {
                     key: None,
-                    headers: Vec::new(),
+                    headers: EmitterHeaders::Text(Vec::new()),
                     message_group: Some(group.to_string()),
                     clauses: None,
                 },
@@ -1111,19 +1111,19 @@ mod tests {
         [
             BatchEnvelope {
                 key: None,
-                headers: Vec::new(),
+                headers: EmitterHeaders::Text(Vec::new()),
                 message_group: None,
                 clauses: None,
             },
             BatchEnvelope {
                 key: Some("key".to_string()),
-                headers: vec![("trace".to_string(), "1".to_string())],
+                headers: EmitterHeaders::Text(vec![("trace".to_string(), "1".to_string())]),
                 message_group: None,
                 clauses: None,
             },
             BatchEnvelope {
                 key: None,
-                headers: Vec::new(),
+                headers: EmitterHeaders::Text(Vec::new()),
                 message_group: Some("group".to_string()),
                 clauses: None,
             },

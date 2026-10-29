@@ -218,7 +218,7 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX MODEL SEP` archive signature and consensus's `raft_platform_` keyspaces
+The registry's `NERVIX MODEL SQS` archive signature and consensus's `raft_platform_` keyspaces
 identify this current shape before decoding. An unrecognized signature or namespace fails with
 the owning storage error and requires the stored data to be recreated.
 
