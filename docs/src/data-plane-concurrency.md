@@ -507,7 +507,7 @@ coordinator acquisitions.
 The status and freeze transition contracts have registered Bolero sequence properties. Status
 observers and freeze registration/release have production-owner Shuttle checks. `just
 bench-task-handles` records raw same-host timing and allocated-byte samples for the repaired paths.
-The [retained task handle measurements](https://github.com/nervix-io/nervix/blob/main/benches/reports/task-handles.md) record the measured
+The [retained task handle measurements](https://app.clickup.com/t/86bc9v74y) record the measured
 operations, host, samples and limits.
 The concurrent map inventory records their lifecycle registration, observation and teardown sites.
 

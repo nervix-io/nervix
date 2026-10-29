@@ -448,7 +448,7 @@ epic, but tracing them found defects:
 ## Task dependency qualification
 
 The retained owners are measured individually by `just bench-task-handles`, including allocations
-for 100 samples of 1,000 operations on one host. The [measurement report](../benches/reports/task-handles.md)
+for 100 samples of 1,000 operations on one host. The [measurement report](https://app.clickup.com/t/86bc9v74y)
 records the host, operation timings, allocation samples and limits. Status and freeze transition sequences use the
 registered `task-status-transitions` and `entity-freeze-transitions` Bolero properties. The
 production freeze release, status observer and force-flush generation checks run through the

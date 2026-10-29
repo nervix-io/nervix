@@ -234,7 +234,7 @@ hands the decision back to the 50 ms interval and the batches grow:
 `just bench-window-admission` measures the sum, count, moment, and histogram-index kernels for
 one nullable 4,096-row run. Use `just benchmark-ab` with `kafka-dedup-window`, one partition,
 and the precision-10 sketch for the complete window path. The command, measurements, and
-generated-instruction inspection are in [SIMD kernels 05](reports/simd-kernels-05.md).
+generated-instruction inspection are in [SIMD kernels 05](https://app.clickup.com/t/86bc85vat).
 
 ### VM failure packing and selections
 
@@ -244,7 +244,7 @@ lanes, whose failure bytes the kernel crate packs into bitmap words, and complet
 timing, then alternate the baseline and candidate runs so host load affects both alike.
 `just build-vm-bench-x86-64-v3` builds the same harness for the Docker image's x86-64-v3 payload
 for `objdump` inspection. The measurements and generated-instruction inspection are in
-[SIMD kernels 06](reports/simd-kernels-06.md).
+[SIMD kernels 06](https://app.clickup.com/t/86bc85vbf).
 
 ### JSON emission from Arrow columns
 
@@ -255,7 +255,7 @@ serde case is a reference cost for this fixture, not the former server codec pat
 `just bench-json-encode --test` to check both benchmark bodies, and use
 `just benchmark-ab origin/main 3 kafka-filter-map --partitions 1` for end-to-end server evidence.
 The full measurements and generated-instruction inspection are in
-[SIMD kernels 02](reports/simd-kernels-02.md).
+[SIMD kernels 02](https://app.clickup.com/t/86bc85v8c).
 
 ### Delivery latency per batch
 
@@ -266,7 +266,7 @@ global ones. The rows are one millisecond apart, so the 1,024-row batch spans th
 and doubling ranges of the latency buckets. Use
 `just benchmark-ab origin/main 3 hot-path-processor --partitions 1` for end-to-end server evidence.
 The measurements and generated-instruction inspection are in
-[SIMD kernels 03](reports/simd-kernels-03.md).
+[SIMD kernels 03](https://app.clickup.com/t/86bc85v94).
 
 ### Expression VM function workbench
 
