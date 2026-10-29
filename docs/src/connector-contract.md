@@ -859,6 +859,35 @@ own bulk-length refusal stays a record outcome; the emitter declares optional ba
 a learned size ceiling. The Redis-specific declaration tests, generated grammar conformance and
 one-/three-node public declaration scenarios qualify these facts together.
 
+`SQS QUEUE` shares one queue-name rule between ingestion and emission: 1 to 80 ASCII letters,
+digits, `-` and `_`, where a FIFO queue's name ends in `.fifo` within those 80 characters, passed
+through exactly as written. Its declaration permits `ACK SEQUENTIAL` and `SUSPEND` for intake,
+since the queue keeps a message until the source deletes it, and `SINGLE` or `BATCH` for emission,
+where a `.fifo` queue requires `FIFO GROUP` and a standard queue refuses it. Message attributes are
+its headers in both directions, as `last_wins` exact names; the emitter declares no envelope and
+optional batching up to the 256 KiB SQS admits in one message. An SQS client declares only the keys
+its connections read: `endpoint`, `region`, `access_key_id`, `secret_access_key` and `tls_ca_file`
+in both directions, and `timeout_ms`, which bounds an emitter's send. An SQS connection trusts
+`tls_ca_file`, or the platform's roots without it, and presents no client certificate, so the
+client declares neither client-identity key.
+The SQS-specific declaration tests, generated grammar conformance and one-/three-node public
+declaration scenarios qualify these facts together.
+
+`NATS SUBJECT` holds both directions to one subject rule: at most 1,024 UTF-8 bytes of
+`.`-separated tokens, none empty, without whitespace or control characters, kept exactly as
+written. A subscription may write `*` for one token and `>` for every remaining token, each only
+as a whole token and `>` only last; a publication subject admits neither, since a message is
+published to one literal subject. The ingestor declares `NO ACK` with a required `QUEUE GROUP` and
+`INSTANCES`, and `BUFFER`/`DROP` for intake, because Core NATS keeps no backlog, position or
+acknowledgement for a subscriber. Both directions carry headers by name, and the ingestor projects
+no typed metadata field. The emitter declares Core `NO ACK` and `JETSTREAM ACK` publication, codec
+payloads, no envelope clause, and optional batching without a protocol maximum: each server
+announces its `max_payload`, and the client refuses a message above it before writing it. The
+unpooled client's Nervix-owned keys are the address, `timeout_ms` and the TLS files, while the
+address's userinfo and query options belong to the driver and are masked in inspection. The
+NATS-specific declaration tests, generated grammar conformance and one-/three-node public
+declaration scenarios qualify these facts together.
+
 Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
 endpoint ingestors reference endpoints, while a Syslog listener references a client; all three
 declare every-node execution. Scheduling and placement-reference completion read that capability,
@@ -1959,8 +1988,8 @@ schema requires a positive request timeout, and its native DSN parser runs at th
 pre-commit offline boundary without network I/O. Both the
 envelope header and the event carry that identity, and every attempt sends the retained envelope
 byte for byte, including after the host reopens the emitter. Preparation checks the final event
-against the vocabulary-owned 1 MB decompressed event limit. It writes every other member as the codec wrote it, a number to
-its last digit. Both classify a definite local refusal as a record rejection;
+against the vocabulary-owned 1 MB decompressed event limit. It writes every other member with the value it
+read, a number exactly within the 64-bit integer range and otherwise as the nearest 64-bit float. Both classify a definite local refusal as a record rejection;
 their transport and service failures retain their existing retry boundaries.
 
 The host owns that membership. It keeps every payload it offers the emitter, with its exact bytes,
