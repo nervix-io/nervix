@@ -39,19 +39,23 @@ pub(crate) enum ConnectorDurationSetting {
     Delay,
 }
 
-/// Where an emitter's envelope computes a value: one of its clauses, or one of its properties.
+/// Where an emitter computes a value for every record beside its payload: the routing key its
+/// destination computes, one of its envelope's clauses, or one of its envelope's properties.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EnvelopeValueSite {
+    RoutingKey,
     Clause(nervix_models::EnvelopeClauseKind),
     Property(String),
 }
 
-/// A site is named as its statement writes it: `TIMESTAMP`, or `PROPERTIES key 'priority'`.
+/// A site is named as its statement writes it: the destination's `ROUTING KEY`, `envelope
+/// TIMESTAMP`, or `envelope PROPERTIES key 'priority'`.
 impl fmt::Display for EnvelopeValueSite {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Clause(kind) => formatter.write_str(kind.keywords()),
-            Self::Property(name) => write!(formatter, "PROPERTIES key '{name}'"),
+            Self::RoutingKey => formatter.write_str("ROUTING KEY"),
+            Self::Clause(kind) => write!(formatter, "envelope {}", kind.keywords()),
+            Self::Property(name) => write!(formatter, "envelope PROPERTIES key '{name}'"),
         }
     }
 }
@@ -97,7 +101,7 @@ pub(crate) enum ConnectorDeclarationIssue {
     },
     #[error("{0}")]
     Envelope(nervix_models::EnvelopeDeclarationError),
-    #[error("envelope {site} requires an exact, non-null, non-sensitive {expected} value")]
+    #[error("{site} requires an exact, non-null, non-sensitive {expected} value")]
     EnvelopeValue {
         site: EnvelopeValueSite,
         expected: nervix_models::ParseAsType,

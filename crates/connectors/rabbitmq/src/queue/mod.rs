@@ -3,8 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The queue ingestor: the consumer and prefetch window it reads through, the AMQP
-//!   headers it reads and per-delivery acknowledgement and requeue. The queue emitter is the shared
-//!   publisher's.
+//!   headers it reads and per-delivery acknowledgement and requeue; and the queue emitter, which
+//!   publishes through the shared publisher to the default exchange.
 //! - **Depends on.** The connector contract, vocabulary values, the node resolver, the crate's
 //!   connection and publisher, `error-stack`, Tokio and `lapin`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -22,12 +22,12 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+mod emitter;
 mod ingestor;
 
+pub use emitter::{RabbitMqQueueEmitter, RabbitMqQueueEmitterConfig};
 pub use ingestor::{
     RabbitMqConsumerMode, RabbitMqDeliveryHeaders, RabbitMqQueueIngestor,
     RabbitMqQueueIngestorError, RabbitMqQueueIngestorMessage, RabbitMqQueueIngestorPlan,
     RabbitMqQueueIngestorPosition,
 };
-
-pub use crate::publisher::{RabbitMqQueueEmitter, RabbitMqQueueEmitterConfig};

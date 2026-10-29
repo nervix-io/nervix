@@ -396,6 +396,10 @@ fn emitter_template(kind: EmitterEntityKind, body: &str) -> String {
         EmitterBodyForm::Native => String::new(),
     };
     body_clause.push_str(&option_template(&payload_options));
+    // Each envelope clause the entity declares follows the payload, written at most once.
+    for clause in declared.envelope {
+        body_clause.push_str(&format!("\n    [{}]", clause.example()));
+    }
     let batch = match declared.batch {
         EmitterBatchLegality::Required { .. } => "\n  BATCH MAX MESSAGES <count> MAX SIZE <bytes>",
         EmitterBatchLegality::Optional { .. } => {

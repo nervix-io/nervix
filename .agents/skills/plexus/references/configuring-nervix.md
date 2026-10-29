@@ -229,6 +229,15 @@ current connection, retry and deadline limits.
   outcome; a rejection requeues that delivery. `NO ACK` disables broker prefetch and cannot
   recover a delivery already consumed before downstream completion. See
   [Ingestors → RabbitMQ](../../../../docs/src/ingestors.md#rabbitmq).
+- A RabbitMQ emitter publishes to a queue through the default exchange with
+  `RABBITMQ QUEUE EMITTER … TO <client> QUEUE '<queue>'`, or to a declared exchange with
+  `RABBITMQ EXCHANGE EMITTER … TO <client> EXCHANGE '<exchange>' ROUTING KEY <expression>`, whose
+  expression computes every record's key as an exact, non-null, non-sensitive `STRING`. Nervix never
+  declares the exchange or its bindings, and an emitter whose exchange is missing stays unavailable
+  until it exists. Without `MANDATORY` a message no binding routes is dropped by the broker and its
+  record reported delivered; write `MANDATORY` after the payload, on either entity, to reject such a
+  record through `ON MESSAGE ERROR` instead. See
+  [Emitters → RabbitMQ](../../../../docs/src/emitters.md#rabbitmq).
 - For Core NATS completion, reconnect retries and finish outcomes, read
   [Emitters → NATS](../../../../docs/src/emitters.md#nats) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).

@@ -2,12 +2,13 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The RabbitMQ client Model, the queue source and emitter Models with their delivery
-//!   mode, the queue name a source consumes with the rule AMQP holds it to, and what each entity
+//! - **Owns.** The RabbitMQ client Model, the queue source and emitter Models and the exchange
+//!   emitter Model with their delivery modes, the queue and exchange names with the rule AMQP holds
+//!   them to, the routing key an exchange emitter computes for every record, and what each entity
 //!   declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
-//! - **Must not know.** The AMQP driver, or how a queue is consumed or
+//! - **Must not know.** The AMQP driver, or how a queue is consumed or a queue or an exchange is
 //!   published to.
 
 #![cfg_attr(
@@ -26,6 +27,7 @@ use super::{
         DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
     },
     configured_client::configured_client,
+    declaration::{OptionForm, OptionPresence, OptionValue},
     entity_union::{connector_emitters, connector_ingestors},
     external_name::{ExternalNameError, external_names, require_length},
 };
@@ -33,10 +35,10 @@ use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
-    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
-    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionDeclaration, PositionClass,
-    RetryPolicy,
+    EnvelopeClauseKind, Expression, HeaderLayout, HeaderModel, IngestAcknowledgement,
+    IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorMetadataScope, IngestorReference, IngestorReferenceKind, LocatorDeclaration,
+    LocatorName, OptionDeclaration, PositionClass, RetryPolicy,
 };
 
 configured_client!(RabbitMq: unpooled, config CLIENT_CONFIG, CreateClientRabbitMq => RabbitMqConfigEntry);
@@ -58,23 +60,26 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
     )
 };
 
-/// The longest queue name AMQP 0-9-1 carries, in bytes.
+/// The longest queue or exchange name AMQP 0-9-1 carries, in bytes.
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
         fixed,
-        reason = "AMQP 0-9-1 encodes queue names as one-byte-length short strings"
+        reason = "AMQP 0-9-1 encodes queue and exchange names as one-byte-length short strings"
     )
 )]
-const RABBITMQ_QUEUE_MAX: usize = 255;
+const RABBITMQ_NAME_MAX: usize = 255;
 
 external_names! {
     /// A RabbitMQ queue: 1 to 255 bytes, the length AMQP 0-9-1 carries a queue name in.
-    pub struct RabbitMqQueueName => rabbitmq_queue_rule, label "rabbitmq_queue", example "orders";
+    pub struct RabbitMqQueueName => rabbitmq_name_rule, label "rabbitmq_queue", example "orders";
+    /// A RabbitMQ exchange: 1 to 255 bytes, the length AMQP 0-9-1 carries an exchange name in. The
+    /// default exchange, whose name is empty, is the one a QUEUE emitter publishes through.
+    pub struct RabbitMqExchangeName => rabbitmq_name_rule, label "rabbitmq_exchange", example "events";
 }
 
-fn rabbitmq_queue_rule(text: &str) -> Result<(), ExternalNameError> {
-    require_length(text, RABBITMQ_QUEUE_MAX)
+fn rabbitmq_name_rule(text: &str) -> Result<(), ExternalNameError> {
+    require_length(text, RABBITMQ_NAME_MAX)
 }
 
 /// One queue a RabbitMQ client consumes.
@@ -135,21 +140,46 @@ const RABBITMQ_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
 };
 
+/// What the connector of a RabbitMQ emitter holds between its writes, whichever entity it
+/// publishes to.
+const RABBITMQ_EMITTER_BUFFERS: &[DeclaredBuffer] = &[
+    DeclaredBuffer {
+        holds: "publishes awaiting confirmation",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("ACK PARALLEL MAX, 1 under ACK SEQUENTIAL"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    },
+    DeclaredBuffer {
+        holds: "messages the broker returns unrouted under MANDATORY, until the write that \
+                published them reads them",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("the messages of one write"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    },
+];
+
+/// The waits of a RabbitMQ emitter after its connection opens, whichever entity it publishes to.
+const PUBLISH_WAIT: DeclaredWait = DeclaredWait {
+    wait: "a publish",
+    bound: WaitBound::Unbounded,
+};
+const CONFIRMATION_WAIT: DeclaredWait = DeclaredWait {
+    wait: "a confirmation under ACK",
+    bound: WaitBound::Clause("ACK TIMEOUT"),
+};
+const ROUND_TRIP_WAIT: DeclaredWait = DeclaredWait {
+    wait: "the round trip that ends a publish under NO ACK",
+    bound: WaitBound::Key {
+        key: DeadlineKey::Timeout,
+        omitted: OmittedDeadline::Unbounded,
+    },
+};
+
 /// What the connector of a RABBITMQ QUEUE emitter holds and how long it waits.
-const RABBITMQ_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
-    buffers: &[
-        DeclaredBuffer {
-            holds: "publishes awaiting confirmation",
-            bound: BufferBound::Bounded {
-                capacity: BufferCapacity::Setting("ACK PARALLEL MAX, 1 under ACK SEQUENTIAL"),
-                overflow: BufferOverflow::Backpressure,
-            },
-        },
-        DeclaredBuffer {
-            holds: "unroutable messages the broker returns under NO ACK",
-            bound: BufferBound::Unbounded,
-        },
-    ],
+const RABBITMQ_QUEUE_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: RABBITMQ_EMITTER_BUFFERS,
     waits: &[
         DeclaredWait {
             wait: "connection: name resolution, address attempts, TLS, the AMQP handshake, \
@@ -159,23 +189,34 @@ const RABBITMQ_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
                 omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
             },
         },
-        DeclaredWait {
-            wait: "a publish",
-            bound: WaitBound::Unbounded,
-        },
-        DeclaredWait {
-            wait: "a confirmation under ACK",
-            bound: WaitBound::Clause("ACK TIMEOUT"),
-        },
-        DeclaredWait {
-            wait: "the round trip that ends a publish under NO ACK",
-            bound: WaitBound::Key {
-                key: DeadlineKey::Timeout,
-                omitted: OmittedDeadline::Unbounded,
-            },
-        },
+        PUBLISH_WAIT,
+        CONFIRMATION_WAIT,
+        ROUND_TRIP_WAIT,
     ],
     driver_limits: &["A frame above the negotiated frame_max ends the connection."],
+};
+
+/// What the connector of a RABBITMQ EXCHANGE emitter holds and how long it waits.
+const RABBITMQ_EXCHANGE_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: RABBITMQ_EMITTER_BUFFERS,
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, address attempts, TLS, the AMQP handshake, \
+                   channel open, confirm select and the exchange check",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        PUBLISH_WAIT,
+        CONFIRMATION_WAIT,
+        ROUND_TRIP_WAIT,
+    ],
+    driver_limits: &[
+        "A frame above the negotiated frame_max ends the connection.",
+        "A routing key longer than the 255 bytes an AMQP short string carries is not sent; its \
+         record is rejected.",
+    ],
 };
 
 impl IngestorDeclaration for RabbitMqQueueIngestor {
@@ -300,9 +341,9 @@ impl EmitterDeclaration for RabbitMqQueueEmitter {
             name: LocatorName::External(RabbitMqQueueName::DECLARATION),
         }),
         options: &[],
-        envelope: &[],
+        envelope: &[EnvelopeClauseKind::Mandatory],
         properties: &[],
-        bounds: RABBITMQ_EMITTER_BOUNDS,
+        bounds: RABBITMQ_QUEUE_EMITTER_BOUNDS,
     };
 }
 
@@ -319,20 +360,85 @@ impl EmitterEntityBody for RabbitMqQueueEmitter {
     }
 }
 
+/// One exchange a RabbitMQ client publishes to, and the key the exchange routes each record by.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct RabbitMqExchangeEmitter {
+    pub mode: RabbitMqExchangePublishingMode,
+    pub client: ClientName,
+    pub exchange: RabbitMqExchangeName,
+    /// `ROUTING KEY <expression>`: the exact, non-null, non-sensitive `STRING` each record is
+    /// routed by, which the host computes for every record it publishes.
+    pub routing_key: Expression,
+}
+
+impl EmitterDeclaration for RabbitMqExchangeEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        // An AMQP field table holds one value per name, in ascending order of name.
+        headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
+        reference: EmitterReferenceKind::Client(ConnectorKind::RabbitMq),
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
+        requires_batch_transformation: false,
+        publishing_modes: RabbitMqExchangePublishingMode::KINDS,
+        locator: Some(LocatorDeclaration {
+            keywords: "EXCHANGE",
+            name: LocatorName::External(RabbitMqExchangeName::DECLARATION),
+        }),
+        options: &[OptionDeclaration {
+            keywords: "ROUTING KEY",
+            presence: OptionPresence::Required,
+            form: OptionForm::Value {
+                value: OptionValue::Expression,
+                example: "ROUTING KEY input.category",
+            },
+        }],
+        envelope: &[EnvelopeClauseKind::Mandatory],
+        properties: &[],
+        bounds: RABBITMQ_EXCHANGE_EMITTER_BOUNDS,
+    };
+}
+
+impl EmitterEntityBody for RabbitMqExchangeEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
+            client: &self.client,
+            connector: ConnectorKind::RabbitMq,
+        })
+    }
+
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
+    fn routing_key(&self) -> Option<&Expression> {
+        Some(&self.routing_key)
+    }
+}
+
 connector_emitters! {
     connector RabbitMq = "RABBITMQ";
     /// What a RabbitMQ emitter writes.
     pub enum RabbitMqEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum RabbitMqQueueEmitterMode;
+    pub enum RabbitMqEmitterMode;
     /// The entities a RabbitMQ emitter writes.
     pub enum RabbitMqEmitterEntity {
         Queue(RabbitMqQueueEmitter, RabbitMqQueuePublishingMode) = "QUEUE";
+        Exchange(RabbitMqExchangeEmitter, RabbitMqExchangePublishingMode) = "EXCHANGE";
     }
 }
 
 super::publishing::emitter_modes! {
     pub enum RabbitMqQueuePublishingMode {
+        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck,
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum RabbitMqExchangePublishingMode {
         NoAck { retry_policy: crate::RetryPolicy } => NoAck,
         Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck,
     }

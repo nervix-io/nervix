@@ -293,6 +293,8 @@ pub enum Identifier {
     Persistent,
     Mandatory,
     Retain,
+    Exchange,
+    Routing,
     Qos,
     Mode,
     Quiesce,

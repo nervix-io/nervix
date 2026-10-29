@@ -47,9 +47,12 @@ use tracing_subscriber::{
 
 use super::{AppError, TracingArgs};
 
+// Lapin logs every message a broker returns, body included, at `warn`; a RabbitMQ emitter
+// reports each one as its record's rejection instead, without the payload.
 const DEFAULT_TRACE_FILTER: &str =
     "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
-     openraft::replication=error,openraft::engine::handler::replication_handler=error";
+     openraft::replication=error,openraft::engine::handler::replication_handler=error,\
+     lapin::returned_messages=error";
 
 /// The share of root traces the node exports, between nothing and everything.
 pub struct TraceSampleRatio;

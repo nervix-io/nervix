@@ -24,7 +24,10 @@ use fjall::Database;
 use futures_util::{SinkExt, future::join_all};
 use lapin::{
     BasicProperties, Connection, ConnectionProperties,
-    options::{BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
+    options::{
+        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions,
+        QueueBindOptions, QueueDeclareOptions, QueueDeleteOptions,
+    },
     types::FieldTable,
 };
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -2408,6 +2411,27 @@ impl Cluster {
 
     pub(crate) async fn ensure_rabbitmq_queue(&self, queue: &str) -> io::Result<()> {
         ensure_rabbitmq_queue(&self.dependencies, queue).await
+    }
+
+    pub(crate) async fn ensure_rabbitmq_exchange(
+        &self,
+        exchange: &str,
+        kind: lapin::ExchangeKind,
+    ) -> io::Result<()> {
+        ensure_rabbitmq_exchange(&self.dependencies, exchange, kind).await
+    }
+
+    pub(crate) async fn bind_rabbitmq_queue(
+        &self,
+        queue: &str,
+        exchange: &str,
+        routing_key: &str,
+    ) -> io::Result<()> {
+        bind_rabbitmq_queue(&self.dependencies, queue, exchange, routing_key).await
+    }
+
+    pub(crate) async fn delete_rabbitmq_queue(&self, queue: &str) -> io::Result<()> {
+        delete_rabbitmq_queue(&self.dependencies, queue).await
     }
 
     pub(crate) async fn publish_rabbitmq(&self, queue: &str, payload: &str) -> io::Result<()> {
@@ -5306,6 +5330,84 @@ async fn ensure_rabbitmq_queue(dependencies: &DependencyEndpoints, queue: &str) 
         .await
         .map_err(io::Error::other)?;
     declare_rabbitmq_queue(&channel, queue).await
+}
+
+/// Declares `exchange` as an exchange of `kind`, as an operator provisions it before an emitter
+/// publishes to it.
+async fn ensure_rabbitmq_exchange(
+    dependencies: &DependencyEndpoints,
+    exchange: &str,
+    kind: lapin::ExchangeKind,
+) -> io::Result<()> {
+    let connection = Connection::connect(
+        dependencies.get(RABBITMQ_ADDR)?,
+        ConnectionProperties::default(),
+    )
+    .await
+    .map_err(io::Error::other)?;
+    let channel = connection
+        .create_channel()
+        .await
+        .map_err(io::Error::other)?;
+    channel
+        .exchange_declare(
+            exchange.into(),
+            kind,
+            ExchangeDeclareOptions::default(),
+            FieldTable::default(),
+        )
+        .await
+        .map_err(io::Error::other)
+}
+
+/// Declares `queue` and binds it to `exchange` under `routing_key`, so the exchange routes to it
+/// every message its binding matches.
+async fn bind_rabbitmq_queue(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+    exchange: &str,
+    routing_key: &str,
+) -> io::Result<()> {
+    let connection = Connection::connect(
+        dependencies.get(RABBITMQ_ADDR)?,
+        ConnectionProperties::default(),
+    )
+    .await
+    .map_err(io::Error::other)?;
+    let channel = connection
+        .create_channel()
+        .await
+        .map_err(io::Error::other)?;
+    declare_rabbitmq_queue(&channel, queue).await?;
+    channel
+        .queue_bind(
+            queue.into(),
+            exchange.into(),
+            routing_key.into(),
+            QueueBindOptions::default(),
+            FieldTable::default(),
+        )
+        .await
+        .map_err(io::Error::other)
+}
+
+/// Deletes `queue` with the messages it holds, as an operator removes it under a running emitter.
+async fn delete_rabbitmq_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
+    let connection = Connection::connect(
+        dependencies.get(RABBITMQ_ADDR)?,
+        ConnectionProperties::default(),
+    )
+    .await
+    .map_err(io::Error::other)?;
+    let channel = connection
+        .create_channel()
+        .await
+        .map_err(io::Error::other)?;
+    channel
+        .queue_delete(queue.into(), QueueDeleteOptions::default())
+        .await
+        .map_err(io::Error::other)?;
+    Ok(())
 }
 
 async fn publish_rabbitmq(

@@ -567,7 +567,7 @@ mod tests {
             written.push((name.to_string(), value.to_string()));
         }
         let mut delivery = Delivery::mock(0, "".into(), "orders".into(), false, Vec::new());
-        delivery.properties = crate::publisher::RabbitMqQueueEmitter::properties(&written);
+        delivery.properties = crate::publisher::RabbitMqPublisher::properties(&written);
         let headers = RabbitMqDeliveryHeaders { delivery };
         let mut visited = Vec::new();
         headers.visit(&mut |name, value| visited.push(format!("{name}={value}")));
