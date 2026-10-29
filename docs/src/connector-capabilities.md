@@ -237,7 +237,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes. Receiving uses a visibility timeout and deletion; publishing uses single or batch service requests and may declare a FIFO group. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
 | Reference | SQS client |  |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
-| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
@@ -245,8 +245,8 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | answered |  |
-| Buffers | The connector holds no buffer between its transport and the host. |  |
-| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup, a receive and a delete: unbounded |  |
+| Buffers | messages gathered for one host read: set by 1 under ACK SEQUENTIAL; ACK PARALLEL MAX otherwise, at most 10; when full, holds back what fills it |  |
+| Network waits | gathering further messages after the first under ACK PARALLEL; cancellation hands over every message already gathered: `BATCH TIMEOUT`<br>connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup, a receive, a batch deletion and a batch visibility change: unbounded |  |
 | Driver limits | A request that stalls below 1 byte a second for 5 s is cancelled. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 

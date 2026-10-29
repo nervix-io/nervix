@@ -59,8 +59,8 @@ pub(super) fn ack_sequential<'src>()
 /// What `ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY …` states: up to `max`
 /// messages wait on their acknowledgements together.
 #[derive(Debug, Clone)]
-pub(super) struct ParallelAck {
-    pub(super) max: NonZeroU64,
+pub(super) struct ParallelAck<W = NonZeroU64> {
+    pub(super) max: W,
     pub(super) batch_timeout: String,
     pub(super) timeout: String,
     pub(super) retry_policy: RetryPolicy,
@@ -68,8 +68,16 @@ pub(super) struct ParallelAck {
 
 pub(super) fn ack_parallel<'src>()
 -> impl Parser<'src, &'src [Token], ParallelAck, extra::Err<ParseError<'src>>> + Clone {
+    ack_parallel_within(parallel_ack_window())
+}
+
+/// `ACK PARALLEL …` whose `PARALLEL MAX <n>` window `window` reads, for an entity that bounds its
+/// window itself.
+pub(super) fn ack_parallel_within<'src, W: 'src>(
+    window: impl Parser<'src, &'src [Token], W, extra::Err<ParseError<'src>>> + Clone + 'src,
+) -> impl Parser<'src, &'src [Token], ParallelAck<W>, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Ack)
-        .ignore_then(parallel_ack_window())
+        .ignore_then(window)
         .then(batch_timeout_parser())
         .then(ack_timeout())
         .then(retry_policy())

@@ -8966,6 +8966,55 @@ async fn given_sqs_answer_hold(world: &mut ScenarioWorld) {
     world.sqs_answer_hold = Some(hold);
 }
 
+#[then(expr = "SQS queue {string} eventually has {int} messages in flight")]
+async fn then_sqs_queue_eventually_has_messages_in_flight(
+    world: &mut ScenarioWorld,
+    queue: String,
+    in_flight: u64,
+) {
+    let queue = expand_placeholders(world, &queue);
+    world
+        .cluster()
+        .wait_for_sqs_messages_in_flight(&queue, in_flight)
+        .await
+        .expect("the SQS queue did not reach the expected count of messages in flight");
+}
+
+#[then(expr = "SQS queue {string} eventually holds no messages")]
+async fn then_sqs_queue_eventually_holds_no_messages(world: &mut ScenarioWorld, queue: String) {
+    let queue = expand_placeholders(world, &queue);
+    world
+        .cluster()
+        .wait_for_sqs_queue_empty(&queue)
+        .await
+        .expect("the SQS queue still holds messages");
+}
+
+/// The forwarder carried at least one request naming the SQS action `carried` and none naming
+/// `absent`. The step follows the outcome those requests produced, so every request it counts has
+/// already passed the forwarder.
+#[then(expr = "the SQS forwarder carried {string} requests and no {string} request")]
+fn then_the_sqs_forwarder_carried_requests_and_no_request(
+    world: &mut ScenarioWorld,
+    carried: String,
+    absent: String,
+) {
+    let forwarder = world
+        .sqs_answer_hold
+        .as_ref()
+        .expect("a forwarder in front of the SQS service must be configured first");
+    let requests = forwarder.requests_by_action();
+    assert!(
+        forwarder.requests_naming(&carried) > 0,
+        "the SQS forwarder carried no {carried} request; it carried {requests:?}"
+    );
+    assert_eq!(
+        forwarder.requests_naming(&absent),
+        0,
+        "the SQS forwarder carried {absent} requests; it carried {requests:?}"
+    );
+}
+
 /// From now on the forwarder holds the first answer whose bytes carry `text`: the service took the
 /// message it carries off the queue for a receive the client still waits on.
 #[when(expr = "the SQS forwarder holds the answer that carries {string}")]
@@ -26530,6 +26579,29 @@ async fn when_sqs_message_is_published(
         .publish_sqs(&queue, &payload)
         .await
         .expect("failed to publish sqs message");
+}
+
+/// Sends every message of the step's JSON array to `queue`, in batch requests, so the messages of
+/// one request become receivable together.
+#[when(expr = "SQS messages are published to queue {string}")]
+async fn when_sqs_messages_are_published(
+    world: &mut ScenarioWorld,
+    queue: String,
+    #[step] step: &Step,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let payload = expand_placeholders(world, docstring(step));
+    let messages: Vec<serde_json::Value> =
+        serde_json::from_str(&payload).expect("the fixture lists messages as a JSON array");
+    let mut payloads = Vec::with_capacity(messages.len());
+    for message in messages {
+        payloads.push(message.to_string());
+    }
+    world
+        .cluster()
+        .publish_sqs_messages(&queue, &payloads)
+        .await
+        .expect("the SQS service accepts each explicitly published message");
 }
 
 #[when(expr = "TLS SQS message is published to queue {string}")]

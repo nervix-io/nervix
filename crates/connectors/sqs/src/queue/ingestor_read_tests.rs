@@ -21,8 +21,8 @@ use nervix_primitives::{
 use tokio::io::AsyncWriteExt as _;
 
 use super::{
-    CANCELLED_RECEIVE_BUDGET, QueueReceive, SQS, SqsQueueIngestor, SqsQueueIngestorError,
-    SqsQueueIngestorMessage, SqsQueueIngestorResult,
+    CANCELLED_RECEIVE_BUDGET, QueueReceive, ReceiveRequest, SQS, SqsQueueIngestor,
+    SqsQueueIngestorError, SqsQueueIngestorMessage, SqsQueueIngestorResult,
 };
 use crate::queue::connection_tests::{
     Fixture, QUEUE, RefusedEndpoint, batch_request, client_config, open_source, read_request,
@@ -181,17 +181,20 @@ async fn a_receive_in_flight_when_the_host_cancels_the_read_still_hands_over_its
     let read =
         read_while_the_receive_is_held(&fixture, ReceiveAnswer::Message, HostAction::Cancels).await;
 
-    let IngestorBatch::Messages(messages) = read.batch else {
-        panic!(
-            "the read abandoned the receive it had in flight, leaving its message invisible until \
-             its visibility timeout"
-        );
+    // The cancelled read ends interrupted, with every message it had already taken.
+    let IngestorBatch::Interrupted { gathered: messages } = read.batch else {
+        panic!("a read the host cancelled ends interrupted");
     };
-    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages.len(),
+        1,
+        "the read abandoned the receive it had in flight, leaving its message invisible until its \
+         visibility timeout"
+    );
     assert_eq!(messages[0].payload(), BODY.as_bytes());
     assert_eq!(
-        messages[0].position().receipt_handle.as_deref(),
-        Some(RECEIPT_HANDLE),
+        messages[0].position().receipt_handle,
+        RECEIPT_HANDLE,
         "the message the read hands over can be deleted once it is acknowledged"
     );
     let request = read.service.await.expect("the stand-in does not panic");
@@ -222,7 +225,10 @@ async fn a_cancelled_read_whose_receive_brings_nothing_sends_no_further_receive(
 struct SilentQueue;
 
 impl QueueReceive for SilentQueue {
-    fn receive(&self) -> impl Future<Output = SqsQueueIngestorResult<Vec<SqsMessage>>> + Send {
+    fn receive(
+        &self,
+        _receive: ReceiveRequest,
+    ) -> impl Future<Output = SqsQueueIngestorResult<Vec<SqsMessage>>> + Send {
         std::future::pending()
     }
 }
@@ -230,7 +236,11 @@ impl QueueReceive for SilentQueue {
 #[nervix_primitives::test(start_paused = true)]
 async fn a_cancelled_read_waits_for_a_receive_the_service_does_not_answer_only_until_its_budget() {
     let cancellation = IngestorReadCancellation::new();
-    let mut read = pin!(SqsQueueIngestor::read_batch(&SilentQueue, &cancellation));
+    let mut read = pin!(SqsQueueIngestor::read_batch(
+        &SilentQueue,
+        batch_request(),
+        &cancellation
+    ));
 
     // A read nobody cancelled has no budget: it waits for its receive however long that takes.
     let uncancelled = timeout(Duration::from_secs(3_600), &mut read).await;

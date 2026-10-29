@@ -854,8 +854,9 @@ one-/three-node public declaration scenarios qualify these facts together.
 
 `SQS QUEUE` shares one queue-name rule between ingestion and emission: 1 to 80 ASCII letters,
 digits, `-` and `_`, where a FIFO queue's name ends in `.fifo` within those 80 characters, passed
-through exactly as written. Its declaration permits `ACK SEQUENTIAL` and `SUSPEND` for intake,
-since the queue keeps a message until the source deletes it, and `SINGLE` or `BATCH` for emission,
+through exactly as written. Its declaration permits `ACK SEQUENTIAL`, `ACK PARALLEL` with a
+window of at most the ten messages one receive returns, and `SUSPEND` for intake, since the queue
+keeps a message until the source deletes it, and `SINGLE` or `BATCH` for emission,
 where a `.fifo` queue requires `FIFO GROUP` and a standard queue refuses it. Message attributes are
 its headers in both directions, as `last_wins` exact names; the emitter declares no envelope and
 optional batching up to the 256 KiB SQS admits in one message. An SQS client declares only the keys
@@ -1308,7 +1309,7 @@ in one of these ways:
 | `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the connection had already read when the read stopped waiting stays in the connection's read-ahead, which hands it to the next read first. |
 | `RABBITMQ QUEUE` | Ends at once while waiting for the first delivery or between deliveries of a parallel batch, returning every gathered delivery. A transport failure found after gathering is retained and reported on the next read, after the gathered deliveries reach the host. |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
-| `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
+| `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought with every message an `ACK PARALLEL` batch had already gathered. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. A failure found after gathering, a receive that fails or a message without a receipt handle, is retained and reported on the next read, after the gathered messages reach the host. |
 
 An MQTT read takes its publishes from its connection's read-ahead, which the connection's driver
 task fills while it polls the client's event loop; see
@@ -1496,7 +1497,7 @@ it did not get:
 <!-- connector-matrix:confirmation:start -->
 | Acknowledgement confirmation | Entities | Meaning |
 | --- | --- | --- |
-| `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `SQS QUEUE` | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
+| `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `SQS QUEUE` | Once the broker answered: SQS messages are acknowledged by `DeleteMessageBatch` requests of up to ten entries, and acknowledging returns once the service answered every request and deleted every entry. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
 | `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | The source acknowledges nothing on its transport. |
 | `written` | `MQTT TOPIC`, `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT does not answer a `PUBACK`, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` the batch asks for to the connection. |
 <!-- connector-matrix:confirmation:end -->
@@ -1525,6 +1526,16 @@ again. A Pulsar rejection is a redelivery request, which the broker does not ans
 returns once the consumer sent the request. It fails when the consumer could not send it within the
 operation timeout, such as while it reconnects to a broker it cannot reach, or when its connection
 closed first, and the broker redelivers the message once the consumer's connection is replaced.
+
+An SQS source deletes the messages of an acknowledged batch with one `DeleteMessageBatch` request
+for each ten of them, and acknowledging returns once the service answered every request. An entry
+the service did not delete fails the acknowledgement with the service's code, and the host then
+rejects the batch. An SQS rejection makes the rejected messages visible again at once with
+`ChangeMessageVisibilityBatch`, so the source receives them again after its `RETRY POLICY` delay
+rather than after the queue's visibility timeout. An entry the service refuses as the sender's fault
+names a receipt handle that no longer holds its message invisible, because the message was deleted
+or its visibility timeout ended, so the rejection needs nothing more for it; an entry the service
+fails on its side fails the rejection.
 
 RabbitMQ registers `NO ACK` as an automatically acknowledging AMQP consumer, with no `basic.qos`
 request and no later ACK or NACK traffic. Its existing Lapin delivery queue is unbounded without
