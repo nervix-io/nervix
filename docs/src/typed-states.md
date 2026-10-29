@@ -63,6 +63,11 @@ the group's row bound and the vocabulary's frame labels. An estimate that exceed
 is a typed error before allocation; the ingest group adds the opening operation's context and
 retains the cause for its general-error policy.
 
+A paced poll message carries a typed metadata variant. HTTP polling supplies its response status
+and scheduled poll instant in that variant, while sources with no integration fields carry the
+headers-only variant. The host copies the variant into a matching quiesce buffer and Arrow builder;
+neither a missing status nor a default timestamp can be mistaken for a valid HTTP response.
+
 The Pulsar emitter's running publishing choice keeps related state together: the `NO ACK` variant
 owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
 confirmation settings. An empty receipt collection means there are no outstanding receipts,

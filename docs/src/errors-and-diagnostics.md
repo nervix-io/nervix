@@ -1589,6 +1589,12 @@ retries, whatever code tonic reports for it. An answered status other than `INVA
 `RESOURCE_EXHAUSTED` or a code the OTLP specification lists as retryable is a misconfiguration
 failure, which the host does not retry.
 
+An HTTP polling request whose response exceeds `MAX BODY SIZE` fails that poll with a typed
+`ResponseTooLarge` cause. DNS, connection, TLS, response-body and timeout failures retain their
+typed transport causes with the request URL removed. A non-`2xx` answer reports its numeric status
+without target or header values. The ingestor host applies its general-error policy and may poll
+again on its next cadence.
+
 An HTTP emitter rejects a record at the first request field that fails, in the order it evaluates
 them: `METHOD`, `PATH`, and then each header write. A failed expression keeps the `evaluation`
 code and an invalid value has the `validation` code. Method and path failures report the `publish`

@@ -362,6 +362,9 @@ mod tests {
             &domain,
             IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
                 client: client_name.clone(),
+                method: "GET".to_owned(),
+                headers: Vec::new(),
+                max_body_size: None,
                 every: "1s"
                     .parse()
                     .assured("the fixture cadence is a positive duration"),
@@ -465,6 +468,9 @@ mod tests {
             (
                 IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
                     client: client_name.clone(),
+                    method: "GET".to_owned(),
+                    headers: Vec::new(),
+                    max_body_size: None,
                     every: cadence,
                     mode: nervix_models::HttpRequestIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Suspend,

@@ -43,7 +43,7 @@ use nervix_connector::{
     physical_time::actual_utc_now,
 };
 use nervix_dns::{AddressAttempt, DnsResolver, LookupShare, OperationBudget};
-use nervix_models::{ClientConfigEntry, DeadlineKey};
+use nervix_models::{ClientConfigEntry, CreateClientHttp};
 use nervix_primitives::{net::TcpStream, sync::StdArc, time::Instant};
 use rustls::ClientConfig as RustlsClientConfig;
 use rustls_pki_types::ServerName;
@@ -122,7 +122,7 @@ impl HttpRequestEmitter {
         let Some(timeout) = configured else {
             return Err(Report::new(ClientConfigError::MissingRequired {
                 connector: HTTP_EMITTER,
-                key: DeadlineKey::Timeout.key().to_string(),
+                key: CreateClientHttp::TRANSPORT.timeout.key().to_string(),
             })
             .change_context(EmitterOpenError::InvalidConfiguration {
                 connector: HTTP_EMITTER,

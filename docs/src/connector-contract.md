@@ -685,10 +685,14 @@ reading, and the transport's own window or prefetch keeps the peer from sending 
 waits for the buffer to drain. A protocol without flow control drops what does not fit and counts
 it. A buffer that drops without counting, or whose overflow fails the publish for the host to retry,
 is declared as it behaves, and a buffer that nothing bounds yet is declared unbounded, so the matrix
-shows each gap until its connector closes it. A `PROMETHEUS QUERY` response is bounded by its
-statement's `MAX BODY SIZE`: a response that exceeds it fails the poll, which the ingestor reports
-as its transient error, and the next poll reads again. An `HTTP REQUEST` poll's response body has
-no such bound yet and is declared unbounded.
+shows each gap until its connector closes it. A `PROMETHEUS QUERY` or `HTTP REQUEST` response is
+bounded by its statement's `MAX BODY SIZE` (16 MiB where omitted). A response that exceeds the
+bound fails the poll, which the ingestor reports as its transient error, and the next poll reads
+again. The HTTP polling request's method and literal headers are carried by the typed ingestor plan;
+its client supplies the required total `timeout_ms` and TLS settings. The polling client reads no
+proxy from the environment and follows redirects only when `follow_redirects` is true. Its optional
+`proxy` is the only proxy it uses. An HTTP response carries its status and scheduled poll instant
+into the same metadata group as its response headers, including when quiescence buffers the poll.
 
 A per-connection bound does not bound the total when the listener accepts an unlimited number of
 connections. The Syslog listener declares frame assembly and completed frames waiting for its

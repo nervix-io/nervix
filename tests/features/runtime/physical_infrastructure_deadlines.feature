@@ -26,11 +26,10 @@ Feature: Physical infrastructure deadlines under domain pacing
       CREATE HTTP CLIENT physical_poll_source
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?delay_ms=10000',
-          'method' = 'GET',
           'timeout_ms' = 30000
         };
       CREATE HTTP REQUEST INGESTOR physical_poll_reader
-        FROM physical_poll_source EVERY 1h
+        FROM physical_poll_source METHOD 'GET' EVERY 1h
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING physical_poll_codec
         TIMESTAMP NOW
         TO physical_poll_records
@@ -143,11 +142,10 @@ Feature: Physical infrastructure deadlines under domain pacing
       CREATE HTTP CLIENT physical_timeout_source
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?delay_ms=10000',
-          'method' = 'GET',
           'timeout_ms' = 250
         };
       CREATE HTTP REQUEST INGESTOR physical_timeout_reader
-        FROM physical_timeout_source EVERY 1s
+        FROM physical_timeout_source METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING physical_timeout_codec
         TIMESTAMP NOW
         TO physical_timeout_records
