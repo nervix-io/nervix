@@ -369,7 +369,9 @@ locale, whose collation orders `sort` output differently from the `C.UTF-8` of G
 image, so every workflow sets `LC_ALL=C.UTF-8`. Its Docker daemon can start a few seconds after a
 job begins, so a job whose first steps use Docker waits for it. Its own Node.js comes from nvm,
 which a job's shell may not load, so a job that runs Node.js or npm pins it with
-`actions/setup-node`.
+`actions/setup-node`. Its Rust toolchain is installed system-wide under `/usr/local/cargo`, so a
+job creates `~/.cargo` before it writes its Cargo configuration there, and the chaos shards drop
+that directory from the PATH their suite runs with.
 
 ### Compiler architecture gate
 

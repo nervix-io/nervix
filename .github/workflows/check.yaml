@@ -121,6 +121,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -291,6 +293,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -409,6 +413,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -578,6 +584,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -783,6 +791,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -1265,6 +1275,8 @@ jobs:
       # interchangeable in the shared cache rather than a second set of artifacts.
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -1447,6 +1459,8 @@ jobs:
       # interchangeable in the shared cache rather than a second set of artifacts.
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -1756,6 +1770,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -1936,6 +1952,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -2089,6 +2107,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -2255,6 +2275,8 @@ jobs:
       # shares with them compile identically.
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
