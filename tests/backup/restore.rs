@@ -44,7 +44,7 @@ const RESTORE_PAUSE_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Debug)]
 pub(crate) struct BackgroundRestore {
     reference: CommandExecutionReference,
-    task: AbortOnDropHandle<TestRestoreEnd>,
+    pub(super) task: AbortOnDropHandle<TestRestoreEnd>,
 }
 
 #[given("the restore coordinator uses remote placement in a multi-node cluster")]

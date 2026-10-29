@@ -222,7 +222,9 @@ compose() {
     printf 'chaos_output:0:24\n'
 }
 status=0
-printf 'foreign input\n' | broker_admin /opt/kafka/bin/kafka-get-offsets.sh \
+# A here-string, not a pipe: a provider that never reads its input can finish before a piped
+# writer does, and pipefail would then report the writer's SIGPIPE as the provider's failure.
+broker_admin /opt/kafka/bin/kafka-get-offsets.sh <<<'foreign input' \
     >"${tmp_dir}/provider.txt" || status=$?
 [[ "${status}" -eq 0 && "$(cat "${tmp_dir}/provider.txt")" == 'chaos_output:0:24' ]] \
     || fail 'broker administration retained foreign stdin or interactive terminal ownership'

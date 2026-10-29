@@ -17,6 +17,11 @@ running service. A node publishes, carries and verifies its prerequisites as
 parameters are not committed through Raft and capability records are not announced: a node reads
 its cluster parameters from its own options, and its capabilities stay local claims.
 
+Runtime admission and failed committed-runtime installation share the existing half-second retry
+cadence owned by `RuntimeAdmission`. This remains an internal policy constant pending settings
+adoption; installation does not introduce another numeric policy or an operator option. Committed
+schedule and domain updates can wake an installation retry sooner, and success ends that cadence.
+
 Changes to the server's command line, startup settings and initialization contract keep the shipped
 Kubernetes operator's generated startup command, chart and example current in the same delivery.
 The server-image [deployment checks](installation-kubernetes.md#deployment-qualification) qualify

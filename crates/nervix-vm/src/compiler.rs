@@ -5086,7 +5086,10 @@ mod tests {
             HeaderValues::Typed(TYPED),
         )
         .expect_err("a header value of a declared type must be present for every row");
-        assert_eq!(nullable.current_context().code(), "nullable_header_argument");
+        assert_eq!(
+            nullable.current_context().code(),
+            "nullable_header_argument"
+        );
         assert_eq!(
             nullable.current_context().message,
             "write_header value must not be nullable"

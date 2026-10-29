@@ -1135,7 +1135,7 @@ Transport-specific expectations:
 - `CLICKHOUSE`: use an `https://...` `addr` with mounted `tls_ca_file` and required positive
   `timeout_ms`; HTTP addresses refuse TLS file keys.
 - `POSTGRES`: use `sslmode=verify-full` in the `addr` URL; Nervix honors `tls_ca_file`, `tls_cert_file`, and `tls_key_file`. `sslmode=disable` is the only other accepted policy.
-- `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file`.
+- `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file` and paired `tls_cert_file`/`tls_key_file` client identity files.
 - `MONGODB`: Nervix honors `tls_ca_file`, and `tls_cert_file` with `tls_key_file` as its client
   certificate; any of them enables TLS without `tls=true` in `addr`, and an `addr` with `tls=false`
   refuses them. See [MongoDB](#mongodb).
@@ -1411,7 +1411,8 @@ the failure as its transient error; it confirms nothing, so its input stays unac
 reopens on its `RETRY POLICY` backoff. The emitter reads the client's `addr`, trusts its
 `tls_ca_file` and presents its `tls_cert_file` and `tls_key_file` as a RabbitMQ source does; see
 [RabbitMQ](./ingestors.md#rabbitmq). A broker that refuses the TLS session leaves the emitter
-unavailable with that refusal as its transient error.
+unavailable with that refusal as its transient error. The client's `tls_ca_file`, `tls_cert_file`
+and `tls_key_file` require an `amqps` address; combining them with `amqp` is refused before commit.
 
 ### Redis Pub/Sub
 
@@ -1586,6 +1587,14 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-emit).
 <!-- connector-matrix:emit-nats-subject:end -->
+
+`SUBJECT` names one literal subject, published to exactly as written, letter case included. It
+follows the [ingestion subject rule](ingestors.md#external-names) without the `*` and `>`
+wildcards, so `SUBJECT 'orders.*'` is refused when the emitter is created. A message carries its
+subject, the written headers and the payload; the emitter sets no reply subject or JetStream
+message id of its own. `BATCH` is optional. The NATS protocol sets no message size of its own:
+each server announces its `max_payload`, and the client refuses a batch message above it before
+writing it, as [Broker and message emitters](#broker-and-message-emitters) describes.
 
 `NO ACK` publishes through Core NATS. A write delivers its records only after the client's queued
 bytes have drained and their connection has flushed. The flush is local: the server answers
@@ -2627,9 +2636,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | connection, its handshake and an insert: unbounded |
-| Driver limits | The driver has no connect, read or write timeout.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |
+| Network waits | pool checkout (including connection and handshake), initial validation, and each insert: `timeout_ms`; unbounded when omitted |
+| Driver limits | Without timeout_ms, pool checkout, connection validation and inserts have no deadline.<br>TLS identity keys use the driver's RSA PKCS#1 private-key format.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [MYSQL TABLE capability and mirror reference](connector-capabilities.md#mysql-table-emit).
 <!-- connector-matrix:emit-mysql-table:end -->
@@ -2676,13 +2685,28 @@ CREATE MYSQL CLIENT mysql
   };
 ```
 
-For TLS connections, include `require_ssl=true`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path.
+For TLS connections, include `require_ssl=true`, mount a TLS resource, and set `'tls_ca_file'` to
+the mounted CA path. Supplying the CA preserves the URL's certificate-verification, hostname and
+built-in-root options. For mutual TLS, also set `tls_cert_file` and `tls_key_file` together. The
+driver reads a PEM certificate chain and an RSA PKCS#1 private key; for a PEM key this is the
+`RSA PRIVATE KEY` form, which OpenSSL can produce with `openssl rsa -traditional`.
 
-The current client CONFIG keys are required `addr` and optional `tls_ca_file`. The address must
+The current client CONFIG keys are required `addr` and optional `timeout_ms`, `tls_ca_file`,
+`tls_cert_file` and `tls_key_file`. The address must
 be a `mysql://` URL accepted by the driver's offline parser. URL query options belong to the
 driver, except connection-pool sizing: declare that capacity with `POOL SIZE MIN ... MAX ...`.
 Pool-size query parameters such as `pool_min` and `pool_max` are refused before the client is
 committed. Unknown standalone CONFIG keys are refused rather than ignored.
+
+`timeout_ms` is a positive, schedulable whole number of milliseconds. It bounds opening and
+validating the pool's first connection, each subsequent pool checkout (including connection
+establishment and authentication), and each insert. The minimum keeper uses the same checkout
+bound. Each of these is a separate operation; an insert's bound starts after checkout, and an
+isolated row's insert receives its own bound. Omitting the key leaves these waits unbounded.
+An elapsed bound is an infrastructure failure, reported with `timeout_ms` and its duration, and
+the emitter retries its pending rows on its declared policy. The driver discards a connection
+whose in-flight command was cancelled. A timeout does not establish whether the server committed
+an insert; use a stable key and an appropriate `ON CONFLICT` action where retries must converge.
 
 ### MongoDB
 
@@ -2968,7 +2992,9 @@ a mismatched scheme at `CREATE` or `ALTER`, naming `LOCATION`, before opening ei
 
 The four Iceberg client schemas distinguish Nervix-owned options from driver properties.
 Nervix validates declared addresses, booleans and deadlines at `CREATE CLIENT`; for example,
-`'path_style_access' = 'yes'` and `'no_auth' = 'yes'` are refused. Unknown unprefixed keys are
+`'path_style_access' = 'yes'` and `'no_auth' = 'yes'` are refused. A Boolean option means the value
+it states: `'no_auth' = false` keeps the GCS client's authentication, and only `true` makes it send
+unsigned requests without loading credentials. Unknown unprefixed keys are
 refused rather than treated as driver settings. The generated
 [client key tables](./connector-capabilities.md#s3-client) list the current keys and file roles.
 S3 delegates `s3.*` and `client.*`, GCS delegates `gcs.*`, and Azure delegates `adls.*`.
@@ -2980,17 +3006,26 @@ strings without opening an operator. The Azure table's `LOCATION` selects its en
 supplies account and authentication options. GCS inline credentials use the driver's
 Base64-encoded JSON form in `credentials_json`.
 
-HTTPS currently uses the catalog client's built-in web PKI roots. The declared catalog TLS-file
-keys participate in admission and mounting; the Iceberg HTTP transports do not yet apply those
-files.
+Both Iceberg clients verify an HTTPS server's certificate against the bundled WebPKI roots, the
+platform's native roots and the client's own `tls_ca_file`. A client that also names `tls_cert_file`
+and `tls_key_file` presents that certificate chain and private key as its identity. Each client
+uses only its own files: the `ICEBERG_REST` client's for catalog requests, and the `S3`, `GCS` or
+`AZURE_BLOB` client's for data-file reads and writes and for the HTTP calls of its credential
+provider. Mount the resource that holds the files on each client that names them, as
+[Resources](./resources.md) describes. Nervix reads the files when the emitter opens. A file it
+cannot read or parse stops the emitter as a configuration failure that names whether the catalog
+or the object-store client's TLS failed. A client whose address is plain HTTP never uses its TLS
+files, though Nervix still reads them when the emitter opens.
 
-
-When building the REST catalog's file I/O properties, Nervix first supplies the storage client's
-properties and then the catalog client's properties. Within a storage client, the last entry
-for a normalized property takes precedence. A catalog entry for the same Iceberg
-property key takes precedence in the effective properties used by the table's file I/O,
-including its object-store operations. Keep the two clients' settings consistent when configuring
-both namespaces.
+The table's file I/O receives the storage client's properties and the catalog client's
+storage-namespace properties. Each Nervix-owned storage option supplies one Iceberg property:
+`endpoint` supplies `s3.endpoint`, `no_auth` supplies `gcs.no-auth`, `account_name` supplies
+`adls.account-name`, and so on. A delegated property supplies itself, as written. The deadline and
+TLS-file options configure the clients' own HTTP transport and supply no property. The two clients
+must not set the same property. Nervix refuses `CREATE` or `ALTER` of an emitter whose catalog client
+sets a property that its storage client supplies, and the refusal names the property, the
+storage option that supplies it and both clients. Within a storage client, the last entry for a
+property is its value.
 
 The catalog and object-store HTTP clients resolve endpoint names through the node's configured
 DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
