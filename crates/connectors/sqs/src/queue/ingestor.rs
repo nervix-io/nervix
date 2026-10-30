@@ -251,9 +251,7 @@ impl IngestorMessage for SqsQueueIngestorMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::Headers {
-            headers: &self.attributes,
-        }
+        IngestMetadataRow::headers(&self.attributes)
     }
 }
 

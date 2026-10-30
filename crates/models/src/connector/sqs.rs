@@ -34,7 +34,7 @@ use crate::{
     EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
     EmitterReferenceKind, EnvelopeClauseKind, Expression, HeaderLayout, HeaderModel,
     HeaderValueType, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
     IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
     OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass, PropertyType,
     RetryPolicy,
@@ -146,7 +146,7 @@ impl IngestorDeclaration for SqsQueueIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // An SQS message's attributes: one value per name, in no order.
         headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
-        metadata: IngestorMetadataScope::Headers,
+        metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Sqs),
         position_class: PositionClass::BrokerRedelivered,

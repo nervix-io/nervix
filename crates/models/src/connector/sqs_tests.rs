@@ -94,7 +94,7 @@ fn queue_declares_message_attributes_as_headers_with_a_delay_and_a_deduplication
         ingest.headers,
         Some(HeaderModel::exact(HeaderLayout::LastWins))
     );
-    assert_eq!(ingest.metadata, IngestorMetadataScope::Headers);
+    assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
     assert!(ingest.metadata.fields().is_empty());
     assert_eq!(ingest.options, &[OptionDeclaration::INSTANCES]);
     assert_eq!(

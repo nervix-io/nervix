@@ -12,8 +12,13 @@ decoding; existing current-header corruption and namespace validation tests qual
 
 SQS QUEUE emitter generators draw both `SEND` request shapes beside the `MODE ACK` retry policy and
 the optional FIFO group. The Model/archive, registry, consensus and canonical Plexus properties
-preserve the request shape, and the archive signature fences the current SQS emitter shape before
-decoding.
+preserve the request shape, and the archive signature and consensus keyspace namespace fence the
+current SQS emitter shape before decoding.
+
+Ingestor generators draw every timestamp source, `TIMESTAMP AT metadata.<field>` included, in
+`CREATE` and in `ALTER ... SET TIMESTAMP`. The Model/archive, registry, consensus and canonical
+Plexus properties preserve the metadata source distinctly from a payload field of the same name,
+and the same signature and namespace fence that shape.
 
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions

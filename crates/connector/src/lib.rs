@@ -8,9 +8,9 @@
 //!   mounts they read files from, the deadline keys read from them with the one meaning every
 //!   connector gives them, the TLS material and HTTP client settings built from those entries,
 //!   service URL parsing, the parsed retry policy, physical deadlines and the actual-UTC
-//!   read an ingestor stamps arrival with, the transport-header trait an ingestor message implements,
-//!   the typed ingest metadata row with its Kafka, syslog, WebSockets and header scopes, and the confirmation
-//!   window a brokered emitter awaits its broker's answers through.
+//!   read an ingestor stamps arrival with, the transport-header and declared-metadata traits an
+//!   ingestor message implements, the ingest metadata row with its retained copy and transport
+//!   position, and the confirmation window a brokered emitter awaits its broker's answers through.
 //! - **Depends on.** The vocabulary, Arrow, `error-stack` and Tokio, the node's bounded executor a
 //!   emitter host hands a connector, and the TLS, HTTP client, URL and template libraries a client
 //!   configuration is built with.
@@ -81,7 +81,9 @@ pub use emitter::{
 };
 pub use http_client::{HttpClientConfig, HttpClientConfigError};
 pub use ingest_metadata::{
-    IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders, RetainedIngestHeaders,
+    IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow, IngestMetadataValues,
+    IngestRowHeaders, IngestTransportPosition, NoIngestHeaders, NoIngestMetadata,
+    RetainedIngestHeaders, RetainedIngestMetadata, RetainedIngestMetadataValue,
 };
 pub use ingestor::{
     BrokerIngestorConnector, IngestorAckPolicy, IngestorAcknowledgementOutcome,
@@ -89,8 +91,8 @@ pub use ingestor::{
     IngestorBatchAcknowledgementServices, IngestorBatchRequest, IngestorCapabilities,
     IngestorConnector, IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError,
     IngestorIntakeMessage, IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll,
-    IngestorPollMessage, IngestorPollMetadata, IngestorReadCancellation, IngestorResult,
-    IngestorResume, IngestorSettlement, PacedIngestorConnector,
+    IngestorPollMessage, IngestorReadCancellation, IngestorResult, IngestorResume,
+    IngestorSettlement, PacedIngestorConnector,
 };
 pub use row_requests::{
     ExceededLimit, MeasuredRequest, RowOversize, RowRequest, RowRequestLimits, RowRequests,

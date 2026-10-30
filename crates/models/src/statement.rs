@@ -2245,8 +2245,13 @@ pub enum AlterIngestorError {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum IngestTimestampSource {
+    /// The domain clock's instant when the record is delivered.
     Now,
+    /// A `DATETIME` field of the decoded payload.
     At(FieldName),
+    /// A metadata field the ingestor's entity declares as `DATETIME`, written
+    /// `TIMESTAMP AT metadata.<field>`.
+    AtMetadata(FieldName),
 }
 
 #[derive(

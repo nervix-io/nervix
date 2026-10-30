@@ -1079,8 +1079,8 @@ The injectors:
 
 - **Header reads.** `IngestHeaderFunctionInjector` answers header reads from the ingest metadata of
   one execution. Outbound WebSockets supply their connection's captured response headers, including
-  after quiesce replay; the metadata builder writes the retained frame kind into a typed STRING
-  column before VM execution.
+  after quiesce replay; where a route reads `metadata.frame_type`, the metadata builder writes the
+  retained frame kind into a typed STRING column before VM execution.
 - **Window aggregates.** `WindowAggregateResults` answers window aggregates from the accumulators at
   emission.
 - **UDFs.** `nervix-roto`'s `UdfExecutor` answers UDF calls:
