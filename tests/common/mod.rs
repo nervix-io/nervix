@@ -30,6 +30,7 @@ pub(crate) mod phase_deadline;
 pub(crate) mod port_pool;
 pub(crate) mod process_cluster_convergence;
 pub(crate) mod process_observation;
+pub(crate) mod process_program;
 pub(crate) mod process_report;
 pub(crate) mod producer_session;
 pub(crate) mod rabbitmq_queue;

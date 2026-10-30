@@ -275,6 +275,40 @@ pub struct Application {
     pub graceful_shutdown_drain: bool,
 }
 
+/// Runs this process as the server, from its own command line to its exit. The `nervix-server`
+/// executable is this call, and a test process that re-executes itself under the server's name
+/// makes the same call, so a real process in a test starts the way a deployed one does.
+pub fn run_server_process() -> Result<(), Report<AppError>> {
+    let args = Args::parse();
+    // Registered before any other thread exists, so neither SIGINT nor SIGTERM can end the process
+    // by its default action at any later point in its life.
+    let termination_signals = TerminationSignals::register()?;
+    // A diagnostic node installs its deadlock detector before any tracked lock or runtime worker
+    // exists, and after the signals, so the detector's threads never see one by its default action.
+    #[cfg(feature = "deloxide")]
+    nervix_deadlock::DiagnosticRun::start_selected(
+        args.diagnostics
+            .deadlock_evidence
+            .clone()
+            .map(nervix_deadlock::EvidenceDirectory::new),
+        nervix_primitives::deadlock::DiagnosticSelection::for_build(
+            args.diagnostics.deadlock_active_only,
+        ),
+    )
+    .change_context(AppError::StartDeadlockDiagnostics)?;
+    let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
+        .thread_stack_size(8 * 1024 * 1024) // Set custom stack size here
+        .enable_all()
+        .build()
+        .change_context(AppError::BuildRuntime)?;
+
+    let tracing_guard = {
+        let _entered = runtime.enter();
+        init_tracing(&args.tracing)?
+    };
+    runtime.block_on(run_cli(args, termination_signals, &tracing_guard))
+}
+
 /// Runs the server command line with termination signals the caller has already registered, so
 /// neither signal can end the process by its default action while the application starts.
 pub async fn run_cli(

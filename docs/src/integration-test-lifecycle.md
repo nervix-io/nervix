@@ -187,7 +187,7 @@ resubmitting an outcome that might already have produced output.
 | Scenario steps and hooks | One runner task: Cucumber polls every running scenario, and the suite watchdog around them, from the task the binary's main thread blocks on | `tests/scenarios.rs` |
 | Scenario admission and timing | Feature permits, prioritized run slots, the long-running declaration, queue reasons, and accumulated attempt times in the runner process | `scenario_schedule.rs` and `scenario_phase.rs` |
 | In-process nodes | One Tokio task per node on the binary's multi-threaded runtime, which has one worker thread per CPU | The cluster fixture, `tests/common/cluster.rs` |
-| Server processes | Child processes executing the `nervix-server` binary | The server-process fixture, `tests/common/server_process.rs` |
+| Server processes | Child processes of the scenario executable itself, started under the name `nervix-server` | The server-process fixture, `tests/common/server_process.rs`, and the program selection in `tests/common/process_program.rs` |
 | Real-process cluster | Three server children with separate durable stores, ports and identities under one test certificate authority | `tests/common/server_process_cluster.rs`, using the server-process fixture |
 | Deadlock diagnostics | In a scenario binary built for the `deloxide` mode only: one deadlock detector for the whole process, installed by the binary's `main`, and a diagnostic run for each server child, each recording evidence in a directory of its own | `tests/scenarios.rs`; the `@deadlock_diagnostics` steps, `tests/deadlock_diagnostics` |
 | CLI sessions | Child processes executing `nervix-cli`. One-shot commands and the `subscribe` and `domain-clock` subcommands run on pipes; the subscription reader retains at most 256 output lines and the clock reader retains at most 2,048. The interactive REPL runs on a pseudo-terminal, whose fixture retains the newest 256 KiB the terminal displayed | The scenario world, `tests/scenarios.rs`; the terminal fixture, `tests/common/cli_terminal.rs` |
@@ -2286,6 +2286,16 @@ node that executes its ingestor or serves its session is killed or frozen, runs 
 cluster and faults one member, because only a real process death closes, or stops answering on,
 every connection the node held at once without running any of its shutdown.
 
+A server child is the scenario executable running again, not a second program: the executable links
+the whole server, so no build has to produce another file and no launch has to find one.
+`tests/common/process_program.rs` starts the file `current_exe` names with `arg0` set to
+`nervix-server`, and `main` reads `arg0` before it does anything else. A process of that name calls
+`run_server_process`, the entry point the `nervix-server` executable's own `main` calls, and none of
+the suite runs. Clap takes the program's name from the same `arg0`, so the command line a scenario
+reads is the product's. The dependency lifecycle helper is selected the same way. The one launch
+of another file is the client protocol's baseline, whose subject is a release build:
+`just client-wire-baseline` builds that server and names it to the suite.
+
 Each launch has 120 seconds from its start until the process accepts commands. Reading the
 executable, spawning the process and waiting for its readiness share that one deadline, and a
 restart starts a deadline of its own. Readiness uses the same probe outcomes as an in-process node,
@@ -2305,16 +2315,16 @@ cluster's convergence requirement.
 
 **Reading the executable first.** A process does not read its executable when it starts. The kernel
 maps the file, and every page the process first touches is read when the process faults on it: one
-page at a time, in the order its code happens to run. A debug server executable maps about 450 MB,
-the loadable segments of a file of about 2.9 GB whose rest is debug information that is never
-mapped, and its first start touches code all over those megabytes. When the file is not in memory
-and the storage under it is busy, each of those reads waits for the storage on its own, and on a
-rotational disk each one pays a seek. So each launch first reads every range the executable's
-loadable segments map, in file order and nothing else, and the process then faults its pages in
-from memory. The read runs off the runner task, a 4 MiB chunk at a time, and every chunk receives
-only what is left of the launch's deadline. A read that the storage cannot serve in time ends the
-startup at that deadline, naming how many of the mapped bytes it had read, and spawns nothing. A
-read of an executable that is already in memory costs one copy of its mapped bytes.
+page at a time, in the order its code happens to run. The debug scenario executable maps about 565
+MB, the loadable segments of a file of about 3.9 GB whose rest is debug information that is never
+mapped, and a server's first start touches code all over those megabytes. When the file is not in
+memory and the storage under it is busy, each of those reads waits for the storage on its own, and
+on a rotational disk each one pays a seek. So each launch first reads every range the executable's
+loadable segments map, in file order and nothing else, and the process then faults its pages in from
+memory. The read runs off the runner task, a 4 MiB chunk at a time, and every chunk receives only
+what is left of the launch's deadline. A read that the storage cannot serve in time ends the startup
+at that deadline, naming how many of the mapped bytes it had read, and spawns nothing. A read of an
+executable that is already in memory costs one copy of its mapped bytes.
 
 The read is what the retained first failure of the stressed lane needed. On 13 October 2026 the
 one-node diagnostic process cluster started on a host whose data disk was rotational and busy:

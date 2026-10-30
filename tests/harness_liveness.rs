@@ -90,6 +90,10 @@ mod process_cluster_convergence;
 mod process_observation;
 #[path = "common/process_observation_tests.rs"]
 mod process_observation_tests;
+#[path = "common/process_program.rs"]
+mod process_program;
+#[path = "common/process_program_tests.rs"]
+mod process_program_tests;
 #[path = "common/process_report.rs"]
 mod process_report;
 #[path = "common/process_report_tests.rs"]
