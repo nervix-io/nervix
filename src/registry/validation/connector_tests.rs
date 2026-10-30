@@ -533,10 +533,10 @@ fn direct_values_type_failure_keeps_the_vm_compile_cause() {
             sensitive: false,
         }],
     };
-    let mapping = nervix_models::ClickHouseValueMapping {
-        column: "external_value".to_string(),
-        expression: nervix_plexus::parse_expression("input.missing")
-            .expect("a missing field is still a valid expression"),
+    let mapping = |column: &str, expression: &str| nervix_models::ClickHouseValueMapping {
+        column: column.to_string(),
+        expression: nervix_plexus::parse_expression(expression)
+            .expect("the mapping expression is valid syntax"),
     };
     *emitter.connector = EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
         mode: nervix_models::PostgresTablePublishingMode::Ack {
@@ -547,25 +547,54 @@ fn direct_values_type_failure_keeps_the_vm_compile_cause() {
         },
         client: named("database"),
         table: named("events"),
-        values: vec![mapping],
+        values: vec![
+            mapping("first_value", "input.value"),
+            mapping("external_value", "input.value"),
+            mapping("last_value", "input.value"),
+        ],
         conflict_action: nervix_models::PostgresConflictAction::None,
     }));
-    let error = validate_direct_value_mappings(
-        &domain,
-        &identifier,
-        &ModelIndex::new(),
-        &emitter,
-        &input_schema,
-    )
-    .expect_err("an unknown source field must fail VALUES type inference");
-    assert!(matches!(
-        error.current_context(),
-        RegistryError::InvalidModel { domain, identifier, reason }
-            if domain == "default"
-                && identifier == "emit"
-                && reason.contains("emitter VALUES type inference failed")
-    ));
-    assert!(error.contains::<nervix_vm::CompileError>());
+    for (expression, expected_code) in [
+        (
+            "input.missing",
+            nervix_vm::CompileErrorCode::UnknownIdentifier,
+        ),
+        ("NULL", nervix_vm::CompileErrorCode::UntypedNull),
+    ] {
+        let EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
+            values, ..
+        })) = emitter.connector.as_mut()
+        else {
+            panic!("the test emitter uses Postgres VALUES");
+        };
+        values[1] = mapping("external_value", expression);
+        let error = validate_direct_value_mappings(
+            &domain,
+            &identifier,
+            &ModelIndex::new(),
+            &emitter,
+            &input_schema,
+        )
+        .expect_err("an uninferable expression must fail VALUES admission");
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::InvalidConnectorDeclaration {
+                domain: actual_domain,
+                node,
+                issue: ConnectorDeclarationIssue::MappedExpressionInference {
+                    section: nervix_models::MappedValueSection::Values,
+                    key,
+                },
+            } if actual_domain == &domain
+                && node == &nervix_models::NodeRef::new(nervix_models::ModelKind::Emitter, identifier.clone())
+                && key == "external_value"
+        ));
+        let cause = error
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<nervix_vm::CompileError>())
+            .expect("the declaration refusal retains the typed VM cause");
+        assert_eq!(cause.code, expected_code);
+    }
 }
 
 #[test]

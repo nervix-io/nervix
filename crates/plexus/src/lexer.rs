@@ -141,6 +141,7 @@ pub enum Identifier {
     Time,
     Rate,
     Timestamp,
+    Metadata,
     Session,
     Subscription,
     Owned,

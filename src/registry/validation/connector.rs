@@ -24,10 +24,10 @@ use nervix_models::{
     EndpointName, EnvelopeClauseForm, Expression, FieldName, HttpApplicationHeaders, HttpBodyMode,
     HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, HttpRequestEmitter,
     IcebergCatalogProperties, IcebergStorageBackend, IcebergTableEmitter, IngestTimestampSource,
-    IngestorInput, LiteralHeaderWrite, Model, ModelIndex, ModelKind, ModelName, NodeRef,
-    OtelEmitter, OtelMappings, OtelMetricKind, OtelMetricsEmitter, ParseAsType, ProcessorOutput,
-    RelayName, RouteConstruction, SchemaField, SchemaName, SignalingWireFormat, SqsEmitter,
-    SqsFifoGroup, SqsQueueEmitter, VhostName, parse_duration_text,
+    IngestorInput, IngestorMetadataType, LiteralHeaderWrite, Model, ModelIndex, ModelKind,
+    ModelName, NodeRef, OtelEmitter, OtelMappings, OtelMetricKind, OtelMetricsEmitter, ParseAsType,
+    ProcessorOutput, RelayName, RouteConstruction, SchemaField, SchemaName, SignalingWireFormat,
+    SqsEmitter, SqsFifoGroup, SqsQueueEmitter, VhostName, parse_duration_text,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
@@ -48,8 +48,8 @@ use crate::{
         validation::{
             branching::relay_declared_branch,
             expression::{
-                LookupHashMapRewriteResult, lookup_hash_map_bindings, program_uses_header_reads,
-                rewrite_lookup_hash_map_program,
+                LookupHashMapRewriteResult, collect_program_field_refs, lookup_hash_map_bindings,
+                program_uses_header_reads, rewrite_lookup_hash_map_program,
             },
             materialized_state::referenced_materialized_stream_bindings,
             processor::{
@@ -483,21 +483,41 @@ pub(in crate::registry) fn validate_direct_value_mappings(
         readonly_binding_for_internal_schema("message", input_schema),
     ];
     let udf_signatures = udf_compile_options(models, CompileOptions::default()).udf_signatures;
-    let inferred = {
-        let mapping_input =
-            infer_set_expr_types_for_bindings_with_udfs(&program, bindings, udf_signatures);
-        match mapping_input {
-            Ok(mapped_value) => Ok(mapped_value),
-            Err(error) => Err({
-                let message = error.current_context().message.clone();
-                error.change_context(RegistryError::InvalidModel {
-                    domain: domain.as_str().to_string(),
-                    identifier: identifier.as_str().to_string(),
-                    reason: format!("emitter VALUES type inference failed: {}", message),
-                })
-            }),
-        }
-    }?;
+    let inferred =
+        match infer_set_expr_types_for_bindings_with_udfs(&program, bindings, udf_signatures) {
+            Ok(inferred) => inferred,
+            Err(error) => {
+                let mappings_by_span = program
+                    .inner
+                    .set
+                    .iter()
+                    .zip(&mappings)
+                    .map(|((_, expression), mapping)| (expression.span, mapping))
+                    .collect::<HashMap<_, _>>();
+                let context = match mappings_by_span.get(&error.current_context().span) {
+                    Some(mapping) => RegistryError::InvalidConnectorDeclaration {
+                        domain: domain.clone(),
+                        node: nervix_models::NodeRef::new(
+                            nervix_models::ModelKind::Emitter,
+                            identifier.clone(),
+                        ),
+                        issue: ConnectorDeclarationIssue::MappedExpressionInference {
+                            section: mapping.section,
+                            key: mapping.mapping.column.clone(),
+                        },
+                    },
+                    None => RegistryError::InvalidModel {
+                        domain: domain.as_str().to_string(),
+                        identifier: identifier.as_str().to_string(),
+                        reason: format!(
+                            "emitter VALUES type inference failed: {}",
+                            error.current_context().message
+                        ),
+                    },
+                };
+                return Err(error.change_context(context));
+            }
+        };
     let invalid = |issue| {
         Report::new(RegistryError::InvalidConnectorDeclaration {
             domain: domain.clone(),
@@ -1406,6 +1426,36 @@ pub(in crate::registry) fn ensure_signaling_protocol_is_valid(
     Ok(())
 }
 
+/// Refuses a route whose program reads a `metadata.<field>` the entity of the ingestor's input does
+/// not declare, naming the field and the fields the entity does declare. The VM would refuse the
+/// read too, but only as an unknown input column.
+fn refuse_undeclared_metadata_reads(
+    domain: &DomainName,
+    identifier: &ModelName,
+    ingestor: &CreateIngestor,
+    output: &ProcessorOutput,
+    program: &Program,
+) -> Result<(), Report<RegistryError>> {
+    let kind = ingestor.input.entity_kind();
+    let declared = kind.capabilities().metadata;
+    for (namespace, field) in collect_program_field_refs(program) {
+        if namespace != "metadata" || declared.position(&field).is_some() {
+            continue;
+        }
+        let field = FieldName::parse(&field).assured(
+            "a field a lowered route reads was written as a field name in the route's Model",
+        );
+        return Err(Report::new(RegistryError::UndeclaredIngestorMetadata {
+            domain: domain.clone(),
+            ingestor: identifier.clone(),
+            relay: output.relay.clone(),
+            field,
+            kind,
+        }));
+    }
+    Ok(())
+}
+
 pub(in crate::registry) fn ensure_ingestor_timestamp_source(
     domain: &DomainName,
     identifier: &ModelName,
@@ -1414,6 +1464,29 @@ pub(in crate::registry) fn ensure_ingestor_timestamp_source(
 ) -> Result<(), Report<RegistryError>> {
     match &ingestor.timestamp_source {
         None | Some(IngestTimestampSource::Now) => Ok(()),
+        Some(IngestTimestampSource::AtMetadata(field)) => {
+            let kind = ingestor.input.entity_kind();
+            let Some(declared) = kind.capabilities().metadata.field(field.as_str()) else {
+                return Err(Report::new(
+                    RegistryError::UndeclaredIngestorTimestampMetadata {
+                        domain: domain.clone(),
+                        ingestor: identifier.clone(),
+                        field: field.clone(),
+                        kind,
+                    },
+                ));
+            };
+            if declared.ty() == IngestorMetadataType::Datetime {
+                return Ok(());
+            }
+            Err(Report::new(RegistryError::IngestorTimestampMetadataType {
+                domain: domain.clone(),
+                ingestor: identifier.clone(),
+                field: field.clone(),
+                kind,
+                declared: declared.ty(),
+            }))
+        }
         Some(IngestTimestampSource::At(timestamp_field)) => {
             let Some(field) = schema
                 .fields
@@ -1534,6 +1607,7 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
             ),
         }));
     }
+    refuse_undeclared_metadata_reads(domain, identifier, ingestor, output, &parsed.inner)?;
     let original_parsed = parsed.clone();
     let LookupHashMapRewriteResult {
         program: parsed,
@@ -1544,8 +1618,8 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
         readonly_binding_for_internal_schema("input", input_schema),
         writable_binding_for_internal_schema("output", output_schema),
     ];
-    let metadata_scope = ingestor.input.entity_kind().capabilities().metadata;
-    if let Some(metadata_schema) = metadata_scope.arrow_schema() {
+    let declared_metadata = ingestor.input.entity_kind().capabilities().metadata;
+    if let Some(metadata_schema) = declared_metadata.arrow_schema() {
         bindings.push(CompileBinding::readonly(
             "metadata",
             StdArc::new(metadata_schema),
