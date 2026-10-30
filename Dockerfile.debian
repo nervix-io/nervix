@@ -165,7 +165,9 @@ COPY scripts/runner_diagnostics.py scripts/record_runner_load.py ./scripts/
 ENV CARGO_PROFILE_RELEASE_LTO=fat
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 ENV RUSTC_WRAPPER=kache
-# `kache_remote.py configure` lets the builder's store hold a quarter of its cache mount's volume.
+# `kache_remote.py configure` lets the builder's store hold a quarter of its cache mount's volume,
+# and `prepare-index` keeps the store's index in the build step's tmpfs until `restore-index` moves
+# it back into the cache mount, which outlives the step.
 # BuildKit does not inherit the workflow's environment; opt into the same 64 GiB recovery floor.
 ENV KACHE_AUTO_RECOVER_MIN_FREE_BYTES=68719476736
 ENV KACHE_CACHE_EXECUTABLES=true
@@ -175,6 +177,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
     --mount=type=cache,target=/root/.cache/kache,sharing=locked \
+    --mount=type=tmpfs,target=/kache-index \
     : "${KACHE_S3_BUCKET:?KACHE_S3_BUCKET is required}" \
     && : "${KACHE_S3_REGION:?KACHE_S3_REGION is required}" \
     && : "${KACHE_S3_ENDPOINT:?KACHE_S3_ENDPOINT is required}" \
@@ -182,11 +185,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && : "${KACHE_S3_SECRET_KEY:?KACHE_S3_SECRET_KEY is required}" \
     && export KACHE_CONFIG=/tmp/kache.toml \
     && python3 scripts/kache_remote.py configure "${KACHE_CONFIG}" \
+    && python3 scripts/kache_remote.py prepare-index --memory /kache-index \
     && export KACHE_DAEMON_IDLE_TIMEOUT=0 \
     && export KACHE_MANIFEST_KEY="docker-${TARGETARCH}${NERVIX_DIAGNOSTIC_SELECTION:+-${NERVIX_DIAGNOSTIC_SELECTION}}" \
     && export KACHE_NAMESPACE="${KACHE_MANIFEST_KEY}" \
     && kache daemon start \
-    && trap 'build_status=$?; python3 scripts/publish_kache_report.py /tmp/kache-report || true; kache stats || true; kache daemon stop >/dev/null 2>&1 || true; exit "${build_status}"' EXIT \
+    && trap 'build_status=$?; python3 scripts/publish_kache_report.py /tmp/kache-report || true; kache stats || true; kache daemon stop >/dev/null 2>&1 || true; python3 scripts/kache_remote.py restore-index || true; exit "${build_status}"' EXIT \
     && case "${TARGETARCH}" in \
     amd64) export RUST_TARGET=x86_64-unknown-linux-gnu ;; \
     arm64) export RUST_TARGET=aarch64-unknown-linux-gnu ;; \

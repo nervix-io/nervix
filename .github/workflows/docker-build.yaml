@@ -111,6 +111,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # BuildKit keeps its state, and the build's kache store with it, on the runner's volume, which
+      # a single-use runner needs without write barriers.
+      - name: Lighten the build volume
+        run: python3 scripts/kache_remote.py lighten-volume "$(docker info --format '{{.DockerRootDir}}')"
+
       - name: Runner diagnostics before Build and push arch image
         uses: ./.github/actions/runner-diagnostics
         with:
@@ -189,6 +194,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # BuildKit keeps its state, and the build's kache store with it, on the runner's volume, which
+      # a single-use runner needs without write barriers.
+      - name: Lighten the build volume
+        run: python3 scripts/kache_remote.py lighten-volume "$(docker info --format '{{.DockerRootDir}}')"
 
       - name: Runner diagnostics before Build and push the diagnostic image
         uses: ./.github/actions/runner-diagnostics

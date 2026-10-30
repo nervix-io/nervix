@@ -8,6 +8,11 @@ store, a quarter of the volume that holds the cache directory.
 disk, exports the environment later steps need, starts the job's daemon and fails unless the daemon
 runs with that remote.
 
+`prepare-index --memory DIR` and `restore-index` move kache's index into a tmpfs before any kache
+process opens it, and back once none has it open, for a builder whose store outlives the tmpfs.
+`lighten-volume PATH` remounts the ext4 volume holding PATH without access times and write
+barriers, for a volume no job step prepares through `start`, such as the image builder's.
+
 `publish --job-status STATUS REPORT_DIR` publishes what the job built within a bounded time and
 records the outcome beside the job's kache report.
 
@@ -342,21 +347,42 @@ def lighten_volume(path: Path, environment: Mapping[str, str]) -> str:
     return f"The store's volume, {mount.target}, is remounted with {','.join(remounted.options)}."
 
 
+def prepare_index(environment: Mapping[str, str], memory: Path) -> str:
+    """Keep the store's index in `memory` when it is a tmpfs with room for it, before any kache
+    process opens the index; say what was done."""
+    memory_mount = Mount.holding(memory, environment)
+    if memory_mount is None or memory_mount.filesystem != "tmpfs":
+        return f"kache's index stays on disk: {memory} is not a tmpfs."
+    if shutil.disk_usage(memory).free < MEMORY_INDEX_FREE_BYTES:
+        return f"kache's index stays on disk: {memory} has less than 1 GiB free."
+    return keep_index_in_memory(cache_directory(environment), memory)
+
+
+def restore_index(cache_dir: Path) -> str:
+    """Move kache's index from memory back into the cache directory, once no kache process has it
+    open, so a store that outlives the memory, such as an image builder's cache mount, keeps it."""
+    index = cache_dir / INDEX_FILES[0]
+    if not index.is_symlink():
+        return "kache's index is already in the cache directory."
+    target = cache_dir / os.readlink(index)
+    index.unlink()
+    if not target.exists():
+        return f"kache's index in memory, {target}, is gone; kache starts a new one in {cache_dir}."
+    for name in INDEX_FILES:
+        source = target.parent / name
+        if source.exists():
+            shutil.move(source, cache_dir / name)
+    return f"kache's index is back in {cache_dir}."
+
+
 def prepare_store(environment: Mapping[str, str], memory: Path = MEMORY_DIRECTORY) -> list[str]:
     """Keep the store's index in memory and lighten its volume's writes, before the job's daemon
     opens the index. Neither is required: a runner where one does not apply keeps kache's default,
     and the lines returned say what was done."""
-    cache_dir = cache_directory(environment)
-    lines = []
-    memory_mount = Mount.holding(memory, environment)
-    if memory_mount is None or memory_mount.filesystem != "tmpfs":
-        lines.append(f"kache's index stays on disk: {memory} is not a tmpfs.")
-    elif shutil.disk_usage(memory).free < MEMORY_INDEX_FREE_BYTES:
-        lines.append(f"kache's index stays on disk: {memory} has less than 1 GiB free.")
-    else:
-        lines.append(keep_index_in_memory(cache_dir, memory))
-    lines.append(lighten_volume(cache_dir, environment))
-    return lines
+    return [
+        prepare_index(environment, memory),
+        lighten_volume(cache_directory(environment), environment),
+    ]
 
 
 @dataclass(frozen=True)
@@ -1018,6 +1044,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_parser = commands.add_parser("configure", help="write the configuration file of kache's remote and store")
     configure_parser.add_argument("path", type=Path)
     commands.add_parser("start", help="configure the job's remote and start its kache daemon")
+    prepare_parser = commands.add_parser(
+        "prepare-index", help="keep kache's index in a tmpfs before any kache process opens it"
+    )
+    prepare_parser.add_argument("--memory", type=Path, required=True)
+    commands.add_parser("restore-index", help="move kache's index back into its cache directory")
+    lighten_parser = commands.add_parser(
+        "lighten-volume", help="remount the ext4 volume holding a path without access times and write barriers"
+    )
+    lighten_parser.add_argument("path", type=Path)
     publish_parser = commands.add_parser("publish", help="publish the job's cache within its budget")
     publish_parser.add_argument("--job-status", required=True, choices=JOB_STATUSES)
     publish_parser.add_argument("report_directory", type=Path)
@@ -1031,6 +1066,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             Configuration(store=store, remote=remote).write(arguments.path)
         elif arguments.command == "start":
             start(environment)
+        elif arguments.command == "prepare-index":
+            print(prepare_index(environment, arguments.memory), flush=True)
+        elif arguments.command == "restore-index":
+            print(restore_index(cache_directory(environment)), flush=True)
+        elif arguments.command == "lighten-volume":
+            print(lighten_volume(arguments.path, environment), flush=True)
         else:
             termination = Termination()
             termination.install()

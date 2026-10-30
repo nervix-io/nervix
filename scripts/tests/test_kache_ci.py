@@ -453,6 +453,25 @@ class KacheWorkflowTests(unittest.TestCase):
         configure = dockerfile.index('python3 scripts/kache_remote.py configure "${KACHE_CONFIG}"')
         daemon = dockerfile.index("kache daemon start")
         self.assertLess(configure, daemon)
+        # The store's index lives in the build step's tmpfs while the daemon runs, and returns to the
+        # cache mount, which outlives the step, once the daemon stops.
+        self.assertIn("--mount=type=tmpfs,target=/kache-index", dockerfile)
+        prepare = dockerfile.index("python3 scripts/kache_remote.py prepare-index --memory /kache-index")
+        self.assertLess(configure, prepare)
+        self.assertLess(prepare, daemon)
+        trap = re.search(r"trap '([^']*)' EXIT", dockerfile)
+        assert trap is not None
+        self.assertLess(
+            trap.group(1).index("kache daemon stop"),
+            trap.group(1).index("python3 scripts/kache_remote.py restore-index"),
+        )
+        jobs = workflow_jobs(workflow)
+        for build in ("build-arch", "build-diagnostic"):
+            with self.subTest(job=build):
+                names = [step.name for step in job_steps(jobs[build])]
+                lighten = names.index("Lighten the build volume")
+                self.assertLess(names.index("Wait for Docker"), lighten)
+                self.assertLess(lighten, next(index for index, name in enumerate(names) if name.startswith("Build and push")))
         # The build stage ends with the publication, after every artifact it built.
         build_stage = dockerfile.split("\nFROM ", maxsplit=2)[1]
         self.assertTrue(
@@ -1347,6 +1366,46 @@ class StorePreparationTests(unittest.TestCase):
             line,
             "Remounting the store's volume, /, exited with status 1: mount: only root can do that; it keeps its options.",
         )
+
+    def test_the_index_returns_to_the_cache_directory_once_no_daemon_has_it_open(self) -> None:
+        self.cache.mkdir(parents=True)
+        (self.cache / "index.db").write_text("pages")
+        (self.cache / "index.db-wal").write_text("log")
+        kache_remote.keep_index_in_memory(self.cache, self.memory)
+        self.assertEqual(kache_remote.restore_index(self.cache), f"kache's index is back in {self.cache}.")
+        self.assertFalse((self.cache / "index.db").is_symlink())
+        self.assertEqual((self.cache / "index.db").read_text(), "pages")
+        self.assertEqual((self.cache / "index.db-wal").read_text(), "log")
+        self.assertEqual(list((self.memory / "kache-index").iterdir()), [])
+        self.assertEqual(kache_remote.restore_index(self.cache), "kache's index is already in the cache directory.")
+
+    def test_an_index_whose_memory_is_gone_leaves_kache_to_start_a_new_one(self) -> None:
+        self.cache.mkdir(parents=True)
+        (self.cache / "index.db").symlink_to(self.memory / "gone" / "index.db")
+        line = kache_remote.restore_index(self.cache)
+        self.assertEqual(
+            line, f"kache's index in memory, {self.memory / 'gone' / 'index.db'}, is gone; kache starts a new one in {self.cache}."
+        )
+        self.assertFalse((self.cache / "index.db").exists() or (self.cache / "index.db").is_symlink())
+
+    def test_the_command_line_prepares_restores_and_lightens(self) -> None:
+        mounts = [
+            [str(self.memory), {"target": "/kache-index", "fstype": "tmpfs", "options": "rw"}],
+            ["/", {"target": "/", "fstype": "ext4", "options": "rw,relatime", "remounted": "rw,noatime,nobarrier"}],
+        ]
+        environment = self.environment(mounts)
+        prepared = run_cli(["prepare-index", "--memory", str(self.memory)], environment)
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        self.assertIn("live in memory", prepared.stdout)
+        self.assertTrue((self.cache / "index.db").is_symlink())
+        # The daemon creates the index where the symlink points.
+        (self.memory / "kache-index" / "index.db").write_text("pages")
+        restored = run_cli(["restore-index"], environment)
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertEqual(restored.stdout.strip(), f"kache's index is back in {self.cache}.")
+        lightened = run_cli(["lighten-volume", str(self.root)], environment)
+        self.assertEqual(lightened.returncode, 0, lightened.stderr)
+        self.assertEqual(lightened.stdout.strip(), "The store's volume, /, is remounted with rw,noatime,nobarrier.")
 
     def test_a_volume_findmnt_cannot_describe_is_left_alone(self) -> None:
         line = kache_remote.lighten_volume(self.cache, self.environment([]))

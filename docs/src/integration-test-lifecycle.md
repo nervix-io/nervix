@@ -736,8 +736,13 @@ holds every kache-backed job and Docker image build to the bucket of its `runs-o
 kache-backed job passes its bucket's settings, as kache's `KACHE_S3_*` environment variables, to
 `python3 scripts/kache_remote.py start` right after the setup action. Docker image builds pass the
 same settings to their builder, whose build command runs `scripts/kache_remote.py configure` before
-it starts the daemon. Either way the service URL is written into the daemon's TOML configuration
-before startup.
+it starts the daemon. The build step also mounts a tmpfs at `/kache-index`: `prepare-index` moves
+the store's index into it before the daemon starts, and the step's exit trap runs `restore-index`
+once the daemon has stopped, moving the index back into the BuildKit cache mount, which outlives the
+step. Before the build, the job's `Lighten the build volume` step remounts the ext4 volume holding
+Docker's root directory, where BuildKit keeps that cache mount, with `noatime` and `barrier=0`, as
+the start step does for the store of every other kache-backed job. Either way the service URL is
+written into the daemon's TOML configuration before startup.
 
 For Cloudflare R2, set `KACHE_BUCKET_REGION` to `auto` and each bucket's endpoint to the account's
 service URL, without the bucket name in the URL. That is
