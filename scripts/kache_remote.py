@@ -4,9 +4,9 @@
 `configure PATH` writes the file every kache process reads: the remote, and the budget of the local
 store, a quarter of the volume that holds the cache directory.
 
-`start` configures that remote and store for the current GitHub Actions job, exports the
-environment later steps need, starts the job's daemon and fails unless the daemon runs with that
-remote.
+`start` configures that remote and store for the current GitHub Actions job, prepares the store's
+disk, exports the environment later steps need, starts the job's daemon and fails unless the daemon
+runs with that remote.
 
 `publish --job-status STATUS REPORT_DIR` publishes what the job built within a bounded time and
 records the outcome beside the job's kache report.
@@ -19,7 +19,7 @@ Publication" section of docs/src/integration-test-lifecycle.md owns the contract
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 import contextlib
 from dataclasses import asdict, dataclass, field
 import enum
@@ -238,6 +238,127 @@ class LocalStore:
         return f"[cache]\nlocal_max_size = {toml_string(f'{self.max_size_gib}GiB')}\n"
 
 
+# A single-use runner's store needs no crash consistency: the machine and everything on it end with
+# the job. On Boat, kache's downloads spent most of their time waiting for the lock of its SQLite
+# index, whose holders wait on the disk, so a job keeps the index in memory and lets the other
+# writes on the store's volume skip the disk's write barrier.
+MEMORY_DIRECTORY = Path("/dev/shm")
+MEMORY_INDEX = "kache-index"
+# The index and the files SQLite keeps beside it in write-ahead-log mode. SQLite resolves a
+# symlinked database and keeps those files next to its target.
+INDEX_FILES = ("index.db", "index.db-wal", "index.db-shm")
+# The least free memory the index may move to.
+MEMORY_INDEX_FREE_BYTES = GIB
+SYSTEM_COMMAND_SECONDS = 30.0
+# What remounting the store's ext4 volume adds: no access-time writes, and no write barrier, so an
+# fsync returns once the device has the data instead of after its cache is flushed too.
+VOLUME_OPTIONS = ("noatime", "barrier=0")
+
+
+def existing_ancestor(path: Path) -> Path:
+    """`path`, or the nearest directory above it that exists; the filesystem root always does."""
+    existing = path
+    while not existing.exists():
+        existing = existing.parent
+    return existing
+
+
+def run_system(arguments: Sequence[str], environment: Mapping[str, str]) -> subprocess.CompletedProcess[str] | None:
+    """A system command's result, or None when it could not run or did not finish in time."""
+    try:
+        return subprocess.run(
+            list(arguments),
+            env=dict(environment),
+            capture_output=True,
+            text=True,
+            timeout=SYSTEM_COMMAND_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+@dataclass(frozen=True)
+class Mount:
+    """The mounted filesystem that holds a path, as findmnt reports it."""
+
+    target: str
+    filesystem: str
+    options: tuple[str, ...]
+
+    @classmethod
+    def holding(cls, path: Path, environment: Mapping[str, str]) -> Mount | None:
+        """None when findmnt cannot say."""
+        completed = run_system(
+            [
+                "findmnt", "--raw", "--noheadings", "--output", "TARGET,FSTYPE,OPTIONS",
+                "--target", str(existing_ancestor(path)),
+            ],
+            environment,
+        )
+        if completed is None or completed.returncode != 0:
+            return None
+        fields = completed.stdout.split()
+        if len(fields) != 3:
+            return None
+        return cls(target=fields[0], filesystem=fields[1], options=tuple(fields[2].split(",")))
+
+
+def keep_index_in_memory(cache_dir: Path, memory: Path) -> str:
+    """Move kache's index into `memory` behind a symlink. Only before any kache process opens it."""
+    index = cache_dir / INDEX_FILES[0]
+    if index.is_symlink():
+        return f"kache's index already lives at {os.readlink(index)}."
+    directory = memory / MEMORY_INDEX
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    for name in INDEX_FILES:
+        source = cache_dir / name
+        if source.exists():
+            shutil.move(source, directory / name)
+    index.symlink_to(directory / INDEX_FILES[0])
+    return f"kache's index and its write-ahead log live in memory, in {directory}."
+
+
+def lighten_volume(path: Path, environment: Mapping[str, str]) -> str:
+    """Remount the ext4 volume that holds `path` without access times and write barriers."""
+    mount = Mount.holding(path, environment)
+    if mount is None:
+        return "The store's volume was not remounted: findmnt could not describe it."
+    if mount.filesystem != "ext4":
+        return f"The store's volume, {mount.target}, is {mount.filesystem}, so it was not remounted."
+    options = ",".join(("remount", *VOLUME_OPTIONS))
+    completed = run_system(["sudo", "--non-interactive", "mount", "-o", options, mount.target], environment)
+    if completed is None:
+        return f"Remounting the store's volume, {mount.target}, did not run; it keeps its options."
+    if completed.returncode != 0:
+        return (
+            f"Remounting the store's volume, {mount.target}, exited with status "
+            f"{completed.returncode}: {completed.stderr.strip()}; it keeps its options."
+        )
+    remounted = Mount.holding(path, environment)
+    if remounted is None:
+        return f"The store's volume, {mount.target}, is remounted; findmnt could not read its options."
+    return f"The store's volume, {mount.target}, is remounted with {','.join(remounted.options)}."
+
+
+def prepare_store(environment: Mapping[str, str], memory: Path = MEMORY_DIRECTORY) -> list[str]:
+    """Keep the store's index in memory and lighten its volume's writes, before the job's daemon
+    opens the index. Neither is required: a runner where one does not apply keeps kache's default,
+    and the lines returned say what was done."""
+    cache_dir = cache_directory(environment)
+    lines = []
+    memory_mount = Mount.holding(memory, environment)
+    if memory_mount is None or memory_mount.filesystem != "tmpfs":
+        lines.append(f"kache's index stays on disk: {memory} is not a tmpfs.")
+    elif shutil.disk_usage(memory).free < MEMORY_INDEX_FREE_BYTES:
+        lines.append(f"kache's index stays on disk: {memory} has less than 1 GiB free.")
+    else:
+        lines.append(keep_index_in_memory(cache_dir, memory))
+    lines.append(lighten_volume(cache_dir, environment))
+    return lines
+
+
 @dataclass(frozen=True)
 class Configuration:
     """The file every kache process of a job reads, through KACHE_CONFIG: its local store's budget
@@ -418,10 +539,15 @@ def daemon_logs(environment: Mapping[str, str]) -> str:
 
 
 def start(
-    environment: Mapping[str, str], clock: Clock | None = None, verify_seconds: float = VERIFY_SECONDS
+    environment: Mapping[str, str],
+    clock: Clock | None = None,
+    verify_seconds: float = VERIFY_SECONDS,
+    prepare: Callable[[Mapping[str, str]], list[str]] | None = None,
 ) -> DaemonState:
-    """Configure the job's remote, export it to later steps, and start the job's daemon with it."""
+    """Configure the job's remote, prepare its store, export them to later steps, and start the
+    job's daemon with them."""
     clock = clock or Clock()
+    prepare = prepare or prepare_store
     remote = Remote.from_environment(environment)
     store = LocalStore.from_environment(environment)
     manifest_key = required(environment, "KACHE_MANIFEST_KEY")
@@ -439,6 +565,8 @@ def start(
     }
     append_job_environment(job_environment, exported)
     daemon_environment = kache_environment(environment) | exported
+    for line in prepare(environment):
+        print(line, flush=True)
 
     for attempt in range(1, DAEMON_STARTS + 1):
         start_daemon(daemon_environment)

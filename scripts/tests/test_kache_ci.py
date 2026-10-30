@@ -11,6 +11,7 @@ import re
 import shlex
 import shutil
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -408,6 +409,19 @@ class KacheWorkflowTests(unittest.TestCase):
         # Without a configuration kache reads none either, so no remote is named.
         self.assertEqual(publish_kache_report.Redaction.from_environment({}).apply(doctor), doctor)
 
+    def test_the_report_says_where_the_index_lives(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "cache"
+            cache.mkdir()
+            (cache / "index.db").write_text("")
+            on_disk = publish_kache_report.index_location({"KACHE_CACHE_DIR": str(cache)})
+            (cache / "index.db").unlink()
+            (cache / "index.db").symlink_to("/dev/shm/kache-index/index.db")
+            in_memory = publish_kache_report.index_location({"KACHE_CACHE_DIR": str(cache)})
+        self.assertEqual(on_disk, "Index: on disk, in the cache directory.")
+        self.assertEqual(in_memory, "Index: in memory, at /dev/shm/kache-index/index.db.")
+        self.assertIsNone(publish_kache_report.index_location({}))
+
     def test_a_build_report_names_its_phase(self) -> None:
         self.assertEqual(publish_kache_report.heading("tests", "build"), "## Kache: tests, after the build")
         self.assertEqual(publish_kache_report.heading("tests", "job"), "## Kache: tests")
@@ -753,15 +767,55 @@ sys.exit(f"unexpected kache arguments: {arguments}")
 '''
 
 
+# The system commands the store preparation runs, faked so that no test reads the host's mounts or
+# remounts its volume. `findmnt` answers from FAKE_MOUNTS, a list of [path prefix, mount] pairs whose
+# mount may give the options it shows once `sudo` has remounted it; without FAKE_MOUNTS every path
+# is on an overlay filesystem, which the preparation leaves alone. `sudo` records its arguments in
+# FAKE_SUDO_LOG and exits with FAKE_SUDO_STATUS, refusing by default.
+FAKE_FINDMNT = r'''
+import json, os, sys
+target = sys.argv[sys.argv.index("--target") + 1]
+mounts = json.loads(os.environ.get("FAKE_MOUNTS", '[["/", {"target": "/", "fstype": "overlay", "options": "rw"}]]'))
+remounted = os.path.exists(os.environ.get("FAKE_REMOUNTED", "/nonexistent"))
+for prefix, mount in mounts:
+    if target.startswith(prefix):
+        options = mount.get("remounted", mount["options"]) if remounted else mount["options"]
+        print(mount["target"], mount["fstype"], options)
+        sys.exit(0)
+sys.exit(1)
+'''
+FAKE_SUDO = r'''
+import json, os, sys
+log = os.environ.get("FAKE_SUDO_LOG")
+if log:
+    with open(log, "a") as output:
+        output.write(json.dumps(sys.argv[1:]) + "\n")
+status = int(os.environ.get("FAKE_SUDO_STATUS", "1"))
+if status:
+    print("mount: only root can do that", file=sys.stderr)
+    sys.exit(status)
+remounted = os.environ.get("FAKE_REMOUNTED")
+if remounted:
+    open(remounted, "w").close()
+'''
+
+
+def install_fake(directory: Path, name: str, body: str) -> None:
+    executable = directory / name
+    executable.write_text(f"#!{sys.executable}\n{body}")
+    executable.chmod(0o755)
+
+
 class FakeKache:
-    """A `kache` executable whose answers a test sets, recording every invocation."""
+    """A `kache` executable whose answers a test sets, recording every invocation, beside harmless
+    `findmnt` and `sudo` commands for the store preparation."""
 
     def __init__(self, directory: Path, behavior: dict) -> None:
         self.bin = directory / "bin"
         self.bin.mkdir()
-        executable = self.bin / "kache"
-        executable.write_text(f"#!{sys.executable}\n{FAKE_KACHE}")
-        executable.chmod(0o755)
+        install_fake(self.bin, "kache", FAKE_KACHE)
+        install_fake(self.bin, "findmnt", FAKE_FINDMNT)
+        install_fake(self.bin, "sudo", FAKE_SUDO)
         self.behavior = directory / "behavior.json"
         self.behavior.write_text(json.dumps(behavior))
         self.log = directory / "kache.log"
@@ -1198,6 +1252,108 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(self.recorded()["outcome"], "not-run")
 
 
+class StorePreparationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.cache = self.root / "home" / ".cache" / "kache"
+        self.memory = self.root / "shm"
+        self.memory.mkdir()
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        install_fake(self.bin, "findmnt", FAKE_FINDMNT)
+        install_fake(self.bin, "sudo", FAKE_SUDO)
+        self.sudo_log = self.root / "sudo.log"
+        self.remounted = self.root / "remounted"
+
+    def environment(self, mounts: list, sudo_status: int = 0) -> dict[str, str]:
+        return {
+            "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            "KACHE_CACHE_DIR": str(self.cache),
+            "FAKE_MOUNTS": json.dumps(mounts),
+            "FAKE_SUDO_LOG": str(self.sudo_log),
+            "FAKE_SUDO_STATUS": str(sudo_status),
+            "FAKE_REMOUNTED": str(self.remounted),
+        }
+
+    def sudo_calls(self) -> list[list[str]]:
+        if not self.sudo_log.exists():
+            return []
+        return [json.loads(line) for line in self.sudo_log.read_text().splitlines()]
+
+    def test_the_index_moves_into_memory_with_the_files_sqlite_keeps_beside_it(self) -> None:
+        self.cache.mkdir(parents=True)
+        for name, content in (("index.db", "pages"), ("index.db-wal", "log"), ("index.db-shm", "shared")):
+            (self.cache / name).write_text(content)
+        line = kache_remote.keep_index_in_memory(self.cache, self.memory)
+        directory = self.memory / "kache-index"
+        self.assertEqual(line, f"kache's index and its write-ahead log live in memory, in {directory}.")
+        self.assertTrue((self.cache / "index.db").is_symlink())
+        self.assertEqual(os.readlink(self.cache / "index.db"), str(directory / "index.db"))
+        self.assertEqual(sorted(path.name for path in self.cache.iterdir()), ["index.db"])
+        self.assertEqual((directory / "index.db-wal").read_text(), "log")
+        self.assertEqual((directory / "index.db-shm").read_text(), "shared")
+        self.assertEqual((self.cache / "index.db").read_text(), "pages")
+        self.assertEqual(
+            kache_remote.keep_index_in_memory(self.cache, self.memory),
+            f"kache's index already lives at {directory / 'index.db'}.",
+        )
+
+    def test_sqlite_keeps_a_symlinked_index_and_its_log_in_memory(self) -> None:
+        kache_remote.keep_index_in_memory(self.cache, self.memory)
+        database = sqlite3.connect(self.cache / "index.db")
+        self.addCleanup(database.close)
+        database.execute("PRAGMA journal_mode=WAL")
+        database.execute("CREATE TABLE entries (cache_key TEXT PRIMARY KEY)")
+        database.execute("INSERT INTO entries VALUES ('key')")
+        database.commit()
+        directory = self.memory / "kache-index"
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), ["index.db", "index.db-shm", "index.db-wal"])
+        self.assertEqual(sorted(path.name for path in self.cache.iterdir()), ["index.db"])
+
+    def test_the_store_moves_its_index_into_a_tmpfs_and_remounts_an_ext4_volume(self) -> None:
+        mounts = [
+            [str(self.memory), {"target": "/dev/shm", "fstype": "tmpfs", "options": "rw,nosuid,nodev"}],
+            ["/", {"target": "/", "fstype": "ext4", "options": "rw,relatime", "remounted": "rw,noatime,nobarrier"}],
+        ]
+        lines = kache_remote.prepare_store(self.environment(mounts), memory=self.memory)
+        self.assertEqual(
+            lines,
+            [
+                f"kache's index and its write-ahead log live in memory, in {self.memory / 'kache-index'}.",
+                "The store's volume, /, is remounted with rw,noatime,nobarrier.",
+            ],
+        )
+        self.assertEqual(self.sudo_calls(), [["--non-interactive", "mount", "-o", "remount,noatime,barrier=0", "/"]])
+
+    def test_a_store_without_a_tmpfs_or_an_ext4_volume_keeps_kaches_defaults(self) -> None:
+        mounts = [["/", {"target": "/", "fstype": "xfs", "options": "rw,relatime"}]]
+        lines = kache_remote.prepare_store(self.environment(mounts), memory=self.memory)
+        self.assertEqual(
+            lines,
+            [
+                f"kache's index stays on disk: {self.memory} is not a tmpfs.",
+                "The store's volume, /, is xfs, so it was not remounted.",
+            ],
+        )
+        self.assertFalse((self.cache / "index.db").exists())
+        self.assertEqual(self.sudo_calls(), [])
+
+    def test_a_refused_remount_keeps_the_volume_as_it_was(self) -> None:
+        mounts = [["/", {"target": "/", "fstype": "ext4", "options": "rw,relatime"}]]
+        line = kache_remote.lighten_volume(self.cache, self.environment(mounts, sudo_status=1))
+        self.assertEqual(
+            line,
+            "Remounting the store's volume, /, exited with status 1: mount: only root can do that; it keeps its options.",
+        )
+
+    def test_a_volume_findmnt_cannot_describe_is_left_alone(self) -> None:
+        line = kache_remote.lighten_volume(self.cache, self.environment([]))
+        self.assertEqual(line, "The store's volume was not remounted: findmnt could not describe it.")
+        self.assertEqual(self.sudo_calls(), [])
+
+
 class StartTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = Path(tempfile.mkdtemp())
@@ -1303,6 +1459,20 @@ class StartTests(unittest.TestCase):
             output.getvalue(),
         )
         self.assertIn("error: socket bind timed out", output.getvalue())
+
+    def test_the_store_is_prepared_before_any_daemon_opens_its_index(self) -> None:
+        kache = FakeKache(self.directory, {})
+        seen: list[list[list[str]]] = []
+
+        def prepare(environment: Mapping[str, str]) -> list[str]:
+            seen.append(kache.commands())
+            return ["kache's index and its write-ahead log live in memory."]
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            kache_remote.start(self.environment(kache), SteppingClock(), verify_seconds=4.0, prepare=prepare)
+        self.assertEqual(seen, [[]])
+        self.assertIn("kache's index and its write-ahead log live in memory.", output.getvalue())
 
     def test_daemon_logs_show_the_end_of_each_log_or_say_there_is_none(self) -> None:
         runtime = self.runtime_with_log("".join(f"line {number}\n" for number in range(100)))

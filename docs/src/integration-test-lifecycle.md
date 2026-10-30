@@ -769,7 +769,17 @@ shared remote stay enabled. The `Start kache remote` step that follows the actio
 2. exports `KACHE_CONFIG`, the credentials, and the job's `KACHE_MANIFEST_KEY` and
    `KACHE_NAMESPACE` to the job's later steps. A matrix job's key includes its matrix value, so
    every build variant keeps its own manifest and shards.
-3. starts the daemon, and fails the job unless `kache --json daemon status` reports it running with
+3. prepares the store before any kache process opens it. Nothing on a single-use runner needs to
+   survive a crash, and on Boat kache's downloads spent most of their time waiting for the lock of
+   its SQLite index, whose holders wait on the disk. When `/dev/shm` is a tmpfs with at least a GiB
+   free, the step moves the index, with the write-ahead log and shared-memory files SQLite keeps
+   beside it, into `/dev/shm/kache-index` and leaves a symlink in the cache directory; SQLite
+   resolves the symlink and keeps those files next to its target, so the index never touches the
+   disk. When the store's volume is ext4, the step remounts it with `noatime` and `barrier=0`
+   through passwordless `sudo`, so an fsync returns once the device has the data instead of after
+   its cache is flushed too. A runner where either step does not apply, or where it fails, keeps
+   kache's default, and the step prints what it did.
+4. starts the daemon, and fails the job unless `kache --json daemon status` reports it running with
    that file and `kache --json stats` reports that the file names `s3://<bucket>/artifacts`. A
    daemon gets a minute to answer, polled every two seconds, because a loaded runner can start it
    slowly. One that never answers is started once more, after the step warns and prints the end of

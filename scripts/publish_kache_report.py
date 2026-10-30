@@ -72,6 +72,18 @@ class Redaction:
         return text
 
 
+def index_location(environment: Mapping[str, str]) -> str | None:
+    """Where the job's kache index lives: in memory, where the job's start moved it behind a
+    symlink, or on disk. None outside a job's kache setup, which names no cache directory."""
+    configured = environment.get("KACHE_CACHE_DIR")
+    if not configured:
+        return None
+    index = Path(configured) / "index.db"
+    if index.is_symlink():
+        return f"Index: in memory, at {os.readlink(index)}."
+    return "Index: on disk, in the cache directory."
+
+
 def heading(job: str, phase: str) -> str:
     """The report's heading: the job, and whether the report covers its build or the whole job."""
     if phase == "build":
@@ -336,6 +348,9 @@ def main(arguments: Sequence[str] | None = None) -> None:
     (destination / "report.json").write_text(redaction.apply(report.stdout))
     markdown = [heading(os.environ.get("GITHUB_JOB", "local build"), options.phase), ""]
     markdown.append(f"Doctor exit status: `{doctor.returncode}`. Problems are diagnostic only.")
+    location = index_location(os.environ)
+    if location is not None:
+        markdown.extend(["", location])
     if doctor_output:
         markdown.extend(["", "<details><summary>Doctor output</summary>", "", "```text", doctor_output.strip(), "```", "", "</details>"])
 
