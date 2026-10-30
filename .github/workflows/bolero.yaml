@@ -35,8 +35,8 @@ env:
   # C.UTF-8 locale of GitHub's runner image, which the scripts and their tests expect.
   LC_ALL: C.UTF-8
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-  # Kache sizes its local store from the cache volume (5%, rounded and bounded).
-  # Keep the default so a runner disk change also changes its cache budget.
+  # scripts/kache_remote.py lets each job's local store hold a quarter of its cache volume, so a
+  # runner's disk still sets the store's budget.
   KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
   # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
@@ -133,9 +133,25 @@ jobs:
         with:
           label: run-runner-tests-and-every-ordinary-bolero-property
 
-      - name: Run runner tests and every ordinary Bolero property
+      - name: Build every ordinary Bolero property
         run: |
           just toolchains-install
+          just build-bolero
+
+      # The cache the build filled is published before the run starts: the run's outcome cannot lose
+      # it, the jobs building beside this one can use it, and its report shows what the build
+      # compiled and what the cache served.
+      - name: Publish kache cache after the build
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Publish kache report after the build
+        run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Run runner tests and every ordinary Bolero property
+        run: |
           just test-bolero-runner
           just test-bolero
 
@@ -166,7 +182,9 @@ jobs:
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           overwrite: true
-          path: ${{ runner.temp }}/kache-report
+          path: |
+            ${{ runner.temp }}/kache-report
+            ${{ runner.temp }}/kache-build-report
           if-no-files-found: warn
 
   bolero-fuzz:

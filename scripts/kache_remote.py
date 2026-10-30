@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """The shared kache remote of a CI job: its configuration, its daemon and its publication.
 
-`configure PATH` writes the file that names the remote for a kache daemon.
+`configure PATH` writes the file every kache process reads: the remote, and the budget of the local
+store, a quarter of the volume that holds the cache directory.
 
-`start` configures that remote for the current GitHub Actions job, exports the environment later
-steps need, starts the job's daemon and fails unless the daemon runs with that remote.
+`start` configures that remote and store for the current GitHub Actions job, exports the
+environment later steps need, starts the job's daemon and fails unless the daemon runs with that
+remote.
 
 `publish --job-status STATUS REPORT_DIR` publishes what the job built within a bounded time and
 records the outcome beside the job's kache report.
@@ -24,6 +26,7 @@ import enum
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shutil
 import signal
@@ -69,6 +72,15 @@ AMBIENT_REMOTE_SETTINGS = ("KACHE_S3_BUCKET", "KACHE_S3_REGION", "KACHE_S3_ENDPO
 BUCKET_NAME = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
 REGION_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 JOB_STATUSES = ("success", "failure", "cancelled")
+
+# The share of its volume a job's local store may hold, and the least it may hold. Kache's own
+# default is 5% of the volume, capped at 100 GiB: 15 GiB on a Boat runner, below the 33 GiB the
+# `checks` job's store reached, so the store ran over its budget, where kache's sweeps evict from it
+# while the job still builds. A quarter of the volume holds that with room to spare, and still
+# scales with a runner's disk. The floor is kache's own.
+STORE_SHARE_PERCENT = 25
+STORE_FLOOR_GIB = 5
+GIB = 1024**3
 
 
 class ConfigurationError(Exception):
@@ -159,6 +171,7 @@ class Remote:
         return f"s3://{self.bucket}/{BASE_PREFIX}"
 
     def configuration(self) -> str:
+        """The remote's table of the configuration file."""
         lines = [
             "[cache.remote]",
             'type = "s3"',
@@ -170,11 +183,70 @@ class Remote:
         ]
         return "\n".join(lines) + "\n"
 
-    def write_configuration(self, path: Path) -> None:
+
+
+def cache_directory(environment: Mapping[str, str]) -> Path:
+    """Where kache keeps its store: KACHE_CACHE_DIR, else kache's default below the user's cache
+    directory, which an absolute XDG_CACHE_HOME names, else `.cache` in the home directory: HOME,
+    or the user's passwd entry when HOME is unset."""
+    configured = environment.get("KACHE_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    cache_home = environment.get("XDG_CACHE_HOME")
+    if cache_home and Path(cache_home).is_absolute():
+        return Path(cache_home) / "kache"
+    home = environment.get("HOME")
+    if not home:
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    return Path(home) / ".cache" / "kache"
+
+
+@dataclass(frozen=True)
+class LocalStore:
+    """The budget of a job's local kache store: a share of the volume that holds it."""
+
+    max_size_gib: int
+
+    @classmethod
+    def for_volume(cls, volume_bytes: int) -> LocalStore:
+        """The volume's share, rounded to the nearest GiB as kache rounds its own, and at least the
+        floor."""
+        share = volume_bytes * STORE_SHARE_PERCENT // 100
+        rounded = (share + GIB // 2) // GIB
+        return cls(max_size_gib=max(rounded, STORE_FLOOR_GIB))
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str]) -> LocalStore:
+        """The budget of the store in the job's cache directory, measured on its volume."""
+        directory = cache_directory(environment)
+        # Before kache's first build the directory may not exist yet; it will be created on the
+        # volume of the nearest directory above it, and the filesystem root always exists.
+        existing = directory
+        while not existing.exists():
+            existing = existing.parent
+        return cls.for_volume(shutil.disk_usage(existing).total)
+
+    def configuration(self) -> str:
+        """The store's table of the configuration file."""
+        return f"[cache]\nlocal_max_size = {toml_string(f'{self.max_size_gib}GiB')}\n"
+
+
+@dataclass(frozen=True)
+class Configuration:
+    """The file every kache process of a job reads, through KACHE_CONFIG: its local store's budget
+    and its remote."""
+
+    store: LocalStore
+    remote: Remote
+
+    def text(self) -> str:
+        return self.store.configuration() + "\n" + self.remote.configuration()
+
+    def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            output.write(self.configuration())
+            output.write(self.text())
 
 
 def kache_environment(environment: Mapping[str, str]) -> dict[str, str]:
@@ -288,10 +360,11 @@ def start(environment: Mapping[str, str], clock: Clock | None = None) -> DaemonS
     """Configure the job's remote, export it to later steps, and start the job's daemon with it."""
     clock = clock or Clock()
     remote = Remote.from_environment(environment)
+    store = LocalStore.from_environment(environment)
     manifest_key = required(environment, "KACHE_MANIFEST_KEY")
     configuration = Path(required(environment, "RUNNER_TEMP")) / "kache-remote.toml"
     job_environment = Path(required(environment, "GITHUB_ENV"))
-    remote.write_configuration(configuration)
+    Configuration(store=store, remote=remote).write(configuration)
     exported = {
         "KACHE_CONFIG": str(configuration),
         "KACHE_S3_ACCESS_KEY": remote.access_key,
@@ -327,7 +400,10 @@ def start(environment: Mapping[str, str], clock: Clock | None = None) -> DaemonS
     if refusal is not None or daemon is None:
         raise StartError(f"the kache daemon is not running with {remote.description}: {refusal}")
     writes = "skips uploads" if daemon.remote_readonly else "publishes uploads"
-    print(f"kache daemon runs with {remote.description} from {configuration} and {writes}")
+    print(
+        f"kache daemon runs with {remote.description} and a {store.max_size_gib} GiB local store "
+        f"from {configuration}, and {writes}"
+    )
     return daemon
 
 
@@ -758,7 +834,7 @@ def record(publication: Publication, report_directory: Path, environment: Mappin
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    configure_parser = commands.add_parser("configure", help="write the daemon's remote configuration file")
+    configure_parser = commands.add_parser("configure", help="write the configuration file of kache's remote and store")
     configure_parser.add_argument("path", type=Path)
     commands.add_parser("start", help="configure the job's remote and start its kache daemon")
     publish_parser = commands.add_parser("publish", help="publish the job's cache within its budget")
@@ -769,7 +845,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     environment = dict(os.environ)
     try:
         if arguments.command == "configure":
-            Remote.from_environment(environment).write_configuration(arguments.path)
+            remote = Remote.from_environment(environment)
+            store = LocalStore.from_environment(environment)
+            Configuration(store=store, remote=remote).write(arguments.path)
         elif arguments.command == "start":
             start(environment)
         else:

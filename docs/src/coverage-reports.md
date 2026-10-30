@@ -140,6 +140,17 @@ separate build lock through export. The parts that only compile or target the br
 commands run without the collector's profile environment, so altered source cannot contribute to
 the current-source report.
 
+`just coverage-native-extras-build <producer> ...` compiles a producer's instrumented executables
+without running its check, for the producers that declare a build recipe: `test-shuttle`,
+`test-loom`, `test-turmoil` and the four Deloxide lane selections. It runs the producer's prepare
+recipes, then its build recipe in the same instrumented environment and target and under the same
+build lock, so a later `just coverage-native-extras <producer>` compiles nothing. Only the attempt
+and evidence paths differ, and nothing reads them while compiling. A build collects nothing and
+writes no completion record: Cargo's runner records into a temporary attempt that the build removes,
+and an execution there fails the build, because a build recipe only compiles. A lane's build recipe
+runs the lane's `build` command, whose record has the `built` verdict; the lane's run still measures
+its initial and warm passes, which then find everything built.
+
 Every run collects into a directory of its own,
 `target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. The attempt is the GitHub
 Actions run and attempt in CI, and the time and process locally. No run reuses, reads or cleans
@@ -192,26 +203,25 @@ executables that ran it.
 CI's extra-tests job collects native extras and per-mode primitive conformance, and runs primitive
 compile checks independently. The `shuttle` job, which runs only for a pull request labeled
 `shuttle`, collects its complete inventory, including random/PCT exploration and paired
-nondeterminism checking, and runs schedule replay qualification independently. For a pull
-request labeled `turmoil`, the `turmoil` job collects the canonical simulation suite once,
-including each fresh-process attempt, and runs failure replay qualification independently.
-For a request labeled `loom`, the `loom` job collects the complete Loom inventory, and two
-loom-qualification jobs split weakening qualification into shards, because it rebuilds the server
-once for each weakening of a server owner. The jobs upload `lcov.info`, `completion.json`,
-`executions.jsonl`, `export.log` and model evidence as `coverage-native-extras`,
-`coverage-shuttle`, `coverage-loom` and `coverage-turmoil`, whatever the verdict. The
-[ordinary workspace report](#the-ordinary-workspace-report) merges ordinary collections only; mode
-reports describe modeled or diagnostic execution and retain separate attribution, which the
-[full workspace union](#the-full-workspace-union) keeps when it combines them.
-`just coverage-shuttle <output> [filter]`,
-`just coverage-loom <output> [filter]` and `just coverage-turmoil <output>` copy a successfully
-completed canonical report to the
-requested path while retaining its attempt evidence. Replay uses the unchanged exact-check
-commands and the failure directory under the matching mode build directory.
-The benchmark bodies run instrumented, so
-their Criterion test mode shows that each body executes and measures nothing. The collector itself,
-including real instrumented runs of a fixture crate and its refusal of every incomplete collection,
-is tested with:
+nondeterminism checking, and runs schedule replay qualification independently. For a pull request
+labeled `turmoil`, the `turmoil` job collects the canonical simulation suite once, including each
+fresh-process attempt, and runs failure replay qualification independently. For a request labeled
+`loom`, the `loom` job collects the complete Loom inventory, and two loom-qualification jobs split
+weakening qualification into shards, because it rebuilds the server once for each weakening of a
+server owner. The `shuttle`, `loom` and `turmoil` jobs first build their producer with `just
+coverage-native-extras-build` and publish their kache cache, so a check that fails or reaches the
+job's time limit keeps what its build stored. The jobs upload `lcov.info`, `completion.json`,
+`executions.jsonl`, `export.log` and model evidence as `coverage-native-extras`, `coverage-shuttle`,
+`coverage-loom` and `coverage-turmoil`, whatever the verdict. The [ordinary workspace
+report](#the-ordinary-workspace-report) merges ordinary collections only; mode reports describe
+modeled or diagnostic execution and retain separate attribution, which the [full workspace
+union](#the-full-workspace-union) keeps when it combines them. `just coverage-shuttle <output>
+[filter]`, `just coverage-loom <output> [filter]` and `just coverage-turmoil <output>` copy a
+successfully completed canonical report to the requested path while retaining its attempt evidence.
+Replay uses the unchanged exact-check commands and the failure directory under the matching mode
+build directory. The benchmark bodies run instrumented, so their Criterion test mode shows that each
+body executes and measures nothing. The collector itself, including real instrumented runs of a
+fixture crate and its refusal of every incomplete collection, is tested with:
 
 ```bash
 just test-native-coverage

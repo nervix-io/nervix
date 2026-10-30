@@ -165,7 +165,7 @@ COPY scripts/runner_diagnostics.py scripts/record_runner_load.py ./scripts/
 ENV CARGO_PROFILE_RELEASE_LTO=fat
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 ENV RUSTC_WRAPPER=kache
-# Keep kache's disk-share default: the builder cache scales with its own volume.
+# `kache_remote.py configure` lets the builder's store hold a quarter of its cache mount's volume.
 # BuildKit does not inherit the workflow's environment; opt into the same 64 GiB recovery floor.
 ENV KACHE_AUTO_RECOVER_MIN_FREE_BYTES=68719476736
 ENV KACHE_CACHE_EXECUTABLES=true

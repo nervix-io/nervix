@@ -9,8 +9,8 @@ env:
   # C.UTF-8 locale of GitHub's runner image, which the scripts and their tests expect.
   LC_ALL: C.UTF-8
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-  # Kache sizes its local store from the cache volume (5%, rounded and bounded).
-  # Keep the default so a runner disk change also changes its cache budget.
+  # scripts/kache_remote.py lets each job's local store hold a quarter of its cache volume, so a
+  # runner's disk still sets the store's budget.
   KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
   # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
@@ -511,10 +511,33 @@ jobs:
         with:
           label: diagnostic-lane
 
-      - name: Diagnostic lane
+      # The lane's 335 minutes begin with its build and end with its coverage export.
+      - name: Build the diagnostic lane
         run: |
           just toolchains-install
-          timeout --signal=TERM --kill-after=60 335m just coverage-native-extras "test-${SELECTION}"
+          echo "LANE_DEADLINE=$(( $(date +%s) + 335 * 60 ))" >> "${GITHUB_ENV}"
+          timeout --signal=TERM --kill-after=60 335m just coverage-native-extras-build "test-${SELECTION}"
+
+      # The cache the build filled is published before the run starts: the run's outcome cannot lose
+      # it, the jobs building beside this one can use it, and its report shows what the build
+      # compiled and what the cache served.
+      - name: Publish kache cache after the build
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Publish kache report after the build
+        run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Diagnostic lane
+        run: |
+          remaining=$(( LANE_DEADLINE - $(date +%s) ))
+          if (( remaining <= 0 )); then
+            echo "::error::The diagnostic lane's build used its whole 335-minute bound"
+            exit 124
+          fi
+          timeout --signal=TERM --kill-after=60 "${remaining}s" just coverage-native-extras "test-${SELECTION}"
 
       - name: Runner diagnostics before Supervision qualification
         uses: ./.github/actions/runner-diagnostics
@@ -569,7 +592,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kache-${{ github.job }}-${{ matrix.selection }}-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/kache-report
+          path: |
+            ${{ runner.temp }}/kache-report
+            ${{ runner.temp }}/kache-build-report
           if-no-files-found: warn
 
   tests:
@@ -1925,10 +1950,25 @@ jobs:
         with:
           label: shuttle-concurrency-checks
 
-      - name: Shuttle concurrency checks
+      - name: Build the Shuttle checks
         run: |
           just toolchains-install
-          just coverage-native-extras test-shuttle
+          just coverage-native-extras-build test-shuttle
+
+      # The cache the build filled is published before the run starts: the run's outcome cannot lose
+      # it, the jobs building beside this one can use it, and its report shows what the build
+      # compiled and what the cache served.
+      - name: Publish kache cache after the build
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Publish kache report after the build
+        run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Shuttle concurrency checks
+        run: just coverage-native-extras test-shuttle
 
       - name: Runner diagnostics before Shuttle schedule replay
         uses: ./.github/actions/runner-diagnostics
@@ -1979,7 +2019,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/kache-report
+          path: |
+            ${{ runner.temp }}/kache-report
+            ${{ runner.temp }}/kache-build-report
           if-no-files-found: warn
 
       # A modeled concurrency failure is only reproducible from the schedule that produced it,
@@ -2094,10 +2136,25 @@ jobs:
         with:
           label: loom-memory-ordering-models
 
-      - name: Loom memory-ordering models
+      - name: Build the Loom models
         run: |
           just toolchains-install
-          just coverage-native-extras test-loom
+          just coverage-native-extras-build test-loom
+
+      # The cache the build filled is published before the run starts: the run's outcome cannot lose
+      # it, the jobs building beside this one can use it, and its report shows what the build
+      # compiled and what the cache served.
+      - name: Publish kache cache after the build
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Publish kache report after the build
+        run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Loom memory-ordering models
+        run: just coverage-native-extras test-loom
 
       - name: Publish runner load
         if: always()
@@ -2140,7 +2197,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/kache-report
+          path: |
+            ${{ runner.temp }}/kache-report
+            ${{ runner.temp }}/kache-build-report
           if-no-files-found: warn
 
       # A failed Loom model is only reproducible from the checkpoint of the execution that failed;
@@ -2406,10 +2465,25 @@ jobs:
         with:
           label: turmoil-simulations
 
-      - name: Turmoil simulations
+      - name: Build the Turmoil simulations
         run: |
           just toolchains-install
-          just coverage-native-extras test-turmoil --output target/turmoil.lcov
+          just coverage-native-extras-build test-turmoil
+
+      # The cache the build filled is published before the run starts: the run's outcome cannot lose
+      # it, the jobs building beside this one can use it, and its report shows what the build
+      # compiled and what the cache served.
+      - name: Publish kache cache after the build
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Publish kache report after the build
+        run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Turmoil simulations
+        run: just coverage-native-extras test-turmoil --output target/turmoil.lcov
 
       - name: Runner diagnostics before Turmoil failure replay
         uses: ./.github/actions/runner-diagnostics
@@ -2475,7 +2549,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/kache-report
+          path: |
+            ${{ runner.temp }}/kache-report
+            ${{ runner.temp }}/kache-build-report
           if-no-files-found: warn
 
       # A failed scenario is reproducible only from its record: the seed and every other input,

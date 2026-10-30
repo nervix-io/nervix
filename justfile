@@ -63,6 +63,10 @@ prepare-archive-counts-fuzz: (prepare-bolero "registry-archived-models")
 test-bolero filter="": bolero-deps
     python3 -m scripts.bolero test {{ quote(filter) }}
 
+# Compile every ordinary harness `test-bolero` runs, as it builds them, without running a property.
+build-bolero filter="": bolero-deps
+    python3 -m scripts.bolero build {{ quote(filter) }}
+
 # List every compiled, registered Bolero target after checking the inventory.
 fuzz-list: bolero-deps
     python3 -m scripts.bolero list
@@ -735,6 +739,21 @@ test-deloxide-stress-workloads:
 test-deloxide-stress-restore-workloads:
     python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} run deloxide-stress-restore
 
+# Each selection's diagnostic executables, built as its workloads recipe builds them, without
+# running a workload. Like the workloads recipes they have no dependencies, so the native coverage
+# collector builds exactly the lane's executables inside its instrumentation before CI runs the lane.
+build-deloxide-executables:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} build deloxide
+
+build-deloxide-order-executables:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} build deloxide-order
+
+build-deloxide-stress-executables:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} build deloxide-stress
+
+build-deloxide-stress-restore-executables:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} build deloxide-stress-restore
+
 # Prove the lane's supervision on real failing processes: probe workloads that deadlock, fail their
 # diagnostics, hang on an untracked wait, abort, retain an unreviewed potential cycle or overflow
 # their retention must each fail the lane with its own class, keep their output and evidence, and
@@ -784,6 +803,11 @@ test-shuttle-checks filter="":
     if [[ -n "$evidence" ]]; then report=(--report "$evidence"); fi
     python3 -m scripts.shuttle_checks --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }} "${report[@]}"
 
+# Compile every package `test-shuttle-checks` explores, as it builds them, without running a check.
+[private]
+build-shuttle-checks:
+    python3 -m scripts.shuttle_checks build
+
 # Replay a schedule `test-shuttle` persisted under target/shuttle-failures in a fresh process. Its
 # parent directories name the exact package and check, so the schedule cannot run against another
 # invariant.
@@ -818,6 +842,11 @@ test-loom-models filter="":
     report=()
     if [[ -n "$evidence" ]]; then report=(--report "$evidence"); fi
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }} "${report[@]}"
+
+# Compile every package `test-loom-models` explores, as it builds them, without running a model.
+[private]
+build-loom-models:
+    python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} build
 
 # Measure the native runner's inventory, completion and failure artifact paths.
 coverage-loom-runner:
@@ -857,12 +886,7 @@ test-turmoil budget_seconds="480":
     python3 -m unittest --quiet scripts.tests.test_libtest_accounting
     turmoil_rustflags="--cfg tokio_unstable ${RUSTFLAGS:-}"
     export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
-    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
-        --package nervix-primitives --features 'turmoil native' --lib
-    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
-        --package nervix-execution --features turmoil --lib
-    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
-        --package nervix-interconnect --features turmoil --lib --test simulation
+    just build-turmoil-simulations
     logs={{ quote(cargo_target_dir + "/turmoil-suite") }}
     rm -rf "${logs}"
     mkdir -p "${logs}"
@@ -901,6 +925,19 @@ test-turmoil budget_seconds="480":
     python3 -m scripts.libtest_accounting turmoil --inventory tests/turmoil-inventory.toml \
         "${logs}/primitives.log" "${logs}/execution.log" "${logs}/interconnect-library.log" \
         "${logs}/interconnect-simulation.log"
+
+# Compile every test target `test-turmoil` runs, with its flags, and run none of them.
+[private]
+build-turmoil-simulations:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    turmoil_rustflags="--cfg tokio_unstable ${RUSTFLAGS:-}"
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-primitives --features 'turmoil native' --lib
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-execution --features turmoil --lib
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-interconnect --features turmoil --lib --test simulation
 
 # Run the interconnect's Turmoil simulation scenarios. Extra arguments filter or configure the test
 # binary, so one test can run without the execution and library checks. A selection that executes
@@ -1987,6 +2024,13 @@ coverage-turmoil output:
 # Run all: `just coverage-native-extras`; one: `just coverage-native-extras bench-smoke`.
 coverage-native-extras *producers:
     python3 -m scripts.native_coverage --target-dir {{ quote(cargo_target_dir) }} run {{ producers }}
+
+# Compile the named producers' instrumented executables without running them: their prepare
+# recipes, then each one's build recipe in the instrumented build `coverage-native-extras` collects
+# from, which then compiles nothing. CI builds `test-shuttle`, `test-loom`, `test-turmoil` and each
+# Deloxide lane selection this way, and publishes its cache before the run.
+coverage-native-extras-build +producers:
+    python3 -m scripts.native_coverage --target-dir {{ quote(cargo_target_dir) }} build {{ producers }}
 
 # CI calls these only after the owning phase succeeds. Exported coverage and compiler evidence
 # live outside these Cargo build outputs; failed phases keep their outputs for diagnosis.

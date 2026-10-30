@@ -2,11 +2,12 @@
 """Record kache health, where a job's compile time went, and the causes of the most expensive misses.
 
 A job reports after its build, when it builds before it runs, and again at its end, whatever its
-outcome. The report says how long kache saw compilation run and splits that time into compiling
-cache misses, serving cache hits and kache's own work: computing cache keys, waiting for a cache
-permit, and storing and restoring outputs. Together with the job's steps, which show whether its
-build or its run took the time, a slow job reads as slow compilation, a cache that missed, a cache
-whose hits were slow, or slow execution.
+outcome. The report gives the window in which kache saw compilation and the time kache tracked on
+cacheable crates: the hits it served, the misses it compiled, and how that time splits without
+overlap into compiling the misses and kache's own work, such as computing cache keys, waiting for a
+cache permit, and restoring and storing outputs. Together with the job's steps, which show whether
+its build or its run took the time, a slow job reads as slow compilation, a cache that missed, a
+cache whose hits were slow, or slow execution.
 """
 
 from __future__ import annotations
@@ -57,24 +58,37 @@ def clock_time(timestamp: str) -> str | None:
 
 @dataclass(frozen=True)
 class CompileTime:
-    """Where the compile time kache observed went, from its JSON report."""
+    """Where the compile time kache tracked went, from its JSON report.
+
+    Kache tracks the time its wrapper spends on every cacheable crate: a hit's time is kache's own
+    work, and a miss's time is the compilation plus kache's own work around it. Its phases split
+    that tracked time without overlap.
+    """
 
     window_ms: float
     started: str | None
     ended: str | None
     cacheable: int
-    compiled: int
-    compile_ms: float
     local_hits: int
     prefetch_hits: int
     remote_hits: int
+    compiled: int
     hit_ms: float
     average_hit_ms: float
+    miss_ms: float
+    average_miss_ms: float
+    compile_ms: float
     key_ms: float
-    average_key_ms: float
+    dep_info_ms: float
+    dep_info_runs: int
+    flight_wait_ms: float
     permit_wait_ms: float
-    store_ms: float
+    wait_ms: float
     restore_ms: float
+    store_ms: float
+    lookup_ms: float
+    startup_ms: float
+    unattributed_ms: float
     suggestions: tuple[str, ...]
 
     @classmethod
@@ -89,45 +103,78 @@ class CompileTime:
             window_ms=float(timeline.get("duration_ms", 0)),
             started=clock_time(str(timeline.get("start_time", ""))),
             ended=clock_time(str(timeline.get("end_time", ""))),
-            cacheable=int(summary.get("total_crates", timeline.get("cacheable_count", 0))),
-            compiled=int(summary.get("misses", 0)),
-            compile_ms=float(timing.get("miss_compile_time_ms", 0)),
+            cacheable=int(summary.get("total_crates", 0)),
             local_hits=int(summary.get("local_hits", 0)),
             prefetch_hits=int(summary.get("prefetch_hits", 0)),
             remote_hits=int(summary.get("remote_hits", 0)),
+            # Kache counts a crate it compiled beside an identical compilation as a duplicate.
+            compiled=int(summary.get("misses", 0)) + int(summary.get("dups", 0)),
             hit_ms=float(timing.get("hit_time_ms", 0)),
             average_hit_ms=float(timing.get("avg_hit_ms", 0)),
+            miss_ms=float(timing.get("miss_time_ms", 0)),
+            average_miss_ms=float(timing.get("avg_miss_ms", 0)),
+            compile_ms=float(timing.get("miss_compile_time_ms", 0)),
             key_ms=float(timing.get("total_key_ms", 0)),
-            average_key_ms=float(timing.get("avg_key_ms", 0)),
+            dep_info_ms=float(timing.get("total_dep_info_ms", 0)),
+            dep_info_runs=int(timing.get("dep_info_runs", 0)),
+            flight_wait_ms=float(timing.get("total_flight_wait_ms", 0)),
             permit_wait_ms=float(timing.get("total_permit_wait_ms", 0)),
-            store_ms=float(timing.get("total_store_ms", 0)),
+            wait_ms=float(timing.get("total_wait_ms", 0)),
             restore_ms=float(timing.get("total_restore_ms", 0)),
+            store_ms=float(timing.get("total_store_ms", 0)),
+            lookup_ms=float(timing.get("total_lookup_ms", 0)),
+            startup_ms=float(timing.get("total_startup_ms", 0)),
+            unattributed_ms=float(timing.get("total_unattributed_ms", 0)),
             suggestions=tuple(str(suggestion) for suggestion in report.get("suggestions") or ()),
         )
 
     def hits(self) -> int:
         return self.local_hits + self.prefetch_hits + self.remote_hits
 
+    def tracked_ms(self) -> float:
+        return self.hit_ms + self.miss_ms
+
+    def share(self, milliseconds: float) -> str:
+        tracked = self.tracked_ms()
+        if not tracked:
+            return ""
+        return f"{milliseconds / tracked * 100:.1f}%"
+
+    def phase(self, label: str, milliseconds: float) -> str:
+        return f"| {label} | {minutes(milliseconds)} | {self.share(milliseconds)} |"
+
     def lines(self) -> list[str]:
         window = f"a {minutes(self.window_ms)} window"
         if self.started and self.ended:
             window = f"{window} from {self.started} to {self.ended} UTC"
-        compiled_each = seconds(self.compile_ms / self.compiled) if self.compiled else ""
         lines = [
             "### Where the compile time went",
             "",
-            f"Kache saw {self.cacheable} cacheable crates in {window}. Each total adds up every "
-            "parallel rustc, so together they exceed the window.",
+            f"Kache saw {self.cacheable} cacheable crates in {window}. It tracked "
+            f"{minutes(self.tracked_ms())} on them, adding up every parallel rustc, so it can "
+            "exceed the window.",
             "",
-            "| Part | Crates | Total | Each |",
+            "| Crates | Count | Tracked time | Each |",
             "| --- | ---: | ---: | ---: |",
-            f"| Compiled after a cache miss | {self.compiled} | {minutes(self.compile_ms)} | {compiled_each} |",
             f"| Served from the cache: {self.local_hits} local, {self.prefetch_hits} prefetched, "
             f"{self.remote_hits} remote | {self.hits()} | {minutes(self.hit_ms)} | {seconds(self.average_hit_ms)} |",
-            f"| Computing cache keys | | {minutes(self.key_ms)} | {seconds(self.average_key_ms)} |",
-            f"| Waiting for a cache permit | | {minutes(self.permit_wait_ms)} | |",
-            f"| Storing compiled outputs | | {minutes(self.store_ms)} | |",
-            f"| Restoring cached outputs | | {minutes(self.restore_ms)} | |",
+            f"| Compiled after a cache miss | {self.compiled} | {minutes(self.miss_ms)} | {seconds(self.average_miss_ms)} |",
+            "",
+            "| Where the tracked time went | Time | Share |",
+            "| --- | ---: | ---: |",
+            self.phase("Compiling the misses", self.compile_ms),
+            self.phase("Computing cache keys", self.key_ms),
+            self.phase(f"of which the dep-info pre-pass, {self.dep_info_runs} runs", self.dep_info_ms),
+            self.phase(
+                f"Waiting: {minutes(self.permit_wait_ms)} for a cache permit, "
+                f"{minutes(self.flight_wait_ms)} for the same crate compiling in another process",
+                self.wait_ms,
+            ),
+            self.phase("Restoring cached outputs", self.restore_ms),
+            self.phase("Storing compiled outputs", self.store_ms),
+            self.phase("Looking up the cache", self.lookup_ms),
+            self.phase("Starting the wrapper", self.startup_ms),
+            self.phase("Attributed to no phase", self.unattributed_ms),
         ]
         if self.suggestions:
             lines.extend(["", "Kache's reading of the window:", ""])
@@ -141,7 +188,7 @@ def report_lines(report: Mapping[str, Any]) -> list[str]:
     lines = [
         "",
         f"Hits: {summary.get('local_hits', 0)} local, {summary.get('prefetch_hits', 0)} prefetched, {summary.get('remote_hits', 0)} remote. Misses: {summary.get('misses', 0)}; passthroughs: {summary.get('passthroughs', 0)}.",
-        f"Hit rate: {summary.get('hit_rate_pct', 0)}%; estimated time saved: {summary.get('time_saved_ms', 0)} ms.",
+        f"Hit rate: {summary.get('hit_rate_pct', 0)}%; compile time the hits saved, by kache's estimate: {minutes(float(summary.get('time_saved_ms', 0)))}.",
     ]
     for store in (report.get("storage") or {}).get("stores", []):
         used = store.get("bytes", 0)

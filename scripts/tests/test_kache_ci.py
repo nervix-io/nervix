@@ -6,8 +6,10 @@ import io
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shlex
+import shutil
 import signal
 import stat
 import subprocess
@@ -23,6 +25,7 @@ from scripts import kache_remote, publish_kache_report
 from scripts.kache_remote import (
     ConfigurationError,
     DaemonState,
+    LocalStore,
     Outcome,
     Publication,
     StartError,
@@ -56,9 +59,9 @@ KACHE_JOBS = {
 # The jobs that build before they run, with the cache published and reported between the two, so the
 # run's outcome cannot lose what the build filled and each phase's time is visible on its own.
 BUILD_PHASE_JOBS = {
-    "check.yaml": {"tests", "scenarios", "client-conformance"},
+    "check.yaml": {"tests", "scenarios", "client-conformance", "shuttle", "loom", "turmoil", "deloxide"},
     "docker-build.yaml": set(),
-    "bolero.yaml": {"bolero-fuzz"},
+    "bolero.yaml": {"bolero-random", "bolero-fuzz"},
 }
 BUILD_PUBLISH_COMMAND = 'python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"'
 BUILD_REPORT_COMMAND = 'python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"'
@@ -294,31 +297,58 @@ class KacheWorkflowTests(unittest.TestCase):
                 "start_time": "2026-10-29T21:43:35.902854025+00:00",
                 "end_time": "2026-10-29T21:45:35.100000000+00:00",
             },
-            "summary": {"total_crates": 8, "misses": 2, "local_hits": 3, "prefetch_hits": 1, "remote_hits": 2},
+            "summary": {
+                "total_crates": 9,
+                "misses": 2,
+                "dups": 1,
+                "local_hits": 3,
+                "prefetch_hits": 1,
+                "remote_hits": 2,
+                "time_saved_ms": 90_000,
+            },
+            # Kache's phases split its tracked time, hits plus misses, without overlap.
             "timing": {
-                "miss_compile_time_ms": 30_000,
-                "hit_time_ms": 6_000,
-                "avg_hit_ms": 1_000,
-                "total_key_ms": 12_000,
-                "avg_key_ms": 1_500,
-                "total_permit_wait_ms": 60_000,
+                "hit_time_ms": 60_000,
+                "avg_hit_ms": 10_000,
+                "miss_time_ms": 60_000,
+                "avg_miss_ms": 20_000,
+                "miss_compile_time_ms": 42_000,
+                "total_key_ms": 48_000,
+                "total_dep_info_ms": 6_000,
+                "dep_info_runs": 4,
+                "total_wait_ms": 18_000,
+                "total_flight_wait_ms": 6_000,
+                "total_permit_wait_ms": 12_000,
+                "total_restore_ms": 6_000,
                 "total_store_ms": 3_000,
-                "total_restore_ms": 2_400,
+                "total_lookup_ms": 600,
+                "total_startup_ms": 1_200,
+                "total_unattributed_ms": 1_200,
             },
             "suggestions": ["Average cache hit overhead is 1000ms — check disk I/O or consider faster storage"],
         }
         lines = publish_kache_report.report_lines(report)
+        self.assertIn("Hit rate: 0%; compile time the hits saved, by kache's estimate: 1.5 min.", lines)
         self.assertIn(
-            "Kache saw 8 cacheable crates in a 2.0 min window from 21:43 to 21:45 UTC. Each total adds "
-            "up every parallel rustc, so together they exceed the window.",
+            "Kache saw 9 cacheable crates in a 2.0 min window from 21:43 to 21:45 UTC. It tracked "
+            "2.0 min on them, adding up every parallel rustc, so it can exceed the window.",
             lines,
         )
-        self.assertIn("| Compiled after a cache miss | 2 | 0.5 min | 15.0 s |", lines)
-        self.assertIn("| Served from the cache: 3 local, 1 prefetched, 2 remote | 6 | 0.1 min | 1.0 s |", lines)
-        self.assertIn("| Computing cache keys | | 0.2 min | 1.5 s |", lines)
-        self.assertIn("| Waiting for a cache permit | | 1.0 min | |", lines)
-        self.assertIn("| Storing compiled outputs | | 0.1 min | |", lines)
-        self.assertIn("| Restoring cached outputs | | 0.0 min | |", lines)
+        self.assertIn("| Served from the cache: 3 local, 1 prefetched, 2 remote | 6 | 1.0 min | 10.0 s |", lines)
+        self.assertIn("| Compiled after a cache miss | 3 | 1.0 min | 20.0 s |", lines)
+        self.assertIn("| Compiling the misses | 0.7 min | 35.0% |", lines)
+        self.assertIn("| Computing cache keys | 0.8 min | 40.0% |", lines)
+        self.assertIn("| of which the dep-info pre-pass, 4 runs | 0.1 min | 5.0% |", lines)
+        self.assertIn(
+            "| Waiting: 0.2 min for a cache permit, 0.1 min for the same crate compiling in another "
+            "process | 0.3 min | 15.0% |",
+            lines,
+        )
+        self.assertIn("| Restoring cached outputs | 0.1 min | 5.0% |", lines)
+        self.assertIn("| Storing compiled outputs | 0.1 min | 2.5% |", lines)
+        self.assertIn("| Looking up the cache | 0.0 min | 0.5% |", lines)
+        self.assertIn("| Starting the wrapper | 0.0 min | 1.0% |", lines)
+        self.assertIn("| Attributed to no phase | 0.0 min | 1.0% |", lines)
         self.assertIn("- Average cache hit overhead is 1000ms — check disk I/O or consider faster storage", lines)
 
     def test_a_report_without_compilation_says_so_instead_of_a_breakdown(self) -> None:
@@ -468,19 +498,30 @@ def run_cli(arguments: list[str], environment: dict[str, str]) -> subprocess.Com
     )
 
 
+def quarter_of_volume_gib(path: Path) -> int:
+    """A quarter of the volume holding `path`, in whole GiB rounded half up, and at least 5."""
+    volume = shutil.disk_usage(path).total
+    quarter_mib = volume // 4 // 1024**2
+    return max((quarter_mib + 512) // 1024, 5)
+
+
 class RemoteConfigurationTests(unittest.TestCase):
-    def test_configure_writes_the_remote_for_the_daemon_without_credentials(self) -> None:
+    def test_configure_writes_the_remote_and_the_store_budget_without_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "nested" / "kache.toml"
-            result = run_cli(["configure", str(config)], REMOTE_ENVIRONMENT)
+            # The cache directory does not exist yet: its budget comes from the volume it will be on.
+            cache = Path(directory) / "home" / ".cache" / "kache"
+            result = run_cli(["configure", str(config)], REMOTE_ENVIRONMENT | {"KACHE_CACHE_DIR": str(cache)})
             self.assertEqual(result.returncode, 0, result.stderr)
             parsed = tomllib.loads(config.read_text())
             mode = stat.S_IMODE(config.stat().st_mode)
+            budget = quarter_of_volume_gib(Path(directory))
 
         self.assertEqual(
             parsed,
             {
                 "cache": {
+                    "local_max_size": f"{budget}GiB",
                     "remote": {
                         "type": "s3",
                         "bucket": "kache-ci",
@@ -494,12 +535,38 @@ class RemoteConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(mode, 0o600)
 
+    def test_the_store_may_hold_a_quarter_of_its_volume_and_at_least_kaches_floor(self) -> None:
+        gib = 1024**3
+        self.assertEqual(LocalStore.for_volume(300 * 10**9), LocalStore(max_size_gib=70))
+        self.assertEqual(LocalStore.for_volume(4 * 42 * gib + 4 * gib // 2), LocalStore(max_size_gib=43))
+        self.assertEqual(LocalStore.for_volume(4 * 42 * gib + 4 * gib // 2 - 4), LocalStore(max_size_gib=42))
+        self.assertEqual(LocalStore.for_volume(16 * gib), LocalStore(max_size_gib=5))
+        self.assertEqual(LocalStore(max_size_gib=70).configuration(), '[cache]\nlocal_max_size = "70GiB"\n')
+
+    def test_the_store_is_measured_where_kache_keeps_it(self) -> None:
+        self.assertEqual(
+            kache_remote.cache_directory({"KACHE_CACHE_DIR": "/cache/kache", "XDG_CACHE_HOME": "/xdg", "HOME": "/home/user"}),
+            Path("/cache/kache"),
+        )
+        self.assertEqual(
+            kache_remote.cache_directory({"XDG_CACHE_HOME": "/xdg", "HOME": "/home/user"}), Path("/xdg/kache")
+        )
+        # As in kache, a relative XDG_CACHE_HOME names no cache directory.
+        self.assertEqual(
+            kache_remote.cache_directory({"XDG_CACHE_HOME": "xdg", "HOME": "/home/user"}),
+            Path("/home/user/.cache/kache"),
+        )
+        # Without HOME, kache takes the home directory from the user's passwd entry.
+        self.assertEqual(
+            kache_remote.cache_directory({}), Path(pwd.getpwuid(os.getuid()).pw_dir) / ".cache" / "kache"
+        )
+
     def test_every_remote_setting_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "kache.toml"
             for missing in REMOTE_ENVIRONMENT:
                 with self.subTest(missing=missing):
-                    environment = dict(REMOTE_ENVIRONMENT)
+                    environment = dict(REMOTE_ENVIRONMENT) | {"KACHE_CACHE_DIR": directory}
                     environment.pop(missing)
                     result = run_cli(["configure", str(config)], environment)
                     self.assertEqual(result.returncode, 2)
@@ -1095,6 +1162,7 @@ class StartTests(unittest.TestCase):
             GITHUB_ENV=str(self.github_env),
             KACHE_MANIFEST_KEY="deloxide-deloxide-order-Linux-X64",
             KACHE_S3_PREFIX="ambient-prefix",
+            KACHE_CACHE_DIR=str(self.directory / "kache-cache"),
         ) | REMOTE_ENVIRONMENT | extra
 
     def start(self, behavior: dict, **extra: str) -> tuple[DaemonState, FakeKache, SteppingClock]:
@@ -1120,7 +1188,9 @@ class StartTests(unittest.TestCase):
                 "KACHE_NAMESPACE=deloxide-deloxide-order-Linux-X64",
             ],
         )
-        self.assertEqual(tomllib.loads(configuration.read_text())["cache"]["remote"]["bucket"], "kache-ci")
+        written = tomllib.loads(configuration.read_text())["cache"]
+        self.assertEqual(written["remote"]["bucket"], "kache-ci")
+        self.assertEqual(written["local_max_size"], f"{quarter_of_volume_gib(self.directory)}GiB")
         started = kache.calls()[0]
         self.assertEqual(started["argv"], ["daemon", "start"])
         self.assertEqual(
@@ -1174,10 +1244,12 @@ class StartTests(unittest.TestCase):
     def test_main_maps_each_command_to_its_exit_status(self) -> None:
         kache = FakeKache(self.directory, {"daemon_start_status": 1})
         configuration = self.directory / "image-build.toml"
-        missing_bucket = dict(REMOTE_ENVIRONMENT)
+        # An image build keeps kache's default cache directory below its HOME.
+        image_build = REMOTE_ENVIRONMENT | {"HOME": str(self.directory / "root")}
+        missing_bucket = dict(image_build)
         missing_bucket.pop("KACHE_S3_BUCKET")
         for environment, arguments, status, message in (
-            (REMOTE_ENVIRONMENT, ["configure", str(configuration)], 0, ""),
+            (image_build, ["configure", str(configuration)], 0, ""),
             (missing_bucket, ["configure", str(configuration)], 2, "configure: KACHE_S3_BUCKET is required"),
             (self.environment(kache), ["start"], 1, "`kache daemon start` exited with status 1"),
         ):
@@ -1190,7 +1262,9 @@ class StartTests(unittest.TestCase):
                 ):
                     self.assertEqual(kache_remote.main(arguments), status)
                 self.assertIn(message, errors.getvalue())
-        self.assertEqual(tomllib.loads(configuration.read_text())["cache"]["remote"]["prefix"], "artifacts")
+        written = tomllib.loads(configuration.read_text())["cache"]
+        self.assertEqual(written["remote"]["prefix"], "artifacts")
+        self.assertEqual(written["local_max_size"], f"{quarter_of_volume_gib(self.directory)}GiB")
 
     def test_the_command_line_reports_configuration_and_start_failures(self) -> None:
         kache = FakeKache(self.directory, {"daemon_start_status": 1})

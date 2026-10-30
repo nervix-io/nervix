@@ -2040,7 +2040,12 @@ class ContractTests(unittest.TestCase):
         self.assertIn(f"selection: [{', '.join(inventory.selections)}]", job)
         self.assertIn("fail-fast: false", job)
         job_limit = int(re.search(r"timeout-minutes: (\d+)", job).group(1))  # type: ignore[union-attr]
-        lane_limit = int(re.search(r'--kill-after=60 (\d+)m just coverage-native-extras "test-\$\{SELECTION\}"', job).group(1))  # type: ignore[union-attr]
+        # One bound covers the lane's build step and its run: the build step sets the deadline they
+        # share, and the run gets what the build and the cache publication left of it.
+        lane_limit = int(re.search(r"LANE_DEADLINE=\$\(\( \$\(date \+%s\) \+ (\d+) \* 60 \)\)", job).group(1))  # type: ignore[union-attr]
+        self.assertIn(f'--kill-after=60 {lane_limit}m just coverage-native-extras-build "test-${{SELECTION}}"', job)
+        self.assertIn("remaining=$(( LANE_DEADLINE - $(date +%s) ))", job)
+        self.assertIn('--kill-after=60 "${remaining}s" just coverage-native-extras "test-${SELECTION}"', job)
         qualification_limit = int(re.search(r'--kill-after=60 (\d+)m just test-deloxide-qualification "\$\{SELECTION\}"', job).group(1))  # type: ignore[union-attr]
         # The inventory's budget is the diagnostic part of the lane's bound; preparation and
         # export share the rest, and setup and the uploads the job's remaining minutes.

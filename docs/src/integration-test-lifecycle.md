@@ -693,16 +693,18 @@ storage can slow work without stolen time. The samples support comparison, not a
 Every kache-backed job uses kache 1.2.1, records `doctor` output without making it a test failure,
 and publishes a cache report whatever its outcome, a timeout included. The report reads the last six
 hours of kache's events: no kache-backed job may run longer, and each runs on a machine of its own,
-so the report covers the whole job and nothing before it. It splits the compile time kache observed
-into compiling cache misses, serving cache hits, local, prefetched or remote, and kache's own work:
-computing cache keys, waiting for a cache permit, and storing and restoring outputs. It adds kache's
-own reading of that window and diagnoses the five most expensive misses with `why-miss`. A job that
-builds before it runs also reports right after its build, so its summary shows what the build
-compiled and what the cache served apart from what the run did, and a slow job reads as slow
-compilation, a cache that missed, cache hits that were slow, or a slow run. The shared S3 cache
-keeps executable and test-binary outputs, with stores sized for the full builds: every kache-backed
-job and Docker image build uses a 1 TiB store ceiling. This is an upper bound, not a disk
-reservation. The runner's actual disk capacity remains the practical limit.
+so the report covers the whole job and nothing before it. It gives the window in which kache saw
+compilation and the time kache tracked on cacheable crates, for the hits it served, local,
+prefetched or remote, and for the misses it compiled. It splits that tracked time without overlap
+into compiling the misses and kache's own work: computing cache keys, waiting for a cache permit or
+for the same crate compiling in another process, restoring and storing outputs, looking up the
+cache, starting its wrapper, and time kache attributes to no phase. It adds kache's own reading of
+that window and diagnoses the five most expensive misses with `why-miss`. A job that builds before
+it runs also reports right after its build, so its summary shows what the build compiled and what
+the cache served apart from what the run did, and a slow job reads as slow compilation, a cache that
+missed, cache hits that were slow, or a slow run. The shared S3 cache keeps executable and
+test-binary outputs. The report shows the local store's size against the budget [Cache
+Publication](#cache-publication) describes.
 
 The shared remote is Cloudflare R2 through its S3 API. Kache reads the base `artifacts` prefix
 first. Pull-request jobs also read and publish entries, manifests, and shards under the shared
@@ -744,19 +746,20 @@ remote cache appear empty.
 `scripts/kache_remote.py` owns the remote of every kache-backed job: the `check.yaml`, Bolero,
 `benchmark` and `build-book` jobs, and the builder stage of every Docker image build.
 
-`kunobi-ninja/kache-action` installs kache, sets `RUSTC_WRAPPER`, the store and a job-scoped
-runtime directory, and stops the job's daemon in its post step. The action and Docker builder
-keep the pinned kache version's automatic local-store budget: 5% of the volume that holds the
-store, rounded to the nearest GiB and bounded between 5 and 100 GiB. A 250 GiB volume therefore
-budgets 13 GiB; a 500 GiB volume budgets 25 GiB. This leaves room for compiled outputs and
-coverage profiles, and the budget follows the actual cache volume when the runner changes. If
-the volume size cannot be probed, kache uses its bounded 50 GiB fallback. The daemon applies its
-normal eviction while the compiler wrapper and shared remote stay enabled. The action receives
-no S3 inputs, so its
-post step neither saves a manifest nor pushes. The `Start kache remote` step that follows it:
+`kunobi-ninja/kache-action` installs kache, sets `RUSTC_WRAPPER`, the store and a job-scoped runtime
+directory, and stops the job's daemon in its post step. The action receives no S3 inputs, so its
+post step neither saves a manifest nor pushes. The configuration file `scripts/kache_remote.py`
+writes, for a job and for the Docker builder alike, lets the local store hold a quarter of the
+volume that holds the store, rounded to the nearest GiB and at least kache's own floor of 5 GiB, so
+the budget still follows the cache volume when the runner changes. Kache's own default, 5% of the
+volume and at most 100 GiB, gave a Boat runner 15 GiB, while the `checks` job's store reached 33
+GiB: the store stayed over its budget, where kache's sweeps evict from it while the job still
+builds. Within the budget the daemon applies its normal eviction while the compiler wrapper and
+shared remote stay enabled. The `Start kache remote` step that follows the action:
 
-1. writes the daemon's configuration, `$RUNNER_TEMP/kache-remote.toml`, with the bucket, region,
-   service URL, base prefix and pull-request prefix. The credentials stay in the environment.
+1. writes the daemon's configuration, `$RUNNER_TEMP/kache-remote.toml`, with the local store's
+   budget and the bucket, region, service URL, base prefix and pull-request prefix. The credentials
+   stay in the environment.
 2. exports `KACHE_CONFIG`, the credentials, and the job's `KACHE_MANIFEST_KEY` and
    `KACHE_NAMESPACE` to the job's later steps. A matrix job's key includes its matrix value, so
    every build variant keeps its own manifest and shards.
@@ -787,16 +790,17 @@ During the build the daemon publishes each entry the build stores: kache records
 intent, uploads the entry in the background, and retries an upload that failed for a retryable
 reason every five seconds.
 
-The `tests`, `scenarios`, `client-conformance` and Bolero sanitizer jobs build before they run.
-The build step compiles every binary the run executes, under the same instrumentation and into the
-same target directory, so the run compiles nothing; `just test-coverage-build`,
-`just test-scenarios-coverage-build`, `just build-client-conformance-tests` and
-`just prepare-bolero-shard` are those build steps. `Publish kache cache after the build` then
-publishes the job's cache as described below, into `$RUNNER_TEMP/kache-build-report`, and
-`Publish kache report after the build` reports it. Both run only when the build succeeded. A run
-that then fails or reaches the job's time limit cannot lose what the build stored, the jobs
-building beside it already find it, and the step that was running when a job ended names the phase
-that took its time. The job's kache report artifact carries both reports.
+The `tests`, `scenarios`, `client-conformance`, `shuttle`, `loom`, `turmoil` and `deloxide` jobs and
+the Bolero randomized and sanitizer jobs build before they run. The build step compiles every binary
+the run executes, under the same instrumentation and into the same target directory, so the run
+compiles nothing; `just test-coverage-build`, `just test-scenarios-coverage-build`, `just
+build-client-conformance-tests`, `just coverage-native-extras-build`, `just build-bolero` and `just
+prepare-bolero-shard` are those build steps. `Publish kache cache after the build` then publishes
+the job's cache as described below, into `$RUNNER_TEMP/kache-build-report`, and `Publish kache
+report after the build` reports it. Both run only when the build succeeded. A run that then fails or
+reaches the job's time limit cannot lose what the build stored, the jobs building beside it already
+find it, and the step that was running when a job ended names the phase that took its time. The
+job's kache report artifact carries both reports.
 
 `Publish kache cache` runs `scripts/kache_remote.py publish` whatever the job's result, just before
 the kache report that every kache-backed job publishes. For a job whose
@@ -3005,18 +3009,19 @@ stall, the lane records it as `timed-out` with no finding: a wait inside a depen
 storage engine's own worker channel while a database closes, is visible only in a stack of the
 binary's threads taken before the bound expires.
 
-In CI the `deloxide` job, which runs only for a pull request labeled `deloxide`, runs each
-selection on its own 16-vCPU runner through `just coverage-native-extras test-deloxide`,
-`test-deloxide-order`, `test-deloxide-stress` or `test-deloxide-stress-restore`, then
-`just test-deloxide-qualification` for the same selection, and uploads every attempt whatever the
-verdict.
+In CI the `deloxide` job, which runs only for a pull request labeled `deloxide`, runs each selection
+on its own 16-vCPU runner. It builds the selection with `just coverage-native-extras-build
+test-deloxide`, `test-deloxide-order`, `test-deloxide-stress` or `test-deloxide-stress-restore` and
+publishes its kache cache, runs the lane through `just coverage-native-extras` for the same
+producer, then `just test-deloxide-qualification` for the same selection, and uploads every attempt
+whatever the verdict.
 
 | Part of the job | Bound | Basis |
 | --- | --- | --- |
 | Setup before the lane | No bound of its own | Toolchain, LLVM, Go, TinyGo and kache installation, as in the other native jobs: 46 seconds for `deloxide` and 40 for `deloxide-order` in the measured run |
 | Diagnostic builds | 80 minutes, `build_budget_seconds` in the inventory | A separate bound for all selected test and driver builds. A measured cold stressed scenario build on a loaded local host took 33m08s; CI builds measured 5.5–11 minutes. The bound leaves time for the other builds and variation without reducing workload time |
 | Workloads | 240 minutes, `budget_seconds` in the inventory | Starts after every diagnostic build succeeds. On CI's Boat runner the order selection's workloads take about three times as long as on the previous runner, about 180 minutes by the progress of Check run 40926015015. Per-invocation bounds and the six-minute scenario teardown reserve still apply; workload time reduces the time left for later invocations |
-| Prerequisites, both stages and the coverage export | 335 minutes, `timeout` in the step | The 80-minute build and 240-minute workload bounds plus 15 minutes for prerequisites and export. The historical combined-stage run took 25m02s for `deloxide` and 23m24s for `deloxide-order`; prerequisites took 3m05s and 2m46s, and export 2 seconds each |
+| Prerequisites, both stages and the coverage export | 335 minutes, one deadline the build step sets: its own `timeout`, then what remains for the lane's step after the build and the cache publication | The 80-minute build and 240-minute workload bounds plus 15 minutes for prerequisites and export. The historical combined-stage run took 25m02s for `deloxide` and 23m24s for `deloxide-order`; prerequisites took 3m05s and 2m46s, and export 2 seconds each |
 | Supervision qualification | 10 minutes, `timeout` in the step | A small probe build and up to seven bounded cases; only the untracked wait runs to its bound, 15 seconds, and the others end in milliseconds. It took 40 and 41 seconds in the measured run |
 | Uploads and the kache report | The rest of the 360-minute job limit, the six hours a Boat CI job may run | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict, then [cache publication](#cache-publication), which waits at most 120 seconds. In the measured run the uploads took 4 and 3 seconds |
 
