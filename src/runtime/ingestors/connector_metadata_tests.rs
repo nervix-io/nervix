@@ -10,7 +10,10 @@
     nervix::layer(harness, reason = "owns the metadata property boundary declared above")
 )]
 
-use nervix_connector::IngestMessageHeaders;
+use nervix_connector::{
+    IngestMessageHeaders, IngestRowHeaders, RetainedIngestHeaders, RetainedIngestMetadata,
+    RetainedIngestMetadataValue,
+};
 use nervix_models::WebsocketsFrameType;
 
 use super::*;
@@ -35,25 +38,22 @@ fn bolero_websockets_retained_metadata_preserves_every_field() {
         ];
         let headers = Arc::new(RetainedIngestHeaders::capture(&Headers(expected.clone())));
         for kind in [WebsocketsFrameType::Text, WebsocketsFrameType::Binary] {
-            let original = IngestMetadataRow::Websockets {
-                frame_type: kind,
-                headers: &headers,
+            let frame =
+                RetainedIngestMetadata::from_values(vec![RetainedIngestMetadataValue::String(
+                    kind.as_ref().to_string(),
+                )]);
+            let original = IngestMetadataRow {
+                fields: &frame,
+                headers: IngestRowHeaders::Shared(&headers),
+                position: None,
             };
-            let retained = RuntimeIngestorHost::retained_metadata(&original)
-                .assured("a WebSockets connection declares BUFFER and its metadata is retainable");
+            let retained = BufferedIngestMetadata::retain(&original);
             let decoded = retained.row();
-            assert_eq!(
-                decoded.scope(),
-                nervix_models::IngestorMetadataScope::Websockets
-            );
-            let IngestMetadataRow::Websockets {
-                frame_type,
-                headers: decoded_headers,
-            } = decoded
-            else {
-                panic!("the retained metadata keeps its scope");
+            assert_eq!(RetainedIngestMetadata::capture(decoded.fields), frame);
+            assert!(decoded.position.is_none());
+            let IngestRowHeaders::Shared(decoded_headers) = decoded.headers else {
+                panic!("the retained metadata keeps the connection's shared header snapshot");
             };
-            assert_eq!(frame_type, kind);
             assert!(Arc::ptr_eq(&headers, decoded_headers));
             let mut actual = Vec::new();
             decoded_headers

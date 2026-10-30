@@ -355,4 +355,77 @@ mod tests {
             .is_ok()
         );
     }
+
+    #[test]
+    fn bolero_clickhouse_tls_pairing_matches_the_transport_contract() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(32)
+            .with_type::<[u8; 16]>()
+            .for_each(|bytes| {
+                let hosts = ["localhost", "127.0.0.1", "[::1]", "warehouse.example.test"];
+                let host = hosts[usize::from(bytes[0]) % hosts.len()];
+                let port = u16::from_le_bytes([bytes[1], bytes[2]]).max(1);
+                let timeout = u32::from(u16::from_le_bytes([bytes[3], bytes[4]])) + 1;
+                for scheme in ["http", "https"] {
+                    for mask in 0_u8..8 {
+                        let trust = mask & 1 != 0;
+                        let certificate = mask & 2 != 0;
+                        let private_key = mask & 4 != 0;
+                        let mut entries = vec![
+                            ClientConfigEntry {
+                                key: "addr".into(),
+                                value: format!("{scheme}://{host}:{port}/warehouse/{}", bytes[5]),
+                            },
+                            ClientConfigEntry {
+                                key: "timeout_ms".into(),
+                                value: timeout.to_string(),
+                            },
+                        ];
+                        for (present, key) in [
+                            (trust, "tls_ca_file"),
+                            (certificate, "tls_cert_file"),
+                            (private_key, "tls_key_file"),
+                        ] {
+                            if present {
+                                entries.push(ClientConfigEntry {
+                                    key: key.into(),
+                                    value: format!("/mounted trust/{}/{key}.pem", bytes[6]),
+                                });
+                            }
+                        }
+                        let offset = usize::from(bytes[7]) % entries.len();
+                        entries.rotate_left(offset);
+                        if bytes[8] & 1 != 0 {
+                            entries.reverse();
+                        }
+
+                        let result = validate_clickhouse_client_config(&entries);
+                        let accepted = match scheme {
+                            "http" => mask == 0,
+                            _ => trust && certificate == private_key,
+                        };
+                        assert_eq!(result.is_ok(), accepted, "{scheme}, TLS mask {mask}");
+                        if let Err(report) = result {
+                            let expected = if scheme == "http" {
+                                let key = match mask {
+                                    1 | 3 | 5 | 7 => "tls_ca_file",
+                                    2 | 6 => "tls_cert_file",
+                                    _ => "tls_key_file",
+                                };
+                                matches!(report.current_context(), ClientConfigSchemaError::InvalidValue { key: actual, .. } if actual == key)
+                            } else {
+                                let (key, required) = match (certificate, private_key) {
+                                    (true, false) => ("tls_cert_file", "tls_key_file"),
+                                    (false, true) => ("tls_key_file", "tls_cert_file"),
+                                    _ => ("addr", "tls_ca_file"),
+                                };
+                                matches!(report.current_context(), ClientConfigSchemaError::RequiresKey { key: actual, required: actual_required } if *actual == key && *actual_required == required)
+                            };
+                            assert!(expected, "{scheme}, TLS mask {mask}: {report:#}");
+                        }
+                    }
+                }
+            });
+    }
 }
