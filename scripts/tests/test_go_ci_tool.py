@@ -161,7 +161,7 @@ class GoCiToolTests(unittest.TestCase):
             for index, match in enumerate(starts)
         }
         self.assertNotIn("go install github.com/reteps/dockerfmt@latest", workflow)
-        for name, tools in (("checks", ("dockerfmt", "ghokin")), ("tests", ("dockerfmt",)), ("scenarios", ("dockerfmt",))):
+        for name, tools in (("checks", ("dockerfmt", "ghokin")), ("tests", ("dockerfmt",)), ("scenarios-build", ("dockerfmt",))):
             with self.subTest(job=name):
                 job = jobs[name]
                 self.assertLess(job.index("- name: Checkout"), job.index("scripts/install_go_ci_tool.py"))

@@ -83,7 +83,7 @@ class ModelCoverageTests(unittest.TestCase):
         # The ordinary merge reads only the ordinary producers' artifacts, and leaves out each
         # collection of another mode that the native extras artifact holds.
         self.assertIn(
-            "just coverage-merge coverage-inputs/tests coverage-inputs/scenarios coverage-inputs/native-extras",
+            'just coverage-merge coverage-inputs/tests "${scenarios[@]}" coverage-inputs/native-extras',
             coverage,
         )
         for artifact in ("coverage-shuttle", "coverage-loom", "coverage-turmoil"):

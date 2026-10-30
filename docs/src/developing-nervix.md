@@ -276,7 +276,7 @@ For repository-wide validation:
 just validate
 ```
 
-The `checks`, `tests`, and `scenarios` CI jobs install the Go formatters through
+The `checks`, `tests`, and `scenarios-build` CI jobs install the Go formatters through
 `scripts/install_go_ci_tool.py`: dockerfmt is pinned to v0.5.4 and ghokin to v3.9.0. The installer
 uses Go 1.26 in each job, keeps the public Go checksum database enabled, and disallows an implicit
 toolchain download. It retries only a transport failure while reading that database, at most three
@@ -378,9 +378,10 @@ minute, hour and day. A job's size follows the memory and disk its builds use ra
 since a Boat machine has only 2 GB of memory per CPU, with 4 GB of swap beside it:
 
 - `boat-xlarge`, with 16 CPUs, 32 GB and 251 GB of disk, runs validation, the diagnostic evidence,
-  the unit tests, the scenarios, the extra checks, Shuttle, Loom, the Deloxide lane, the Bolero
-  randomized properties, the image builds and the benchmarks. In runs of October 2026 the extra
-  checks used about 95 GiB of disk and the amd64 image build lost its runner on a 16 GB machine.
+  the unit tests, the scenario build and each of its shards, the extra checks, Shuttle, Loom, the
+  Deloxide lane, the Bolero randomized properties, the image builds and the benchmarks. In runs of
+  October 2026 the extra checks used about 95 GiB of disk and the amd64 image build lost its runner
+  on a 16 GB machine.
   Sixteen compilers of the instrumented Loom build exceed the machine's 32 GB, so the `loom` job
   sets `CARGO_BUILD_JOBS` to eight; its build then peaked at 21 GiB.
 - `boat-large`, with 8 CPUs, 16 GB and 111 GB, runs Turmoil.

@@ -84,6 +84,10 @@ class InventoryTests(unittest.TestCase):
         for index, check in enumerate(ordinary.checks, 1):
             if check != "coverage-full":
                 successful.append(run(check, identity=index))
+        # The scenario suite runs in shards, every one of which passed.
+        for index, prefix in enumerate(ordinary.sharded, 1):
+            for shard in range(1, 4):
+                successful.append(run(f"{prefix} ({shard} of 3)", identity=200 + 10 * index + shard))
         cases = (
             (None, "it did not run on the revision"),
             ("failure", "its latest run is failure"),

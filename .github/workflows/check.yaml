@@ -16,6 +16,10 @@ env:
   # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
   KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "68719476736"
   TINYGO_VERSION: "0.41.1"
+  # How many shards run the scenario suite: scenarios-build plans a matrix of this many, and each
+  # shard runs its share of the scenario runs. More shards shorten each shard down to its longest
+  # scenario; see the shards in docs/src/integration-test-lifecycle.md.
+  SCENARIO_SHARDS: "3"
 
 permissions:
   contents: read
@@ -172,7 +176,8 @@ jobs:
           sudo apt install -y \
             gh \
             libcurl4-openssl-dev \
-            protobuf-compiler
+            protobuf-compiler \
+            zstd
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -830,29 +835,35 @@ jobs:
           path: tests/logs
           if-no-files-found: ignore
 
-  scenarios:
-    name: scenarios
+  # One build of the scenario suite for every shard: the instrumented scenario executable, the
+  # binaries its scenarios start and the generated inputs they read, packed into one archive that
+  # each shard restores. The build publishes its cache before anything runs, and then runs the
+  # failed backup cut cleanup check, whose deliberate failures keep a verdict of their own.
+  scenarios-build:
+    name: scenarios-build
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
     runs-on: boat-xlarge
-    # The harness derives 105 minutes of scenarios from this limit, with 35 for setup/builds and
-    # 15 for cleanup/export/uploads. Keep tests/common/suite_watchdog.rs in step.
-    timeout-minutes: 155
+    # Setup took up to 13 minutes and a warm build 10 to 26 on Boat; the limit also funds a cold
+    # build, cache publication, packing and the upload.
+    timeout-minutes: 90
     permissions:
       contents: read
+    outputs:
+      shards: ${{ steps.shards.outputs.shards }}
     env:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
-      # 48 slots on the 16-CPU runner. Every scenario's steps run on one runner thread, and 64 slots
-      # (Check 40358096404) kept that thread on a CPU for 86% of the run, made every scenario about
-      # 45% slower and raised no throughput; see the run slots in docs/src/integration-test-lifecycle.md.
-      NERVIX_TEST_CONCURRENCY_FACTOR: "3"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
+
+      - name: Plan the scenario shards
+        id: shards
+        run: echo "shards=$(python3 -m scripts.scenario_shards matrix "${SCENARIO_SHARDS}")" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
@@ -901,23 +912,20 @@ jobs:
       - name: Install dockerfmt
         run: python3 scripts/install_go_ci_tool.py dockerfmt "${RUNNER_TEMP}/go-tool-bootstrap"
 
-      # Boat's own Node.js comes from nvm, which a job's shell may not load, so a global install
-      # goes into the Node.js this step pins instead.
+      # Boat's own Node.js comes from nvm, which a job's shell may not load, so the build uses the
+      # Node.js this step pins instead.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "24"
-
-      - name: Install playwright
-        run: |
-          npm install -g playwright
 
       - name: Install apt deps
         run: |
           sudo apt update
           sudo apt install -y \
             libcurl4-openssl-dev \
-            protobuf-compiler
+            protobuf-compiler \
+            zstd
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -947,22 +955,19 @@ jobs:
           python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
 
-      - name: Setup uv for Python driver coverage
-        uses: astral-sh/setup-uv@v6
-
-      - name: Runner diagnostics before Scenario coverage
+      - name: Runner diagnostics before the scenario build
         uses: ./.github/actions/runner-diagnostics
         with:
-          label: scenario-coverage
+          label: scenario-build
 
       - name: Build the scenario suite
         run: |
           just toolchains-install
           just test-scenarios-coverage-build
 
-      # The cache the build filled is published before the run starts: the run's outcome cannot lose
-      # it, the jobs building beside this one can use it, and its report shows what the build
-      # compiled and what the cache served.
+      # The cache the build filled is published before anything runs: no later step can lose it,
+      # the jobs building beside this one can use it, and its report shows what the build compiled
+      # and what the cache served.
       - name: Publish kache cache after the build
         timeout-minutes: 4
         env:
@@ -972,8 +977,20 @@ jobs:
       - name: Publish kache report after the build
         run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
 
-      - name: Scenario coverage
-        run: just test-scenarios-coverage-run
+      - name: Pack the scenario suite
+        run: just test-scenarios-coverage-pack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
+
+      # The archive is compressed already, and the shards of this run are its only readers. A
+      # rerun of this job replaces it, and a shard rerun within the week restores it.
+      - name: Upload the scenario suite
+        uses: actions/upload-artifact@v4
+        with:
+          name: scenario-suite
+          overwrite: true
+          path: ${{ runner.temp }}/scenario-suite/scenario-suite.tar.zst
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
 
       # These bodies must fail. The supervisor separately requires complete after-hook cleanup;
       # their failure status is preserved and contributes no ordinary coverage verdict.
@@ -986,18 +1003,6 @@ jobs:
         with:
           name: backup-cut-cleanup
           path: target/backup-cut-cleanup.*
-          if-no-files-found: warn
-
-      - name: Upload scenarios coverage
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-scenarios
-          overwrite: true
-          path: |
-            lcov-workspace.info
-            coverage-source-root.txt
-            target/paced-simulation/python.lcov
           if-no-files-found: warn
 
       - name: Publish runner load
@@ -1025,13 +1030,6 @@ jobs:
             ${{ runner.temp }}/runner-load.md
             ${{ runner.temp }}/runner-load.log
           if-no-files-found: warn
-
-      - name: Publish suite summary
-        if: always()
-        run: |
-          if [[ -f tests/logs/suite-summary.md ]]; then
-            cat tests/logs/suite-summary.md >> "${GITHUB_STEP_SUMMARY}"
-          fi
 
       - name: Publish kache cache
         if: always()
@@ -1073,11 +1071,147 @@ jobs:
           path: ${{ runner.temp }}/go-tool-bootstrap
           if-no-files-found: ignore
 
+  # One shard of the scenario suite. Each shard restores the archive scenarios-build packed into a
+  # checkout of the same revision at the same path, and runs its share of the scenario runs, which
+  # the scenario executable's --shard option deals out. SCENARIO_SHARDS sets how many shards run.
+  # A shard compiles nothing, so it needs neither the build's toolchain setup nor the cache.
+  scenarios:
+    name: scenarios (${{ matrix.shard }} of ${{ strategy.job-total }})
+    needs: [scenarios-build]
+    runs-on: boat-xlarge
+    # The harness derives each shard's 85-minute suite budget from this limit, with 15 minutes for
+    # setup and the archive's restore before it and 15 for cleanup, export and uploads after it.
+    # Keep tests/common/suite_watchdog.rs in step.
+    timeout-minutes: 115
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.scenarios-build.outputs.shards) }}
+    permissions:
+      contents: read
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+      # 48 slots on the 16-CPU runner. Every scenario's steps run on one runner thread, and 64 slots
+      # (Check 40358096404) kept that thread on a CPU for 86% of the run, made every scenario about
+      # 45% slower and raised no throughput; see the run slots in docs/src/integration-test-lifecycle.md.
+      NERVIX_TEST_CONCURRENCY_FACTOR: "3"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The report reads the profiles with the toolchain's own LLVM tools; nothing is compiled. The
+      # toolchain file's components and target are installed here, so no command fetches them.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          targets: wasm32-unknown-unknown
+          components: clippy, llvm-tools
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,cargo-llvm-cov
+
+      # Boat's own Node.js comes from nvm, which a job's shell may not load, so a global install
+      # goes into the Node.js this step pins instead.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install playwright
+        run: |
+          npm install -g playwright
+
+      - name: Setup uv for Python driver coverage
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install zstd
+        run: |
+          if ! command -v zstd > /dev/null; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends zstd
+          fi
+
+      - name: Start runner load recorder
+        run: |
+          python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
+
+      - name: Runner diagnostics before the scenario shard
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: scenario-shard
+
+      - name: Download the scenario suite
+        uses: actions/download-artifact@v4
+        with:
+          name: scenario-suite
+          path: ${{ runner.temp }}/scenario-suite
+
+      - name: Restore the scenario suite
+        run: |
+          just test-scenarios-coverage-unpack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
+          rm "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
+
+      - name: Scenario coverage
+        env:
+          SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
+        run: just test-scenarios-coverage-shard "${SHARD}"
+
+      - name: Upload scenarios coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-scenarios-${{ matrix.shard }}
+          overwrite: true
+          path: |
+            lcov-workspace.info
+            coverage-source-root.txt
+            target/paced-simulation/python.lcov
+          if-no-files-found: warn
+
+      - name: Publish runner load
+        if: always()
+        run: |
+          if [[ -f "${RUNNER_TEMP}/runner-load.pid" ]]; then
+            kill -TERM "$(cat "${RUNNER_TEMP}/runner-load.pid")" || true
+            for _ in {1..10}; do
+              [[ -f "${RUNNER_TEMP}/runner-load.md" ]] && break
+              sleep 1
+            done
+          fi
+          if [[ -f "${RUNNER_TEMP}/runner-load.md" ]]; then
+            cat "${RUNNER_TEMP}/runner-load.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload runner load
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-load-${{ github.job }}-${{ matrix.shard }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/runner-load.csv
+            ${{ runner.temp }}/runner-load.md
+            ${{ runner.temp }}/runner-load.log
+          if-no-files-found: warn
+
+      - name: Publish suite summary
+        if: always()
+        run: |
+          if [[ -f tests/logs/suite-summary.md ]]; then
+            cat tests/logs/suite-summary.md >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
       - name: Upload scenario logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scenario-logs
+          name: scenario-logs-${{ matrix.shard }}
           overwrite: true
           path: tests/logs
           if-no-files-found: ignore
@@ -1139,11 +1273,12 @@ jobs:
           name: coverage-tests
           path: coverage-inputs/tests
 
+      # Each shard's report lands in its own directory, named after its artifact.
       - name: Download scenarios coverage
         uses: actions/download-artifact@v4
         with:
-          name: coverage-scenarios
-          path: coverage-inputs/scenarios
+          pattern: coverage-scenarios-*
+          path: coverage-inputs
 
       - name: Download native extra coverage
         uses: actions/download-artifact@v4
@@ -1155,7 +1290,13 @@ jobs:
       # merge leaves out the collections of other modes the native extras artifact holds, and fails
       # rather than publish an incomplete report.
       - name: Merge coverage
-        run: just coverage-merge coverage-inputs/tests coverage-inputs/scenarios coverage-inputs/native-extras
+        run: |
+          # Every shard's report is an input, so a shard whose report is missing fails the merge.
+          scenarios=()
+          for shard in $(seq 1 "${SCENARIO_SHARDS}"); do
+            scenarios+=("coverage-inputs/coverage-scenarios-${shard}")
+          done
+          just coverage-merge coverage-inputs/tests "${scenarios[@]}" coverage-inputs/native-extras
 
       # The pinned cargo-crap scores the repository's Rust sources against the merged report. No score
       # fails the step: it fails only when the analysis cannot describe the report, and it writes its

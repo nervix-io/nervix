@@ -1333,6 +1333,47 @@ test-scenarios-coverage-run: tests-deps
 
 test-scenarios-coverage: test-scenarios-coverage-build test-scenarios-coverage-run
 
+# Write the archive the scenario shards restore: the executables `test-scenarios-coverage-build`
+# left and the generated inputs a scenario run reads, which `scripts/scenario_shards.py` names.
+test-scenarios-coverage-pack archive:
+    python3 -m scripts.scenario_shards pack {{ quote(archive) }}
+
+# Restore the archive `test-scenarios-coverage-pack` wrote into a checkout of the same revision and
+# path, checking every file it holds and the shared libraries its executables load.
+test-scenarios-coverage-unpack archive:
+    python3 -m scripts.scenario_shards unpack {{ quote(archive) }}
+
+# Run one shard, written INDEX/COUNT, of the scenario suite from the executables a restored archive
+# holds, and write the coverage of the shard and of the paced-simulation Python driver. It compiles
+# nothing: it runs the scenario executable directly, so a shard needs neither the build nor a cache.
+test-scenarios-coverage-shard shard:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
+    export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
+    collection_dir="$(mktemp -d {{ quote(cargo_target_dir + "/paced-simulation-coverage.XXXXXX") }})"
+    export COVERAGE_FILE="${collection_dir}/python.coverage"
+    export PYTHONPATH="{{ justfile_directory() }}/scripts/paced_simulation_coverage${PYTHONPATH:+:${PYTHONPATH}}"
+    export COVERAGE_PROCESS_START="{{ justfile_directory() }}/scripts/paced_simulation_coverage/coverage.ini"
+    # The profiles go where `cargo llvm-cov report` reads them, beside the restored executables.
+    source <(CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} cargo llvm-cov show-env --sh 2>/dev/null)
+    executable="$(python3 -m scripts.scenario_shards executable)"
+    uv run --no-project --with coverage==7.11.0 "${executable}" --shard {{ quote(shard) }}
+    # A shard may hold no run of the Python driver, and then it has no Python coverage to report.
+    if compgen -G "${collection_dir}/python.coverage.*" > /dev/null; then
+        uvx --from coverage==7.11.0 coverage combine --data-file "${collection_dir}/python.coverage"
+        mkdir -p {{ quote(cargo_target_dir + "/paced-simulation") }}
+        uvx --from coverage==7.11.0 coverage lcov --data-file "${collection_dir}/python.coverage" \
+            -o "{{ cargo_target_dir }}/paced-simulation/python.lcov"
+    else
+        echo "Shard {{ shard }} ran no paced-simulation Python driver, so it reports no Python coverage."
+    fi
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
+    pwd -P > coverage-source-root.txt
+
 # Remove collected profiles and instrumented workspace artifacts before collecting a new revision.
 # Append recipes retain artifacts, so a source move can otherwise leave stale line mappings beside
 # the current ones in a report.

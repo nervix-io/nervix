@@ -122,6 +122,10 @@ mod scenario_phase;
     reason = "the scenario binary uses the admission APIs shared by this harness test"
 )]
 mod scenario_schedule;
+#[path = "common/scenario_shard.rs"]
+mod scenario_shard;
+#[path = "common/scenario_shard_tests.rs"]
+mod scenario_shard_tests;
 #[path = "common/server_executable.rs"]
 mod server_executable;
 #[path = "common/server_executable_tests.rs"]

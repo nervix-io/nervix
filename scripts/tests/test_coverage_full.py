@@ -1248,6 +1248,12 @@ class WorkflowTests(unittest.TestCase):
             with self.subTest(job=name):
                 job = job_section(self.workflow, name)
                 if "python3 scripts/record_runner_load.py" in job:
+                    # A matrix job's entries each retain their own load under the entry's value.
+                    if "\n      matrix:\n" in job:
+                        matrix_artifact = re.search(r"name: (runner-load-\$\{\{ github\.job \}\}-\$\{\{ matrix\.[a-z]+ \}\})\n", job)
+                        self.assertIsNotNone(matrix_artifact, "a matrix job names its load after its entry")
+                        artifacts.append(matrix_artifact[1].replace("${{ github.job }}", name))
+                        continue
                     self.assertIn("name: runner-load-${{ github.job }}\n", job)
                     artifacts.append(f"runner-load-{name}")
                     continue

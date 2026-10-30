@@ -146,12 +146,13 @@ use crate::common::{
     runner_observation::ArrivalObservation,
     scenario_phase::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
-        begin_suite_measurement, record_runner_tick, suite_summary,
+        begin_suite_measurement, record_runner_tick, record_shard_selection, suite_summary,
     },
     scenario_schedule::{
         FeatureLimit, SCENARIO_RETRIES, ScenarioAdmission, ScenarioLength, ScenarioRunSlots,
         prioritize_features,
     },
+    scenario_shard::{ScenarioShard, ScenarioShardArgs},
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
@@ -33481,13 +33482,19 @@ struct ScenarioRunArgs {
     parallelism: TestParallelismArgs,
     #[command(flatten)]
     watchdog: SuiteWatchdogArgs,
+    #[command(flatten)]
+    shard: ScenarioShardArgs,
 }
 
-/// Parse the same Gherkin inputs and CLI options as Cucumber's basic parser, then take the
-/// limited feature chains up before the bulk. Cucumber may schedule all parsed scenarios at
-/// once; admission to a feature and to a run slot happens in the before hook.
+/// Parse the same Gherkin inputs and CLI options as Cucumber's basic parser, keep a shard's own
+/// scenario runs when the run is one shard of a sharded run, then take the limited feature chains
+/// up before the bulk. Cucumber may schedule all parsed scenarios at once; admission to a feature
+/// and to a run slot happens in the before hook.
 #[derive(Clone, Debug, Default)]
-struct PrioritizedScenarioParser;
+struct PrioritizedScenarioParser {
+    /// The shard this run executes, or `None` when it executes every run it selects.
+    shard: Option<ScenarioShard>,
+}
 
 impl<I: AsRef<Path>> cucumber::parser::Parser<I> for PrioritizedScenarioParser {
     type Cli = cucumber::parser::basic::Cli;
@@ -33498,8 +33505,15 @@ impl<I: AsRef<Path>> cucumber::parser::Parser<I> for PrioritizedScenarioParser {
 
     fn parse(self, input: I, cli: Self::Cli) -> Self::Output {
         let parsed = cucumber::parser::Parser::parse(cucumber::parser::Basic::new(), input, cli);
+        let shard = self.shard;
         futures_util::stream::once(async move {
             let mut features = parsed.collect::<Vec<_>>().await;
+            if let Some(shard) = shard {
+                let selection = shard.keep_own_runs(&mut features);
+                println!("scenario {selection}");
+                append_cucumber_log_line(&format!("scenario {selection}"));
+                record_shard_selection(selection);
+            }
             prioritize_features(&mut features, |feature| {
                 feature.as_ref().ok().map(|feature| feature.name.as_str())
             });
@@ -33548,6 +33562,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         );
     }
     let watchdog = cli.custom.watchdog.watchdog();
+    let shard = cli.custom.shard.shard();
     let concurrency_factor = cli.custom.parallelism.concurrency_factor();
     let default_max_concurrent_scenarios = parallelism.max_concurrent_scenarios(concurrency_factor);
     let effective_max_concurrent_scenarios = cli
@@ -33579,7 +33594,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     .normalized()
     .repeat_failed();
     let run = ScenarioWorld::cucumber::<&str>()
-        .with_parser(PrioritizedScenarioParser)
+        .with_parser(PrioritizedScenarioParser { shard })
         .max_concurrent_scenarios(usize::MAX)
         .retries(SCENARIO_RETRIES)
         .before(move |feature, rule, scenario, world| {

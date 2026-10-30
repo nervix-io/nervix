@@ -40,6 +40,7 @@ pub(crate) mod runner_observation;
 pub(crate) mod runner_offload;
 pub(crate) mod scenario_phase;
 pub(crate) mod scenario_schedule;
+pub(crate) mod scenario_shard;
 pub(crate) mod server_executable;
 pub(crate) mod server_process;
 pub(crate) mod server_process_cluster;

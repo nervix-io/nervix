@@ -162,7 +162,8 @@ the scenario reads the staging directory, the table and the producer's batch out
 that cannot move.
 
 Before starting ordinary CI producers, Check verifies its exact tested merge and every changed
-path. A verified documentation-only selection excludes `scenarios` with the other ordinary suites;
+path. A verified documentation-only selection excludes the scenario build and its shards with the
+other ordinary suites;
 validation and title checks remain enabled. This exclusion records a source decision rather than
 scenario execution, and cancellation of a required run never supplies successful evidence. Explicit
 mode labels retain their own selections. [Documentation-only Selection](./property-testing-and-fuzzing.md#documentation-only-selection)
@@ -526,13 +527,13 @@ selects them through `NERVIX_PACED_SIMULATION_PATH` and `NERVIX_CLIENT_LIBRARY`.
 inherits the profile location of the scenario binary that starts it, so the Rust driver and the
 binding loaded by the Python driver write their profiles into the same report when they exit.
 
-The CI `scenarios` job uses the shared native
+The CI `scenarios-build` job uses the shared native
 [CI linker](./developing-nervix.md#validation-and-tests) for the server, CLI and scenario harness,
 including their instrumented builds. Coverage flags do not replace Wild linker selection.
 
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
 factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default;
-`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `3`, so its
+`--concurrency` sets an absolute slot count. Each CI `scenarios` shard uses factor `3`, so its
 16-CPU runner has 48 slots. Cucumber may take up all parsed scenarios without charging a slot.
 
 The slots are the suite's capacity, and the measurement of 26 October 2026 set their number. Over
@@ -621,7 +622,8 @@ The CI jobs divide the work at the scenario boundary:
 | Job | Work |
 | --- | --- |
 | `tests` | Instrumented workspace build and all tests except the scenario target |
-| `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 3, and scenario logs |
+| `scenarios-build` | Instrumented scenario executable, server, CLI and paced simulation drivers, built once and packed with the generated inputs a run reads into the archive every shard restores, and the failed backup cut cleanup check |
+| `scenarios (I of N)` | One [shard](#scenario-shards) of the scenario suite at factor 3, run from the restored archive without compiling, with its coverage report and scenario logs |
 | `coverage` | After tests, scenarios and extra tests, publishes the [ordinary workspace report](./coverage-reports.md#the-ordinary-workspace-report). Merge and analysis integrity are mandatory; patch percentages and CRAP scores are advisory |
 | `coverage-full` | After every producer job, including a skipped or failed one: `just coverage-full` combines the ordinary report, the modeled and diagnostic native collections and the requested live fuzz campaigns into the [full workspace union](./coverage-reports.md#the-full-workspace-union), validated against the run's event and label snapshot and every producer job's result. It downloads artifacts only, fails on a missing, stale or incomplete input, and publishes its contributor breakdown as the job summary and the `coverage-full` artifact |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and primitive conformance checks |
@@ -641,9 +643,9 @@ transport, selected by `CARGO_NET_GIT_FETCH_WITH_CLI=true`. `Cargo.lock` still p
 A dependency download that fails before a test starts provides no test execution or coverage
 qualification evidence.
 
-The `checks`, `tests`, and `scenarios` jobs use Go 1.26 and check out the source before installing
-their pinned Go formatters. This makes the installer and the later cache publication and report
-scripts available when a tool setup step fails. The installer retains every attempt in a
+The `checks`, `tests`, and `scenarios-build` jobs use Go 1.26 and check out the source before
+installing their pinned Go formatters. This makes the installer and the later cache publication and
+report scripts available when a tool setup step fails. The installer retains every attempt in a
 `go-tool-bootstrap-<job>` artifact and retries transport errors reading Go's public module proxy or
 checksum database within its eight-minute budget. Checksum verification remains mandatory; compiler,
 version and verification failures end installation immediately. The publication and report steps
@@ -651,7 +653,8 @@ check for their scripts before calling them,
 so a failed checkout does not add a second failure that obscures the original one. The jobs'
 existing deadlines and test budgets are unchanged.
 
-The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
+The `tests` and `scenarios-build` jobs and every `scenarios` shard also sample runner CPU
+utilization and steal time every five
 seconds, with UTC timestamps, guest-reported MHz and Linux PSI CPU, memory and I/O `some avg10`
 pressure. Missing VM counters are blank, not zero measurements.
 
@@ -815,10 +818,10 @@ During the build the daemon publishes each entry the build stores: kache records
 intent, uploads the entry in the background, and retries an upload that failed for a retryable
 reason every five seconds.
 
-The `tests`, `scenarios`, `client-conformance`, `shuttle`, `loom`, `turmoil` and `deloxide` jobs and
-the Bolero randomized and sanitizer jobs build before they run. The build step compiles every binary
-the run executes, under the same instrumentation and into the same target directory, so the run
-compiles nothing; `just test-coverage-build`, `just test-scenarios-coverage-build`, `just
+The `tests`, `scenarios-build`, `client-conformance`, `shuttle`, `loom`, `turmoil` and `deloxide`
+jobs and the Bolero randomized and sanitizer jobs build before they run. The build step compiles
+every binary the run executes, under the same instrumentation and into the same target directory, so
+the run compiles nothing; `just test-coverage-build`, `just test-scenarios-coverage-build`, `just
 build-client-conformance-tests`, `just coverage-native-extras-build`, `just build-bolero` and `just
 prepare-bolero-shard` are those build steps. `Publish kache cache after the build` then publishes
 the job's cache as described below, into `$RUNNER_TEMP/kache-build-report`, and `Publish kache
@@ -2787,13 +2790,54 @@ asked to stop, so a node held by one can still be running at the end of the wind
 when the process drops the runtime. The induced timeout during qualification had one such node,
 held by a consensus commit delay that only its scenario's cleanup releases.
 
+### Scenario Shards
+
+CI runs the suite in shards. The `scenarios-build` job builds the instrumented scenario executable,
+server, CLI, paced simulation driver, shared binding and report tool once with
+`just test-scenarios-coverage-build`, publishes its cache, and packs them with the generated inputs
+a run reads into one archive with `just test-scenarios-coverage-pack`. `scripts/scenario_shards.py`
+names what the archive holds: every executable `cargo llvm-cov report` reads as an object, the
+Playwright driver whose path the scenario executable holds, the ONNX fixtures and runtime, and the
+WASM guests. Each `scenarios (I of N)` job checks out the same revision at the same path, which the
+executables' absolute paths require, and restores the archive with
+`just test-scenarios-coverage-unpack`. The restore refuses an archive of another revision or
+checkout path, a file restored at another size, and an executable whose shared libraries the runner
+lacks, before any scenario starts. The shard then runs `just test-scenarios-coverage-shard I/N`. A
+shard compiles nothing: it runs the scenario executable directly, because Cargo would compare the
+restored files with sources whose modification times the checkout set, and rebuild them.
+
+The scenario executable's `--shard INDEX/COUNT` option, or `NERVIX_TEST_SCENARIO_SHARD`, divides the
+scenario runs. Every shard reads the same features and numbers each run the parser produced, an
+outline's example row counting as one run, in the order of its feature file's path and then of the
+run's line. It keeps the runs whose number leaves its own remainder when divided by the number of
+shards. Each run belongs to exactly one shard, and consecutive runs of one feature go to different
+shards. A whole feature cannot be the unit: the coordinated WASM state-reset feature runs one
+scenario at a time, and its chain took 48.8 minutes of the 85.5-minute unsharded run of Check
+41010408001. Dealt across three shards, each shard holds about a third of that chain, of the web
+console features that run two at a time, and of every feature of long-running scenarios. A shard
+admits its runs to its own run slots and feature limits.
+
+`SCENARIO_SHARDS` in the Check workflow sets the number of shards, and `scenarios-build` turns it
+into the shards' matrix. In that run, a third of the 240,698 slot-seconds of work fills 48 slots
+for 28.5 minutes, while the longest attempt ran for 37.5 minutes, so the longest attempt bounds a
+shard of three. More shards shorten each shard's work but not that attempt; fewer make each shard
+longer, and the suite budget below assumes three. Each shard uploads its own coverage report,
+`coverage-scenarios-<I>`, its logs, `scenario-logs-<I>`, and its runner load. The coverage job
+merges the report of every shard the workflow runs and fails when one is missing. A shard's suite
+summary names the shard and how many of the runs it read it kept.
+
+The build job also runs the failed backup cut cleanup check from its own build, which took under a
+minute in the unsharded job, so the shards start once it ends. Its 90-minute limit funds a setup that
+took up to 13 minutes on Boat, a build that took 10 to 26 minutes warm or a cold one, cache
+publication, packing and the upload.
+
 ### The CI Reserve
 
-The suite runs inside `just test-scenarios-coverage-run` in the CI `scenarios` job, after that job's
-build step, `just test-scenarios-coverage-build`, has built the instrumented server, CLI, paced
-simulation driver and scenario binary and the job has published its cache. The `tests` job runs at
-the same time on another runner. The `scenarios` job's `timeout-minutes` is 155, and the suite
-budget is derived from it so that the job ends on its own.
+Each shard's suite runs inside `just test-scenarios-coverage-shard` in a CI `scenarios` job, after
+the `scenarios-build` job has built the instrumented executables, published its cache and packed
+the archive, and after the shard has restored it. The `tests` job runs beside the build on another
+runner. A shard job's `timeout-minutes` is 115, and the suite budget is derived from it so that the
+job ends on its own.
 
 For focused local coverage, `just coverage-scenarios <lcov-path> <scenario-options>` starts a
 fresh measurement. `just coverage-scenarios-append <lcov-path> <scenario-options>` retains the
@@ -2827,19 +2871,18 @@ Deloxide selections reach its Rust and Python drivers on one-node and three-node
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
-| Work before the scenario binary starts | 35 minutes | 5m42s to 16m54s across the scenarios jobs of 22 Check runs of 21-27 October 2026; twice the slowest, rounded up, funds cold builds and setup variation |
-| The scenario run | 105 minutes | What the limit leaves; twice the rounded 50-minute healthy ceiling plus five minutes |
-| After the budget expires | 15-minute reserve | At most 60 seconds of cleanup, 2 minutes of dependency stop and 60 seconds of runtime shutdown; eleven further minutes fund slow coverage export, uploads and cache publication after a successful run, which took 0.7 to 1.9 minutes in those 22 jobs |
+| Work before the scenario binary starts | 15 minutes | A shard's setup, and the download and restore of an archive of about 1.4 GiB; the unsharded job's setup steps took up to five minutes on Boat in Check 41010408001, and fifteen minutes funds twice that with the archive's transfer and restore beside it |
+| The scenario run | 85 minutes | What the limit leaves; twice the 40-minute healthy shard ceiling plus five minutes |
+| After the budget expires | 15-minute reserve | At most 60 seconds of cleanup, 2 minutes of dependency stop and 60 seconds of runtime shutdown; eleven further minutes fund slow coverage export and uploads after a successful run, which took 0.7 to 1.9 minutes in the unsharded scenarios jobs of 22 Check runs of 21-27 October 2026 |
 
 A healthy suite finishes inside its budget and exits `0` or reports its failures. A wedged one exits
 `124` with its diagnostic and leaves the upload its reserve. Either way, a step that runs whatever
-the job's result uploads the whole `tests/logs` directory as the `scenario-logs` artifact.
+the job's result uploads the whole `tests/logs` directory as the shard's `scenario-logs-<I>`
+artifact.
 
-A suite that passes ends before its budget, so the reserve then holds the coverage export, the
-uploads and [cache publication](#cache-publication), which waits at most 120 seconds. Saving the
-manifest took 5 to 14 seconds in the scenario jobs measured on 2026-10-14, and the daemon had
-already published every entry those jobs built. A suite that fails or runs out of its budget leaves
-publication `not-run`, so the reserve stays with the cleanup.
+A suite that passes ends before its budget, so the reserve then holds the coverage export and the
+uploads. A shard compiles nothing and publishes no cache: `scenarios-build` publishes what its build
+filled, as [cache publication](#cache-publication) describes, before it packs the archive.
 
 Run 40419254390 completed 3,703 attempts in 2,971.1 seconds with 98.9% utilization and
 141,081.3 slot-seconds, the first run after the scenario build optimized the parser that had held
@@ -2848,7 +2891,9 @@ before it on one inventory of about 3,620 attempts took 2,688.7 to 4,501.9 secon
 budget: every scenario of a run took the same multiple of its median, from 0.74 to
 1.25, so the slowest runners ran the suite 1.7 times as long as the fastest, and the slowest run
 exhausted the budget. Those distributed slowdowns justify proportional headroom, and twice the
-measured ceiling covers that spread.
+measured ceiling covers that spread. On Boat, Check 41010408001 ran the unsharded suite's 4,406
+attempts in 85.5 minutes, and the 40-minute healthy shard ceiling rests on its longest attempt, as
+[Scenario Shards](#scenario-shards) explains.
 
 The job's limit remains the emergency guard outside the budget rather than the mechanism that ends a
 wedged run. A job the limit cancels is killed wherever its scenarios are: the logs it uploads end
@@ -2860,13 +2905,15 @@ harness's copy of it change together.
 The review of 21 October 2026 compares execution allowances with retained progress rather than
 restarting an unchanged run after its watchdog expires. Its suite allowance of 75 minutes in a
 120-minute job became 105 minutes in a 155-minute job on 27 October 2026, when the measurement in
-[The CI Reserve](#the-ci-reserve) replaced the 34-minute ceiling it rested on. Other narrow bounds use at least 1.5 times the observed duration or current shard
-estimate, with time left for their surrounding work. The rows below cover the workflow job families
-and their nested execution guards; a missing completion is reported as incomplete evidence.
+[The CI Reserve](#the-ci-reserve) replaced the 34-minute ceiling it rested on, and 85 minutes in
+each 115-minute shard job on 30 October 2026, when the suite was divided into three shards. Other
+narrow bounds use at least 1.5 times the observed duration or current shard estimate, with time left
+for their surrounding work. The rows below cover the workflow job families and their nested
+execution guards; a missing completion is reported as incomplete evidence.
 
 | Guard | Evidence | Current allowance and decision |
 | --- | --- | --- |
-| Scenario suite and job | 49m31s complete in 40419254390; 17 earlier runs of one inventory took 44m49s to 75m02s with a 1.7-times spread between runners | 105-minute suite, 155-minute job, including 35 minutes before and 15 after the suite |
+| Scenario suite and jobs | Unsharded on Boat, 85.5 minutes in 41010408001 with a 37.5-minute longest attempt; 49m31s in 40419254390, and 17 earlier runs of one inventory took 44m49s to 75m02s with a 1.7-times spread between runners | 85-minute suite in each 115-minute shard job, including 15 minutes before and 15 after the suite; 90-minute build job |
 | Ordinary Bolero job | 47m10s in run 39649567371 | 90 minutes; 1.5 times the measurement is 70m45s |
 | Sanitizer shards | The current 205-target, three-shard plan estimates at most 114 minutes before discovery, qualification and uploads | 240 minutes; 1.5 times the estimate is 171 minutes, leaving 69 for surrounding work and cold-build variation |
 | Ordinary image builds | 65m01s for amd64 in Docker Build 39534273321; 56m43s in 39654966533 | 120 minutes; 1.5 times the slower complete build is about 98 minutes |
@@ -2892,9 +2939,11 @@ a failed product deadline or assertion remains a failure that needs its owning r
 review changes no synchronization protocol or tracked lock path, so Deloxide does not apply to the
 budget changes themselves. The inventory and workflow contract tests validate the affected guards.
 
-A same-commit rerun of the scenarios job replaces that job's four report artifacts: scenario logs,
-runner load, kache report, and scenario coverage. This lets a rerun publish its own diagnostics
-under GitHub Actions' immutable artifact names. When the coverage job is rerun, its advisory
+A same-commit rerun of a scenario shard replaces that shard's three report artifacts: its scenario
+logs, runner load and scenario coverage. A rerun of `scenarios-build` replaces the archive, its
+runner load and its kache report. This lets a rerun publish its own diagnostics under GitHub
+Actions' immutable artifact names. The archive is kept for seven days, so a shard rerun in that
+week restores it without rebuilding. When the coverage job is rerun, its advisory
 reporter updates its marked PR comment for the same PR head instead of adding a comment.
 
 ### Runner Stalls
@@ -3297,16 +3346,16 @@ creates a new attempt and never qualifies the one that failed.
 
 ## How Failure Reaches CI Output
 
-The job log carries the scenario binary's standard output and standard error, and the `scenario-logs`
-artifact carries `tests/logs`.
+Each shard's job log carries the scenario binary's standard output and standard error, and the
+shard's `scenario-logs-<I>` artifact carries its `tests/logs`.
 
 | Output | Where | What it holds |
 | --- | --- | --- |
 | Cucumber report | Standard output | Every scenario and step result in order, the world of a failed step, the summary, and every failed scenario repeated at the end |
 | Harness transitions | Standard error | Node startup transitions and outcomes, the stops scenarios waited for, and a suite timeout's diagnostic and cleanup |
-| Scenario log | `tests/logs/cucumber.log` | The run's parallelism and suite budget, cluster start requests and failures, the Plexus statements scenarios run, every phase marker, teardown diagnostics and context, unfinished cleanups, and the suite timeout diagnostic |
-| Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, run-slot utilization and scenario work, retries, the runner task's tick lateness and stalls with its thread's CPU and run-queue time, how busy the runtime workers were, wait time by reason, the ten longest attempts, and every attempt that reached two minutes without declaring itself long-running; captured at watchdog expiry before cleanup on a timed-out run |
-| Runner load | `runner-load-tests` and `runner-load-scenarios` artifacts | Five-second CPU utilization and steal-time samples and their mean and peak |
+| Scenario log | `tests/logs/cucumber.log` | The run's parallelism and suite budget, the runs a shard kept, cluster start requests and failures, the Plexus statements scenarios run, every phase marker, teardown diagnostics and context, unfinished cleanups, and the suite timeout diagnostic |
+| Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, the shard and how many of the runs it read it kept, run-slot utilization and scenario work, retries, the runner task's tick lateness and stalls with its thread's CPU and run-queue time, how busy the runtime workers were, wait time by reason, the ten longest attempts, and every attempt that reached two minutes without declaring itself long-running; captured at watchdog expiry before cleanup on a timed-out run |
+| Runner load | `runner-load-tests`, `runner-load-scenarios-build` and `runner-load-scenarios-<I>` artifacts | Five-second CPU utilization and steal-time samples and their mean and peak |
 | Node traces | `tests/logs/scenarios.log` | The trace output of every in-process node of the run |
 
 Server processes write their logs into their own temporary directories, and a failure quotes the

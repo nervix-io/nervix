@@ -38,7 +38,7 @@ counters.
 | Producer | Execution and exported evidence |
 | --- | --- |
 | `just test-coverage` (`tests`) | Ordinary workspace unit, binary, benchmark test-mode and harness-liveness tests. Packages that own execution modes run separately with ordinary features, so an all-features invocation never combines modes. Exports `lcov-workspace.info` and `coverage-source-root.txt` as `coverage-tests`. |
-| `just test-scenarios-coverage` (`scenarios`) | The public Cucumber suite, including its instrumented server, CLI, report tool, paced Rust driver and shared binding. Exports the same report/root pair and the paced Python drivers' `python.lcov` as `coverage-scenarios`. |
+| `just test-scenarios-coverage` (`scenarios-build` and the `scenarios` shards) | The public Cucumber suite, including its instrumented server, CLI, report tool, paced Rust driver and shared binding. Each shard exports the same report/root pair for its share of the suite, and the paced Python drivers' `python.lcov` when it ran them, as `coverage-scenarios-<I>`. |
 | `coverage-native-extras test-typed-ratchet` (`extra-tests`) | Source-contract compiler fixtures, including their paired fixture doctests and loaded procedural macro objects, using the analysis compiler's matching LLVM tools. Product API doctests and modeled fixture checks finish separately without instrumentation. |
 | `coverage-native-extras bench-smoke` (`extra-tests`) | The smoke recipe's benchmark bodies in test mode. Other Cargo benchmark test targets run in `test-coverage`. Instrumented timings are not performance evidence. |
 | `coverage-native-extras test-primitives-ordinary` (`extra-tests`) | The primitive boundary's native ordinary conformance checks. Other conformance modes remain separate. |
@@ -239,16 +239,27 @@ and the test sources the run executed. Each writes the absolute checkout path it
 `coverage-source-root.txt` beside the report. Each is a build recipe followed by a run recipe:
 `test-coverage-build` and `test-scenarios-coverage-build` compile every binary under the
 instrumentation and into the target directory of `cargo llvm-cov`, and `test-coverage-run` and
-`test-scenarios-coverage-run` run them and export the report, compiling nothing. CI runs the two as
-separate steps and publishes the job's cache between them. `just coverage-report-workspace` writes
-the same pair from the profiles a focused recipe collected. CI uploads the pair as the
-`coverage-tests` and `coverage-scenarios` artifacts, the second with the Python paced drivers'
-report, and the extra-tests job uploads its native collections and Python tooling reports as
-`coverage-native-extras`. The coverage job then runs:
+`test-scenarios-coverage-run` run them and export the report, compiling nothing. CI runs the tests'
+two as separate steps and publishes the job's cache between them. The scenario suite runs in
+[shards](./integration-test-lifecycle.md#scenario-shards): `scenarios-build` builds once, publishes
+its cache and packs the executables, and each shard restores them and runs
+`test-scenarios-coverage-shard`, which runs its share of the suite and exports the pair from that
+share's profiles, compiling nothing. `just coverage-report-workspace` writes the same pair from the
+profiles a focused recipe collected. CI uploads the pairs as the `coverage-tests` artifact and one
+`coverage-scenarios-<I>` artifact for each shard, with the Python paced drivers' report of a shard
+that ran them, and the extra-tests job uploads its native collections and Python tooling reports as
+`coverage-native-extras`. The coverage job downloads each shard's artifact into a directory named
+after it and then runs, for three shards:
 
 ```bash
-just coverage-merge coverage-inputs/tests coverage-inputs/scenarios coverage-inputs/native-extras
+just coverage-merge coverage-inputs/tests coverage-inputs/coverage-scenarios-1 \
+    coverage-inputs/coverage-scenarios-2 coverage-inputs/coverage-scenarios-3 \
+    coverage-inputs/native-extras
 ```
+
+It names one input for each shard that `SCENARIO_SHARDS` runs, so a shard whose report is missing
+fails the merge as a missing input. The merge sums the counters of every report that measured a
+file, so the shards' reports add up to the suite's.
 
 An input is a producer's artifact directory or one report, with the producer's
 `coverage-source-root.txt` in the directory or beside the report. The merge reads the workspace

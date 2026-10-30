@@ -552,14 +552,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("needs: [tests, scenarios, extra-tests]", job)
         downloads = [step for step in job.split("\n      - name: ") if "uses: actions/download-artifact" in step]
         self.assertEqual(
-            [re.search(r"name: (\S+)", step.split("with:")[1])[1] for step in downloads],
-            ["coverage-tests", "coverage-scenarios", "coverage-native-extras"],
+            [re.search(r"(?:name|pattern): (\S+)", step.split("with:")[1])[1] for step in downloads],
+            ["coverage-tests", "coverage-scenarios-*", "coverage-native-extras"],
         )
+        # Every scenario shard's report lands in a directory named after its artifact, and the merge
+        # names each shard the workflow runs, so a missing report fails it.
+        self.assertIn("          path: coverage-inputs\n", step_section(job, "Download scenarios coverage"))
         merge = step_section(job, "Merge coverage")
+        self.assertIn('for shard in $(seq 1 "${SCENARIO_SHARDS}"); do\n', merge)
+        self.assertIn('scenarios+=("coverage-inputs/coverage-scenarios-${shard}")\n', merge)
         self.assertIn(
-            "run: just coverage-merge coverage-inputs/tests coverage-inputs/scenarios coverage-inputs/native-extras\n",
+            'just coverage-merge coverage-inputs/tests "${scenarios[@]}" coverage-inputs/native-extras\n',
             merge,
         )
+        self.assertIn('  SCENARIO_SHARDS: "', self.workflow.split("\njobs:\n", 1)[0])
         self.assertNotIn("lcov --add-tracefile", job)
         self.assertNotIn("apt-get install -y lcov", job)
         report = step_section(job, "Report patch line coverage")
@@ -571,16 +577,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("lcov.info", upload)
 
     def test_producers_publish_the_workspace_export_with_its_root_and_no_focused_report(self) -> None:
-        for name, artifact in (("tests", "coverage-tests"), ("scenarios", "coverage-scenarios")):
+        for name, artifact in (("tests", "coverage-tests"), ("scenarios", "coverage-scenarios-${{ matrix.shard }}")):
             with self.subTest(job=name):
                 job = job_section(self.workflow, name)
                 upload = step_section(job, f"Upload {name} coverage")
-                self.assertIn(f"name: {artifact}", upload)
+                self.assertIn(f"name: {artifact}\n", upload)
                 self.assertIn("            lcov-workspace.info\n", upload)
                 self.assertIn("            coverage-source-root.txt\n", upload)
                 self.assertNotIn("            lcov.info\n", upload)
                 self.assertNotIn("pwd > coverage-source-root.txt", job)
-        for recipe in ("test-coverage-phase", "test-scenarios-coverage-run", "coverage-report-workspace"):
+        for recipe in (
+            "test-coverage-phase",
+            "test-scenarios-coverage-run",
+            "test-scenarios-coverage-shard",
+            "coverage-report-workspace",
+        ):
             with self.subTest(recipe=recipe):
                 body = recipe_body(self.justfile, recipe)
                 self.assertIn("--no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info", body)

@@ -454,11 +454,13 @@ class CheckWorkflowSelectionTests(unittest.TestCase):
         return re.split(r"\n  [a-z][a-z-]*:\n", self.check.split(f"\n  {name}:\n", 1)[1], maxsplit=1)[0]
 
     def test_ordinary_producers_wait_for_the_same_verified_selection(self) -> None:
-        for name in ("tests", "scenarios", "extra-tests", "diagnostic-evidence"):
+        for name in ("tests", "scenarios-build", "extra-tests", "diagnostic-evidence"):
             with self.subTest(job=name):
                 job = self.job(name)
                 self.assertIn("needs: [test-selection]", job)
                 self.assertIn("if: needs.test-selection.outputs.tests-required == 'true'", job)
+        # The scenario shards run only from a build the selection required.
+        self.assertIn("needs: [scenarios-build]", self.job("scenarios"))
         self.assertIn("needs: [tests, scenarios, extra-tests]", self.job("coverage"))
         for name in ("checks", "conventional-pr-title"):
             with self.subTest(job=name):

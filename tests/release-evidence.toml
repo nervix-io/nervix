@@ -13,7 +13,7 @@ checks = [
   "test-selection",
   "checks",
   "tests",
-  "scenarios",
+  "scenarios-build",
   "coverage",
   "coverage-full",
   "extra-tests",
@@ -21,6 +21,7 @@ checks = [
 ]
 description = "Formatting, lints, validation and ratchets; unit, documentation, scenario and runner tests; ordinary coverage integrity, complete selected-producer union and the deterministic complexity ratchet; advisory coverage percentages and CRAP scores"
 name = "ordinary"
+sharded = ["scenarios"]
 
 [[method]]
 checks = ["build-debian-amd64", "build-debian-arm64"]

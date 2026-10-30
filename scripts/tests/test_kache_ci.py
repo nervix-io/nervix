@@ -45,7 +45,7 @@ KACHE_JOBS = {
         "diagnostic-evidence",
         "deloxide",
         "tests",
-        "scenarios",
+        "scenarios-build",
         "coverage",
         "client-conformance",
         "extra-tests",
@@ -60,7 +60,7 @@ KACHE_JOBS = {
 # The jobs that build before they run, with the cache published and reported between the two, so the
 # run's outcome cannot lose what the build filled and each phase's time is visible on its own.
 BUILD_PHASE_JOBS = {
-    "check.yaml": {"tests", "scenarios", "client-conformance", "shuttle", "loom", "turmoil", "deloxide"},
+    "check.yaml": {"tests", "scenarios-build", "client-conformance", "shuttle", "loom", "turmoil", "deloxide"},
     "docker-build.yaml": set(),
     "bolero.yaml": {"bolero-random", "bolero-fuzz"},
 }
@@ -259,7 +259,7 @@ class KacheWorkflowTests(unittest.TestCase):
             regional_remote("  tests:\n    runs-on: ${{ matrix.runner }}\n")
 
     def test_the_publication_step_records_a_failed_job_and_tolerates_a_missing_checkout(self) -> None:
-        scenarios = job_steps(workflow_jobs(Path(".github/workflows/check.yaml").read_text())["scenarios"])
+        scenarios = job_steps(workflow_jobs(Path(".github/workflows/check.yaml").read_text())["scenarios-build"])
         script = next(step for step in scenarios if step.name == "Publish kache cache").block("run")
         self.assertEqual(script, PUBLISH_SCRIPT)
         with tempfile.TemporaryDirectory() as directory:

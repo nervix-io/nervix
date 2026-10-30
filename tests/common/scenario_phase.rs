@@ -23,6 +23,7 @@ use super::{
     scenario_schedule::{
         AdmissionWait, LONG_RUNNING_ATTEMPT, LONG_RUNNING_TAG, ScenarioLength, ScenarioRun,
     },
+    scenario_shard::ShardSelection,
 };
 
 /// Where one scenario is between its first step and the end of its cleanup.
@@ -273,6 +274,8 @@ struct SuiteMeasurements {
     runner_thread: Option<RunnerThread>,
     /// How busy the runtime's workers had been when the run began, when it began inside one.
     workers_began: Option<WorkerBusy>,
+    /// The runs this shard kept, when the run is one shard of a sharded run.
+    shard: Option<ShardSelection>,
 }
 
 static MEASUREMENTS: LazyLock<Mutex<SuiteMeasurements>> =
@@ -305,6 +308,17 @@ impl SuiteMeasurements {
             times.on_cpu.as_secs_f64(),
             times.run_queue_wait.as_secs_f64()
         )
+    }
+
+    /// Which runs this run executed: one shard's, or every run it selected.
+    fn shard_line(&self) -> String {
+        match &self.shard {
+            Some(selection) => format!(
+                "Shard: {}, which kept {} of the {} scenario runs read.",
+                selection.shard, selection.kept, selection.read
+            ),
+            None => "Shard: none; the run executed every scenario run it selected.".to_string(),
+        }
     }
 
     /// How busy the runtime's workers, which run every in-process node, were over a run of
@@ -341,6 +355,11 @@ pub(crate) fn begin_suite_measurement(slots: usize, budget: Duration) {
         workers_began: WorkerBusy::of_current_runtime(),
         ..SuiteMeasurements::default()
     };
+}
+
+/// Records which runs this shard of a sharded run kept, for the run's summary.
+pub(crate) fn record_shard_selection(selection: ShardSelection) {
+    MEASUREMENTS.lock().shard = Some(selection);
 }
 
 /// Adds one tick of the runner task to the run's measurement.
@@ -402,6 +421,7 @@ pub(crate) fn suite_summary() -> String {
             length.as_secs_f64(),
             measurements.budget.as_secs_f64()
         ),
+        measurements.shard_line(),
         format!(
             "Run slots: {}; utilization: {utilization:.1}%; scenario work: {:.1} slot-seconds.",
             measurements.slots,
