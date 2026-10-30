@@ -217,13 +217,13 @@ jobs:
         with:
           label: validate
 
-      # The checks run beside each other with one recipe per CPU: kache's scheduler admits the
-      # Clippy compilations, and the typed ratchet's admission queue its server analyses, against
-      # the runner's memory.
+      # Memory limits this job, not CPUs: each recipe's Cargo already uses every CPU, so a recipe
+      # per CPU adds no speed, and on a run that compiled the server cold it overlapped enough
+      # Clippy compilations to pass the runner's 32 GB. Four recipes run at a time.
       - name: Validate
         run: |
           just toolchains-install
-          just validate-ci "$(nproc)"
+          just validate-ci 4
         env:
           GH_TOKEN: ${{ github.token }}
 
