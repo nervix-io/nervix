@@ -112,6 +112,15 @@ def with_retries(what: str, operation: Callable[[], T]) -> T:
     raise AssertionError("the last attempt returns or raises")
 
 
+def error_code(body: bytes) -> str:
+    """The code an S3 error document names, which tells a refused token from a bad signature."""
+    try:
+        document = ElementTree.fromstring(body)
+    except ElementTree.ParseError:
+        return "without an error document"
+    return document.findtext("Code") or "without an error code"
+
+
 def signing_key(secret_key: str, date: str, region: str) -> bytes:
     key = f"AWS4{secret_key}".encode()
     for part in (date, region, SERVICE, "aws4_request"):
@@ -159,7 +168,8 @@ class Bucket:
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> Bucket:
-        values = {field: environment.get(name, "") for field, name in ENVIRONMENT.items()}
+        # A pasted setting easily keeps a line ending, which changes every signature.
+        values = {field: environment.get(name, "").strip() for field, name in ENVIRONMENT.items()}
         missing = [name for field, name in ENVIRONMENT.items() if not values[field]]
         if missing:
             raise ArtifactError(f"{', '.join(missing)} must be set to reach the artifacts' bucket")
@@ -202,7 +212,8 @@ class Bucket:
             if response.status in TRANSIENT_STATUSES or response.status >= 500:
                 raise Transient(f"status {response.status}")
             if response.status >= 300:
-                raise ArtifactError(f"{method} of {key} answered status {response.status}")
+                reason = error_code(response.read())
+                raise ArtifactError(f"{method} of {key or 'the bucket'} answered {response.status} {reason}")
             yield response
         finally:
             connection.close()

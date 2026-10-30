@@ -179,6 +179,8 @@ class FakeBucket:
                 return None
 
             def answer(self, status: int, body: bytes = b"") -> None:
+                if status == 403:
+                    body = b"<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>"
                 self.send_response(status)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -295,7 +297,7 @@ class TransferTests(unittest.TestCase):
 
     def test_a_refused_request_is_not_retried(self) -> None:
         self.fake.failures = [("part-0", 403)]
-        with self.quiet(), self.assertRaisesRegex(artifacts.ArtifactError, "status 403"):
+        with self.quiet(), self.assertRaisesRegex(artifacts.ArtifactError, "answered 403 AccessDenied"):
             artifacts.upload(self.bucket, "7", "refused", self.tree({"a": b"1"}), 0)
         self.assertEqual(sum(1 for method, _ in self.fake.requests if method == "PUT"), 1)
         self.assertEqual(self.sleeps.call_count, 0)
@@ -378,6 +380,12 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("R2_ARTIFACTS_SECRET_ACCESS_KEY", output)
         self.assertNotIn("visible-key-id", output)
+
+    def test_a_setting_pasted_with_a_line_ending_is_trimmed(self) -> None:
+        values = dict.fromkeys(artifacts.ENVIRONMENT.values(), "value\n")
+        values["R2_ARTIFACTS_ENDPOINT"] = "https://account.example\n"
+        bucket = artifacts.Bucket.from_environment(values)
+        self.assertEqual((bucket.secret_key, bucket.endpoint), ("value", "https://account.example"))
 
     def test_an_endpoint_without_a_scheme_is_refused(self) -> None:
         values = dict.fromkeys(artifacts.ENVIRONMENT.values(), "value")
