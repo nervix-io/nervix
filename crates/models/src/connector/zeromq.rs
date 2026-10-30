@@ -30,8 +30,8 @@ use crate::{
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody,
-    IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference, IngestorReferenceKind,
-    PositionClass,
+    IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
+    IngestorReferenceKind, PositionClass,
 };
 
 configured_client!(ZeroMq: unpooled, config CLIENT_CONFIG, CreateClientZeroMq => ZeroMqConfigEntry);
@@ -112,7 +112,7 @@ const ZEROMQ_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 impl IngestorDeclaration for ZeroMqPullIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         headers: None,
-        metadata: IngestorMetadataScope::Headers,
+        metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::ZeroMq),
         position_class: PositionClass::None,

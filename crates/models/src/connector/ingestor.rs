@@ -45,7 +45,7 @@ use super::{
 };
 use crate::{
     AlterIngestorError, ClientName, ConnectorKind, EndpointName, EndpointType, IngestorInput,
-    IngestorMetadataScope, Model, ModelKind, ModelName, RetryPolicy,
+    IngestorMetadataDeclaration, Model, ModelKind, ModelName, RetryPolicy,
 };
 
 #[derive(
@@ -435,7 +435,7 @@ pub struct IngestorEntityCapabilities {
     /// or `None` where they carry none.
     pub headers: Option<HeaderModel>,
     /// The typed `metadata` namespace its messages expose to the ingestor's programs.
-    pub metadata: IngestorMetadataScope,
+    pub metadata: IngestorMetadataDeclaration,
     /// Whether it executes on every live cluster node rather than on one scheduled owner.
     pub executes_on_every_cluster_node: bool,
     /// What its body names to read from.
@@ -496,8 +496,10 @@ impl IngestorEntityCapabilities {
             capabilities.push(RuntimeCapability::Delivery(delivery.kind));
         }
         capabilities.extend(RuntimeCapability::of_options(self.options));
-        for field in self.metadata.declared_fields() {
-            capabilities.push(RuntimeCapability::Metadata { field: field.name });
+        for field in self.metadata.fields() {
+            capabilities.push(RuntimeCapability::Metadata {
+                field: field.name(),
+            });
         }
         capabilities.extend(RuntimeCapability::of_bounds(self.bounds));
         capabilities

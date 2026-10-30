@@ -1217,6 +1217,14 @@ emitter, the emitter's connector and entity, the header as the emitter's
 `emitter 'out' in domain 'shop' writes header 'route' at INVOKE #1 and again at #3, but PULSAR TOPIC
 emitters keep one value per header name, so the later write would replace the earlier one on every
 record`. The header is a name the statement writes, never a value a record carries.
+An ingestor route that reads a `metadata.<field>` its entity does not declare is refused with
+`RegistryError::UndeclaredIngestorMetadata`, which names the domain, the ingestor, the route's relay,
+the field and the entity with the fields it declares, such as `ingestor 'orders' in domain 'shop'
+reads metadata.key in its route to 'events', but KAFKA TOPIC ingestors declare only metadata.topic,
+metadata.partition and metadata.offset`. A `TIMESTAMP AT metadata.<field>` that names an undeclared
+field is refused with `RegistryError::UndeclaredIngestorTimestampMetadata`, and one that names a
+field declared as another type than `DATETIME` with `RegistryError::IngestorTimestampMetadataType`,
+which names the declared type.
 Planning failures
 likewise retain the selected entity or placement so an operator can correct the request. A
 relocation the graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`:
@@ -1577,8 +1585,8 @@ The source host, or the endpoint that received the payload, turns each codec ref
 `DecodeRejection`: a UUIDv7 reference, the code `validation`, the operation `decode`, the codec,
 the fields its `MissingField`, `UnexpectedField` and `ParseField` contexts name at fault, including
 those of a failed message an unfolding kept as a report of its own, the instant the source took the
-payload in, the transport position the payload's typed metadata names, and the codec report's whole
-chain rendered once as its message. The code and the operation are the same for every decode
+payload in, the transport position the payload's ingest metadata row names, and the codec report's
+whole chain rendered once as its message. The code and the operation are the same for every decode
 rejection, so the record does not store them. The record never holds the payload, and the codec's
 contexts name the codec and the field, never a value. The ingestor's `ON GENERAL ERROR` policy then
 reports the rejection: `LOG` publishes `ingestor '<name>' general error in domain '<domain>': decode
@@ -1715,10 +1723,14 @@ guest-requested state reset reports on its own, and an ingest group's failure to
 branch entrypoint, which the group's flush also returns to its caller. A branch whose domain
 routing can no longer be read fails the acknowledgements it was handed with that routing failure
 directly, without a policy or a runtime event.
-A WebSockets ingest metadata builder checks its frame-label capacity before allocation. A row bound
-whose byte estimate exceeds the address space returns `IngestMetadataError::WebsocketsCapacityOverflow`;
-the ingest group retains it below its `open ingest metadata` operation and the source's general-error
-policy reports that chain.
+An ingest group's metadata builders refuse a message that hands over another number of metadata
+values than its entity declares, or a value of another type than its field's, with
+`IngestMetadataError::ExcessValues`, `MissingValues` or `ValueType`, which name the declared count
+or the field with its declared and handed type. Such a message is a connector defect: the ingest
+group retains the refusal below its `append ingest metadata` operation and the source's
+general-error policy reports that chain. An ingestor whose programs and the declaration they were
+validated against disagree fails to bind with `EntrypointBindingError::ProjectMetadata` above
+`IngestMetadataError::UndeclaredField`, which names the field.
 
 Each failure reports its owner's typed context above the cause it kept:
 

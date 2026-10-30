@@ -44,9 +44,9 @@ use crate::{
     EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
     EmitterReferenceKind, Expression, HeaderLayout, HeaderModel, IngestAcknowledgement,
     IngestDeliveryKind, IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody,
-    IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference, IngestorReferenceKind,
-    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
-    OptionValue, PayloadSizeLimit, PositionClass, RetryPolicy,
+    IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass, RetryPolicy,
 };
 
 configured_client!(Sqs: unpooled, config CLIENT_CONFIG, CreateClientSqs => SqsConfigEntry);
@@ -177,7 +177,7 @@ impl IngestorDeclaration for SqsQueueIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // An SQS message's attributes: one value per name, in no order.
         headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
-        metadata: IngestorMetadataScope::Headers,
+        metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Sqs),
         position_class: PositionClass::BrokerRedelivered,

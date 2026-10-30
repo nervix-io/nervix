@@ -98,7 +98,7 @@ fn queue_declares_message_attributes_as_headers_and_no_envelope() {
 
     assert_eq!(ingest.headers, attributes);
     assert_eq!(emit.headers, attributes);
-    assert_eq!(ingest.metadata, IngestorMetadataScope::Headers);
+    assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
     assert!(ingest.metadata.fields().is_empty());
     assert_eq!(ingest.options, &[OptionDeclaration::INSTANCES]);
     assert!(emit.envelope.is_empty());

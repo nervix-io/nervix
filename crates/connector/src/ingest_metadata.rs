@@ -1,13 +1,15 @@
-//! The transport headers and typed metadata an ingestor message carries into the host.
+//! The transport headers, typed metadata and transport position an ingestor message carries into
+//! the host.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The header trait an ingestor message implements over its own borrowed headers, the
-//!   retained copy of headers that must outlive their message, and the typed metadata row an ingestor
-//!   reads per message, one shape for each metadata scope the vocabulary declares.
-//! - **Depends on.** The vocabulary's metadata scopes and the standard library.
-//! - **Must not know.** The Arrow columns the host projects these rows into, or the VM namespaces
-//!   programs read them through.
+//!   retained copy of headers that must outlive their message, the visit through which a message
+//!   hands the host the value of every metadata field its entity declares, the retained copy of
+//!   those values, and the transport position a decode rejection names.
+//! - **Depends on.** The vocabulary's metadata types and timestamps, and the standard library.
+//! - **Must not know.** The Arrow columns the host projects these values into, which fields a
+//!   program reads, or the VM namespaces programs read them through.
 
 #![cfg_attr(
     nervix_lint,
@@ -17,7 +19,9 @@
     )
 )]
 
-use nervix_models::{IngestorMetadataScope, Timestamp};
+use std::{fmt, net::SocketAddr};
+
+use nervix_models::{IngestorMetadataType, Timestamp};
 use nervix_primitives::sync::Arc;
 
 /// Transport headers of one ingestor message, visited in the order its entity's declared header model
@@ -81,75 +85,338 @@ impl IngestMessageHeaders for RetainedIngestHeaders {
     }
 }
 
-/// One message's ingest metadata, read from its ingestor message.
-///
-/// The variant must match the metadata scope the ingestor started with; the fields borrow the
-/// ingestor message so appending a row copies bytes into Arrow buffers and nothing else, and copying a
-/// row copies only those borrows.
+/// How an ingestor message lends the host its transport headers.
 #[derive(Clone, Copy)]
-pub enum IngestMetadataRow<'a> {
-    Http {
-        status: u16,
-        polled_at: Timestamp,
-        headers: &'a dyn IngestMessageHeaders,
-    },
-    Websockets {
-        frame_type: nervix_models::WebsocketsFrameType,
-        // A buffered frame can outlive the exact connection whose upgrade supplied these fields.
-        headers: &'a Arc<RetainedIngestHeaders>,
-    },
+pub enum IngestRowHeaders<'a> {
+    /// Headers the message lends for as long as it lives, which the host copies when it must keep
+    /// them after the message is gone.
+    Borrowed(&'a dyn IngestMessageHeaders),
+    /// A snapshot the message shares with the other messages of its connection, which the host
+    /// keeps by reference rather than copying it per message.
+    Shared(&'a Arc<RetainedIngestHeaders>),
+}
+
+impl<'a> IngestRowHeaders<'a> {
+    /// The headers of a message that carries none.
+    pub const NONE: IngestRowHeaders<'static> = IngestRowHeaders::Borrowed(&NoIngestHeaders);
+
+    /// The headers themselves, however the message lends them.
+    pub fn headers(self) -> &'a dyn IngestMessageHeaders {
+        match self {
+            Self::Borrowed(headers) => headers,
+            Self::Shared(headers) => headers.as_ref(),
+        }
+    }
+}
+
+/// Where a message's metadata values go: exactly one call for each field its entity declares, in
+/// the order the declaration lists them, the call of the field's declared type or `absent` where the
+/// message carries no value for that field.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the ingestor host appends the metadata a program reads for each admitted record"
+    )
+)]
+pub trait IngestMetadataValues {
+    /// The value of a `STRING` field.
+    fn string(&mut self, value: &str);
+    /// The value of a `STRING` field the message writes in place rather than holding as text, such
+    /// as a socket address, so that no text is allocated for it per message.
+    fn rendered(&mut self, value: &dyn fmt::Display);
+    /// The value of a `BYTES` field.
+    fn bytes(&mut self, value: &[u8]);
+    /// The value of a `BOOL` field.
+    fn bool(&mut self, value: bool);
+    /// The value of a `U16` field.
+    fn u16(&mut self, value: u16);
+    /// The value of an `I32` field.
+    fn i32(&mut self, value: i32);
+    /// The value of an `I64` field.
+    fn i64(&mut self, value: i64);
+    /// The value of a `DATETIME` field.
+    fn datetime(&mut self, value: Timestamp);
+    /// The message carries no value for the field, which reads as a typed null.
+    fn absent(&mut self);
+}
+
+/// The typed metadata of one ingestor message, which hands the host the value of every field the
+/// message's entity declares.
+///
+/// Connectors implement this over their own borrowed message, as they implement
+/// [`IngestMessageHeaders`], so the host appends the values a program reads straight into its
+/// columns, without an owned row per message.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the ingestor host visits the metadata a program reads for each admitted record"
+    )
+)]
+pub trait IngestMessageMetadata: Send + Sync {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the synchronous value sink; local sink \
+                                   bodies remain analyzed")
+    )]
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues);
+}
+
+/// The metadata of a message whose entity declares no metadata field.
+pub struct NoIngestMetadata;
+
+impl IngestMessageMetadata for NoIngestMetadata {
+    fn visit_metadata(&self, _values: &mut dyn IngestMetadataValues) {}
+}
+
+/// One metadata value of a message, owned so it outlives the message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RetainedIngestMetadataValue {
+    /// The message carried no value for the field.
+    Absent,
+    String(String),
+    Bytes(Vec<u8>),
+    Bool(bool),
+    U16(u16),
+    I32(i32),
+    I64(i64),
+    Datetime(Timestamp),
+}
+
+impl RetainedIngestMetadataValue {
+    /// The declared type this value is of, or `None` for a field the message carried no value
+    /// for, which fits a field of any type.
+    pub fn ty(&self) -> Option<IngestorMetadataType> {
+        match self {
+            Self::Absent => None,
+            Self::String(_) => Some(IngestorMetadataType::String),
+            Self::Bytes(_) => Some(IngestorMetadataType::Bytes),
+            Self::Bool(_) => Some(IngestorMetadataType::Bool),
+            Self::U16(_) => Some(IngestorMetadataType::U16),
+            Self::I32(_) => Some(IngestorMetadataType::I32),
+            Self::I64(_) => Some(IngestorMetadataType::I64),
+            Self::Datetime(_) => Some(IngestorMetadataType::Datetime),
+        }
+    }
+}
+
+/// The metadata values of a message copied out of it, in its entity's declared order, so they
+/// outlive it: the quiesce buffer replays them long after the message was dropped, and a paced
+/// source returns its poll's messages owned.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RetainedIngestMetadata(Vec<RetainedIngestMetadataValue>);
+
+impl RetainedIngestMetadata {
+    /// Copies the values `metadata` hands over right now.
+    pub fn capture(metadata: &dyn IngestMessageMetadata) -> Self {
+        let mut values = Vec::new();
+        metadata.visit_metadata(&mut RetainedIngestMetadataCapture(&mut values));
+        Self(values)
+    }
+
+    /// The metadata of a message whose entity declares no metadata field.
+    pub fn none() -> Self {
+        Self(Vec::new())
+    }
+
+    /// The values, in declared order, of a message a connector already holds owned.
+    pub fn from_values(values: Vec<RetainedIngestMetadataValue>) -> Self {
+        Self(values)
+    }
+
+    /// The retained values in declared order.
+    pub fn values(&self) -> &[RetainedIngestMetadataValue] {
+        &self.0
+    }
+}
+
+impl IngestMessageMetadata for RetainedIngestMetadata {
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+        for value in &self.0 {
+            match value {
+                RetainedIngestMetadataValue::Absent => values.absent(),
+                RetainedIngestMetadataValue::String(value) => values.string(value),
+                RetainedIngestMetadataValue::Bytes(value) => values.bytes(value),
+                RetainedIngestMetadataValue::Bool(value) => values.bool(*value),
+                RetainedIngestMetadataValue::U16(value) => values.u16(*value),
+                RetainedIngestMetadataValue::I32(value) => values.i32(*value),
+                RetainedIngestMetadataValue::I64(value) => values.i64(*value),
+                RetainedIngestMetadataValue::Datetime(value) => values.datetime(*value),
+            }
+        }
+    }
+}
+
+/// Appends every value a message hands over to the owned copy being taken of it.
+struct RetainedIngestMetadataCapture<'a>(&'a mut Vec<RetainedIngestMetadataValue>);
+
+impl IngestMetadataValues for RetainedIngestMetadataCapture<'_> {
+    fn string(&mut self, value: &str) {
+        self.0
+            .push(RetainedIngestMetadataValue::String(value.to_string()));
+    }
+
+    fn rendered(&mut self, value: &dyn fmt::Display) {
+        self.0
+            .push(RetainedIngestMetadataValue::String(value.to_string()));
+    }
+
+    fn bytes(&mut self, value: &[u8]) {
+        self.0
+            .push(RetainedIngestMetadataValue::Bytes(value.to_vec()));
+    }
+
+    fn bool(&mut self, value: bool) {
+        self.0.push(RetainedIngestMetadataValue::Bool(value));
+    }
+
+    fn u16(&mut self, value: u16) {
+        self.0.push(RetainedIngestMetadataValue::U16(value));
+    }
+
+    fn i32(&mut self, value: i32) {
+        self.0.push(RetainedIngestMetadataValue::I32(value));
+    }
+
+    fn i64(&mut self, value: i64) {
+        self.0.push(RetainedIngestMetadataValue::I64(value));
+    }
+
+    fn datetime(&mut self, value: Timestamp) {
+        self.0.push(RetainedIngestMetadataValue::Datetime(value));
+    }
+
+    fn absent(&mut self) {
+        self.0.push(RetainedIngestMetadataValue::Absent);
+    }
+}
+
+/// Where on its transport a message was read, which a decode rejection of its payload names.
+///
+/// A position is the transport's own coordinate, never a header value its sender wrote, and only
+/// the transports that give one name it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IngestTransportPosition<'a> {
+    /// The topic, partition and offset of a Kafka record.
     Kafka {
         topic: &'a str,
         partition: i32,
         offset: i64,
-        headers: &'a dyn IngestMessageHeaders,
     },
-    Syslog {
-        peer_addr: std::net::SocketAddr,
-    },
-    Headers {
-        headers: &'a dyn IngestMessageHeaders,
-    },
+    /// The peer a syslog frame came from.
+    Syslog { peer: SocketAddr },
 }
 
-impl IngestMetadataRow<'_> {
-    /// The metadata scope this row carries the fields of, which is the one builder set it can be
-    /// appended into.
-    pub fn scope(&self) -> IngestorMetadataScope {
-        match self {
-            Self::Http { .. } => IngestorMetadataScope::Http,
-            Self::Websockets { .. } => IngestorMetadataScope::Websockets,
-            Self::Kafka { .. } => IngestorMetadataScope::Kafka,
-            Self::Syslog { .. } => IngestorMetadataScope::Syslog,
-            Self::Headers { .. } => IngestorMetadataScope::Headers,
+/// One message's ingest metadata, read from its ingestor message: the values of its entity's
+/// declared metadata fields, its transport headers and, where its transport names one, its
+/// position.
+///
+/// The parts borrow the ingestor message, so copying a row copies only those borrows.
+#[derive(Clone, Copy)]
+pub struct IngestMetadataRow<'a> {
+    pub fields: &'a dyn IngestMessageMetadata,
+    pub headers: IngestRowHeaders<'a>,
+    pub position: Option<IngestTransportPosition<'a>>,
+}
+
+impl<'a> IngestMetadataRow<'a> {
+    /// The row of a message that lends its headers alone: its entity declares no metadata field and
+    /// its transport names no position.
+    pub fn headers(headers: &'a dyn IngestMessageHeaders) -> Self {
+        Self {
+            fields: &NoIngestMetadata,
+            headers: IngestRowHeaders::Borrowed(headers),
+            position: None,
         }
     }
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
-    use nervix_models::IngestorMetadataScope;
+    use std::net::SocketAddr;
 
-    use super::{IngestMetadataRow, NoIngestHeaders};
+    use nervix_models::Timestamp;
+
+    use super::{
+        IngestMessageMetadata, IngestMetadataRow, IngestMetadataValues, IngestRowHeaders,
+        NoIngestHeaders, NoIngestMetadata, RetainedIngestMetadata, RetainedIngestMetadataValue,
+    };
+
+    /// A message whose entity declares one field of every type, in a fixed order.
+    struct EveryType {
+        peer: SocketAddr,
+        observed_at: Timestamp,
+    }
+
+    impl IngestMessageMetadata for EveryType {
+        fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+            values.string("orders");
+            values.rendered(&self.peer);
+            values.bytes(b"key");
+            values.bool(true);
+            values.u16(206);
+            values.i32(-3);
+            values.i64(42);
+            values.datetime(self.observed_at);
+            values.absent();
+        }
+    }
 
     #[test]
-    fn a_metadata_row_names_the_scope_whose_fields_it_carries() {
-        let kafka = IngestMetadataRow::Kafka {
-            topic: "orders",
-            partition: 3,
-            offset: 42,
-            headers: &NoIngestHeaders,
+    fn a_retained_copy_visits_every_value_in_the_order_its_message_handed_them_over() {
+        let message = EveryType {
+            peer: SocketAddr::from(([127, 0, 0, 1], 514)),
+            observed_at: Timestamp::from_unix_nanos(1_234),
         };
-        assert_eq!(kafka.scope(), IngestorMetadataScope::Kafka);
 
-        let syslog = IngestMetadataRow::Syslog {
-            peer_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 514)),
-        };
-        assert_eq!(syslog.scope(), IngestorMetadataScope::Syslog);
+        let retained = RetainedIngestMetadata::capture(&message);
 
-        let headers = IngestMetadataRow::Headers {
-            headers: &NoIngestHeaders,
-        };
-        assert_eq!(headers.scope(), IngestorMetadataScope::Headers);
+        assert_eq!(
+            retained.values(),
+            [
+                RetainedIngestMetadataValue::String("orders".to_string()),
+                RetainedIngestMetadataValue::String("127.0.0.1:514".to_string()),
+                RetainedIngestMetadataValue::Bytes(b"key".to_vec()),
+                RetainedIngestMetadataValue::Bool(true),
+                RetainedIngestMetadataValue::U16(206),
+                RetainedIngestMetadataValue::I32(-3),
+                RetainedIngestMetadataValue::I64(42),
+                RetainedIngestMetadataValue::Datetime(Timestamp::from_unix_nanos(1_234)),
+                RetainedIngestMetadataValue::Absent,
+            ]
+        );
+        assert_eq!(RetainedIngestMetadata::capture(&retained), retained);
+    }
+
+    #[test]
+    fn a_message_without_declared_fields_or_headers_hands_over_nothing() {
+        assert!(
+            RetainedIngestMetadata::capture(&NoIngestMetadata)
+                .values()
+                .is_empty()
+        );
+        assert_eq!(
+            RetainedIngestMetadata::none(),
+            RetainedIngestMetadata::from_values(Vec::new())
+        );
+
+        let row = IngestMetadataRow::headers(&NoIngestHeaders);
+        assert!(
+            RetainedIngestMetadata::capture(row.fields)
+                .values()
+                .is_empty()
+        );
+        assert!(row.position.is_none());
+        let mut visited = 0;
+        row.headers.headers().visit(&mut |_, _| visited += 1);
+        IngestRowHeaders::NONE
+            .headers()
+            .visit(&mut |_, _| visited += 1);
+        assert_eq!(visited, 0);
     }
 }
