@@ -550,7 +550,7 @@ class WorkflowTests(unittest.TestCase):
     def test_the_coverage_job_merges_the_ordinary_artifacts_through_the_recipe(self) -> None:
         job = job_section(self.workflow, "coverage")
         self.assertIn("needs: [tests, scenarios, extra-tests]", job)
-        downloads = [step for step in job.split("\n      - name: ") if "uses: actions/download-artifact" in step]
+        downloads = [step for step in job.split("\n      - name: ") if "uses: ./.github/actions/ci-artifact-download" in step]
         self.assertEqual(
             [re.search(r"(?:name|pattern): (\S+)", step.split("with:")[1])[1] for step in downloads],
             ["coverage-tests", "coverage-scenarios-*", "coverage-native-extras"],

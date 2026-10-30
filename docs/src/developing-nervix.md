@@ -409,6 +409,34 @@ A kache-backed job uses the cache bucket in its runner's region: the EU bucket o
 machines, and the US bucket on GitHub's hosted runners and on Blacksmith's US runners.
 [What Runs Where](integration-test-lifecycle.md#what-runs-where) names their settings.
 
+### CI artifacts
+
+A run's artifacts live in one R2 bucket, below `runs/<run id>/<name>/`, and not in GitHub's artifact
+service, so jobs exchange files through a store that fails independently of GitHub. Every job uses
+`.github/actions/ci-artifact-upload` and `.github/actions/ci-artifact-download`, which take the
+inputs of the GitHub actions they replaced, so a step reads the same. `scripts/ci_artifacts.py`
+states the format and how paths are rooted: an artifact is a tar stream cut into 128 MiB parts, each
+sent and retried on its own, and a manifest written last, so an unfinished upload cannot be read.
+An artifact belongs to the run, so a rerun of other jobs keeps it and a job that runs again replaces
+its own. A local action needs the repository, so a job checks out before it uses one.
+
+| Repository secret | Value |
+| --- | --- |
+| `R2_ARTIFACTS_BUCKET` | The bucket's name |
+| `R2_ARTIFACTS_ENDPOINT` | The account's S3 URL, `https://<account id>.r2.cloudflarestorage.com` |
+| `R2_ARTIFACTS_ACCESS_KEY_ID` | The access key of an Object Read & Write token scoped to that bucket |
+| `R2_ARTIFACTS_SECRET_ACCESS_KEY` | That token's secret access key |
+
+Each workflow passes them to its jobs as environment variables of the same names, and a reusable
+workflow's caller passes them on. The bucket is private, and its lifecycle rule is the only
+retention: a job has no retention of its own. With the same variables set locally, read an artifact
+of any run the bucket still holds:
+
+```bash
+just ci-artifact-download <run> --name coverage-full --path retained
+just ci-artifact-download <run> --pattern 'scenario-logs-*' --path logs
+```
+
 ### Compiler architecture gate
 
 `just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler

@@ -2969,10 +2969,12 @@ budget changes themselves. The inventory and workflow contract tests validate th
 
 A same-commit rerun of a scenario shard replaces that shard's three report artifacts: its scenario
 logs, runner load and scenario coverage. A rerun of `scenarios-build` replaces the archive, its
-runner load and its kache report. This lets a rerun publish its own diagnostics under GitHub
-Actions' immutable artifact names. The archive is kept for seven days, so a shard rerun in that
-week restores it without rebuilding. When the coverage job is rerun, its advisory
-reporter updates its marked PR comment for the same PR head instead of adding a comment.
+runner load and its kache report. An artifact belongs to the run rather than to an attempt, and a
+rerun's upload replaces it as a whole once its manifest lands, so a rerun publishes its own
+diagnostics under the same names. A shard rerun restores the archive without rebuilding for as long
+as the [artifact bucket](./developing-nervix.md#ci-artifacts) keeps it. When the coverage job is
+rerun, its advisory reporter updates its marked PR comment for the same PR head instead of adding a
+comment.
 
 ### Runner Stalls
 

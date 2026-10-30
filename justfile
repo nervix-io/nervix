@@ -1515,6 +1515,11 @@ coverage-harness-liveness *args: test-tools
 coverage-harness-liveness-report output:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/harness-coverage") }} cargo llvm-cov report --package nervix-scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
 
+# Fetch artifacts of a CI run from their bucket, with the R2_ARTIFACTS_* variables set: pass
+# `--name NAME` or `--pattern GLOB`, and `--path DIR`.
+ci-artifact-download run *args:
+    python3 -m scripts.ci_artifacts download --run {{ quote(run) }} {{ args }}
+
 # Judge whether a pull request's head revision holds the complete evidence a release needs: every
 # check tests/release-evidence.toml requires passed on that revision and the label of every
 # label-gated method is on the pull request. Writes the register, with every gap an owner of tracked

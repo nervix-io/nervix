@@ -473,7 +473,7 @@ class CheckWorkflowSelectionTests(unittest.TestCase):
         self.assertIn("run: python3 scripts/ci_test_selection.py --record target/ci-test-selection.json", job)
         self.assertIn("tests-required: ${{ steps.selection.outputs.tests-required }}", job)
         self.assertIn("bolero-required: ${{ steps.selection.outputs.bolero-required }}", job)
-        self.assertIn("uses: actions/upload-artifact@v4", job)
+        self.assertIn("uses: ./.github/actions/ci-artifact-upload", job)
         self.assertIn("name: ci-test-selection", job)
         self.assertIn("if-no-files-found: error", job)
 

@@ -133,7 +133,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertRegex(version[1], r"^\d+\.\d+\.\d+$")
         self.assertNotIn("continue-on-error", check)
         self.assertIn("if: always()", check)
-        self.assertIn("actions/upload-artifact@", check)
+        self.assertIn("./.github/actions/ci-artifact-upload", check)
 
 
 class ControllerTests(unittest.TestCase):

@@ -31,6 +31,11 @@ env:
   KACHE_REMOTE_KEY_LISTING: "false"
   # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
   KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "68719476736"
+  # The bucket that holds this run's artifacts, which scripts/ci_artifacts.py reads.
+  R2_ARTIFACTS_BUCKET: ${{ secrets.R2_ARTIFACTS_BUCKET }}
+  R2_ARTIFACTS_ENDPOINT: ${{ secrets.R2_ARTIFACTS_ENDPOINT }}
+  R2_ARTIFACTS_ACCESS_KEY_ID: ${{ secrets.R2_ARTIFACTS_ACCESS_KEY_ID }}
+  R2_ARTIFACTS_SECRET_ACCESS_KEY: ${{ secrets.R2_ARTIFACTS_SECRET_ACCESS_KEY }}
 
 jobs:
   meta:
@@ -360,7 +365,7 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report
@@ -406,12 +411,11 @@ jobs:
 
       - name: Upload benchmark artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: benchmark-results-pr-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/nervix-benchmarks
           if-no-files-found: warn
-          retention-days: 14
 
   benchmark-comment:
     name: benchmark-comment
@@ -427,9 +431,17 @@ jobs:
     permissions:
       pull-requests: write
     steps:
+      # This job's token can write to the pull request, so it never runs the pull request's code:
+      # the artifact action and its script come from the base revision.
+      - name: Checkout the base revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
       - name: Download benchmark artifacts
         continue-on-error: true
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/ci-artifact-download
         with:
           name: benchmark-results-pr-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/nervix-benchmarks
@@ -516,6 +528,11 @@ jobs:
       contents: read
       packages: read
     uses: ./.github/workflows/chaos.yaml
+    secrets:
+      R2_ARTIFACTS_BUCKET: ${{ secrets.R2_ARTIFACTS_BUCKET }}
+      R2_ARTIFACTS_ENDPOINT: ${{ secrets.R2_ARTIFACTS_ENDPOINT }}
+      R2_ARTIFACTS_ACCESS_KEY_ID: ${{ secrets.R2_ARTIFACTS_ACCESS_KEY_ID }}
+      R2_ARTIFACTS_SECRET_ACCESS_KEY: ${{ secrets.R2_ARTIFACTS_SECRET_ACCESS_KEY }}
     with:
       image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64
       image-kind: ordinary
@@ -533,6 +550,11 @@ jobs:
       contents: read
       packages: read
     uses: ./.github/workflows/chaos.yaml
+    secrets:
+      R2_ARTIFACTS_BUCKET: ${{ secrets.R2_ARTIFACTS_BUCKET }}
+      R2_ARTIFACTS_ENDPOINT: ${{ secrets.R2_ARTIFACTS_ENDPOINT }}
+      R2_ARTIFACTS_ACCESS_KEY_ID: ${{ secrets.R2_ARTIFACTS_ACCESS_KEY_ID }}
+      R2_ARTIFACTS_SECRET_ACCESS_KEY: ${{ secrets.R2_ARTIFACTS_SECRET_ACCESS_KEY }}
     with:
       image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64-deloxide-order
       image-kind: deloxide-order
@@ -550,6 +572,11 @@ jobs:
       contents: read
       packages: read
     uses: ./.github/workflows/chaos.yaml
+    secrets:
+      R2_ARTIFACTS_BUCKET: ${{ secrets.R2_ARTIFACTS_BUCKET }}
+      R2_ARTIFACTS_ENDPOINT: ${{ secrets.R2_ARTIFACTS_ENDPOINT }}
+      R2_ARTIFACTS_ACCESS_KEY_ID: ${{ secrets.R2_ARTIFACTS_ACCESS_KEY_ID }}
+      R2_ARTIFACTS_SECRET_ACCESS_KEY: ${{ secrets.R2_ARTIFACTS_SECRET_ACCESS_KEY }}
     with:
       image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64
       image-kind: ordinary
@@ -567,6 +594,11 @@ jobs:
       contents: read
       packages: read
     uses: ./.github/workflows/chaos.yaml
+    secrets:
+      R2_ARTIFACTS_BUCKET: ${{ secrets.R2_ARTIFACTS_BUCKET }}
+      R2_ARTIFACTS_ENDPOINT: ${{ secrets.R2_ARTIFACTS_ENDPOINT }}
+      R2_ARTIFACTS_ACCESS_KEY_ID: ${{ secrets.R2_ARTIFACTS_ACCESS_KEY_ID }}
+      R2_ARTIFACTS_SECRET_ACCESS_KEY: ${{ secrets.R2_ARTIFACTS_SECRET_ACCESS_KEY }}
     with:
       image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64-deloxide-order
       image-kind: deloxide-order
@@ -648,7 +680,7 @@ jobs:
 
       - name: Retain deployment observations and failure diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: operator-deployment-${{ matrix.arch }}
           path: target/operator-deployment
@@ -899,7 +931,7 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report

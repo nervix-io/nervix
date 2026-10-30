@@ -2818,7 +2818,7 @@ qualification, two at the 600-second cap of the controls and one whose control o
 7. It always runs `just chaos suite cleanup` next. Cleanup waits up to five minutes for a
    controller that is still finishing its run's exit work, kills whatever still executes, and, as a
    second witness after the runs' own traps, captures and removes what any run left behind.
-8. It publishes the shard summary and uploads two artifacts, kept for 14 days:
+8. It publishes the shard summary and uploads two artifacts:
    - `chaos-verdict-<suite>-<n>-<kind>-<run>-<attempt>`, holding `suite.json` and `summary.md`
    - `chaos-<suite>-<n>-<kind>-<run>-<attempt>`, holding the whole suite directory, with every run
      directory and a diagnostic run's evidence files

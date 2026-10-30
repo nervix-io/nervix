@@ -341,7 +341,6 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         upload = build[build.index("name: scenario-suite\n"):]
         self.assertIn("compression-level: 0", upload)
-        self.assertIn("overwrite: true", upload)
 
     def test_each_shard_restores_the_build_and_runs_its_share_without_compiling(self) -> None:
         shard = self.job("scenarios")

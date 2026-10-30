@@ -20,6 +20,11 @@ env:
   # shard runs its share of the scenario runs. More shards shorten each shard down to its longest
   # scenario; see the shards in docs/src/integration-test-lifecycle.md.
   SCENARIO_SHARDS: "3"
+  # The bucket that holds this run's artifacts, which scripts/ci_artifacts.py reads.
+  R2_ARTIFACTS_BUCKET: ${{ secrets.R2_ARTIFACTS_BUCKET }}
+  R2_ARTIFACTS_ENDPOINT: ${{ secrets.R2_ARTIFACTS_ENDPOINT }}
+  R2_ARTIFACTS_ACCESS_KEY_ID: ${{ secrets.R2_ARTIFACTS_ACCESS_KEY_ID }}
+  R2_ARTIFACTS_SECRET_ACCESS_KEY: ${{ secrets.R2_ARTIFACTS_SECRET_ACCESS_KEY }}
 
 permissions:
   contents: read
@@ -52,7 +57,7 @@ jobs:
         run: python3 scripts/ci_test_selection.py --record target/ci-test-selection.json
 
       - name: Retain the source selection
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: ci-test-selection
           path: target/ci-test-selection.json
@@ -267,7 +272,7 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report
@@ -275,7 +280,7 @@ jobs:
 
       - name: Upload Go tool bootstrap logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: go-tool-bootstrap-${{ github.job }}
           path: ${{ runner.temp }}/go-tool-bootstrap
@@ -370,7 +375,7 @@ jobs:
 
       - name: Upload diagnostic evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: diagnostic-evidence
           path: |
@@ -405,10 +410,9 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          overwrite: true
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
@@ -578,7 +582,7 @@ jobs:
 
       - name: Upload diagnostic lane evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: deloxide-${{ matrix.selection }}
           path: |
@@ -609,7 +613,7 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: kache-${{ github.job }}-${{ matrix.selection }}-${{ runner.os }}-${{ runner.arch }}
           path: |
@@ -755,7 +759,7 @@ jobs:
 
       - name: Upload tests coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: coverage-tests
           path: |
@@ -779,7 +783,7 @@ jobs:
 
       - name: Upload runner load
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: runner-load-${{ github.job }}
           path: |
@@ -811,7 +815,7 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: |
@@ -821,7 +825,7 @@ jobs:
 
       - name: Upload Go tool bootstrap logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: go-tool-bootstrap-${{ github.job }}
           path: ${{ runner.temp }}/go-tool-bootstrap
@@ -829,7 +833,7 @@ jobs:
 
       - name: Upload test logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: test-logs
           path: tests/logs
@@ -983,15 +987,13 @@ jobs:
         run: just test-scenarios-coverage-pack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
 
       # The archive is compressed already, and the shards of this run are its only readers. A
-      # rerun of this job replaces it, and a shard rerun within the week restores it.
+      # rerun of this job replaces it, and a shard rerun restores it while the bucket keeps it.
       - name: Upload the scenario suite
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: scenario-suite
-          overwrite: true
           path: ${{ runner.temp }}/scenario-suite/scenario-suite.tar.zst
           compression-level: 0
-          retention-days: 7
           if-no-files-found: error
 
       # These bodies must fail. The supervisor separately requires complete after-hook cleanup;
@@ -1001,7 +1003,7 @@ jobs:
 
       - name: Upload failed backup cut cleanup evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: backup-cut-cleanup
           path: target/backup-cut-cleanup.*
@@ -1023,10 +1025,9 @@ jobs:
 
       - name: Upload runner load
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: runner-load-${{ github.job }}
-          overwrite: true
           path: |
             ${{ runner.temp }}/runner-load.csv
             ${{ runner.temp }}/runner-load.md
@@ -1056,10 +1057,9 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          overwrite: true
           path: |
             ${{ runner.temp }}/kache-report
             ${{ runner.temp }}/kache-build-report
@@ -1067,7 +1067,7 @@ jobs:
 
       - name: Upload Go tool bootstrap logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: go-tool-bootstrap-${{ github.job }}
           path: ${{ runner.temp }}/go-tool-bootstrap
@@ -1157,7 +1157,7 @@ jobs:
           label: scenario-shard
 
       - name: Download the scenario suite
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/ci-artifact-download
         with:
           name: scenario-suite
           path: ${{ runner.temp }}/scenario-suite
@@ -1174,10 +1174,9 @@ jobs:
 
       - name: Upload scenarios coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: coverage-scenarios-${{ matrix.shard }}
-          overwrite: true
           path: |
             lcov-workspace.info
             coverage-source-root.txt
@@ -1200,10 +1199,9 @@ jobs:
 
       - name: Upload runner load
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: runner-load-${{ github.job }}-${{ matrix.shard }}
-          overwrite: true
           path: |
             ${{ runner.temp }}/runner-load.csv
             ${{ runner.temp }}/runner-load.md
@@ -1219,10 +1217,9 @@ jobs:
 
       - name: Upload scenario logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: scenario-logs-${{ matrix.shard }}
-          overwrite: true
           path: tests/logs
           if-no-files-found: ignore
 
@@ -1278,20 +1275,20 @@ jobs:
         run: just install-cargo-crap
 
       - name: Download tests coverage
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/ci-artifact-download
         with:
           name: coverage-tests
           path: coverage-inputs/tests
 
       # Each shard's report lands in its own directory, named after its artifact.
       - name: Download scenarios coverage
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/ci-artifact-download
         with:
           pattern: coverage-scenarios-*
           path: coverage-inputs
 
       - name: Download native extra coverage
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/ci-artifact-download
         with:
           name: coverage-native-extras
           path: coverage-inputs/native-extras
@@ -1332,10 +1329,9 @@ jobs:
 
       - name: Upload merged coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: coverage-merged
-          overwrite: true
           path: |
             lcov-workspace.info
             target/coverage-merge/record.json
@@ -1367,7 +1363,7 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report
@@ -1409,19 +1405,19 @@ jobs:
             --tests-required "$TESTS_REQUIRED" --bolero-required "$BOLERO_REQUIRED" --jobs "$JOBS"
 
       - name: Download ordinary coverage
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/ci-artifact-download
         with:
           pattern: coverage-merged
           path: coverage-full-inputs
 
       - name: Download native extra coverage
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/ci-artifact-download
         with:
           pattern: coverage-native-extras
           path: coverage-full-inputs
 
       - name: Download diagnostic evidence
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/ci-artifact-download
         with:
           pattern: diagnostic-evidence
           path: coverage-full-inputs
@@ -1429,37 +1425,37 @@ jobs:
       # The artifacts of label-enabled producers and of the Bolero call. A pattern that matches no
       # artifact downloads nothing; the union then names what the selection required and lacks.
       - name: Download Shuttle coverage
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/ci-artifact-download
         with:
           pattern: coverage-shuttle
           path: coverage-full-inputs
 
       - name: Download Loom coverage
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/ci-artifact-download
         with:
           pattern: coverage-loom
           path: coverage-full-inputs
 
       - name: Download Turmoil coverage
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/ci-artifact-download
         with:
           pattern: coverage-turmoil
           path: coverage-full-inputs
 
       - name: Download Deloxide lane coverage
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/ci-artifact-download
         with:
           pattern: deloxide-*
           path: coverage-full-inputs
 
       - name: Download combined fuzz coverage
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/ci-artifact-download
         with:
           pattern: coverage-bolero-fuzz
           path: coverage-full-inputs
 
       - name: Download Bolero selection
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/ci-artifact-download
         with:
           pattern: bolero-selection
           path: coverage-full-inputs
@@ -1470,7 +1466,7 @@ jobs:
 
       - name: Upload full coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: coverage-full
           path: |
@@ -1659,7 +1655,7 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: |
@@ -1669,7 +1665,7 @@ jobs:
 
       - name: Upload test logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: client-conformance-logs
           path: tests/logs
@@ -1956,7 +1952,7 @@ jobs:
 
       - name: Upload native extra coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: coverage-native-extras
           path: |
@@ -2000,7 +1996,7 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report
@@ -2149,7 +2145,7 @@ jobs:
 
       - name: Upload Shuttle coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: coverage-shuttle
           path: |
@@ -2178,7 +2174,7 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: |
@@ -2198,7 +2194,7 @@ jobs:
 
       - name: Upload Shuttle failure traces
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: shuttle-failures
           path: target/shuttle-failures.tar.gz
@@ -2327,7 +2323,7 @@ jobs:
 
       - name: Upload Loom coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: coverage-loom
           path: |
@@ -2356,7 +2352,7 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: |
@@ -2368,7 +2364,7 @@ jobs:
       # this job is the only witness of it.
       - name: Upload Loom failure evidence
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: loom-failures
           path: target/native-coverage-build-loom/loom-failures
@@ -2515,7 +2511,7 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: kache-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report
@@ -2525,7 +2521,7 @@ jobs:
       # The isolated weakened source copy is gone by the time these records are uploaded.
       - name: Upload Loom qualification evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: loom-qualification-evidence-${{ matrix.shard }}
           path: |
@@ -2675,7 +2671,7 @@ jobs:
 
       - name: Upload Turmoil coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: coverage-turmoil
           path: |
@@ -2705,7 +2701,7 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: |
@@ -2718,7 +2714,7 @@ jobs:
       # witness of them.
       - name: Upload Turmoil failure records
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/ci-artifact-upload
         with:
           name: turmoil-failures
           path: |
