@@ -23,7 +23,7 @@ use super::{
     scenario_schedule::{
         AdmissionWait, LONG_RUNNING_ATTEMPT, LONG_RUNNING_TAG, ScenarioLength, ScenarioRun,
     },
-    scenario_shard::ShardSelection,
+    scenario_shard::ScenarioShard,
 };
 
 /// Where one scenario is between its first step and the end of its cleanup.
@@ -274,8 +274,8 @@ struct SuiteMeasurements {
     runner_thread: Option<RunnerThread>,
     /// How busy the runtime's workers had been when the run began, when it began inside one.
     workers_began: Option<WorkerBusy>,
-    /// The runs this shard kept, when the run is one shard of a sharded run.
-    shard: Option<ShardSelection>,
+    /// The shard this run executes, when it is one shard of a sharded run.
+    shard: Option<ScenarioShard>,
 }
 
 static MEASUREMENTS: LazyLock<Mutex<SuiteMeasurements>> =
@@ -310,13 +310,11 @@ impl SuiteMeasurements {
         )
     }
 
-    /// Which runs this run executed: one shard's, or every run it selected.
+    /// Which runs this run executed: one shard's, whose count the scenario log names, or every
+    /// run it selected.
     fn shard_line(&self) -> String {
-        match &self.shard {
-            Some(selection) => format!(
-                "Shard: {}, which kept {} of the {} scenario runs read.",
-                selection.shard, selection.kept, selection.read
-            ),
+        match self.shard {
+            Some(shard) => format!("Shard: {shard}; the scenario log names the runs it kept."),
             None => "Shard: none; the run executed every scenario run it selected.".to_string(),
         }
     }
@@ -345,21 +343,22 @@ impl SuiteMeasurements {
     }
 }
 
-/// Starts measuring a run of `slots` run slots and `budget`, polled on the calling thread.
-pub(crate) fn begin_suite_measurement(slots: usize, budget: Duration) {
+/// Starts measuring a run of `slots` run slots and `budget`, executing `shard` when it is one
+/// shard of a sharded run, polled on the calling thread.
+pub(crate) fn begin_suite_measurement(
+    slots: usize,
+    budget: Duration,
+    shard: Option<ScenarioShard>,
+) {
     *MEASUREMENTS.lock() = SuiteMeasurements {
         began: Some(Instant::now()),
         slots,
         budget,
+        shard,
         runner_thread: Some(RunnerThread::current()),
         workers_began: WorkerBusy::of_current_runtime(),
         ..SuiteMeasurements::default()
     };
-}
-
-/// Records which runs this shard of a sharded run kept, for the run's summary.
-pub(crate) fn record_shard_selection(selection: ShardSelection) {
-    MEASUREMENTS.lock().shard = Some(selection);
 }
 
 /// Adds one tick of the runner task to the run's measurement.

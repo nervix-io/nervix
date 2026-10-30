@@ -2824,7 +2824,8 @@ shard of three. More shards shorten each shard's work but not that attempt; fewe
 longer, and the suite budget below assumes three. Each shard uploads its own coverage report,
 `coverage-scenarios-<I>`, its logs, `scenario-logs-<I>`, and its runner load. The coverage job
 merges the report of every shard the workflow runs and fails when one is missing. A shard's suite
-summary names the shard and how many of the runs it read it kept.
+summary names the shard, and its standard output and scenario log name how many of the runs it read
+it kept.
 
 The build job also runs the failed backup cut cleanup check from its own build, which took under a
 minute in the unsharded job, so the shards start once it ends. Its 90-minute limit funds a setup that
@@ -3354,7 +3355,7 @@ shard's `scenario-logs-<I>` artifact carries its `tests/logs`.
 | Cucumber report | Standard output | Every scenario and step result in order, the world of a failed step, the summary, and every failed scenario repeated at the end |
 | Harness transitions | Standard error | Node startup transitions and outcomes, the stops scenarios waited for, and a suite timeout's diagnostic and cleanup |
 | Scenario log | `tests/logs/cucumber.log` | The run's parallelism and suite budget, the runs a shard kept, cluster start requests and failures, the Plexus statements scenarios run, every phase marker, teardown diagnostics and context, unfinished cleanups, and the suite timeout diagnostic |
-| Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, the shard and how many of the runs it read it kept, run-slot utilization and scenario work, retries, the runner task's tick lateness and stalls with its thread's CPU and run-queue time, how busy the runtime workers were, wait time by reason, the ten longest attempts, and every attempt that reached two minutes without declaring itself long-running; captured at watchdog expiry before cleanup on a timed-out run |
+| Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, the shard a sharded run executes, run-slot utilization and scenario work, retries, the runner task's tick lateness and stalls with its thread's CPU and run-queue time, how busy the runtime workers were, wait time by reason, the ten longest attempts, and every attempt that reached two minutes without declaring itself long-running; captured at watchdog expiry before cleanup on a timed-out run |
 | Runner load | `runner-load-tests`, `runner-load-scenarios-build` and `runner-load-scenarios-<I>` artifacts | Five-second CPU utilization and steal-time samples and their mean and peak |
 | Node traces | `tests/logs/scenarios.log` | The trace output of every in-process node of the run |
 

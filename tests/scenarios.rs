@@ -146,7 +146,7 @@ use crate::common::{
     runner_observation::ArrivalObservation,
     scenario_phase::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
-        begin_suite_measurement, record_runner_tick, record_shard_selection, suite_summary,
+        begin_suite_measurement, record_runner_tick, suite_summary,
     },
     scenario_schedule::{
         FeatureLimit, SCENARIO_RETRIES, ScenarioAdmission, ScenarioLength, ScenarioRunSlots,
@@ -33512,7 +33512,6 @@ impl<I: AsRef<Path>> cucumber::parser::Parser<I> for PrioritizedScenarioParser {
                 let selection = shard.keep_own_runs(&mut features);
                 println!("scenario {selection}");
                 append_cucumber_log_line(&format!("scenario {selection}"));
-                record_shard_selection(selection);
             }
             prioritize_features(&mut features, |feature| {
                 feature.as_ref().ok().map(|feature| feature.name.as_str())
@@ -33577,7 +33576,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     // jemalloc's purges cost in a process of this many threads.
     purge_freed_memory_in_the_background();
     truncate_cucumber_log();
-    begin_suite_measurement(effective_max_concurrent_scenarios, watchdog.budget());
+    begin_suite_measurement(effective_max_concurrent_scenarios, watchdog.budget(), shard);
     append_cucumber_log_line(&format!(
         "scenario parallelism: run_slots={effective_max_concurrent_scenarios} \
          concurrency_factor={concurrency_factor} tokio_worker_threads={} suite_budget={:?} \
