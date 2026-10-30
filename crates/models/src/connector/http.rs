@@ -33,9 +33,10 @@ use crate::{
     EmitterClientReference, EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities,
     EmitterReference, EmitterReferenceKind, EndpointIngestMode, EndpointName, EndpointType,
     Expression, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
-    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope,
-    IngestorReference, IngestorReferenceKind, OptionDeclaration, OptionForm, OptionPresence,
-    OptionValue, PayloadSizeLimit, PositionClass,
+    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
+    IngestorReferenceKind, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PayloadSizeLimit, PositionClass,
 };
 
 configured_client!(Http: unpooled, config CLIENT_CONFIG, CreateClientHttp => HttpConfigEntry);
@@ -181,12 +182,18 @@ const HTTP_REQUEST_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["A response head above 74,240 bytes or 128 fields fails the attempt."],
 };
 
+/// The response status and the scheduled instant of one HTTP poll.
+const HTTP_REQUEST_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("status", IngestorMetadataType::U16),
+    IngestorMetadataField::new("polled_at", IngestorMetadataType::Datetime),
+]);
+
 impl IngestorDeclaration for HttpRequestIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // An HTTP response's fields, as the client's header map keeps them: names in lowercase, every
         // value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-        metadata: IngestorMetadataScope::Http,
+        metadata: HTTP_REQUEST_METADATA,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Http),
         position_class: PositionClass::None,
@@ -278,7 +285,7 @@ impl IngestorDeclaration for HttpEndpointIngestor {
         // An HTTP request's fields, as the server's header map keeps them: names in lowercase, every
         // value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-        metadata: IngestorMetadataScope::Headers,
+        metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: true,
         reference: IngestorReferenceKind::Endpoint(EndpointType::Http),
         position_class: PositionClass::None,

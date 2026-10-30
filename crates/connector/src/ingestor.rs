@@ -6,7 +6,7 @@
 //!   acknowledgement policies, lifecycle operations, typed ingestor failures, the cancellation
 //!   through which the host ends a broker read in flight, and the opaque host handle through which
 //!   an ingestor delivers messages and reports lifecycle state.
-//! - **Depends on.** Typed ingest metadata, the vocabulary's metadata scopes and timestamps,
+//! - **Depends on.** Typed ingest metadata, the vocabulary's positions and timestamps,
 //!   `error-stack`, and the primitive boundary's monotonic clock and cancellation token.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, ACK-tree
 //!   implementations, metrics implementations, or any connector driver.
@@ -28,11 +28,14 @@ use std::{
 
 use async_trait::async_trait;
 use error_stack::Report;
-use nervix_models::{IngestorMetadataScope, PositionClass, Timestamp};
+use nervix_models::{PositionClass, Timestamp};
 use nervix_primitives::{sync::CancellationToken, time::Instant};
 use thiserror::Error;
 
-use crate::{IngestMessageHeaders, IngestMetadataRow, ParsedRetryPolicy, RetainedIngestHeaders};
+use crate::{
+    IngestMessageHeaders, IngestMetadataRow, ParsedRetryPolicy, RetainedIngestHeaders,
+    RetainedIngestMetadata,
+};
 
 /// The acknowledgement behavior an ingestor transport supports for the selected plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +49,6 @@ pub enum IngestorAcknowledgementSupport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngestorCapabilities {
     reads_headers: bool,
-    metadata_scope: IngestorMetadataScope,
     supports_quiesce: bool,
     instances: NonZeroU64,
     acknowledgement: IngestorAcknowledgementSupport,
@@ -56,7 +58,6 @@ pub struct IngestorCapabilities {
 impl IngestorCapabilities {
     pub fn new(
         reads_headers: bool,
-        metadata_scope: IngestorMetadataScope,
         supports_quiesce: bool,
         instances: NonZeroU64,
         acknowledgement: IngestorAcknowledgementSupport,
@@ -64,7 +65,6 @@ impl IngestorCapabilities {
     ) -> Self {
         Self {
             reads_headers,
-            metadata_scope,
             supports_quiesce,
             instances,
             acknowledgement,
@@ -74,10 +74,6 @@ impl IngestorCapabilities {
 
     pub fn reads_headers(self) -> bool {
         self.reads_headers
-    }
-
-    pub fn metadata_scope(self) -> IngestorMetadataScope {
-        self.metadata_scope
     }
 
     pub fn supports_quiesce(self) -> bool {
@@ -372,17 +368,12 @@ pub trait BrokerIngestorConnector: IngestorConnector {
     async fn reject(&mut self, positions: &[Self::Position]) -> IngestorResult<()>;
 }
 
-/// One owned message returned by a paced poll.
+/// One owned message returned by a paced poll: its payload, its transport headers and the values
+/// of the metadata fields its entity declares, in declared order.
 pub struct IngestorPollMessage {
     pub payload: Vec<u8>,
     pub headers: RetainedIngestHeaders,
-    pub metadata: IngestorPollMetadata,
-}
-
-/// The metadata a paced connector returns with one message.
-pub enum IngestorPollMetadata {
-    Headers,
-    Http { status: u16, polled_at: Timestamp },
+    pub metadata: RetainedIngestMetadata,
 }
 
 /// The result of one host-scheduled ingestor poll.

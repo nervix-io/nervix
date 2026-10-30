@@ -344,7 +344,7 @@ impl Runtime {
         // request headers is taken here and only here.
         let payload = BufferedIngestPayload::new(
             payload,
-            BufferedIngestMetadata::Headers(RetainedIngestHeaders::capture(headers)),
+            BufferedIngestMetadata::headers(RetainedIngestHeaders::capture(headers)),
             actual_utc_now(),
         );
         let admission = match binding.quiesce.intake(0, payload, true) {
@@ -389,11 +389,14 @@ impl Runtime {
         headers: &dyn IngestMessageHeaders,
         protocol: &str,
     ) -> EndpointRequestOutcome {
-        let mut collector =
-            IngestRouteCollector::new(IngestorMetadataScope::Headers, 1, binding.metrics.clone());
+        let mut collector = IngestRouteCollector::new(
+            binding.output_routes.metadata.clone(),
+            1,
+            binding.metrics.clone(),
+        );
         let (root, mut completion) = binding.handles.tracked_root();
         let observed_at = actual_utc_now();
-        let metadata = BufferedIngestMetadata::Headers(RetainedIngestHeaders::capture(headers));
+        let metadata = BufferedIngestMetadata::headers(RetainedIngestHeaders::capture(headers));
         match collector
             .decode_payload(
                 self.executor(),
@@ -492,8 +495,11 @@ impl Runtime {
     ) -> EndpointBindingDispatch {
         // One request is one group, so its builders are sized for the single payload this binding
         // decodes; a payload that unfolds into several messages grows them.
-        let mut collector =
-            IngestRouteCollector::new(IngestorMetadataScope::Headers, 1, binding.metrics.clone());
+        let mut collector = IngestRouteCollector::new(
+            binding.output_routes.metadata.clone(),
+            1,
+            binding.metrics.clone(),
+        );
         // The sender is answered, so a body the extension workers have no room for is refused
         // rather than held.
         let decoded = collector

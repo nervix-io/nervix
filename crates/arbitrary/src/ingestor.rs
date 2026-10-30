@@ -43,10 +43,11 @@ impl Arbitrary<'_> {
     /// An ingestor over a source of the requested connector and entity.
     pub fn create_ingestor_from(&mut self, kind: IngestorEntityKind) -> CreateIngestor {
         let input = self.ingestor_input_of(kind);
-        let timestamp_source = match self.entropy.byte() % 3 {
+        let timestamp_source = match self.entropy.byte() % 4 {
             0 => None,
             1 => Some(IngestTimestampSource::Now),
-            _ => Some(IngestTimestampSource::At(self.name())),
+            2 => Some(IngestTimestampSource::At(self.name())),
+            _ => Some(IngestTimestampSource::AtMetadata(self.name())),
         };
         CreateIngestor {
             name: self.name(),

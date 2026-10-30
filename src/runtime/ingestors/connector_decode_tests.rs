@@ -13,7 +13,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use nervix_connector::{IngestorPollMessage, NoIngestHeaders};
+use nervix_connector::{IngestorPollMessage, NoIngestHeaders, RetainedIngestHeaders};
 use nervix_models::{IngestQuiesceMode, IngestQuiesceOverflow};
 
 use super::{
@@ -35,9 +35,7 @@ const REJECTION: &str =
 fn message(payload: &[u8]) -> IngestorIntakeMessage<'_> {
     IngestorIntakeMessage {
         payload,
-        metadata: IngestMetadataRow::Headers {
-            headers: &NoIngestHeaders,
-        },
+        metadata: IngestMetadataRow::headers(&NoIngestHeaders),
     }
 }
 
@@ -213,7 +211,7 @@ async fn a_poll_its_codec_refuses_whole_enters_nothing() {
                 messages: vec![IngestorPollMessage {
                     payload: REFUSED.to_vec(),
                     headers: RetainedIngestHeaders::none(),
-                    metadata: nervix_connector::IngestorPollMetadata::Headers,
+                    metadata: nervix_connector::RetainedIngestMetadata::none(),
                 }],
                 failures: Vec::new(),
                 observed_at: Timestamp::from_unix_nanos(1),
@@ -248,12 +246,12 @@ async fn a_poll_consumes_a_message_its_codec_refuses_and_delivers_the_rest() {
                     IngestorPollMessage {
                         payload: REFUSED.to_vec(),
                         headers: RetainedIngestHeaders::none(),
-                        metadata: nervix_connector::IngestorPollMetadata::Headers,
+                        metadata: nervix_connector::RetainedIngestMetadata::none(),
                     },
                     IngestorPollMessage {
                         payload: br#"{"user_id":9}"#.to_vec(),
                         headers: RetainedIngestHeaders::none(),
-                        metadata: nervix_connector::IngestorPollMetadata::Headers,
+                        metadata: nervix_connector::RetainedIngestMetadata::none(),
                     },
                 ],
                 failures: Vec::new(),
