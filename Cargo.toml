@@ -556,7 +556,6 @@ js-sys = "0.3"
 # runtime that used it.
 lapin = "4.12.0"
 leptos = { version = "0.8.19", features = ["csr"] }
-libc = "0.2"
 # The model checker for memory-ordering claims. Only `nervix-primitives` selects its atomics and
 # threads, and only `nervix-model-harness` runs its models; both take it as an optional dependency,
 # so no ordinary dependency graph contains it.
@@ -725,7 +724,6 @@ rustyline = "17"
 ryu = "1"
 sentry-types = "0.48.5"
 serde = { version = "1", features = ["derive"] }
-serde_bytes = "0.11"
 # `float_roundtrip` reads a decimal as the float nearest to it. serde_json's default reader is
 # best-effort and names a neighbouring float for 10 to 25 percent of the sixteen- and
 # seventeen-digit decimals that computed floats print as, which changed an F64 on its way through
