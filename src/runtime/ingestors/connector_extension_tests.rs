@@ -14,7 +14,7 @@
 )]
 
 use futures_util::FutureExt as _;
-use nervix_connector::{IngestorPollMessage, NoIngestHeaders};
+use nervix_connector::{IngestorPollMessage, NoIngestHeaders, RetainedIngestHeaders};
 use nervix_execution::CpuClass;
 use nervix_models::{
     CreateSchema, IngestQuiesceMode, IngestQuiesceOverflow, ParseAsType, SchemaField,
@@ -187,7 +187,6 @@ impl UnfoldingDomain {
                 .into_iter()
                 .next()
                 .assured("the source fixture declares one instance"),
-            metadata_scope: plan.ingestor.metadata_scope(),
             buffered_intake: intake.buffered,
             flush_each_intake: intake.flush_each_intake,
             unacknowledged_admission: intake.admission,
@@ -248,7 +247,7 @@ fn poll_of(user_id: i64) -> IngestorPoll {
         messages: vec![IngestorPollMessage {
             payload: format!(r#"{{"user_id":{user_id}}}"#).into_bytes(),
             headers: RetainedIngestHeaders::none(),
-            metadata: nervix_connector::IngestorPollMetadata::Headers,
+            metadata: nervix_connector::RetainedIngestMetadata::none(),
         }],
         failures: Vec::new(),
         observed_at: Timestamp::from_unix_nanos(1),
@@ -318,9 +317,7 @@ async fn an_unacknowledged_batch_waits_for_the_extension_workers_when_its_source
         let intake = host
             .intake_unacknowledged(vec![IngestorIntakeMessage {
                 payload: &payload,
-                metadata: IngestMetadataRow::Headers {
-                    headers: &NoIngestHeaders,
-                },
+                metadata: IngestMetadataRow::headers(&NoIngestHeaders),
             }])
             .await;
         (host, intake)
@@ -360,9 +357,7 @@ async fn take_in_unacknowledged(
     let payload = format!(r#"{{"user_id":{user_id}}}"#).into_bytes();
     host.intake_unacknowledged(vec![IngestorIntakeMessage {
         payload: &payload,
-        metadata: IngestMetadataRow::Headers {
-            headers: &NoIngestHeaders,
-        },
+        metadata: IngestMetadataRow::headers(&NoIngestHeaders),
     }])
     .await
 }
@@ -714,9 +709,7 @@ async fn take_in_acknowledged(
     let payload = format!(r#"{{"user_id":{user_id}}}"#).into_bytes();
     host.intake_acknowledged(vec![IngestorIntakeMessage {
         payload: &payload,
-        metadata: IngestMetadataRow::Headers {
-            headers: &NoIngestHeaders,
-        },
+        metadata: IngestMetadataRow::headers(&NoIngestHeaders),
     }])
     .await
 }

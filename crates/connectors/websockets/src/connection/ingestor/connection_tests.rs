@@ -66,14 +66,17 @@ async fn a_message_retains_its_upgrade_snapshot_and_exact_data_frame_kind() {
         drop(source);
         drop(peer);
         assert_eq!(message.payload(), case.payload);
-        let IngestMetadataRow::Websockets {
-            frame_type,
-            headers,
-        } = message.metadata()
-        else {
-            panic!("a connection frame has its declared metadata scope");
+        let metadata = message.metadata();
+        assert_eq!(
+            nervix_connector::RetainedIngestMetadata::capture(metadata.fields).values(),
+            [nervix_connector::RetainedIngestMetadataValue::String(
+                case.kind.as_ref().to_string()
+            )]
+        );
+        assert!(metadata.position.is_none());
+        let IngestRowHeaders::Shared(headers) = metadata.headers else {
+            panic!("a connection frame shares its connection's header snapshot");
         };
-        assert_eq!(frame_type, case.kind);
         assert!(Arc::ptr_eq(headers, &snapshot));
         let mut seen = Vec::new();
         message

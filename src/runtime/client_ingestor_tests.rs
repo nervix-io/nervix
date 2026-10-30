@@ -45,7 +45,7 @@ async fn runtime_report_chain_admitted_client_batch_log() {
     let schema = test_schema(&[("id", ParseAsType::U64)]);
     let route = bind_ingestor_route_for_test(
         &ModelName::from(&ingestor),
-        IngestorMetadataScope::Headers,
+        IngestorMetadataDeclaration::NONE,
         false,
         &nervix_plexus::parse_route_construction("SET id = input.id")
             .assured("the fixture route assigns its declared field"),
@@ -79,6 +79,7 @@ async fn runtime_report_chain_admitted_client_batch_log() {
                 branch: BoundRouteBranch::Unbranched,
                 message_error_policy: MessageErrorPolicy::Log,
             }],
+            metadata: IngestMetadataProjection::none(),
         }),
         filter_where: None,
         branched_senders: HashMap::default(),

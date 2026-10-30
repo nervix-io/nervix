@@ -35,9 +35,9 @@ use super::{
 use crate::{
     AcknowledgementConfirmation, ByteSizeUnit, ClientConfigEntry, ClientName, ConnectorKind,
     DeclaredDelivery, DeclaredQuiesce, DomainClockPeriod, IngestAcknowledgement, IngestQuiesceMode,
-    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope,
-    IngestorReference, IngestorReferenceKind, OptionDeclaration, OptionForm, OptionPresence,
-    OptionValue, PayloadSizeLimit, PositionClass,
+    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorMetadataDeclaration, IngestorReference, IngestorReferenceKind, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass,
 };
 
 configured_client!(Prometheus: unpooled, config CLIENT_CONFIG, CreateClientPrometheus => PrometheusConfigEntry);
@@ -197,7 +197,7 @@ const PROMETHEUS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
 impl IngestorDeclaration for PrometheusQueryIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         headers: None,
-        metadata: IngestorMetadataScope::Headers,
+        metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Prometheus),
         position_class: PositionClass::None,
