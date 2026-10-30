@@ -2,12 +2,14 @@
 """Record kache health, where a job's compile time went, and the causes of the most expensive misses.
 
 A job reports after its build, when it builds before it runs, and again at its end, whatever its
-outcome. The report gives the window in which kache saw compilation and the time kache tracked on
-cacheable crates: the hits it served, the misses it compiled, and how that time splits without
-overlap into compiling the misses and kache's own work, such as computing cache keys, waiting for a
-cache permit, and restoring and storing outputs. Together with the job's steps, which show whether
-its build or its run took the time, a slow job reads as slow compilation, a cache that missed, a
-cache whose hits were slow, or slow execution.
+outcome. The report covers every build on the job's machine, which no other job shares. It gives
+the window in which kache saw compilation and the time kache tracked on cacheable crates: the hits
+it served, the misses it compiled, and how that time splits without overlap into compiling the
+misses and kache's own work, such as computing cache keys, waiting for a cache permit, and restoring
+and storing outputs. It adds what moved to and from the remote cache: downloads with their sizes
+and times, and uploads. Together with the job's steps, which show whether its build or its run took
+the time, a slow job reads as slow compilation, a cache that missed, a cache whose hits were slow,
+or slow execution.
 """
 
 from __future__ import annotations
@@ -24,7 +26,8 @@ from typing import Any
 
 PHASES = ("build", "job")
 # The report's window. No kache-backed job may run longer, and each job has its machine to itself,
-# so the window holds the whole job and nothing from before it.
+# so the window holds the whole job and nothing from before it. For the same reason the report
+# filters no build tree: kache leaves the remote transfers out of a report filtered by one.
 REPORT_WINDOW_HOURS = 6
 
 
@@ -48,6 +51,10 @@ def minutes(milliseconds: float) -> str:
 
 def seconds(milliseconds: float) -> str:
     return f"{milliseconds / 1000:.1f} s"
+
+
+def gibibytes(size: float) -> str:
+    return f"{size / 1024**3:.1f} GiB"
 
 
 def clock_time(timestamp: str) -> str | None:
@@ -182,6 +189,71 @@ class CompileTime:
         return lines
 
 
+@dataclass(frozen=True)
+class RemoteTransfer:
+    """What moved between the job's store and the remote cache, from kache's JSON report."""
+
+    downloads: int
+    failed_downloads: int
+    downloaded_bytes: int
+    average_download_ms: float
+    p95_download_ms: float
+    max_download_ms: float
+    slot_wait_ms: float
+    most_concurrent_downloads: int
+    dominant_phase: str | None
+    dominant_phase_percent: float
+    uploads: int
+    failed_uploads: int
+    uploaded_bytes: int
+
+    @classmethod
+    def from_report(cls, report: Mapping[str, Any]) -> RemoteTransfer | None:
+        """None when kache recorded no transfer in the report's window."""
+        network = report.get("network")
+        if not network:
+            return None
+        return cls(
+            downloads=int(network.get("downloads_ok", 0)),
+            failed_downloads=int(network.get("downloads_failed", 0)),
+            downloaded_bytes=int(network.get("bytes_down", 0)),
+            average_download_ms=float(network.get("avg_download_ms", 0)),
+            p95_download_ms=float(network.get("p95_download_ms", 0)),
+            max_download_ms=float(network.get("max_download_ms", 0)),
+            slot_wait_ms=float(network.get("total_semaphore_wait_ms", 0)),
+            most_concurrent_downloads=int(network.get("max_concurrent_downloads", 0)),
+            dominant_phase=network.get("dominant_download_phase") or None,
+            dominant_phase_percent=float(network.get("dominant_download_phase_pct", 0)),
+            uploads=int(network.get("uploads_ok", 0)),
+            failed_uploads=int(network.get("uploads_failed", 0)),
+            uploaded_bytes=int(network.get("bytes_up", 0)),
+        )
+
+    def lines(self) -> list[str]:
+        download_times = (
+            f"{seconds(self.average_download_ms)} on average, {seconds(self.p95_download_ms)} at the "
+            f"95th percentile, {seconds(self.max_download_ms)} at most"
+        )
+        lines = [
+            "### Remote transfer",
+            "",
+            "| Direction | Objects | Failed | Size | Time each |",
+            "| --- | ---: | ---: | ---: | --- |",
+            f"| Downloaded | {self.downloads} | {self.failed_downloads} | {gibibytes(self.downloaded_bytes)} | {download_times} |",
+            f"| Uploaded | {self.uploads} | {self.failed_uploads} | {gibibytes(self.uploaded_bytes)} | |",
+            "",
+            f"Downloads waited {minutes(self.slot_wait_ms)} in all for a transfer slot, with at most "
+            f"{self.most_concurrent_downloads} at once.",
+        ]
+        if self.dominant_phase:
+            lines[-1] += (
+                f" Most of their time went to {self.dominant_phase}: "
+                f"{self.dominant_phase_percent:.1f}%."
+            )
+        return lines
+
+
+
 def report_lines(report: Mapping[str, Any]) -> list[str]:
     """The summary lines of kache's JSON report, before the costliest misses' diagnoses."""
     summary = report.get("summary") or {}
@@ -193,13 +265,17 @@ def report_lines(report: Mapping[str, Any]) -> list[str]:
     for store in (report.get("storage") or {}).get("stores", []):
         used = store.get("bytes", 0)
         limit = store.get("max_size", 0)
-        lines.append(f"Store: {used / 1024**3:.1f} GiB of {limit / 1024**3:.1f} GiB configured.")
+        lines.append(f"Store: {gibibytes(used)} of {gibibytes(limit)} configured.")
     lines.append("")
     compile_time = CompileTime.from_report(report)
     if compile_time is None:
         lines.append("Kache recorded no compilation in this report's window.")
     else:
         lines.extend(compile_time.lines())
+    transfer = RemoteTransfer.from_report(report)
+    if transfer is not None:
+        lines.append("")
+        lines.extend(transfer.lines())
     return lines
 
 
@@ -215,13 +291,10 @@ def main(arguments: Sequence[str] | None = None) -> None:
     options = parser.parse_args(arguments)
     destination = options.destination
     destination.mkdir(parents=True, exist_ok=True)
-    root = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
     doctor = run("kache", "doctor")
     (destination / "doctor.txt").write_text(doctor.stdout + doctor.stderr)
 
-    report = run(
-        "kache", "report", "--format", "json", "--since", f"{REPORT_WINDOW_HOURS}h", "--top", "20", "--root", root
-    )
+    report = run("kache", "report", "--format", "json", "--since", f"{REPORT_WINDOW_HOURS}h", "--top", "20")
     (destination / "report.json").write_text(report.stdout)
     markdown = [heading(os.environ.get("GITHUB_JOB", "local build"), options.phase), ""]
     markdown.append(f"Doctor exit status: `{doctor.returncode}`. Problems are diagnostic only.")

@@ -692,19 +692,22 @@ storage can slow work without stolen time. The samples support comparison, not a
 
 Every kache-backed job uses kache 1.2.1, records `doctor` output without making it a test failure,
 and publishes a cache report whatever its outcome, a timeout included. The report reads the last six
-hours of kache's events: no kache-backed job may run longer, and each runs on a machine of its own,
-so the report covers the whole job and nothing before it. It gives the window in which kache saw
-compilation and the time kache tracked on cacheable crates, for the hits it served, local,
-prefetched or remote, and for the misses it compiled. It splits that tracked time without overlap
-into compiling the misses and kache's own work: computing cache keys, waiting for a cache permit or
-for the same crate compiling in another process, restoring and storing outputs, looking up the
-cache, starting its wrapper, and time kache attributes to no phase. It adds kache's own reading of
-that window and diagnoses the five most expensive misses with `why-miss`. A job that builds before
-it runs also reports right after its build, so its summary shows what the build compiled and what
-the cache served apart from what the run did, and a slow job reads as slow compilation, a cache that
-missed, cache hits that were slow, or a slow run. The shared S3 cache keeps executable and
-test-binary outputs. The report shows the local store's size against the budget [Cache
-Publication](#cache-publication) describes.
+hours of kache's events for every build on the machine: no kache-backed job may run longer, and each
+runs on a machine of its own, so the report covers the whole job, its tool builds included, and
+nothing before it. Filtering by the checkout's build tree would also drop the remote transfers,
+which kache leaves out of a filtered report. It gives the window in which kache saw compilation and
+the time kache tracked on cacheable crates, for the hits it served, local, prefetched or remote, and
+for the misses it compiled. It splits that tracked time without overlap into compiling the misses
+and kache's own work: computing cache keys, waiting for a cache permit or for the same crate
+compiling in another process, restoring and storing outputs, looking up the cache, starting its
+wrapper, and time kache attributes to no phase. It names what moved to and from the remote: the
+downloads with their sizes and their times on average, at the 95th percentile and at most, the wait
+for a transfer slot, and the uploads. It adds kache's own reading of the window and diagnoses the
+five most expensive misses with `why-miss`. A job that builds before it runs also reports right
+after its build, so its summary shows what the build compiled and what the cache served apart from
+what the run did, and a slow job reads as slow compilation, a cache that missed, cache hits that
+were slow, or a slow run. The shared S3 cache keeps executable and test-binary outputs. The report
+shows the local store's size against the budget [Cache Publication](#cache-publication) describes.
 
 The shared remote is Cloudflare R2 through its S3 API. Kache reads the base `artifacts` prefix
 first. Pull-request jobs also read and publish entries, manifests, and shards under the shared

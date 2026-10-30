@@ -288,6 +288,8 @@ class KacheWorkflowTests(unittest.TestCase):
         self.assertIn('run("kache", "doctor")', report_script)
         self.assertIn('run("kache", "why-miss", crate)', report_script)
         self.assertIn('"kache", "report", "--format", "json", "--since", f"{REPORT_WINDOW_HOURS}h"', report_script)
+        # Kache leaves the remote transfers out of a report filtered by a build tree.
+        self.assertNotIn('"--root"', report_script)
 
     def test_the_report_splits_compile_time_into_compilation_hits_and_kache_work(self) -> None:
         report = {
@@ -350,6 +352,36 @@ class KacheWorkflowTests(unittest.TestCase):
         self.assertIn("| Starting the wrapper | 0.0 min | 1.0% |", lines)
         self.assertIn("| Attributed to no phase | 0.0 min | 1.0% |", lines)
         self.assertIn("- Average cache hit overhead is 1000ms — check disk I/O or consider faster storage", lines)
+
+    def test_the_report_names_what_moved_to_and_from_the_remote(self) -> None:
+        network = {
+            "downloads_ok": 1537,
+            "downloads_failed": 2,
+            "bytes_down": 3 * 1024**3,
+            "avg_download_ms": 2_950,
+            "p95_download_ms": 7_100,
+            "max_download_ms": 20_300,
+            "total_semaphore_wait_ms": 90_000,
+            "max_concurrent_downloads": 16,
+            "dominant_download_phase": "body",
+            "dominant_download_phase_pct": 71.25,
+            "uploads_ok": 911,
+            "uploads_failed": 0,
+            "bytes_up": 2 * 1024**3,
+        }
+        lines = publish_kache_report.report_lines({"network": network})
+        self.assertIn("### Remote transfer", lines)
+        self.assertIn(
+            "| Downloaded | 1537 | 2 | 3.0 GiB | 3.0 s on average, 7.1 s at the 95th percentile, 20.3 s at most |",
+            lines,
+        )
+        self.assertIn("| Uploaded | 911 | 0 | 2.0 GiB | |", lines)
+        self.assertIn(
+            "Downloads waited 1.5 min in all for a transfer slot, with at most 16 at once. Most of "
+            "their time went to body: 71.2%.",
+            lines,
+        )
+        self.assertNotIn("### Remote transfer", publish_kache_report.report_lines({"network": None}))
 
     def test_a_report_without_compilation_says_so_instead_of_a_breakdown(self) -> None:
         lines = publish_kache_report.report_lines({"summary": {}, "timeline": {"event_count": 0}})
