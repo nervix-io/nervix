@@ -768,8 +768,12 @@ shared remote stay enabled. The `Start kache remote` step that follows the actio
    every build variant keeps its own manifest and shards.
 3. starts the daemon, and fails the job unless `kache --json daemon status` reports it running with
    that file and `kache --json stats` reports that the file names `s3://<bucket>/artifacts`. A
-   daemon that has not answered yet gets three polls, two seconds apart. The step prints whether
-   the daemon publishes uploads or, under kache's read-only policy, skips them.
+   daemon gets a minute to answer, polled every two seconds, because a loaded runner can start it
+   slowly. One that never answers is started once more, after the step warns and prints the end of
+   every log in the job's kache runtime directory, where a daemon that cannot start writes why; a
+   second failure fails the job with those logs. The logs go only to the job's log, where GitHub
+   masks the bucket's secrets, never to an artifact. The step prints whether the daemon publishes
+   uploads or, under kache's read-only policy, skips them.
 
 The extra-tests job also reclaims completed build phases. Before benchmark smoke it runs
 `just clean-ci-docs` to release the completed doctests' Cargo target directory. After the native

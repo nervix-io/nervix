@@ -49,10 +49,17 @@ PULL_REQUEST_PREFIX = "artifacts-pr"
 PUBLICATION_BUDGET_SECONDS = 120.0
 UPLOAD_POLL_SECONDS = 2.0
 
-# A daemon that has just started may not answer at once; it gets three polls, two seconds apart.
-VERIFY_ATTEMPTS = 3
+# A daemon that has just started may not answer at once, and on a loaded runner it can take a while:
+# it gets a minute to answer, polled every two seconds. A daemon that never answers is started once
+# more, after its log is shown, before the job fails: on 2026-10-30 one Boat runner, slow enough that
+# `kache doctor` took 47 seconds, never reached a daemon its first start reported as started.
+VERIFY_SECONDS = 60.0
 VERIFY_RETRY_SECONDS = 2.0
+DAEMON_STARTS = 2
 DAEMON_COMMAND_SECONDS = 30.0
+# How much of each daemon log a failed start shows.
+DAEMON_LOG_LINES = 40
+DAEMON_LOG_BYTES = 64 * 1024
 
 KACHE_DOCUMENT_SCHEMA_VERSION = 1
 TELEMETRY_SCHEMA_VERSION = "1"
@@ -356,7 +363,63 @@ class DaemonState:
         return None
 
 
-def start(environment: Mapping[str, str], clock: Clock | None = None) -> DaemonState:
+@dataclass(frozen=True)
+class DaemonCheck:
+    """What the job's daemon answered when start last asked, and why it is not the job's daemon,
+    if it is not."""
+
+    daemon: DaemonState | None
+    refusal: str | None
+
+
+def await_daemon(
+    environment: Mapping[str, str], remote: Remote, configuration: Path, clock: Clock, verify_seconds: float
+) -> DaemonCheck:
+    """Poll the daemon until it runs with the job's remote or `verify_seconds` pass."""
+    deadline = clock.now() + verify_seconds
+    while True:
+        try:
+            daemon = DaemonState.read(environment, DAEMON_COMMAND_SECONDS)
+            check = DaemonCheck(daemon=daemon, refusal=daemon.refusal(remote, configuration))
+        except KacheError as error:
+            check = DaemonCheck(daemon=None, refusal=str(error))
+        if check.refusal is None or clock.now() >= deadline:
+            return check
+        clock.sleep(VERIFY_RETRY_SECONDS)
+
+
+def start_daemon(environment: Mapping[str, str]) -> None:
+    try:
+        started = run_kache(["daemon", "start"], environment, DAEMON_COMMAND_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        raise StartError(f"`kache daemon start` did not return within {DAEMON_COMMAND_SECONDS:.0f} s") from error
+    print((started.stdout + started.stderr).strip(), flush=True)
+    if started.returncode != 0:
+        raise StartError(f"`kache daemon start` exited with status {started.returncode}")
+
+
+def daemon_logs(environment: Mapping[str, str]) -> str:
+    """The end of every log in the job's kache runtime directory, where a daemon that cannot start
+    writes why."""
+    runtime = environment.get("KACHE_RUNTIME_DIR")
+    if not runtime:
+        return "KACHE_RUNTIME_DIR is not set, so no kache daemon log can be shown."
+    logs = sorted(Path(runtime).glob("*.log"))
+    if not logs:
+        return f"{runtime} holds no kache daemon log."
+    sections = []
+    for log in logs:
+        with log.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(stream.tell() - DAEMON_LOG_BYTES, 0))
+            tail = stream.read().decode(errors="replace").splitlines()[-DAEMON_LOG_LINES:]
+        sections.append(f"The end of {log}:\n" + "\n".join(tail))
+    return "\n".join(sections)
+
+
+def start(
+    environment: Mapping[str, str], clock: Clock | None = None, verify_seconds: float = VERIFY_SECONDS
+) -> DaemonState:
     """Configure the job's remote, export it to later steps, and start the job's daemon with it."""
     clock = clock or Clock()
     remote = Remote.from_environment(environment)
@@ -377,28 +440,18 @@ def start(environment: Mapping[str, str], clock: Clock | None = None) -> DaemonS
     append_job_environment(job_environment, exported)
     daemon_environment = kache_environment(environment) | exported
 
-    try:
-        started = run_kache(["daemon", "start"], daemon_environment, DAEMON_COMMAND_SECONDS)
-    except subprocess.TimeoutExpired as error:
-        raise StartError(f"`kache daemon start` did not return within {DAEMON_COMMAND_SECONDS:.0f} s") from error
-    print((started.stdout + started.stderr).strip())
-    if started.returncode != 0:
-        raise StartError(f"`kache daemon start` exited with status {started.returncode}")
-
-    attempt = 1
-    while True:
-        try:
-            daemon = DaemonState.read(daemon_environment, DAEMON_COMMAND_SECONDS)
-            refusal = daemon.refusal(remote, configuration)
-        except KacheError as error:
-            daemon = None
-            refusal = str(error)
-        if refusal is None or attempt == VERIFY_ATTEMPTS:
+    for attempt in range(1, DAEMON_STARTS + 1):
+        start_daemon(daemon_environment)
+        check = await_daemon(daemon_environment, remote, configuration, clock, verify_seconds)
+        if check.refusal is None and check.daemon is not None:
+            daemon = check.daemon
             break
-        attempt += 1
-        clock.sleep(VERIFY_RETRY_SECONDS)
-    if refusal is not None or daemon is None:
-        raise StartError(f"the kache daemon is not running with {remote.description}: {refusal}")
+        failure = f"the kache daemon is not running with {remote.description}: {check.refusal}"
+        logs = daemon_logs(environment)
+        if attempt == DAEMON_STARTS:
+            raise StartError(f"{failure}\n{logs}")
+        print(f"::warning title=kache daemon start {attempt} of {DAEMON_STARTS}::{failure}", flush=True)
+        print(logs, flush=True)
     writes = "skips uploads" if daemon.remote_readonly else "publishes uploads"
     print(
         f"kache daemon runs with {remote.description} and a {store.max_size_gib} GiB local store "

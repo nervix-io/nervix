@@ -1201,9 +1201,16 @@ class StartTests(unittest.TestCase):
     def start(self, behavior: dict, **extra: str) -> tuple[DaemonState, FakeKache, SteppingClock]:
         kache = FakeKache(self.directory, behavior)
         clock = SteppingClock()
+        # Four seconds of polling, three polls, keep the tests of a daemon that never answers quick.
         with contextlib.redirect_stdout(io.StringIO()):
-            daemon = kache_remote.start(self.environment(kache, **extra), clock)
+            daemon = kache_remote.start(self.environment(kache, **extra), clock, verify_seconds=4.0)
         return daemon, kache, clock
+
+    def runtime_with_log(self, text: str) -> Path:
+        runtime = self.directory / "kache-runtime"
+        runtime.mkdir(exist_ok=True)
+        (runtime / "daemon-pr-ff050e90.log").write_text(text)
+        return runtime
 
     def test_the_daemon_starts_with_the_configured_remote_and_later_steps_inherit_it(self) -> None:
         daemon, kache, clock = self.start({})
@@ -1238,7 +1245,8 @@ class StartTests(unittest.TestCase):
             },
         )
 
-    def test_a_daemon_without_the_remote_fails_the_job_after_three_polls(self) -> None:
+    def test_a_daemon_without_the_remote_fails_the_job_after_two_starts_with_its_log(self) -> None:
+        runtime = self.runtime_with_log("starting\nerror: the store index is locked\n")
         for behavior, refusal in (
             ({"config_path": "/elsewhere/kache.toml"}, "the daemon reads configuration /elsewhere/kache.toml"),
             ({"remote": "s3://other/artifacts"}, "the configuration names remote s3://other/artifacts"),
@@ -1247,11 +1255,48 @@ class StartTests(unittest.TestCase):
         ):
             with self.subTest(refusal=refusal):
                 subprocess.run(["rm", "-rf", str(self.directory / "bin")], check=True)
+                (self.directory / "kache.log").unlink(missing_ok=True)
                 self.github_env.write_text("")
                 with self.assertRaises(StartError) as raised:
-                    self.start(behavior)
+                    self.start(behavior, KACHE_RUNTIME_DIR=str(runtime))
                 self.assertIn(refusal, str(raised.exception))
                 self.assertIn("s3://kache-ci/artifacts", str(raised.exception))
+                self.assertIn(f"The end of {runtime}/daemon-pr-ff050e90.log:\nstarting\nerror: the store index is locked", str(raised.exception))
+                started = [
+                    call["argv"] for call in map(json.loads, (self.directory / "kache.log").read_text().splitlines())
+                    if call["argv"] == ["daemon", "start"]
+                ]
+                self.assertEqual(len(started), kache_remote.DAEMON_STARTS)
+
+    def test_a_daemon_that_answers_only_after_its_second_start_is_accepted_with_a_warning(self) -> None:
+        runtime = self.runtime_with_log("error: socket bind timed out\n")
+        kache = FakeKache(self.directory, {"running": [False, False, False, True]})
+        clock = SteppingClock()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            daemon = kache_remote.start(
+                self.environment(kache, KACHE_RUNTIME_DIR=str(runtime)), clock, verify_seconds=4.0
+            )
+        self.assertTrue(daemon.running)
+        self.assertEqual(kache.commands().count(["daemon", "start"]), 2)
+        self.assertIn(
+            "::warning title=kache daemon start 1 of 2::the kache daemon is not running with "
+            "s3://kache-ci/artifacts: the daemon is not running",
+            output.getvalue(),
+        )
+        self.assertIn("error: socket bind timed out", output.getvalue())
+
+    def test_daemon_logs_show_the_end_of_each_log_or_say_there_is_none(self) -> None:
+        runtime = self.runtime_with_log("".join(f"line {number}\n" for number in range(100)))
+        shown = kache_remote.daemon_logs({"KACHE_RUNTIME_DIR": str(runtime)})
+        self.assertTrue(shown.startswith(f"The end of {runtime}/daemon-pr-ff050e90.log:\nline 60\n"), shown[:120])
+        self.assertTrue(shown.endswith("line 99"))
+        empty = self.directory / "empty-runtime"
+        empty.mkdir()
+        self.assertEqual(kache_remote.daemon_logs({"KACHE_RUNTIME_DIR": str(empty)}), f"{empty} holds no kache daemon log.")
+        self.assertEqual(
+            kache_remote.daemon_logs({}), "KACHE_RUNTIME_DIR is not set, so no kache daemon log can be shown."
+        )
 
     def test_a_daemon_that_answers_on_the_second_poll_is_accepted(self) -> None:
         _daemon, kache, clock = self.start({"running": [False, True]})
