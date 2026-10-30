@@ -277,7 +277,9 @@ class TransferTests(unittest.TestCase):
             with self.subTest(level=level):
                 files = {"a.bin": os.urandom(2500), "deep/b.bin": os.urandom(1200), "empty": b""}
                 with self.quiet():
-                    artifacts.upload(self.bucket, "7", f"pack-{level}", self.tree(files), level, part_bytes=1024)
+                    artifacts.upload(
+                        self.bucket, "7", f"pack-{level}", self.tree(files), level, part_bytes=1024
+                    )
                     artifacts.download(self.bucket, "7", f"pack-{level}", "", self.work / f"out-{level}")
                 manifest = json.loads(self.fake.objects[f"runs/7/pack-{level}/manifest.json"])
                 self.assertGreater(len(manifest["parts"]), 2)
@@ -335,6 +337,27 @@ class TransferTests(unittest.TestCase):
             artifacts.upload(self.bucket, "7", "again", self.tree({"shared": b"2"}), 0)
             artifacts.download(self.bucket, "7", "again", "", self.work / "out")
         self.assertEqual(self.extracted(self.work / "out"), {"shared": b"2"})
+
+    def test_a_transfer_keeps_its_parts_below_their_own_prefix(self) -> None:
+        files = {"a.bin": os.urandom(3000)}
+        with self.quiet():
+            artifacts.upload(self.bucket, "7", "suite", self.tree(files), 0, "transfer", part_bytes=1024)
+            artifacts.download(self.bucket, "7", "suite", "", self.work / "named")
+            artifacts.download(self.bucket, "7", "", "sui*", self.work / "matched")
+        parts = [key for key in self.fake.objects if "/part-" in key]
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(key.startswith("transfer/7/suite/") for key in parts), parts)
+        self.assertIn("runs/7/suite/manifest.json", self.fake.objects)
+        self.assertEqual(self.extracted(self.work / "named"), files)
+        self.assertEqual(self.extracted(self.work / "matched/suite"), files)
+
+    def test_an_artifact_whose_parts_expired_says_so(self) -> None:
+        with self.quiet():
+            artifacts.upload(self.bucket, "7", "suite", self.tree({"a": b"1"}), 0, "transfer")
+        for key in [key for key in self.fake.objects if key.startswith("transfer/")]:
+            del self.fake.objects[key]
+        with self.quiet(), self.assertRaisesRegex(artifacts.ArtifactError, "suite of run 7 has expired"):
+            artifacts.download(self.bucket, "7", "suite", "", self.work / "out")
 
     def test_a_pattern_extracts_each_match_under_its_name(self) -> None:
         with self.quiet():

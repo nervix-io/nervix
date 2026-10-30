@@ -28,10 +28,14 @@ selected. A file or directory whose name starts with a dot is skipped. Each entr
 to one root: the common ancestor of the patterns' literal prefixes, or the single file's directory
 when one literal path selected one file, or the one literal prefix.
 
-Objects live at `runs/<run id>/<name>/manifest.json` and `runs/<run id>/<name>/<upload id>/part-N`.
-A run id is shared by every attempt of a run, so an artifact survives a rerun of other jobs, and a
-job that runs again replaces its own. Retention is the bucket's lifecycle rule. The credentials are
-the environment's R2_ARTIFACTS_* variables, and developing-nervix.md lists them.
+A manifest lives at `runs/<run id>/<name>/manifest.json`, and its parts at
+`<prefix>/<run id>/<name>/<upload id>/part-N`. A run id is shared by every attempt of a run, so an
+artifact survives a rerun of other jobs, and a job that runs again replaces its own. Retention is
+the bucket's lifecycle rules, which match key prefixes: `--retention standard` keeps parts below
+`runs/`, and `--retention transfer` below `transfer/`, for a large artifact only later jobs of the
+run read. The manifest names the prefix, so a reader needs no option, and a reader of an artifact
+whose parts expired is told so. The credentials are the environment's R2_ARTIFACTS_* variables, and
+developing-nervix.md lists them.
 """
 
 from __future__ import annotations
@@ -70,6 +74,8 @@ LONGEST_BACKOFF_SECONDS = 30
 SOCKET_SECONDS = 60
 SOCKET_BLOCK_BYTES = 1024 * 1024
 GZIP_DEFAULT_LEVEL = 1
+# The key prefix of an upload's parts, which the bucket's lifecycle rules match.
+PART_PREFIXES = {"standard": "runs", "transfer": "transfer"}
 # R2 has one region, and SigV4 names it `auto`.
 REGION = "auto"
 SERVICE = "s3"
@@ -504,8 +510,10 @@ def upload(
     name: str,
     selection: Selection,
     compression_level: int,
+    retention: str = "standard",
     part_bytes: int = PART_BYTES,
 ) -> None:
+    prefix = PART_PREFIXES[retention]
     with transfer_directory() as directory:
         writer = PartWriter(Path(directory), part_bytes)
         files = pack(selection, writer, compression_level)
@@ -513,12 +521,12 @@ def upload(
 
         def send(index: int) -> None:
             part = writer.parts[index]
-            key = f"runs/{run}/{name}/{upload_id}/part-{index}"
+            key = f"{prefix}/{run}/{name}/{upload_id}/part-{index}"
             bucket.put_file(key, writer.path(index), part.length)
 
         with ThreadPoolExecutor(CONCURRENT_TRANSFERS) as transfers:
             list(transfers.map(send, range(len(writer.parts))))
-        manifest = {"upload": upload_id, "parts": [asdict(part) for part in writer.parts]}
+        manifest = {"prefix": prefix, "upload": upload_id, "parts": [asdict(part) for part in writer.parts]}
         bucket.put_bytes(manifest_key(run, name), json.dumps(manifest).encode())
     total = sum(part.length for part in writer.parts)
     print(f"{name}: {files} files, {total} bytes in {len(writer.parts)} parts")
@@ -527,17 +535,21 @@ def upload(
 def fetch(bucket: Bucket, run: str, name: str, destination: Path) -> None:
     manifest = json.loads(bucket.get_bytes(manifest_key(run, name)))
     parts = [Part(**part) for part in manifest["parts"]]
+    prefix = manifest["prefix"]
     upload_id = manifest["upload"]
     destination.mkdir(parents=True, exist_ok=True)
     with transfer_directory() as directory:
         paths = [Path(directory) / f"part-{index}" for index in range(len(parts))]
 
         def receive(index: int) -> None:
-            key = f"runs/{run}/{name}/{upload_id}/part-{index}"
+            key = f"{prefix}/{run}/{name}/{upload_id}/part-{index}"
             bucket.get_file(key, paths[index], parts[index].length, parts[index].sha256)
 
-        with ThreadPoolExecutor(CONCURRENT_TRANSFERS) as transfers:
-            list(transfers.map(receive, range(len(parts))))
+        try:
+            with ThreadPoolExecutor(CONCURRENT_TRANSFERS) as transfers:
+                list(transfers.map(receive, range(len(parts))))
+        except Missing as error:
+            raise ArtifactError(f"{name} of run {run} has expired: its parts are gone") from error
         with contextlib.closing(PartReader(paths)) as reader:
             with tarfile.open(fileobj=reader, mode="r|*") as archive:
                 archive.extractall(destination, filter="data")
@@ -571,6 +583,7 @@ def parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     send.add_argument("--path", required=True, help="one pattern a line")
     send.add_argument("--if-no-files-found", choices=("warn", "error", "ignore"), default="warn")
     send.add_argument("--compression-level", type=int, choices=range(10), default=GZIP_DEFAULT_LEVEL)
+    send.add_argument("--retention", choices=tuple(PART_PREFIXES), default="standard")
     receive = commands.add_parser("download")
     receive.add_argument("--run", default=os.environ.get("GITHUB_RUN_ID", ""))
     receive.add_argument("--name", default="")
@@ -592,6 +605,7 @@ def run_upload(arguments: argparse.Namespace) -> None:
             arguments.name,
             selection,
             arguments.compression_level,
+            arguments.retention,
         )
         return
     message = f"{arguments.name}: no files match {' '.join(lines)}"

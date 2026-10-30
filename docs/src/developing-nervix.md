@@ -428,9 +428,17 @@ its own. A local action needs the repository, so a job checks out before it uses
 | `R2_ARTIFACTS_SECRET_ACCESS_KEY` | Secret | That token's secret access key |
 
 Each workflow passes them to its jobs as environment variables of the same names, and a reusable
-workflow's caller passes the secrets on. The bucket is private, and its lifecycle rule is the only
-retention: a job has no retention of its own. With the same variables set locally, read an artifact
-of any run the bucket still holds:
+workflow's caller passes the secrets on. The bucket is private, and its lifecycle rules are the only
+retention, matching key prefixes:
+
+| Prefix | Rule | Holds |
+| --- | --- | --- |
+| `transfer/` | Delete after 1 day | The parts of a large artifact only later jobs of its run read, which `retention: transfer` selects: the scenario suite's archive |
+| `runs/` | Delete after 30 days | Every manifest, and the parts of every other artifact: the reports, logs and evidence people read later |
+
+A shard rerun more than a day after its build finds the archive's parts gone and says so, and
+`scenarios-build` has to run again. With the same variables set locally, read an artifact of any
+run the bucket still holds:
 
 ```bash
 just ci-artifact-download <run> --name coverage-full --path retained

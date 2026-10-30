@@ -13,6 +13,9 @@ inputs:
   compression-level:
     description: Gzip level from 1 to 9, or 0 for files that are compressed already.
     default: "1"
+  retention:
+    description: standard, or transfer for a large artifact only later jobs of this run read.
+    default: standard
 runs:
   using: composite
   steps:
@@ -23,9 +26,11 @@ runs:
         ARTIFACT_PATH: ${{ inputs.path }}
         IF_NO_FILES_FOUND: ${{ inputs.if-no-files-found }}
         COMPRESSION_LEVEL: ${{ inputs.compression-level }}
+        RETENTION: ${{ inputs.retention }}
       run: >-
         python3 "${GITHUB_WORKSPACE}/scripts/ci_artifacts.py" upload
         --name "${ARTIFACT_NAME}"
         --path "${ARTIFACT_PATH}"
         --if-no-files-found "${IF_NO_FILES_FOUND}"
         --compression-level "${COMPRESSION_LEVEL}"
+        --retention "${RETENTION}"

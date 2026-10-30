@@ -986,14 +986,16 @@ jobs:
       - name: Pack the scenario suite
         run: just test-scenarios-coverage-pack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
 
-      # The archive is compressed already, and the shards of this run are its only readers. A
-      # rerun of this job replaces it, and a shard rerun restores it while the bucket keeps it.
+      # The archive is compressed already, and the shards of this run are its only readers, so
+      # the bucket keeps it for a day. A rerun of this job replaces it, and a shard rerun within
+      # that day restores it; a later shard rerun needs this job to run again.
       - name: Upload the scenario suite
         uses: ./.github/actions/ci-artifact-upload
         with:
           name: scenario-suite
           path: ${{ runner.temp }}/scenario-suite/scenario-suite.tar.zst
           compression-level: 0
+          retention: transfer
           if-no-files-found: error
 
       # These bodies must fail. The supervisor separately requires complete after-hook cleanup;
