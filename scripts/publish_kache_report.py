@@ -21,8 +21,10 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tomllib
 from collections.abc import Mapping, Sequence
 from typing import Any
+from urllib.parse import urlsplit
 
 PHASES = ("build", "job")
 # The report's window. No kache-backed job may run longer, and each job has its machine to itself,
@@ -36,6 +38,38 @@ def run(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(args, text=True, capture_output=True, check=False)
     except OSError as error:
         return subprocess.CompletedProcess(args, 127, "", str(error))
+
+
+@dataclass(frozen=True)
+class Redaction:
+    """The names of the job's remote that the workflow keeps secret: its bucket and endpoint, from
+    the job's kache configuration. GitHub masks them in a job's log, but not in an artifact, and
+    `kache doctor` prints the remote's bucket."""
+
+    secrets: tuple[str, ...]
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str]) -> Redaction:
+        """A configuration kache cannot read names no remote to kache either, so there is nothing
+        to redact without one."""
+        configured = environment.get("KACHE_CONFIG")
+        if not configured:
+            return cls(secrets=())
+        try:
+            remote = tomllib.loads(Path(configured).read_text(encoding="utf-8"))["cache"]["remote"]
+            bucket = str(remote["bucket"])
+            endpoint = str(remote["endpoint"])
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError):
+            return cls(secrets=())
+        names = [endpoint, urlsplit(endpoint).hostname or "", bucket]
+        # The longest first, so the endpoint goes whole before its host.
+        secrets = tuple(sorted((name for name in names if name), key=len, reverse=True))
+        return cls(secrets=secrets)
+
+    def apply(self, text: str) -> str:
+        for secret in self.secrets:
+            text = text.replace(secret, "***")
+        return text
 
 
 def heading(job: str, phase: str) -> str:
@@ -293,18 +327,20 @@ def main(arguments: Sequence[str] | None = None) -> None:
     options = parser.parse_args(arguments)
     destination = options.destination
     destination.mkdir(parents=True, exist_ok=True)
+    redaction = Redaction.from_environment(os.environ)
     doctor = run("kache", "doctor")
-    (destination / "doctor.txt").write_text(doctor.stdout + doctor.stderr)
+    doctor_output = redaction.apply(doctor.stdout + doctor.stderr)
+    (destination / "doctor.txt").write_text(doctor_output)
 
     report = run("kache", "report", "--format", "json", "--since", f"{REPORT_WINDOW_HOURS}h", "--top", "20")
-    (destination / "report.json").write_text(report.stdout)
+    (destination / "report.json").write_text(redaction.apply(report.stdout))
     markdown = [heading(os.environ.get("GITHUB_JOB", "local build"), options.phase), ""]
     markdown.append(f"Doctor exit status: `{doctor.returncode}`. Problems are diagnostic only.")
-    if doctor.stdout or doctor.stderr:
-        markdown.extend(["", "<details><summary>Doctor output</summary>", "", "```text", (doctor.stdout + doctor.stderr).strip(), "```", "", "</details>"])
+    if doctor_output:
+        markdown.extend(["", "<details><summary>Doctor output</summary>", "", "```text", doctor_output.strip(), "```", "", "</details>"])
 
     if report.returncode:
-        markdown.extend(["", f"Report failed with status `{report.returncode}`: {report.stderr.strip()}"])
+        markdown.extend(["", f"Report failed with status `{report.returncode}`: {redaction.apply(report.stderr.strip())}"])
     else:
         data = json.loads(report.stdout)
         markdown.extend(report_lines(data))
@@ -322,15 +358,14 @@ def main(arguments: Sequence[str] | None = None) -> None:
         for miss in misses:
             crate = miss["crate_name"]
             diagnosis = run("kache", "explain", crate)
-            (destination / f"explain-{crate}.txt").write_text(
-                diagnosis.stdout + diagnosis.stderr
-            )
+            explanation = redaction.apply(diagnosis.stdout + diagnosis.stderr)
+            (destination / f"explain-{crate}.txt").write_text(explanation)
             markdown.extend(
                 [
                     f"#### `{crate}` ({miss.get('compile_time_ms', 0)} ms compile)",
                     "",
                     "```text",
-                    (diagnosis.stdout + diagnosis.stderr).strip() or "No diagnosis returned.",
+                    explanation.strip() or "No diagnosis returned.",
                     "```",
                     "",
                 ]

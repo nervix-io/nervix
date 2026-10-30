@@ -390,6 +390,24 @@ class KacheWorkflowTests(unittest.TestCase):
         self.assertNotIn("### Where the compile time went", lines)
         self.assertIn("Kache recorded no compilation in this report's window.", publish_kache_report.report_lines({}))
 
+    def test_the_report_redacts_the_remote_the_workflow_keeps_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            configuration = Path(directory) / "kache-remote.toml"
+            remote = kache_remote.Remote.from_environment(REMOTE_ENVIRONMENT)
+            kache_remote.Configuration(store=LocalStore(max_size_gib=70), remote=remote).write(configuration)
+            redaction = publish_kache_report.Redaction.from_environment({"KACHE_CONFIG": str(configuration)})
+        doctor = (
+            "Remote           ✓   s3://kache-ci/artifacts\n"
+            "Remote access    ✓   https://account-id.r2.cloudflarestorage.com reachable\n"
+            "Host             account-id.r2.cloudflarestorage.com\n"
+        )
+        self.assertEqual(
+            redaction.apply(doctor),
+            "Remote           ✓   s3://***/artifacts\nRemote access    ✓   *** reachable\nHost             ***\n",
+        )
+        # Without a configuration kache reads none either, so no remote is named.
+        self.assertEqual(publish_kache_report.Redaction.from_environment({}).apply(doctor), doctor)
+
     def test_a_build_report_names_its_phase(self) -> None:
         self.assertEqual(publish_kache_report.heading("tests", "build"), "## Kache: tests, after the build")
         self.assertEqual(publish_kache_report.heading("tests", "job"), "## Kache: tests")

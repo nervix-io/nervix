@@ -706,8 +706,11 @@ for a transfer slot, and the uploads. It adds kache's own reading of the window 
 five most expensive misses with `kache explain`. A job that builds before it runs also reports right
 after its build, so its summary shows what the build compiled and what the cache served apart from
 what the run did, and a slow job reads as slow compilation, a cache that missed, cache hits that
-were slow, or a slow run. The shared S3 cache keeps executable and test-binary outputs. The report
-shows the local store's size against the budget [Cache Publication](#cache-publication) describes.
+were slow, or a slow run. The report's files and summary write the remote's bucket and endpoint,
+which the workflow keeps secret, as `***`: GitHub masks them in a job's log, but not in an artifact,
+and `kache doctor` prints the bucket. The shared S3 cache keeps executable and test-binary outputs.
+The report shows the local store's size against the budget [Cache Publication](#cache-publication)
+describes.
 
 The shared remote is Cloudflare R2 through its S3 API. Kache reads the base `artifacts` prefix
 first. Pull-request jobs also read and publish entries, manifests, and shards under the shared
