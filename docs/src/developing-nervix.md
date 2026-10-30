@@ -347,14 +347,17 @@ just test-connectors <filter>
 
 Each CI job's `runs-on` label picks one of three kinds of machine.
 
-GitHub's own hosted runners, which are free for a public repository, run the jobs that coordinate
-a run or need little of a machine: the test selection, the PR title check, the image metadata and
+GitHub's own hosted runners, which are free for a public repository, run the jobs that coordinate a
+run or need little of a machine: the test selection, the PR title check, the image metadata and
 manifest, the chaos plans and verdicts, the Bolero gate and the combination of its shards, the
-benchmark comment, the coverage merges, the book and the deployment checks. `ubuntu-24.04` has 4
-CPUs, 16 GB of memory and a 14 GB SSD, and `ubuntu-24.04-arm` is the same machine on arm64, so each
-deployment check runs on its image's own architecture. The organization's GitHub plan runs at most
-20 hosted jobs at once across its repositories; in a week of October 2026 these jobs had at most 10
-running at once, while the chaos shards would have needed 42, so the shards stay on Boat.
+benchmark comment, the coverage merges, the book and the deployment checks. They also run the chaos
+shards, on the workers the suites were qualified on. `ubuntu-24.04` has 4 CPUs, 16 GB of memory and
+a 14 GB SSD, and `ubuntu-24.04-arm` is the same machine on arm64, so each deployment check runs on
+its image's own architecture. The organization's GitHub plan runs at most 20 hosted jobs at once
+across its repositories; in a week of October 2026 the other jobs had at most 10 running at once, so
+a soak suite's shards, which need more, wait for one another. On Boat's workers a container's run,
+inspection or stop took 8 to 29 seconds against the chaos suite's 30-second bound of a fault
+operation, and three of fourteen soak shards failed their network qualification.
 
 [Boat](https://boat.dev) machines, which the boat CI GitHub App starts for every job whose `runs-on`
 names a Boat size, run every other job but the Bolero sanitizer shards. Each gets a fresh x86_64
@@ -373,18 +376,17 @@ has only 2 GB of memory per CPU, with 4 GB of swap beside it:
   16 GB machine. Sixteen compilers of the instrumented Loom build or of the Loom qualification
   builds exceed the machine's 32 GB, so both Loom jobs set `CARGO_BUILD_JOBS` to eight; the Loom
   build then peaked at 21 GiB.
-- `boat-large`, with 8 CPUs, 16 GB and 111 GB, runs Turmoil and the chaos shards.
+- `boat-large`, with 8 CPUs, 16 GB and 111 GB, runs Turmoil.
 
 A Boat machine sets the `en_US.UTF-8` locale, whose collation orders `sort` output differently from
 the `C.UTF-8` of GitHub's runner image, so every workflow sets `LC_ALL=C.UTF-8`. Its Docker daemon
-can start a few seconds after a job begins, so a Boat job whose first steps use Docker waits for
-it. Its own Node.js comes from nvm, which a job's shell may not load, so a Boat job that runs
-Node.js or npm pins it with `actions/setup-node`. Its Rust toolchain is installed system-wide under
-`/usr/local/cargo`, so a job creates `~/.cargo` before it writes its Cargo configuration there, and
-the chaos shards drop that directory from the PATH their suite runs with and delete the commands,
-such as `cargo`, that the toolchain also puts in `/usr/local/bin`. Its git is Ubuntu's 2.43, older
-than the 2.44 whose `--no-lazy-fetch` the test selection passes, so the Boat jobs that run the
-selection's tests install the current git from the git-core PPA, as GitHub's runner image does.
+can start a few seconds after a job begins, so a Boat job whose first steps use Docker waits for it.
+Its own Node.js comes from nvm, which a job's shell may not load, so a Boat job that runs Node.js or
+npm pins it with `actions/setup-node`. Its Rust toolchain is installed system-wide under
+`/usr/local/cargo`, so a job creates `~/.cargo` before it writes its Cargo configuration there. Its
+git is Ubuntu's 2.43, older than the 2.44 whose `--no-lazy-fetch` the test selection passes, so the
+Boat jobs that run the selection's tests install the current git from the git-core PPA, as GitHub's
+runner image does.
 
 [Blacksmith](https://www.blacksmith.sh)'s `blacksmith-16vcpu-ubuntu-2404`, with 16 CPUs, 64 GB and
 GitHub's runner image, runs the Bolero sanitizer shards: their address-sanitized server build needs
