@@ -629,9 +629,7 @@ impl IngestorMessage for PulsarTopicIngestorMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::Headers {
-            headers: &self.properties,
-        }
+        IngestMetadataRow::headers(&self.properties)
     }
 }
 

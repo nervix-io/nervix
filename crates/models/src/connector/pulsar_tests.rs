@@ -109,7 +109,7 @@ fn topic_declares_message_properties_as_headers_and_no_envelope() {
         emit.headers,
         Some(HeaderModel::exact(HeaderLayout::LastWins))
     );
-    assert_eq!(ingest.metadata, IngestorMetadataScope::Headers);
+    assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
     assert!(ingest.metadata.fields().is_empty());
     assert!(emit.options.is_empty());
     assert!(emit.envelope.is_empty());

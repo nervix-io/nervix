@@ -1790,6 +1790,9 @@ impl CreateIngestor {
         let timestamp = match &self.timestamp_source {
             Some(IngestTimestampSource::Now) => " TIMESTAMP NOW".to_string(),
             Some(IngestTimestampSource::At(field)) => format!(" TIMESTAMP AT {}", field.as_str()),
+            Some(IngestTimestampSource::AtMetadata(field)) => {
+                format!(" TIMESTAMP AT metadata.{}", field.as_str())
+            }
             None => String::new(),
         };
         let mut clauses = vec![Clause::line(format!(
@@ -2762,6 +2765,9 @@ fn alter_ingestor_operation_to_plexus<Source: IngestorBodyPlexus>(
             IngestTimestampSource::Now => "SET TIMESTAMP NOW".to_string(),
             IngestTimestampSource::At(field) => {
                 format!("SET TIMESTAMP AT {}", field.as_str())
+            }
+            IngestTimestampSource::AtMetadata(field) => {
+                format!("SET TIMESTAMP AT metadata.{}", field.as_str())
             }
         }),
         AlterIngestorOperation::DropTimestamp => Ok("DROP TIMESTAMP".to_string()),

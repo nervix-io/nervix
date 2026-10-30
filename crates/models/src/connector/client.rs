@@ -40,7 +40,7 @@ use crate::{
     EmitterBatchLegality, EmitterBodyForm, EmitterDeclaration, EmitterEntityBody,
     EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind, IngestDeliveryKind,
     IngestQuiesceMode, IngestorAlteration, IngestorDeclaration, IngestorEntityCapabilities,
-    IngestorEntityModel, IngestorInput, IngestorMetadataScope, IngestorReferenceKind,
+    IngestorEntityModel, IngestorInput, IngestorMetadataDeclaration, IngestorReferenceKind,
     PositionClass, RetryPolicy, SchemaName,
 };
 
@@ -133,7 +133,7 @@ impl IngestorDeclaration for ClientProducerIngestor {
     /// that no program may read.
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         headers: None,
-        metadata: IngestorMetadataScope::Headers,
+        metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Schema,
         position_class: PositionClass::None,

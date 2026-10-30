@@ -515,6 +515,8 @@ fn paced_domains_admit_the_logical_origin() {
         Some(&IngestTimestampSource::At(named("occurred_at"))),
         &record.one_row_batch(),
         &RecordMetadataColumns::from_rows([record.metadata().clone()]),
+        &crate::runtime::IngestFilterMapMetadata::headerless(1)
+            .assured("one headerless row builds"),
     );
 
     assert!(
