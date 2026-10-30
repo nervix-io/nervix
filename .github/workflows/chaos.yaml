@@ -301,7 +301,7 @@ jobs:
       # Every attempt of this run keeps its own verdicts, so a rerun of failed shards never replaces
       # the verdicts of the attempt it repeats.
       - name: Download the shard verdicts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           # The kind sits between the shard and the run, so no kind's pattern matches another's.
           pattern: chaos-verdict-${{ inputs.suite }}-*-${{ inputs.image-kind }}-${{ github.run_id }}-*

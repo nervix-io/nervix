@@ -1157,7 +1157,7 @@ jobs:
           label: scenario-shard
 
       - name: Download the scenario suite
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: scenario-suite
           path: ${{ runner.temp }}/scenario-suite
@@ -1278,20 +1278,20 @@ jobs:
         run: just install-cargo-crap
 
       - name: Download tests coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: coverage-tests
           path: coverage-inputs/tests
 
       # Each shard's report lands in its own directory, named after its artifact.
       - name: Download scenarios coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-scenarios-*
           path: coverage-inputs
 
       - name: Download native extra coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: coverage-native-extras
           path: coverage-inputs/native-extras
@@ -1409,19 +1409,19 @@ jobs:
             --tests-required "$TESTS_REQUIRED" --bolero-required "$BOLERO_REQUIRED" --jobs "$JOBS"
 
       - name: Download ordinary coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-merged
           path: coverage-full-inputs
 
       - name: Download native extra coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-native-extras
           path: coverage-full-inputs
 
       - name: Download diagnostic evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: diagnostic-evidence
           path: coverage-full-inputs
@@ -1429,37 +1429,37 @@ jobs:
       # The artifacts of label-enabled producers and of the Bolero call. A pattern that matches no
       # artifact downloads nothing; the union then names what the selection required and lacks.
       - name: Download Shuttle coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-shuttle
           path: coverage-full-inputs
 
       - name: Download Loom coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-loom
           path: coverage-full-inputs
 
       - name: Download Turmoil coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-turmoil
           path: coverage-full-inputs
 
       - name: Download Deloxide lane coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: deloxide-*
           path: coverage-full-inputs
 
       - name: Download combined fuzz coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-bolero-fuzz
           path: coverage-full-inputs
 
       - name: Download Bolero selection
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: bolero-selection
           path: coverage-full-inputs
