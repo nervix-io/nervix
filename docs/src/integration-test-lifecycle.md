@@ -776,7 +776,9 @@ shared remote stay enabled. The `Start kache remote` step that follows the actio
    stay in the environment.
 2. exports `KACHE_CONFIG`, the credentials, and the job's `KACHE_MANIFEST_KEY` and
    `KACHE_NAMESPACE` to the job's later steps. A matrix job's key includes its matrix value, so
-   every build variant keeps its own manifest and shards.
+   every build variant keeps its own manifest and shards. `scenarios-build` keeps the key
+   `scenarios-<os>-<arch>` it had before the suite split into shards: a key with no manifest starts
+   a job with nothing to prefetch.
 3. prepares the store before any kache process opens it. Nothing on a single-use runner needs to
    survive a crash, and on Boat kache's downloads spent most of their time waiting for the lock of
    its SQLite index, whose holders wait on the disk. When `/dev/shm` is a tmpfs with at least a GiB

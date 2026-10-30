@@ -940,9 +940,11 @@ jobs:
           cache-executables: "true"
           pr-comment: "false"
 
+      # The manifest keeps the name it had before the suite split into shards: a new name starts the
+      # job with nothing to prefetch, and a run cancelled before it publishes leaves the next one cold.
       - name: Start kache remote
         env:
-          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_MANIFEST_KEY: scenarios-${{ runner.os }}-${{ runner.arch }}
           KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
           KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
