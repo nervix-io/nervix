@@ -216,6 +216,7 @@ class InventoryTests(unittest.TestCase):
             "models-external-name-validation",
             "models-connector-declarations",
             "websocket-retained-metadata",
+            "ingest-metadata-projection",
             "websocket-client-config",
             "websocket-upgrade-headers",
             "models-timestamps",

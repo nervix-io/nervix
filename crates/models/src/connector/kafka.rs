@@ -34,9 +34,10 @@ use crate::{
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     EnvelopeClauseKind, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
-    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope,
-    IngestorReference, IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice,
-    OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass, RetryPolicy,
+    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, PositionClass, RetryPolicy,
 };
 
 configured_client!(Kafka: unpooled, config CLIENT_CONFIG, CreateClientKafka => KafkaConfigEntry);
@@ -271,11 +272,18 @@ const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
 };
 
+/// Where a Kafka record sits in its topic.
+const KAFKA_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("topic", IngestorMetadataType::String),
+    IngestorMetadataField::new("partition", IngestorMetadataType::I32),
+    IngestorMetadataField::new("offset", IngestorMetadataType::I64),
+]);
+
 impl IngestorDeclaration for KafkaTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // A Kafka record carries its headers as a list, in the order written, repeats included.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
-        metadata: IngestorMetadataScope::Kafka,
+        metadata: KAFKA_TOPIC_METADATA,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Kafka),
         position_class: PositionClass::Replayable,

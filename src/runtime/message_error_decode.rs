@@ -3,9 +3,9 @@
 //!
 //! Layer: data plane.
 //! - **Owns.** Turning one codec refusal of a source payload into its decode rejection, naming the
-//!   payload's transport position from its typed metadata, and reporting the rejection under the
+//!   transport position its ingest metadata row carries, and reporting the rejection under the
 //!   ingestor's `ON GENERAL ERROR` policy.
-//! - **Depends on.** The codec's report, the source's typed ingest metadata, the message-error
+//! - **Depends on.** The codec's report, the source's ingest metadata row, the message-error
 //!   vocabulary and the node's runtime event bus.
 //! - **Must not know.** The payload's bytes, the source's driver, or how the host settles the
 //!   payload's position on its transport.
@@ -17,12 +17,13 @@
 
 use std::{fmt, net::SocketAddr};
 
-use nervix_connector::IngestMetadataRow;
+use nervix_connector::{IngestMetadataRow, IngestTransportPosition};
 use uuid::Uuid;
 
 use super::*;
 
-/// Where on its transport a refused payload was read, as its source's typed metadata names it.
+/// Where on its transport a refused payload was read, as its source's ingest metadata row names
+/// it, owned so that it outlives the message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TransportPosition {
     /// The topic, partition and offset of a Kafka record.
@@ -36,24 +37,35 @@ pub(crate) enum TransportPosition {
 }
 
 impl TransportPosition {
-    /// The position `metadata` names. A source whose metadata holds only headers names none: a
-    /// header value is what its sender wrote, never a position.
-    fn of(metadata: &IngestMetadataRow<'_>) -> Option<Self> {
-        match metadata {
-            IngestMetadataRow::Kafka {
+    /// The owned copy of a position a message lends.
+    pub(super) fn retain(position: IngestTransportPosition<'_>) -> Self {
+        match position {
+            IngestTransportPosition::Kafka {
                 topic,
                 partition,
                 offset,
-                ..
-            } => Some(Self::Kafka {
-                topic: (*topic).to_string(),
+            } => Self::Kafka {
+                topic: topic.to_string(),
+                partition,
+                offset,
+            },
+            IngestTransportPosition::Syslog { peer } => Self::Syslog { peer },
+        }
+    }
+
+    /// This position as a row lends it.
+    pub(super) fn borrowed(&self) -> IngestTransportPosition<'_> {
+        match self {
+            Self::Kafka {
+                topic,
+                partition,
+                offset,
+            } => IngestTransportPosition::Kafka {
+                topic,
                 partition: *partition,
                 offset: *offset,
-            }),
-            IngestMetadataRow::Syslog { peer_addr } => Some(Self::Syslog { peer: *peer_addr }),
-            IngestMetadataRow::Headers { .. }
-            | IngestMetadataRow::Http { .. }
-            | IngestMetadataRow::Websockets { .. } => None,
+            },
+            Self::Syslog { peer } => IngestTransportPosition::Syslog { peer: *peer },
         }
     }
 }
@@ -113,7 +125,7 @@ impl DecodeRejection {
         Self {
             reference: Uuid::now_v7(),
             codec: CodecName::from(&codec.name),
-            position: TransportPosition::of(metadata),
+            position: metadata.position.map(TransportPosition::retain),
             fields: SortedSet::from_unsorted(fields),
             message: format!("{report:#}"),
             occurred_at,
