@@ -329,22 +329,21 @@ def lighten_volume(path: Path, environment: Mapping[str, str]) -> str:
     """Remount the ext4 volume that holds `path` without access times and write barriers."""
     mount = Mount.holding(path, environment)
     if mount is None:
-        return "The store's volume was not remounted: findmnt could not describe it."
+        return f"The volume holding {path} was not remounted: findmnt could not describe it."
+    volume = f"The volume holding {path}, {mount.target},"
+    remounting = f"Remounting the volume holding {path}, {mount.target},"
     if mount.filesystem != "ext4":
-        return f"The store's volume, {mount.target}, is {mount.filesystem}, so it was not remounted."
+        return f"{volume} is {mount.filesystem}, so it was not remounted."
     options = ",".join(("remount", *VOLUME_OPTIONS))
     completed = run_system(["sudo", "--non-interactive", "mount", "-o", options, mount.target], environment)
     if completed is None:
-        return f"Remounting the store's volume, {mount.target}, did not run; it keeps its options."
+        return f"{remounting} did not run; it keeps its options."
     if completed.returncode != 0:
-        return (
-            f"Remounting the store's volume, {mount.target}, exited with status "
-            f"{completed.returncode}: {completed.stderr.strip()}; it keeps its options."
-        )
+        return f"{remounting} exited with status {completed.returncode}: {completed.stderr.strip()}; it keeps its options."
     remounted = Mount.holding(path, environment)
     if remounted is None:
-        return f"The store's volume, {mount.target}, is remounted; findmnt could not read its options."
-    return f"The store's volume, {mount.target}, is remounted with {','.join(remounted.options)}."
+        return f"{volume} is remounted; findmnt could not read its options."
+    return f"{volume} is remounted with {','.join(remounted.options)}."
 
 
 def prepare_index(environment: Mapping[str, str], memory: Path) -> str:

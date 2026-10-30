@@ -1341,7 +1341,7 @@ class StorePreparationTests(unittest.TestCase):
             lines,
             [
                 f"kache's index and its write-ahead log live in memory, in {self.memory / 'kache-index'}.",
-                "The store's volume, /, is remounted with rw,noatime,nobarrier.",
+                f"The volume holding {self.cache}, /, is remounted with rw,noatime,nobarrier.",
             ],
         )
         self.assertEqual(self.sudo_calls(), [["--non-interactive", "mount", "-o", "remount,noatime,barrier=0", "/"]])
@@ -1353,7 +1353,7 @@ class StorePreparationTests(unittest.TestCase):
             lines,
             [
                 f"kache's index stays on disk: {self.memory} is not a tmpfs.",
-                "The store's volume, /, is xfs, so it was not remounted.",
+                f"The volume holding {self.cache}, /, is xfs, so it was not remounted.",
             ],
         )
         self.assertFalse((self.cache / "index.db").exists())
@@ -1364,7 +1364,8 @@ class StorePreparationTests(unittest.TestCase):
         line = kache_remote.lighten_volume(self.cache, self.environment(mounts, sudo_status=1))
         self.assertEqual(
             line,
-            "Remounting the store's volume, /, exited with status 1: mount: only root can do that; it keeps its options.",
+            f"Remounting the volume holding {self.cache}, /, exited with status 1: mount: only root can do that; it "
+            "keeps its options.",
         )
 
     def test_the_index_returns_to_the_cache_directory_once_no_daemon_has_it_open(self) -> None:
@@ -1405,11 +1406,11 @@ class StorePreparationTests(unittest.TestCase):
         self.assertEqual(restored.stdout.strip(), f"kache's index is back in {self.cache}.")
         lightened = run_cli(["lighten-volume", str(self.root)], environment)
         self.assertEqual(lightened.returncode, 0, lightened.stderr)
-        self.assertEqual(lightened.stdout.strip(), "The store's volume, /, is remounted with rw,noatime,nobarrier.")
+        self.assertEqual(lightened.stdout.strip(), f"The volume holding {self.root}, /, is remounted with rw,noatime,nobarrier.")
 
     def test_a_volume_findmnt_cannot_describe_is_left_alone(self) -> None:
         line = kache_remote.lighten_volume(self.cache, self.environment([]))
-        self.assertEqual(line, "The store's volume was not remounted: findmnt could not describe it.")
+        self.assertEqual(line, f"The volume holding {self.cache} was not remounted: findmnt could not describe it.")
         self.assertEqual(self.sudo_calls(), [])
 
 

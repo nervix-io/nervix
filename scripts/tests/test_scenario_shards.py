@@ -6,6 +6,7 @@ import dataclasses
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -287,6 +288,48 @@ class ArchiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(shards.ShardError, "is missing"):
                 shards.unpack(Path(directory), Path(directory) / "absent.tar.zst")
+
+
+class WorkflowTests(unittest.TestCase):
+    """The Check workflow builds the suite once and runs it in the shards SCENARIO_SHARDS sets."""
+
+    def setUp(self) -> None:
+        self.workflow = (shards.ROOT / ".github/workflows/check.yaml").read_text()
+
+    def job(self, name: str) -> str:
+        following = self.workflow.split(f"\n  {name}:\n", 1)[1]
+        return re.split(r"\n  [a-z][a-z0-9-]*:\n", following, maxsplit=1)[0]
+
+    def test_one_build_plans_the_shards_and_packs_the_suite_they_restore(self) -> None:
+        self.assertIn('  SCENARIO_SHARDS: "', self.workflow.split("\njobs:\n", 1)[0])
+        build = self.job("scenarios-build")
+        self.assertIn('python3 -m scripts.scenario_shards matrix "${SCENARIO_SHARDS}"', build)
+        self.assertIn("shards: ${{ steps.shards.outputs.shards }}", build)
+        steps = ["just test-scenarios-coverage-build", "Publish kache cache after the build",
+                 'just test-scenarios-coverage-pack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"',
+                 "name: scenario-suite\n", "just test-backup-cut-cleanup"]
+        positions = [build.index(step) for step in steps]
+        self.assertEqual(positions, sorted(positions))
+        upload = build[build.index("name: scenario-suite\n"):]
+        self.assertIn("compression-level: 0", upload)
+        self.assertIn("overwrite: true", upload)
+
+    def test_each_shard_restores_the_build_and_runs_its_share_without_compiling(self) -> None:
+        shard = self.job("scenarios")
+        self.assertIn("name: scenarios (${{ matrix.shard }} of ${{ strategy.job-total }})", shard)
+        self.assertIn("needs: [scenarios-build]", shard)
+        self.assertIn("shard: ${{ fromJSON(needs.scenarios-build.outputs.shards) }}", shard)
+        self.assertIn("fail-fast: false", shard)
+        steps = ["python3 scripts/kache_remote.py lighten-volume /tmp", "name: scenario-suite\n",
+                 'just test-scenarios-coverage-unpack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"',
+                 'just test-scenarios-coverage-shard "${SHARD}"', "name: coverage-scenarios-${{ matrix.shard }}\n"]
+        positions = [shard.index(step) for step in steps]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}", shard)
+        # A shard compiles nothing, so it neither starts the compiler cache nor builds.
+        for setup in ("kunobi-ninja/kache-action", "kache_remote.py start", "kache_remote.py publish",
+                      "test-scenarios-coverage-build", "toolchains-install"):
+            self.assertNotIn(setup, shard)
 
 
 if __name__ == "__main__":

@@ -2802,7 +2802,9 @@ WASM guests. Each `scenarios (I of N)` job checks out the same revision at the s
 executables' absolute paths require, and restores the archive with
 `just test-scenarios-coverage-unpack`. The restore refuses an archive of another revision or
 checkout path, a file restored at another size, and an executable whose shared libraries the runner
-lacks, before any scenario starts. The shard then runs `just test-scenarios-coverage-shard I/N`. A
+lacks, before any scenario starts. Before it, the shard remounts the ext4 volumes holding `/tmp`,
+where its nodes sync their storage, and the checkout with `noatime` and `barrier=0`, as the build
+job's kache start step remounts its store's volume: a single-use runner needs no crash consistency. The shard then runs `just test-scenarios-coverage-shard I/N`. A
 shard compiles nothing: it runs the scenario executable directly, because Cargo would compare the
 restored files with sources whose modification times the checkout set, and rebuild them.
 

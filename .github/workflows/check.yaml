@@ -1136,6 +1136,14 @@ jobs:
             sudo apt-get install --yes --no-install-recommends zstd
           fi
 
+      # The nodes a scenario starts sync their storage below /tmp. A single-use runner needs no crash
+      # consistency, so the volumes holding it and the checkout drop their write barriers, as the
+      # build job's kache start step drops them for its store.
+      - name: Lighten the scenario volume
+        run: |
+          python3 scripts/kache_remote.py lighten-volume /tmp
+          python3 scripts/kache_remote.py lighten-volume "${GITHUB_WORKSPACE}"
+
       - name: Start runner load recorder
         run: |
           python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
