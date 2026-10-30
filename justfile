@@ -2765,13 +2765,18 @@ validate-dns-dependencies:
 
 # Check formatting and validate with the same concurrency default as local validation. The checks run
 # beside each other, each Cargo build in a target directory of its own, so a check never waits for
-# another's directory lock; `jobs` bounds how many recipes run at once. The ratchet runs as the
-# dependency of `validate-deloxide-applicability`, which reads its gate, so no other check depends on
-# it in parallel.
+# another's directory lock; `jobs` bounds how many recipes run at once. The ratchet's tools build
+# beside them, and the ratchet runs after them, as the dependency of
+# `validate-deloxide-applicability`, which reads its gate: its analyses admit themselves against the
+# host's memory as if nothing else ran, and beside the lints the kernel killed its server analysis
+# for memory (Check 41066649586).
 validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
 
+[private]
+validate-ci-targets: validate-ci-checks validate-deloxide-applicability
+
 [private, parallel]
-validate-ci-targets: fmt-check lint-targets validate-skill validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-deloxide-applicability test-go-ci-tool
+validate-ci-checks: fmt-check lint-targets validate-skill validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies test-go-ci-tool typed-ratchet-build typed-ratchet-source-build install-cargo-crap
 
 # Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's

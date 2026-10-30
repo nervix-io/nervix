@@ -289,11 +289,13 @@ CI installs the latest `just` release. `just validate`, `just validate-ci`, `jus
 cargo-clippy` default to four concurrent recipe bodies across the `[parallel]` groups. Pass a job
 count, such as `just validate 2`, or use `just --jobs 2 validate` to select another limit.
 `JUST_JOBS` also supplies the default. Validation runs the product and compiler tooling Clippy
-recipes in one invocation, so they share the same limit, and its checks run beside each other: the
-lints, the typed ratchet and the other validations each build in directories of their own, so none
-waits for another's directory lock. CI's `checks` job passes the runner's CPU count; kache's
-scheduler admits the Clippy compilations, and the typed ratchet's admission queue its server
-analyses, against the runner's memory.
+recipes in one invocation, so they share the same limit. In `just validate-ci` the lints and the
+other validations run beside each other, each building in directories of its own, so none waits for
+another's directory lock, and the typed ratchet runs once they have finished. CI's `checks` job
+passes the runner's CPU count. Kache's scheduler admits the Clippy compilations against the
+runner's memory, and the typed ratchet's admission queue admits its server analyses as if nothing
+else ran: beside the lints, the kernel's out-of-memory killer ended the ratchet's Shuttle analysis
+of the server in Check 41066649586.
 
 Each package and configuration is a separate parallel dependency of one shared Clippy recipe.
 The `[parallel]` groups map package lists onto that recipe, including the packages checked with
