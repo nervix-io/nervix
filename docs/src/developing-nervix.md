@@ -420,15 +420,15 @@ sent and retried on its own, and a manifest written last, so an unfinished uploa
 An artifact belongs to the run, so a rerun of other jobs keeps it and a job that runs again replaces
 its own. A local action needs the repository, so a job checks out before it uses one.
 
-| Repository secret | Value |
-| --- | --- |
-| `R2_ARTIFACTS_BUCKET` | The bucket's name |
-| `R2_ARTIFACTS_ENDPOINT` | The account's S3 URL, `https://<account id>.r2.cloudflarestorage.com` |
-| `R2_ARTIFACTS_ACCESS_KEY_ID` | The access key of an Object Read & Write token scoped to that bucket |
-| `R2_ARTIFACTS_SECRET_ACCESS_KEY` | That token's secret access key |
+| Repository setting | Kind | Value |
+| --- | --- | --- |
+| `R2_ARTIFACTS_BUCKET` | Variable | The bucket's name |
+| `R2_ARTIFACTS_ENDPOINT` | Variable | The account's S3 URL, `https://<account id>.r2.cloudflarestorage.com` |
+| `R2_ARTIFACTS_ACCESS_KEY_ID` | Secret | The access key of an Object Read & Write token scoped to that bucket |
+| `R2_ARTIFACTS_SECRET_ACCESS_KEY` | Secret | That token's secret access key |
 
 Each workflow passes them to its jobs as environment variables of the same names, and a reusable
-workflow's caller passes them on. The bucket is private, and its lifecycle rule is the only
+workflow's caller passes the secrets on. The bucket is private, and its lifecycle rule is the only
 retention: a job has no retention of its own. With the same variables set locally, read an artifact
 of any run the bucket still holds:
 

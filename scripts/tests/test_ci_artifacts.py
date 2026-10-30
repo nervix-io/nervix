@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[2]
 ACTIONS = ("./.github/actions/ci-artifact-upload", "./.github/actions/ci-artifact-download")
 WORKFLOWS = sorted((ROOT / ".github/workflows").glob("*.yaml"))
 COMPOSITES = sorted((ROOT / ".github/actions").glob("*/action.yml"))
+VARIABLES = ("R2_ARTIFACTS_BUCKET", "R2_ARTIFACTS_ENDPOINT")
+SECRETS = ("R2_ARTIFACTS_ACCESS_KEY_ID", "R2_ARTIFACTS_SECRET_ACCESS_KEY")
 
 
 class SigningTests(unittest.TestCase):
@@ -438,7 +440,9 @@ class WorkflowTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             environment = re.search(r"^env:\n(?:(?:  .*)?\n)*", text, flags=re.M)
             self.assertIsNotNone(environment, path.name)
-            for name in artifacts.ENVIRONMENT.values():
+            for name in VARIABLES:
+                self.assertIn(f"  {name}: ${{{{ vars.{name} }}}}\n", environment.group(0), path.name)
+            for name in SECRETS:
                 self.assertIn(f"  {name}: ${{{{ secrets.{name} }}}}\n", environment.group(0), path.name)
 
     def test_a_reusable_workflow_receives_the_bucket_from_every_caller(self) -> None:
@@ -449,7 +453,7 @@ class WorkflowTests(unittest.TestCase):
                     continue
                 callers += 1
                 if "secrets: inherit" not in text:
-                    for name in artifacts.ENVIRONMENT.values():
+                    for name in SECRETS:
                         self.assertIn(f"{name}: ${{{{ secrets.{name} }}}}", text, f"{path.name} {job}")
         self.assertGreater(callers, 4)
 

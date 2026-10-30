@@ -21,8 +21,8 @@ env:
   # scenario; see the shards in docs/src/integration-test-lifecycle.md.
   SCENARIO_SHARDS: "3"
   # The bucket that holds this run's artifacts, which scripts/ci_artifacts.py reads.
-  R2_ARTIFACTS_BUCKET: ${{ secrets.R2_ARTIFACTS_BUCKET }}
-  R2_ARTIFACTS_ENDPOINT: ${{ secrets.R2_ARTIFACTS_ENDPOINT }}
+  R2_ARTIFACTS_BUCKET: ${{ vars.R2_ARTIFACTS_BUCKET }}
+  R2_ARTIFACTS_ENDPOINT: ${{ vars.R2_ARTIFACTS_ENDPOINT }}
   R2_ARTIFACTS_ACCESS_KEY_ID: ${{ secrets.R2_ARTIFACTS_ACCESS_KEY_ID }}
   R2_ARTIFACTS_SECRET_ACCESS_KEY: ${{ secrets.R2_ARTIFACTS_SECRET_ACCESS_KEY }}
 
