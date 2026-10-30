@@ -197,17 +197,32 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Runner diagnostics before Validate
         uses: ./.github/actions/runner-diagnostics
         with:
           label: validate
 
+      # The checks run beside each other with one recipe per CPU: kache's scheduler admits the
+      # Clippy compilations, and the typed ratchet's admission queue its server analyses, against
+      # the runner's memory.
       - name: Validate
         run: |
           just toolchains-install
-          just validate-ci
+          just validate-ci "$(nproc)"
         env:
           GH_TOKEN: ${{ github.token }}
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-checks
 
       # Every script test, the book tooling's and the docs worker's included, for every pull request:
       # the book build that also runs them runs only for a pull request labeled `book`.

@@ -2497,14 +2497,15 @@ deloxide-clippy-targets: \
     (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide-stress"]) \
     (clippy-target "nervix-server" ["--all-targets", "--features", "deloxide-stress testing"])
 
-# Clippy configurations share four build directories, so a dependency one configuration compiled is
-# fresh for the others in its directory that compile it alike. Cargo keeps the artifacts of
-# different features, profiles, targets and flags, and of the stable and nightly compilers, apart
-# there. The SHA-256 of the package, Cargo arguments and toolchain, modulo four, selects the
-# directory, so a configuration returns to the one that holds its artifacts. Four divides 16, so the
-# hash's last hexadecimal digit decides the remainder.
-hexadecimal_modulo_four(hash) := if hash =~ '[048c]$' { "0" } else if hash =~ '[159d]$' { "1" } else if hash =~ '[26ae]$' { "2" } else { "3" }
-clippy_build_directory(package, args, toolchain) := cargo_target_dir / "clippy" / hexadecimal_modulo_four(sha256(show([package, args, toolchain])))
+# Clippy configurations share sixteen build directories, so a dependency one configuration compiled
+# is fresh for the others in its directory that compile it alike, while Cargo's lock on a directory
+# lets up to sixteen configurations build at once; `--jobs` bounds how many do. With four
+# directories, the four builds holding their locks left a 16-CPU runner's other cores idle. Cargo
+# keeps the artifacts of different features, profiles, targets and flags, and of the stable and
+# nightly compilers, apart there. The last hexadecimal digit of the SHA-256 of the package, Cargo
+# arguments and toolchain selects the directory, so a configuration returns to the one that holds
+# its artifacts.
+clippy_build_directory(package, args, toolchain) := cargo_target_dir / "clippy" / replace_regex(sha256(show([package, args, toolchain])), '^.*(.)$', '$1')
 
 # The shared Clippy command accepts one package and its Cargo arguments. Configurations that share
 # a build directory take turns on its lock. Keep kache configured.
@@ -2762,11 +2763,15 @@ validate-dns-dependencies:
         exit 1
     fi
 
-# Check formatting and validate with the same concurrency default as local validation.
+# Check formatting and validate with the same concurrency default as local validation. The checks run
+# beside each other, each Cargo build in a target directory of its own, so a check never waits for
+# another's directory lock; `jobs` bounds how many recipes run at once. The ratchet runs as the
+# dependency of `validate-deloxide-applicability`, which reads its gate, so no other check depends on
+# it in parallel.
 validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
 
-[private]
-validate-ci-targets: fmt-check lint-targets validate-skill validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
+[private, parallel]
+validate-ci-targets: fmt-check lint-targets validate-skill validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-deloxide-applicability test-go-ci-tool
 
 # Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
@@ -2819,6 +2824,8 @@ validate-execution-mode-conflicts:
     set -euo pipefail
     # The diagnostics are read as text, so Cargo must not color them even where the caller asks.
     export CARGO_TERM_COLOR=never
+    # Beside the other validation builds, in a directory whose lock no other check takes.
+    export CARGO_TARGET_DIR={{ quote(cargo_target_dir / "validate" / "mode-conflicts") }}
     diagnostics="$(mktemp)"
     trap 'rm -f "${diagnostics}"' EXIT
     expect_failure() {
@@ -2925,13 +2932,13 @@ test-plexus-backup-completion:
 # Parse every runnable Plexus block in the documentation directly through the parser crate. Syntax
 # synopses and statement fragments remain Plexus-labelled but opt out explicitly with `plexus,ignore`.
 validate-plexus-docs:
-    cargo test -p nervix-plexus --test documentation -- --nocapture
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir / "validate" / "plexus-docs") }} cargo test -p nervix-plexus --test documentation -- --nocapture
 
 # Hold tests/connector-capability-inventory.toml to the connector entities' declarations and the
 # scenario suite: every capability an entity declares names a scenario that observes it at run
 # time, every entry names a declared capability once, and every scenario it names exists.
 validate-connector-capabilities:
-    cargo test -p nervix-models --test capability_inventory
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir / "validate" / "connector-capabilities") }} cargo test -p nervix-models --test capability_inventory
 
 # Read the vocabulary directly; no Rust-source or manual-table parser supplies capability facts.
 connector-declarations:

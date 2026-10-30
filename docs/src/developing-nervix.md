@@ -285,29 +285,35 @@ fails on the first attempt. Each attempt is retained in the job's
 `go-tool-bootstrap-<job>` artifact. Run `just test-go-ci-tool` to exercise the classifier and
 workflow wiring without network access.
 
-CI installs the latest `just` release. `just validate`, `just validate-ci`, `just lint` and
-`just cargo-clippy` default to four concurrent recipe bodies across the `[parallel]` groups.
-Pass a job count, such as `just validate 2`, or use `just --jobs 2 validate` to select another
-limit. `JUST_JOBS` also supplies the default. Validation runs the product and compiler tooling
-Clippy recipes in one invocation, so they share the same limit.
+CI installs the latest `just` release. `just validate`, `just validate-ci`, `just lint` and `just
+cargo-clippy` default to four concurrent recipe bodies across the `[parallel]` groups. Pass a job
+count, such as `just validate 2`, or use `just --jobs 2 validate` to select another limit.
+`JUST_JOBS` also supplies the default. Validation runs the product and compiler tooling Clippy
+recipes in one invocation, so they share the same limit, and its checks run beside each other: the
+lints, the typed ratchet and the other validations each build in directories of their own, so none
+waits for another's directory lock. CI's `checks` job passes the runner's CPU count; kache's
+scheduler admits the Clippy compilations, and the typed ratchet's admission queue its server
+analyses, against the runner's memory.
 
 Each package and configuration is a separate parallel dependency of one shared Clippy recipe.
 The `[parallel]` groups map package lists onto that recipe, including the packages checked with
 `--all-features` and the compiler tooling packages. Feature, target, profile and compiler selections
 stay separate, so mutually exclusive execution modes never share a Cargo invocation.
 
-Clippy builds in four directories, `clippy/0` to `clippy/3` beneath `CARGO_TARGET_DIR`, or the
-repository's `target` directory when that variable is unset. The SHA-256 of a configuration's
-package, Cargo arguments and toolchain, modulo four, selects its directory, so each run of a
-configuration returns to the directory that holds its artifacts. The configurations in a directory
-share the dependencies they build, build scripts included, and Cargo keeps the artifacts of
-different features, profiles, targets and flags, and of the stable and nightly compilers, apart
+Clippy builds in sixteen directories, `clippy/0` to `clippy/f` beneath `CARGO_TARGET_DIR`, or the
+repository's `target` directory when that variable is unset. The last hexadecimal digit of the
+SHA-256 of a configuration's package, Cargo arguments and toolchain selects its directory, so each
+run of a configuration returns to the directory that holds its artifacts. The configurations in a
+directory share the dependencies they build, build scripts included, and Cargo keeps the artifacts
+of different features, profiles, targets and flags, and of the stable and nightly compilers, apart
 there. Configurations in the same directory take turns on its build directory lock, so two of them
-selected at once run one after the other. Nothing deletes these directories, locally or on CI: the
-four of them bound what a lint leaves on disk. `just cargo-clippy-package <package> [arguments ...]`
-runs a focused check of all targets through the same recipe. The compiler driver builds keep their
-separate `typed-ratchet/driver` directory. All builds retain the configured kache wrapper. Cargo's
-compiler job limit applies separately within each invocation.
+selected at once run one after the other; sixteen directories let up to sixteen build at once, where
+four left a 16-CPU runner mostly idle behind the server's long compilations. Nothing deletes these
+directories, locally or on CI: the sixteen of them bound what a lint leaves on disk. `just
+cargo-clippy-package <package> [arguments ...]` runs a focused check of all targets through the same
+recipe. The compiler driver builds keep their separate `typed-ratchet/driver` directory. All builds
+retain the configured kache wrapper. Cargo's compiler job limit applies separately within each
+invocation.
 
 `just validate-plexus-docs` scans `docs/src` and parses every exact `plexus` code fence directly with
 the parser crate. Use `plexus,ignore` only for loose grammar synopses and statement fragments that
