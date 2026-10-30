@@ -1323,7 +1323,10 @@ jobs:
   client-conformance:
     name: client-conformance
     if: contains(github.event.pull_request.labels.*.name, 'client-conformance')
-    runs-on: boat-xlarge
+    # Blacksmith's 16-CPU, 64 GB runner. On Boat, kache's downloads spent most of their time waiting
+    # for its store's lock, 4.6 seconds each against 0.4 on Blacksmith, and in Check run 40991534806
+    # the build hit 53% of the cache and took 49 of the job's 60 minutes.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     # The suite budget below is derived from this limit: builds before the scenarios, then at most
     # the budget, then the reserve the harness keeps for its own cleanup and the log upload.
     timeout-minutes: 60
@@ -1359,8 +1362,6 @@ jobs:
       # interchangeable in the shared cache rather than a second set of artifacts.
       - name: Configure cargo
         run: |
-          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
-          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -1396,11 +1397,6 @@ jobs:
         with:
           node-version: "24"
 
-      # setup-ruby extracts its prebuilt Ruby to /opt/hostedtoolcache, the prefix the build embeds,
-      # without sudo. A Boat machine has no such directory.
-      - name: Create the hosted tool cache
-        run: sudo install -d -o "$(id -u)" -g "$(id -g)" /opt/hostedtoolcache
-
       # Fiddle's boolean type, which the Ruby probe's signatures use, ships with Ruby 3.3.
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
@@ -1435,11 +1431,11 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       - name: Start recording runner load
@@ -2224,7 +2220,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2]
-    runs-on: boat-xlarge
+    # Blacksmith's 16-CPU, 64 GB runner. On Boat, kache's downloads spent most of their time waiting
+    # for its store's lock, 1.8 and 2.8 seconds each against 0.4 on Blacksmith, and in Check run
+    # 40991534806 both shards reached the two-hour limit after about 107 minutes of compiling.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 120
     permissions:
       contents: read
@@ -2232,10 +2231,6 @@ jobs:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
-      # Sixteen compilers of the qualification builds exceeded the 32 GB of Boat's 16-CPU machine,
-      # which killed processes of both shards, so the builds keep the eight they had on an 8-CPU,
-      # 32 GB runner.
-      CARGO_BUILD_JOBS: "8"
     steps:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
@@ -2256,8 +2251,6 @@ jobs:
 
       - name: Configure cargo
         run: |
-          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
-          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -2309,11 +2302,11 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       - name: Start recording runner load

@@ -360,22 +360,21 @@ inspection or stop took 8 to 29 seconds against the chaos suite's 30-second boun
 operation, and three of fourteen soak shards failed their network qualification.
 
 [Boat](https://boat.dev) machines, which the boat CI GitHub App starts for every job whose `runs-on`
-names a Boat size, run every other job but the Bolero sanitizer shards. Each gets a fresh x86_64
-Ubuntu 24.04 virtual machine with Docker, deleted when the job ends. `.github/actionlint.yaml`
-declares the Boat labels to `just validate-workflows`. Boat runs a public repository's jobs only for
-the GitHub users its account setting lists, and only when both a run's author and the user who
-started it are on that list, so it refuses any other run, such as one for a pull request from a
-fork. Each job starts one machine, and Boat's plan limits how many start each minute, hour and day.
-A job's size follows the memory and disk its builds use rather than its CPUs, since a Boat machine
-has only 2 GB of memory per CPU, with 4 GB of swap beside it:
+names a Boat size, run every other job but the three that run on Blacksmith. Each gets a fresh
+x86_64 Ubuntu 24.04 virtual machine with Docker, deleted when the job ends.
+`.github/actionlint.yaml` declares the Boat labels to `just validate-workflows`. Boat runs a public
+repository's jobs only for the GitHub users its account setting lists, and only when both a run's
+author and the user who started it are on that list, so it refuses any other run, such as one for a
+pull request from a fork. Each job starts one machine, and Boat's plan limits how many start each
+minute, hour and day. A job's size follows the memory and disk its builds use rather than its CPUs,
+since a Boat machine has only 2 GB of memory per CPU, with 4 GB of swap beside it:
 
 - `boat-xlarge`, with 16 CPUs, 32 GB and 251 GB of disk, runs validation, the diagnostic evidence,
-  the unit tests, the scenarios, client conformance, the extra checks, Shuttle, Loom, the Deloxide
-  lane, the Bolero randomized properties, the image builds and the benchmarks. In runs of October
-  2026 the extra checks used about 95 GiB of disk and the amd64 image build lost its runner on a
-  16 GB machine. Sixteen compilers of the instrumented Loom build or of the Loom qualification
-  builds exceed the machine's 32 GB, so both Loom jobs set `CARGO_BUILD_JOBS` to eight; the Loom
-  build then peaked at 21 GiB.
+  the unit tests, the scenarios, the extra checks, Shuttle, Loom, the Deloxide lane, the Bolero
+  randomized properties, the image builds and the benchmarks. In runs of October 2026 the extra
+  checks used about 95 GiB of disk and the amd64 image build lost its runner on a 16 GB machine.
+  Sixteen compilers of the instrumented Loom build exceed the machine's 32 GB, so the `loom` job
+  sets `CARGO_BUILD_JOBS` to eight; its build then peaked at 21 GiB.
 - `boat-large`, with 8 CPUs, 16 GB and 111 GB, runs Turmoil.
 
 A Boat machine sets the `en_US.UTF-8` locale, whose collation orders `sort` output differently from
@@ -389,9 +388,13 @@ Boat jobs that run the selection's tests install the current git from the git-co
 runner image does.
 
 [Blacksmith](https://www.blacksmith.sh)'s `blacksmith-16vcpu-ubuntu-2404`, with 16 CPUs, 64 GB and
-GitHub's runner image, runs the Bolero sanitizer shards: their address-sanitized server build needs
-more than Boat's 32 GB, even with eight compilers. `.github/actionlint.yaml` declares the Blacksmith
-labels as well.
+GitHub's runner image, runs the Bolero sanitizer shards, the Loom qualification shards and client
+conformance. The sanitizer shards' address-sanitized server build needs more than Boat's 32 GB, even
+with eight compilers. The other two are compile-bound builds that kache serves slowly on Boat: in
+Check run 40991534806 kache's downloads spent most of their time waiting for the lock of its local
+store, 1.8 to 4.6 seconds each against 0.4 seconds on Blacksmith, the Loom qualification shards
+reached their two-hour limit after about 107 minutes of compiling, and the client conformance build
+took 49 of its job's 60 minutes. `.github/actionlint.yaml` declares the Blacksmith labels as well.
 
 A kache-backed job uses the cache bucket in its runner's region: the EU bucket on Boat's European
 machines, and the US bucket on GitHub's hosted runners and on Blacksmith's US runners.
