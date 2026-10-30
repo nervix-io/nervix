@@ -511,7 +511,12 @@ retain the same field, key, ordering and shared-timestamp checks, and separately
 burst, physical scheduling at the slow rate, corrupt rows and a stalled or failed subscription.
 
 `tests-deps` builds the CLI, the Plexus formatter, the paced simulation's Rust driver and the shared
-C binding its Python driver loads in the normal target directory. The full and focused
+C binding its Python driver loads in the normal target directory, and `build-scenario-images` builds
+the mock server's image, which no registry holds. A test builds nothing itself: it runs no compiler
+or `docker build`, and a recipe builds everything it starts before it starts. A failed build is
+then reported as one, a scenario's deadlines measure the scenario, and a shard that restored its
+archive needs no toolchain. `test-tools` is the same list without the image, for a recipe whose
+tests start no container. The full and focused
 client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
 and place the normal Plexus formatter there. The scenario runner selects the covered CLI through
 `NERVIX_TEST_CLI_PATH`, so its one-shot completion and command paths contribute to the same LCOV
