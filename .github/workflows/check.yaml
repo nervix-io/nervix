@@ -86,8 +86,7 @@ jobs:
     name: checks
     runs-on: boat-xlarge
     # Cold validation includes Clippy and the complete compiler matrix.
-    # Raised until the job completes once on Boat and publishes its kache manifest.
-    timeout-minutes: 240
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -560,8 +559,7 @@ jobs:
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
     runs-on: boat-xlarge
-    # Raised until the job completes once on Boat and publishes its kache manifest.
-    timeout-minutes: 150
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
@@ -2099,8 +2097,7 @@ jobs:
       matrix:
         shard: [1, 2]
     runs-on: boat-xlarge
-    # Raised until the job completes once on Boat and publishes its kache manifest.
-    timeout-minutes: 240
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
