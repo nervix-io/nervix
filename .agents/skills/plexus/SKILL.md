@@ -260,7 +260,10 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   `TIME RATE` multiplies projection error. `SKEW` is event-admission tolerance, not a host-sync
   allowance.
 - For ingestion, read `Domains And Time` → `Ingestion Timestamps`: `TIMESTAMP NOW` uses domain
-  time at delivery, including after quiescing; explicit source times remain unchanged. Check
+  time at delivery, including after quiescing; explicit source times remain unchanged.
+  `TIMESTAMP AT metadata.<field>` takes a `DATETIME` metadata field the source's entity declares,
+  such as an HTTP poll's `metadata.polled_at`; check the entity's Metadata row in `Ingestors`
+  before writing any `metadata.<field>`, because an undeclared field is refused at `CREATE`. Check
   admission against the newest 256 reached logical centers with inclusive `SKEW`, independently
   of tick notification delivery. Never scale source timestamps by `TIME RATE` or admit against
   an unreached future center. Rejected or missing timestamps follow the route's message-error

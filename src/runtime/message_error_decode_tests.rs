@@ -79,11 +79,13 @@ async fn refusal(codec: &Arc<CompiledCodec>, payload: &[u8]) -> Report<CodecErro
 }
 
 fn kafka_metadata() -> IngestMetadataRow<'static> {
-    IngestMetadataRow::Kafka {
-        topic: "orders",
-        partition: 3,
-        offset: 42,
-        headers: &NoIngestHeaders,
+    IngestMetadataRow {
+        position: Some(nervix_connector::IngestTransportPosition::Kafka {
+            topic: "orders",
+            partition: 3,
+            offset: 42,
+        }),
+        ..IngestMetadataRow::headers(&NoIngestHeaders)
     }
 }
 
@@ -131,9 +133,7 @@ async fn a_refused_field_is_named_with_its_codec_and_its_kafka_position() {
 async fn a_payload_that_is_not_json_names_no_field_and_a_header_source_no_position() {
     let codec = event_codec();
     let report = refusal(&codec, b"not json").await;
-    let headers = IngestMetadataRow::Headers {
-        headers: &NoIngestHeaders,
-    };
+    let headers = IngestMetadataRow::headers(&NoIngestHeaders);
     let rejection = DecodeRejection::new(&codec, &headers, &report, occurred_at());
 
     assert_eq!(rejection.position, None);
@@ -157,7 +157,10 @@ async fn a_syslog_peer_is_the_position_of_its_frame() {
         .assured("the peer is a socket address literal");
     let rejection = DecodeRejection::new(
         &codec,
-        &IngestMetadataRow::Syslog { peer_addr: peer },
+        &IngestMetadataRow {
+            position: Some(nervix_connector::IngestTransportPosition::Syslog { peer }),
+            ..IngestMetadataRow::headers(&NoIngestHeaders)
+        },
         &report,
         occurred_at(),
     );

@@ -565,9 +565,10 @@ General expression rules:
 - generated routes allow bare reads from immutable generated state until the same-named output is
   initialized; `message` and `input` are unavailable
 - `branch.field` must be explicit and is unavailable in successful emitter expressions
-- supported ingestors read headers with `read_header(name)` and `read_headers(name)`; Kafka exposes
-  typed `metadata.topic`, `metadata.partition`, and `metadata.offset`, while Syslog exposes
-  optional `metadata.peer_addr`
+- supported ingestors read headers with `read_header(name)` and `read_headers(name)`; each source
+  entity declares its typed, optional `metadata.<field>` set, such as Kafka's `metadata.topic`,
+  `metadata.partition`, and `metadata.offset` or Syslog's `metadata.peer_addr`, and a route may read
+  only a declared field
 - supported codec emitters stage ordered `write_header(name, value)` calls in `INVOKE`
 
 Example:

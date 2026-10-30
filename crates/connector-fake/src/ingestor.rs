@@ -51,7 +51,7 @@ pub struct IngestorObservations {
     pub unready: usize,
 }
 
-/// An owned transport message, including the typed metadata its header scope exposes.
+/// An owned transport message, including the typed metadata and headers its transport carries.
 #[derive(Clone)]
 pub struct FakeMessage {
     pub position: u64,
@@ -59,8 +59,11 @@ pub struct FakeMessage {
     pub transport: MessageTransport,
 }
 
+/// What a message carries beside its payload, shaped as one real entity's messages are, so a host
+/// test exercises the metadata and position that entity declares.
 #[derive(Clone)]
 pub enum MessageTransport {
+    /// Headers alone, as an entity that declares no metadata field carries.
     Headers(RetainedIngestHeaders),
     Kafka {
         topic: String,
@@ -99,6 +102,28 @@ impl IngestMessageHeaders for FakeMessage {
     }
 }
 
+/// The values of the metadata the transport's entity declares, in its order, as the real
+/// connector of that entity hands them over.
+impl IngestMessageMetadata for FakeMessage {
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+        match &self.transport {
+            MessageTransport::Headers(_) => {}
+            MessageTransport::Kafka {
+                topic,
+                partition,
+                offset,
+                ..
+            } => {
+                values.string(topic);
+                values.i32(*partition);
+                values.i64(*offset);
+            }
+            MessageTransport::Syslog { peer_addr } => values.rendered(peer_addr),
+            MessageTransport::Websockets { frame_type, .. } => values.string(frame_type.as_ref()),
+        }
+    }
+}
+
 impl IngestorMessage for FakeMessage {
     type Position = u64;
     fn payload(&self) -> &[u8] {
@@ -111,29 +136,33 @@ impl IngestorMessage for FakeMessage {
         self
     }
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        match &self.transport {
-            MessageTransport::Headers(_) => IngestMetadataRow::Headers { headers: self },
+        let (headers, position) = match &self.transport {
+            MessageTransport::Headers(_) => (IngestRowHeaders::Borrowed(self), None),
             MessageTransport::Kafka {
                 topic,
                 partition,
                 offset,
                 ..
-            } => IngestMetadataRow::Kafka {
-                topic,
-                partition: *partition,
-                offset: *offset,
-                headers: self,
-            },
-            MessageTransport::Syslog { peer_addr } => IngestMetadataRow::Syslog {
-                peer_addr: *peer_addr,
-            },
-            MessageTransport::Websockets {
-                frame_type,
-                headers,
-            } => IngestMetadataRow::Websockets {
-                frame_type: *frame_type,
-                headers,
-            },
+            } => (
+                IngestRowHeaders::Borrowed(self),
+                Some(IngestTransportPosition::Kafka {
+                    topic,
+                    partition: *partition,
+                    offset: *offset,
+                }),
+            ),
+            MessageTransport::Syslog { peer_addr } => (
+                IngestRowHeaders::NONE,
+                Some(IngestTransportPosition::Syslog { peer: *peer_addr }),
+            ),
+            MessageTransport::Websockets { headers, .. } => {
+                (IngestRowHeaders::Shared(headers), None)
+            }
+        };
+        IngestMetadataRow {
+            fields: self,
+            headers,
+            position,
         }
     }
 }
@@ -425,11 +454,12 @@ impl PacedIngestorConnector for FakeIngestor {
                 .assured("the check keeps its payload sender until shutdown"),
         };
         let headers = RetainedIngestHeaders::capture(&message);
+        let metadata = RetainedIngestMetadata::capture(&message);
         Ok(IngestorPoll {
             messages: vec![IngestorPollMessage {
                 payload: message.payload,
                 headers,
-                metadata: IngestorPollMetadata::Headers,
+                metadata,
             }],
             failures: Vec::new(),
             observed_at: scheduled_at,
