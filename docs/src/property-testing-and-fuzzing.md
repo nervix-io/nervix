@@ -499,7 +499,7 @@ metadata with a 7,200-second compilation deadline; it does not count as a comple
 An expected sanitizer or randomized skip contributes no execution or coverage evidence. The Check
 workflow's validation job and the Bolero randomized job retain their separate scopes and limits.
 Check calls the reusable Bolero workflow with its exact tested SHA, event and label snapshot.
-Scheduled and manual Bolero runs execute randomized checks and record a deliberate sanitizer skip.
+Manual Bolero runs execute randomized checks and record a deliberate sanitizer skip.
 
 ### Documentation-only Selection
 
@@ -724,7 +724,7 @@ label. The sanitizer libFuzzer shards run with `fuzz`, with 30 seconds of engine
 and the ordinary randomized/corpus job runs with `bolero-random`. Every job uses the native
 [CI linker](./developing-nervix.md#validation-and-tests), including sanitizer builds that supply
 their own compiler flags. Adding or removing a label reevaluates the jobs, and a push to a labeled
-PR runs them again. Scheduled and manual workflow runs execute the ordinary properties. Job limits
+PR runs them again. Manual workflow runs execute the ordinary properties. Job limits
 reserve additional time for compilation, artifacts and cleanup. A cache may seed a campaign but
 cannot skip a target or replace checked-in regressions. An empty selection, timeout, engine
 failure, sanitizer finding or property failure fails the job.

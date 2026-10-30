@@ -412,7 +412,7 @@ class UnionTests(unittest.TestCase):
 
 class SelectionTests(unittest.TestCase):
     def test_non_pr_events_keep_the_deliberate_fuzz_skip_even_with_a_fuzz_label(self) -> None:
-        for event in ("push", "schedule", "workflow_dispatch"):
+        for event in ("push", "workflow_dispatch"):
             with self.subTest(event=event):
                 run = Run(self)
                 run.complete()

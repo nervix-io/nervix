@@ -379,7 +379,7 @@ class SourceSelectionTests(unittest.TestCase):
                     self.assertEqual(actual.action, action)
 
     def test_non_pr_events_require_execution_without_a_prose_exclusion(self) -> None:
-        for event in ("schedule", "workflow_dispatch", "push"):
+        for event in ("workflow_dispatch", "push"):
             with self.subTest(event=event):
                 actual = selection.TestSelection.read(event, {}, "a" * 40)
                 self.assertFalse(actual.documentation_only)

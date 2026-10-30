@@ -512,7 +512,7 @@ The event and tested source decide eligibility together:
 | Code or test PR | Required with `bolero-random`; deliberately skipped otherwise | Required for the complete tested inventory with `fuzz`; deliberately skipped otherwise, with no fuzz report | Required, with the label-selected producers |
 | Verified prose-only PR carrying `bolero-random` or `fuzz` | Required with `bolero-random`; deliberately skipped otherwise | Required for the complete tested inventory with `fuzz`; deliberately skipped otherwise | Skipped; each requested run keeps its own report and verdict |
 | Verified prose-only PR carrying neither label | Entire Bolero call excluded | No campaign or report | Skipped; no union evidence |
-| Scheduled or manual Bolero workflow | Required | Deliberately skipped | No Check union is launched by this standalone workflow |
+| Manual Bolero workflow | Required | Deliberately skipped | No Check union is launched by this standalone workflow |
 
 Check runs on PR open, reopen, push and label changes. Each event records its own label snapshot;
 adding or removing a label changes the required producers for that event. `no-docker` never
