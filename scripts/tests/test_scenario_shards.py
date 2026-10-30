@@ -19,7 +19,7 @@ from unittest import mock
 from scripts import scenario_shards as shards
 
 # Workspace package and target names, as `cargo metadata --no-deps` lists some of them.
-TARGETS = {"nervix-server", "scenarios", "nervix-cli", "nervix-client-ffi", "nervix_client_ffi"}
+TARGETS = {"scenarios", "nervix-cli", "nervix-client-ffi", "nervix_client_ffi"}
 ONNX_LIBRARY = Path(".nervix-deps/onnxruntime/onnxruntime-linux-x64-1.30.0/lib/libonnxruntime.so.1.30.0")
 ONNX_LINK = ONNX_LIBRARY.parent / "libonnxruntime.so"
 
@@ -38,9 +38,9 @@ class Checkout:
         self.root = root
         root.mkdir(parents=True)
         debug = root / shards.COVERAGE_DEBUG
-        write(debug / "nervix-server", b"\x7fELF server", executable=True)
+        write(debug / "nervix-cli", b"\x7fELF cli", executable=True)
         (debug / "deps").mkdir(parents=True)
-        os.link(debug / "nervix-server", debug / "deps" / "nervix_server-0f92e8a94feb2377")
+        os.link(debug / "nervix-cli", debug / "deps" / "nervix_cli-0f92e8a94feb2377")
         driver = debug / "build" / "playwright-rs-5e6f" / "out" / "playwright-driver" / "playwright-1.62.1-linux"
         # The scenario executable holds the driver's path from compile time.
         executable = b"\x7fELF scenarios " + str(driver / "node").encode() + b" " + str(driver / "package/cli.js").encode()
@@ -49,11 +49,10 @@ class Checkout:
         write(debug / "deps" / "libnervix_client_ffi.so", b"\x7fELF binding", executable=True)
         write(debug / "deps" / "libnervix_client_ffi.rlib", b"rlib", executable=True)
         write(debug / "deps" / "libserde_derive-1a2b3c.so", b"\x7fELF macro", executable=True)
-        write(debug / "nervix-cli", b"\x7fELF cli", executable=True)
         write(debug / "nervix-cli.d", b"dependencies")
-        write(debug / "incremental" / "nervix_server-1" / "nervix-server", b"\x7fELF stale", executable=True)
-        write(debug / ".fingerprint" / "nervix-server-1" / "nervix-server", b"stamp", executable=True)
-        write(debug / "build" / "nervix-server-1" / "build-script-build", b"\x7fELF script", executable=True)
+        write(debug / "incremental" / "nervix_cli-1" / "nervix-cli", b"\x7fELF stale", executable=True)
+        write(debug / ".fingerprint" / "nervix-cli-1" / "nervix-cli", b"stamp", executable=True)
+        write(debug / "build" / "nervix-cli-1" / "build-script-build", b"\x7fELF script", executable=True)
         write(driver / "node", b"\x7fELF node", executable=True)
         write(driver / "package" / "cli.js", b"cli")
         write(root / shards.ONNX_FIXTURES / "simple_score.onnx", b"model")
@@ -111,16 +110,16 @@ class MatrixTests(unittest.TestCase):
 
 class ObjectTests(unittest.TestCase):
     def test_the_object_pattern_matches_as_cargo_llvm_cov_does(self) -> None:
-        pattern = shards.object_pattern({"nervix-server", "nervix-client-ffi", "scenarios"})
-        for stem in ("nervix-server", "nervix_server-0f92e8a9", "scenarios-4d0e03c6", "libnervix_client_ffi"):
+        pattern = shards.object_pattern({"nervix-cli", "nervix-client-ffi", "scenarios"})
+        for stem in ("nervix-cli", "nervix_cli-0f92e8a9", "scenarios-4d0e03c6", "libnervix_client_ffi"):
             self.assertIsNotNone(pattern.match(stem), stem)
-        for stem in ("serde_derive-1a2b", "nervix-server-extra", "libscenarios-xyz", "nervix"):
+        for stem in ("serde_derive-1a2b", "nervix-cli-extra", "libscenarios-xyz", "nervix"):
             self.assertIsNone(pattern.match(stem), stem)
 
     def test_a_full_stem_drops_every_extension(self) -> None:
         self.assertEqual(shards.full_stem("libnervix_client_ffi.so"), "libnervix_client_ffi")
         self.assertEqual(shards.full_stem("a.tar.gz"), "a")
-        self.assertEqual(shards.full_stem("nervix-server"), "nervix-server")
+        self.assertEqual(shards.full_stem("nervix-cli"), "nervix-cli")
 
     def test_objects_are_the_workspace_executables_outside_incremental_fingerprint_and_build(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -131,9 +130,8 @@ class ObjectTests(unittest.TestCase):
             sorted(objects),
             sorted([
                 debug / "nervix-cli",
-                debug / "nervix-server",
                 debug / "deps" / "libnervix_client_ffi.so",
-                debug / "deps" / "nervix_server-0f92e8a94feb2377",
+                debug / "deps" / "nervix_cli-0f92e8a94feb2377",
                 debug / "deps" / "scenarios-4d0e03c611a711f3",
             ]),
         )
@@ -188,8 +186,8 @@ class ArchiveTests(unittest.TestCase):
                 self.assertEqual((root / path).read_bytes(), content, path)
         debug = root / shards.COVERAGE_DEBUG
         self.assertEqual(
-            (debug / "nervix-server").stat().st_ino,
-            (debug / "deps" / "nervix_server-0f92e8a94feb2377").stat().st_ino,
+            (debug / "nervix-cli").stat().st_ino,
+            (debug / "deps" / "nervix_cli-0f92e8a94feb2377").stat().st_ino,
             "a hard link stays one file",
         )
         self.assertTrue(os.access(root / restored.executable, os.X_OK))
@@ -200,7 +198,7 @@ class ArchiveTests(unittest.TestCase):
         self.assertIn(ONNX_LINK.as_posix(), packed_paths)
         self.assertIn(ONNX_LIBRARY.as_posix(), packed_paths)
         self.assertNotIn("target/llvm-cov-target/debug/deps/libserde_derive-1a2b3c.so", packed_paths)
-        self.assertFalse((debug / "build" / "nervix-server-1" / "build-script-build").exists())
+        self.assertFalse((debug / "build" / "nervix-cli-1" / "build-script-build").exists())
 
     def test_the_pack_holds_only_the_drivers_the_executable_names(self) -> None:
         checkout = Checkout(self.base / "build")

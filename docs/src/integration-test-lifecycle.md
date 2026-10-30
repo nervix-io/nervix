@@ -170,7 +170,13 @@ mode labels retain their own selections. [Documentation-only Selection](./proper
 owns the allowed paths, immutable event snapshot and retained CI selection record.
 
 The suite is the `scenarios` test target, `tests/scenarios.rs`, running the features under
-`tests/features`. Its lifecycle owners live in `tests/common`.
+`tests/features`. Its lifecycle owners live in `tests/common`. It and the harness regressions are
+the `nervix-scenarios` package, rooted at `tests/`. The package has test targets only, because Cargo
+builds a package's binaries for that package's integration tests: the suite links the server's
+library and no server binary is built for it. Every dependency of the package is a dev-dependency,
+so the server's `testing` feature reaches no ordinary build of the workspace. Cargo runs a test in
+its package's directory, so `main` moves to the workspace root first, and every path a scenario or
+`--input` names stays relative to it.
 
 The relay-channel turnover scenario posts through an acknowledged HTTP endpoint on a node other
 than the relay owner. Its generated-payload step reuses one HTTP client and requires each request
@@ -517,8 +523,8 @@ or `docker build`, and a recipe builds everything it starts before it starts. A 
 then reported as one, a scenario's deadlines measure the scenario, and a shard that restored its
 archive needs no toolchain. `test-tools` is the same list without the image, for a recipe whose
 tests start no container. The full and focused
-client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
-and place the normal Plexus formatter there. The scenario runner selects the covered CLI through
+client coverage recipes build a standalone instrumented CLI beside their instrumented scenario
+executable and place the normal Plexus formatter there. The scenario runner selects the covered CLI through
 `NERVIX_TEST_CLI_PATH`, so its one-shot completion and command paths contribute to the same LCOV
 report as the CLI's binary unit tests and the server's public scenarios. The general
 `coverage-scenarios` and `coverage-scenarios-append` recipes provision the same instrumented CLI
@@ -627,7 +633,7 @@ The CI jobs divide the work at the scenario boundary:
 | Job | Work |
 | --- | --- |
 | `tests` | Instrumented workspace build and all tests except the scenario target |
-| `scenarios-build` | Instrumented scenario executable, server, CLI and paced simulation drivers, built once and packed with the generated inputs a run reads into the archive every shard restores, and the failed backup cut cleanup check |
+| `scenarios-build` | Instrumented scenario executable, CLI and paced simulation drivers, built once and packed with the generated inputs a run reads into the archive every shard restores, and the failed backup cut cleanup check |
 | `scenarios (I of N)` | One [shard](#scenario-shards) of the scenario suite at factor 3, run from the restored archive without compiling, with its coverage report and scenario logs |
 | `coverage` | After tests, scenarios and extra tests, publishes the [ordinary workspace report](./coverage-reports.md#the-ordinary-workspace-report). Merge and analysis integrity are mandatory; patch percentages and CRAP scores are advisory |
 | `coverage-full` | After every producer job, including a skipped or failed one: `just coverage-full` combines the ordinary report, the modeled and diagnostic native collections and the requested live fuzz campaigns into the [full workspace union](./coverage-reports.md#the-full-workspace-union), validated against the run's event and label snapshot and every producer job's result. It downloads artifacts only, fails on a missing, stale or incomplete input, and publishes its contributor breakdown as the job summary and the `coverage-full` artifact |
@@ -2810,7 +2816,7 @@ held by a consensus commit delay that only its scenario's cleanup releases.
 ### Scenario Shards
 
 CI runs the suite in shards. The `scenarios-build` job builds the instrumented scenario executable,
-server, CLI, paced simulation driver, shared binding and report tool once with
+CLI, paced simulation driver, shared binding and report tool once with
 `just test-scenarios-coverage-build`, publishes its cache, and packs them with the generated inputs
 a run reads into one archive with `just test-scenarios-coverage-pack`. Cargo holds a target directory
 for one build at a time, so the recipe builds each helper beside the suite in a directory of its own
@@ -3325,8 +3331,8 @@ suite.
 against an explicit runtime library. Retain the binary's source and execution mode, the library
 digest, the selected test and the process evidence with the replay.
 
-`just build-diagnostic-scenarios <selection>` prepares library, scenario and server executables for
-a supervised replay. Capture their source, mode and artifact identities before replaying the
+`just build-diagnostic-scenarios <selection>` prepares library and scenario executables for a
+supervised replay. Capture their source, mode and artifact identities before replaying the
 selected workloads.
 
 ONNX fixture preparation hands native-library loading, directory creation and model copies to

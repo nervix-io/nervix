@@ -19,15 +19,12 @@ mod c_abi_endpoints;
 mod c_abi_probe;
 
 use std::{
-    collections::BTreeMap,
-    env, fmt, io,
-    path::{Path, PathBuf},
-    process::Stdio,
-    str::FromStr,
+    collections::BTreeMap, env, fmt, io, path::PathBuf, process::Stdio, str::FromStr,
     time::Duration,
 };
 
 use nervix_primitives::{sync::mpsc, task::JoinHandle, time::Instant};
+use nervix_test_environment::workspace_root;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader},
     process::{Child, Command},
@@ -35,7 +32,7 @@ use tokio::{
 
 /// The checked-in frames the Rust encoder wrote, and the report of them every reader prints.
 pub(crate) fn corpus_directory() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/client-wire/conformance")
+    workspace_root().join("crates/client-wire/conformance")
 }
 
 /// The report every implementation prints for the corpus.
@@ -106,7 +103,7 @@ impl FromStr for ProbeRuntime {
 impl ProbeRuntime {
     /// The command that runs this runtime's probe, or `None` for the in-process probe.
     fn command(self) -> io::Result<Option<Command>> {
-        let sources = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/client_conformance");
+        let sources = workspace_root().join("tests/client_conformance");
         let command = match self {
             Self::CAbiInProcess => return Ok(None),
             Self::C => Command::new(Self::artifacts()?.join("c-probe")),

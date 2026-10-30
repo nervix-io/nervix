@@ -1,3 +1,14 @@
+//! The public scenario suite: the Cucumber steps over the features in `tests/features`, run against
+//! the nodes this process starts.
+//!
+//! Outside the layer order: a harness test crate, the `scenarios` target of `nervix-scenarios`.
+//!
+//! - **Owns.** The steps, the world they share and the run of the suite, and the choice at the top
+//!   of `main` of what a process of this executable runs.
+//! - **Depends on.** Any layer, the harness modules in `tests/common`, and what the `just` recipe
+//!   running the suite built and provisioned.
+//! - **Must not know.** How anything it starts is built. No product code names it.
+
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -83,7 +94,7 @@ use nervix_server::{
     },
     memory_pressure::MemoryPressureConfig,
 };
-use nervix_test_environment::{TestParallelism, TestParallelismArgs};
+use nervix_test_environment::{TestParallelism, TestParallelismArgs, workspace_root};
 use nervix_wasm::{
     WasmAckSidecar, WasmAckToken, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow,
     WasmRoutedOutput,
@@ -4719,7 +4730,7 @@ impl ScenarioWorld {
                 process.arg("--tls").arg("required");
                 process
                     .arg("--tls-ca-cert")
-                    .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tls/dev/ca.pem"));
+                    .arg(workspace_root().join("tls/dev/ca.pem"));
             }
             process
                 .arg("--dns-resolver-config")
@@ -8613,7 +8624,6 @@ async fn given_concurrent_transaction_limit_is_configured(world: &mut ScenarioWo
     world.cluster_config.transaction_max_open = limit;
 }
 
-#[cfg(feature = "testing")]
 #[given("the production sticky scheduler is configured")]
 async fn given_production_sticky_scheduler_is_configured(world: &mut ScenarioWorld) {
     assert!(
@@ -9727,7 +9737,7 @@ const ONNX_FIXTURE_MODELS: [&str; 7] = [
 ];
 
 fn onnx_fixture_path(fixture: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    workspace_root()
         .join("tests")
         .join("fixtures")
         .join("onnx")
@@ -9886,7 +9896,7 @@ async fn place_wasm_processor_fixture_with_layout(
             .await
             .expect("old fixture directory should be removed");
     }
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = workspace_root();
     let (source_path, artifact_file) = match guest {
         "rust" => (
             repo_root
@@ -17281,7 +17291,7 @@ async fn run_cli_inspection(
         .unwrap_or_else(|| {
             let target_dir = std::env::var_os("CARGO_TARGET_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+                .unwrap_or_else(|| workspace_root().join("target"));
             target_dir.join("debug/nervix-cli")
         });
     let query = expand_placeholders(world, docstring(step));
@@ -33332,6 +33342,10 @@ fn main() -> Result<(), Report<AppError>> {
         ProcessProgram::DependencyLifecycleHelper { scope } => Some(scope),
         ProcessProgram::Suite => None,
     };
+    // Cargo runs a test in its package's directory, and every path a scenario names is relative to
+    // the workspace, as the paths given to `--input` are.
+    std::env::set_current_dir(workspace_root())
+        .expect("the suite runs on the machine that built it");
     TestDependencies::configure_process_lifecycle();
     // A diagnostic build tracks the blocking locks of every in-process node with one detector,
     // installed once for the whole process before any tracked lock or runtime worker exists.

@@ -14,9 +14,9 @@ The archive holds these files, under their paths below the checkout:
 - every executable the build left in `target/llvm-cov-target/debug` that `cargo llvm-cov report`
   reads as an object: a file with an execute bit, outside the incremental, fingerprint and build
   script directories, whose name without its extensions names a workspace package or target,
-  matched as cargo-llvm-cov 0.8 matches it. Those are the scenario executable, the server, the CLI,
-  the paced simulation driver, the shared client binding, the deadlock report tool and the
-  formatter, so a shard's report reads the objects the build's own report would read;
+  matched as cargo-llvm-cov 0.8 matches it. Those are the scenario executable, the CLI, the paced
+  simulation driver, the shared client binding, the deadlock report tool and the formatter, so a
+  shard's report reads the objects the build's own report would read;
 - the Playwright driver that the build script of playwright-rs downloaded into its output
   directory, whose path the scenario executable holds. A scenario executable that names a driver
   the build did not leave fails the pack, rather than leaving a shard to whatever driver it finds;
@@ -25,7 +25,7 @@ The archive holds these files, under their paths below the checkout:
 - `target/scenario-suite/manifest.json`, which names the revision and the checkout the build ran in,
   the scenario executable, and every file with its size.
 
-Executables hold absolute paths below the checkout they were built in, such as the server a
+Executables hold absolute paths below the checkout they were built in, such as the tools a
 scenario starts and the Playwright driver, so a shard must run in a checkout at the same path.
 `unpack` refuses an archive of another revision or of another checkout path, checks that every file
 the manifest names was restored at its size, and refuses an executable or library whose shared
@@ -69,7 +69,7 @@ WASM_GUESTS = (
     Path("examples/wasm-processors/rust-guest/target/wasm32-unknown-unknown/release/nervix_wasm_processor_rust_guest.wasm"),
     Path("examples/wasm-processors/go-guest/nervix_wasm_processor_go_guest.wasm"),
 )
-# The executable `cargo test --test scenarios` writes, named for its target and hash.
+# The executable the `scenarios` test target builds into, named for its target and hash.
 SCENARIO_EXECUTABLE = re.compile(r"^scenarios-[0-9a-f]+$")
 # The shard counts a workflow matrix may hold; GitHub runs at most 256 jobs of one matrix.
 MAXIMUM_SHARDS = 256

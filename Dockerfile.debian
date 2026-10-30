@@ -156,7 +156,7 @@ COPY benches/*.rs ./benches/
 COPY src ./src
 COPY crates ./crates
 COPY examples/paced-simulation/rust ./examples/paced-simulation/rust
-COPY tests/scenarios.rs ./tests/scenarios.rs
+COPY tests/Cargo.toml ./tests/Cargo.toml
 COPY scripts/kache_remote.py ./scripts/kache_remote.py
 COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py
 COPY scripts/wasm_bindgen.py ./scripts/wasm_bindgen.py

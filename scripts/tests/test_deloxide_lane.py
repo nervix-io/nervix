@@ -78,11 +78,10 @@ INVENTORY = textwrap.dedent(
     bound_seconds = 120
     concurrency = 4
     evidence = true
-    features = ["testing"]
     id = "scenarios"
     inputs = ["features/**/*.feature"]
     kind = "cucumber"
-    package = "nervix-server"
+    package = "nervix-scenarios"
     tags = ["@lane"]
     target = "test:scenarios"
 
@@ -287,11 +286,7 @@ class ScriptedProcesses(Processes):
         if name == "conformance-build":
             return artifact("lib", "nervix_primitives", self.executable("primitives"), self.root / "crates/primitives/Cargo.toml")
         if name == "scenarios-build":
-            lines = [
-                artifact("bin", "nervix-server", self.executable("nervix-server"), self.root / "Cargo.toml", test=False),
-                artifact("test", "scenarios", self.executable("scenarios"), self.root / "Cargo.toml"),
-            ]
-            return "\n".join(lines)
+            return artifact("test", "scenarios", self.executable("scenarios"), self.root / "Cargo.toml")
         if name == "nervix-paced-simulation-build":
             return artifact("bin", "nervix-paced-simulation", self.executable("driver"), self.root / "examples/paced-simulation/Cargo.toml", test=False)
         raise AssertionError(f"unexpected build {name}")
@@ -1350,7 +1345,7 @@ class LaneTests(unittest.TestCase):
         launches = {launch.name: launch for launch in processes.launches}
         self.assertEqual(list(launches), ["probes-build", "scenarios-build", "probes", "scenarios"])
         self.assertEqual(launches["probes-build"].argv[5:8], ("--features", "deloxide", "--test"))
-        self.assertEqual(launches["scenarios-build"].argv[5:8], ("--features", "testing deloxide", "--test"))
+        self.assertEqual(launches["scenarios-build"].argv[5:8], ("--features", "deloxide", "--test"))
 
         # An order build starts a fresh scenario process per feature whatever its selection's name.
         processes = ScriptedProcesses(fixture.root, "deloxide-order")
