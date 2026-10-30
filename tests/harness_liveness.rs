@@ -25,6 +25,14 @@
 //!   payload observation and node execution reading owners.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "harness regressions drive every layer from outside the order"
+    )
+)]
+
 use websocket_close::reply_to_close;
 
 #[path = "common/cluster/byte_pace.rs"]

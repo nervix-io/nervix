@@ -9,6 +9,14 @@
 //!   running the suite built and provisioned.
 //! - **Must not know.** How anything it starts is built. No product code names it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "the scenario suite drives every layer from outside the order"
+    )
+)]
+
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
