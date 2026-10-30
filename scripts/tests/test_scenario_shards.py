@@ -290,6 +290,37 @@ class ArchiveTests(unittest.TestCase):
                 shards.unpack(Path(directory), Path(directory) / "absent.tar.zst")
 
 
+class RecipeTests(unittest.TestCase):
+    """The scenario build runs its Cargo builds beside each other, in one target directory each."""
+
+    def setUp(self) -> None:
+        self.justfile = (shards.ROOT / "justfile").read_text()
+
+    def recipe(self, name: str) -> str:
+        lines = []
+        for line in self.justfile.split(f"\n{name}", 1)[1].splitlines():
+            if lines and line and not line.startswith(" "):
+                break
+            lines.append(line)
+        return "\n".join(lines)
+
+    def test_each_helper_builds_beside_the_suite_in_a_directory_of_its_own(self) -> None:
+        group = self.recipe("test-scenarios-coverage-binaries")
+        self.assertIn("test-scenarios-coverage-suite", group)
+        directories = re.findall(r'\(coverage_tools_dir / "([a-z-]+)"\)', group)
+        self.assertEqual(sorted(directories), ["cli", "deadlock-report", "paced-simulation"])
+        self.assertIn("[private, parallel]\ntest-scenarios-coverage-binaries:", self.justfile)
+        self.assertIn('(run-with-jobs "test-scenarios-coverage-binaries" "6")', self.recipe("test-scenarios-coverage-build"))
+
+    def test_every_binary_a_run_starts_ends_up_beside_the_suite(self) -> None:
+        build = self.recipe("test-scenarios-coverage-build")
+        shard = self.recipe("test-scenarios-coverage-shard")
+        for binary in ("nervix-cli", "nervix-deadlock-report", "nervix-paced-simulation", "libnervix_client_ffi.so"):
+            self.assertIn(f'/llvm-cov-target/debug/{binary}"', shard)
+            self.assertIn(f'"${{suite}}/{binary}"', build)
+        self.assertIn('"${suite}/nervix-plexus-format"', build)
+
+
 class WorkflowTests(unittest.TestCase):
     """The Check workflow builds the suite once and runs it in the shards SCENARIO_SHARDS sets."""
 

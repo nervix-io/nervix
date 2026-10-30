@@ -2795,7 +2795,9 @@ held by a consensus commit delay that only its scenario's cleanup releases.
 CI runs the suite in shards. The `scenarios-build` job builds the instrumented scenario executable,
 server, CLI, paced simulation driver, shared binding and report tool once with
 `just test-scenarios-coverage-build`, publishes its cache, and packs them with the generated inputs
-a run reads into one archive with `just test-scenarios-coverage-pack`. `scripts/scenario_shards.py`
+a run reads into one archive with `just test-scenarios-coverage-pack`. Cargo holds a target directory
+for one build at a time, so the recipe builds each helper beside the suite in a directory of its own
+below `target/llvm-cov-tools`, and then installs it into the target directory of `cargo llvm-cov`. `scripts/scenario_shards.py`
 names what the archive holds: every executable `cargo llvm-cov report` reads as an object, the
 Playwright driver whose path the scenario executable holds, the ONNX fixtures and runtime, and the
 WASM guests. Each `scenarios (I of N)` job checks out the same revision at the same path, which the

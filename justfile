@@ -13,6 +13,7 @@ build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
 turmoil_failures := cargo_target_dir + "/turmoil-failures"
+coverage_tools_dir := cargo_target_dir + "/llvm-cov-tools"
 default_jobs := num_jobs() || "4"
 
 # Show the documented recipes, including the Bolero property and fuzz commands.
@@ -293,7 +294,7 @@ test-scenarios *args: tests-deps
 
 # Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
 # This supervision check has its own verdict, outside ordinary coverage reports.
-test-backup-cut-cleanup: tests-deps
+test-backup-cut-cleanup: build-deps build-test-cli
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -1294,18 +1295,28 @@ test-coverage-phase phase: tests-deps
     fi
 
 # Build the scenario suite and the binaries its scenarios start, under the instrumentation of
-# `cargo llvm-cov` and into its target directory, so `test-scenarios-coverage-run` compiles nothing.
-test-scenarios-coverage-build: tests-deps
+# `cargo llvm-cov`, so `test-scenarios-coverage-run` compiles nothing. Cargo holds a target directory
+# for one build at a time, so each helper binary builds beside the suite in a directory of its own,
+# and is then installed into the target directory of `cargo llvm-cov`, where the suite starts it and
+# `cargo llvm-cov report` reads it.
+test-scenarios-coverage-build: build-deps coverage-clean-workspace (run-with-jobs "test-scenarios-coverage-binaries" "6")
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo llvm-cov clean --workspace
-    just coverage-cli-binary
-    just coverage-deadlock-report-binary
-    just coverage-paced-simulation-binaries
-    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
-        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
-    source <(cargo llvm-cov show-env --sh 2>/dev/null)
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
+    suite={{ quote(cargo_target_dir + "/llvm-cov-target/debug") }}
+    tools={{ quote(coverage_tools_dir) }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} "${suite}/nervix-plexus-format"
+    install -m 755 "${tools}/cli/debug/nervix-cli" "${suite}/nervix-cli"
+    install -m 755 "${tools}/deadlock-report/debug/nervix-deadlock-report" "${suite}/nervix-deadlock-report"
+    install -m 755 "${tools}/paced-simulation/debug/nervix-paced-simulation" "${suite}/nervix-paced-simulation"
+    install -m 755 "${tools}/paced-simulation/debug/libnervix_client_ffi.so" "${suite}/libnervix_client_ffi.so"
+
+[private, parallel]
+test-scenarios-coverage-binaries: test-scenarios-coverage-suite build-plexus-format build-test-cli (coverage-cli-binary (coverage_tools_dir / "cli")) (coverage-deadlock-report-binary (coverage_tools_dir / "deadlock-report")) (coverage-paced-simulation-binaries (coverage_tools_dir / "paced-simulation"))
+
+[private]
+test-scenarios-coverage-suite:
+    eval "$(cargo llvm-cov show-env --sh 2>/dev/null)" && \
+        CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
         cargo test --no-run --features testing --package nervix-server --test scenarios
 
 # Run the scenario suite from the binaries `test-scenarios-coverage-build` left, and write the
@@ -1613,29 +1624,21 @@ coverage-web-console-unit:
 
 # Build the standalone CLI with the same coverage flags as its binary unit tests. Cargo's
 # all-targets test pass alone leaves only the test executable, which public scenarios do not run.
-coverage-cli-binary:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    source <(cargo llvm-cov show-env --sh 2>/dev/null)
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
-        cargo build --package nervix-cli --bin nervix-cli
+coverage-cli-binary target_dir=(cargo_target_dir + "/llvm-cov-target"):
+    eval "$(cargo llvm-cov show-env --sh 2>/dev/null)" && \
+        CARGO_TARGET_DIR={{ quote(target_dir) }} cargo build --package nervix-cli --bin nervix-cli
 
 # The local diagnostic report workflow uses this ordinary instrumented executable.
-coverage-deadlock-report-binary:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    source <(cargo llvm-cov show-env --sh --no-rustc-wrapper 2>/dev/null)
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
+coverage-deadlock-report-binary target_dir=(cargo_target_dir + "/llvm-cov-target"):
+    eval "$(cargo llvm-cov show-env --sh --no-rustc-wrapper 2>/dev/null)" && \
+        CARGO_TARGET_DIR={{ quote(target_dir) }} \
         cargo build --package nervix-deadlock --features report-tool --bin nervix-deadlock-report
 
 # Build the paced simulation's Rust driver, and the shared C binding its Python driver loads, with
 # the same coverage flags, so the public scenarios that run both drivers count the lines they reach.
-coverage-paced-simulation-binaries:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    source <(cargo llvm-cov show-env --sh 2>/dev/null)
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
-        cargo build --package nervix-paced-simulation --package nervix-client-ffi
+coverage-paced-simulation-binaries target_dir=(cargo_target_dir + "/llvm-cov-target"):
+    eval "$(cargo llvm-cov show-env --sh 2>/dev/null)" && \
+        CARGO_TARGET_DIR={{ quote(target_dir) }} cargo build --package nervix-paced-simulation --package nervix-client-ffi
 
 coverage-clients-units:
     cargo llvm-cov --no-report --bins \
