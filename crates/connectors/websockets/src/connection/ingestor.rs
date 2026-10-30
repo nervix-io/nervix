@@ -34,10 +34,10 @@ use meticulous::OptionExt as _;
 #[cfg(test)]
 use meticulous::ResultExt as _;
 use nervix_connector::{
-    BrokerIngestorConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMetadataRow,
-    IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
-    IngestorReadCancellation, IngestorResult, IngestorResume, RetainedIngestHeaders,
-    RustlsClientConfigProvider,
+    BrokerIngestorConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMessageMetadata,
+    IngestMetadataRow, IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest,
+    IngestorConnector, IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult,
+    IngestorResume, RetainedIngestHeaders, RustlsClientConfigProvider,
 };
 use nervix_dns::{DnsResolver, LookupShare, OperationBudget};
 use nervix_models::{
@@ -189,10 +189,19 @@ impl IngestorMessage for WebsocketsConnectionIngestorMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::Websockets {
-            frame_type: self.frame.frame_type(),
-            headers: &self.headers,
+        IngestMetadataRow {
+            fields: self,
+            headers: IngestRowHeaders::Shared(&self.headers),
+            position: None,
         }
+    }
+}
+
+/// The value of the metadata `WEBSOCKETS CONNECTION` declares: the text or binary kind of the data
+/// frame.
+impl IngestMessageMetadata for WebsocketsConnectionIngestorMessage {
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+        values.string(self.frame.frame_type().as_ref());
     }
 }
 

@@ -25,14 +25,14 @@ use nervix_models::{
     HeaderLayout, HeaderModel, HttpEmitterEntity, HttpEndpointIngestor, HttpIngestor,
     HttpIngestorEntity, IcebergCatalog, IcebergEmitter, IcebergEmitterEntity, IcebergTableEmitter,
     IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity,
-    IngestorEntityKind, IngestorMetadataScope, IngestorReferenceKind, KafkaEmitterEntity,
+    IngestorEntityKind, IngestorMetadataType, IngestorReferenceKind, KafkaEmitterEntity,
     KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicIngestor,
     Literal, Model, ModelKind, MongoDbCollectionEmitter, MongoDbConflictAction, MongoDbEmitter,
     MongoDbEmitterEntity, MqttEmitterEntity, MqttIngestMode, MqttIngestorEntity, MqttQos,
     MqttSession, MqttTopicIngestor, MySqlConflictAction, MySqlEmitter, MySqlEmitterEntity,
     MySqlTableEmitter, NatsEmitterEntity, NatsIngestorEntity, OtelEmitter, OtelEmitterEntity,
     OtelLogsEmitter, OtelMappings, OtelMetric, OtelMetricKind, OtelMetricsEmitter,
-    OtelTracesEmitter, ParseAsType, PostgresConflictAction, PostgresEmitter, PostgresEmitterEntity,
+    OtelTracesEmitter, PostgresConflictAction, PostgresEmitter, PostgresEmitterEntity,
     PostgresTableEmitter, PrometheusIngestorEntity, PulsarEmitterEntity, PulsarIngestorEntity,
     PulsarTopicEmitter, RabbitMqEmitterEntity, RabbitMqIngestorEntity, RedisEmitter,
     RedisEmitterEntity, RedisIngestor, RedisIngestorEntity, RedisPubSubEmitter,
@@ -251,7 +251,8 @@ fn a_source_form_names_its_pair_by_key_and_label() {
 /// What one source pair declares, as the table below states it.
 struct IngestorDeclaration {
     headers: Option<HeaderModel>,
-    metadata: IngestorMetadataScope,
+    /// The metadata fields it declares, by name and type, in declared order.
+    metadata: &'static [(&'static str, IngestorMetadataType)],
     every_node: bool,
     reference: IngestorReferenceKind,
 }
@@ -259,26 +260,33 @@ struct IngestorDeclaration {
 fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
     let headers_only = |headers, connector| IngestorDeclaration {
         headers,
-        metadata: IngestorMetadataScope::Headers,
+        metadata: &[],
         every_node: false,
         reference: IngestorReferenceKind::Client(connector),
     };
     match kind {
         IngestorEntityKind::Client(ClientIngestorEntity::Producer) => IngestorDeclaration {
             headers: None,
-            metadata: IngestorMetadataScope::Headers,
+            metadata: &[],
             every_node: false,
             reference: IngestorReferenceKind::Schema,
         },
         IngestorEntityKind::Http(HttpIngestorEntity::Request) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-            metadata: IngestorMetadataScope::Http,
+            metadata: &[
+                ("status", IngestorMetadataType::U16),
+                ("polled_at", IngestorMetadataType::Datetime),
+            ],
             every_node: false,
             reference: IngestorReferenceKind::Client(ConnectorKind::Http),
         },
         IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) => IngestorDeclaration {
             headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
-            metadata: IngestorMetadataScope::Kafka,
+            metadata: &[
+                ("topic", IngestorMetadataType::String),
+                ("partition", IngestorMetadataType::I32),
+                ("offset", IngestorMetadataType::I64),
+            ],
             every_node: false,
             reference: IngestorReferenceKind::Client(ConnectorKind::Kafka),
         },
@@ -316,27 +324,27 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
         ),
         IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-            metadata: IngestorMetadataScope::Headers,
+            metadata: &[],
             every_node: true,
             reference: IngestorReferenceKind::Endpoint(EndpointType::Http),
         },
         IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection) => {
             IngestorDeclaration {
                 headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-                metadata: IngestorMetadataScope::Websockets,
+                metadata: &[("frame_type", IngestorMetadataType::String)],
                 every_node: false,
                 reference: IngestorReferenceKind::Client(ConnectorKind::Websockets),
             }
         }
         IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-            metadata: IngestorMetadataScope::Headers,
+            metadata: &[],
             every_node: true,
             reference: IngestorReferenceKind::Endpoint(EndpointType::Websockets),
         },
         IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener) => IngestorDeclaration {
             headers: None,
-            metadata: IngestorMetadataScope::Syslog,
+            metadata: &[("peer_addr", IngestorMetadataType::String)],
             every_node: true,
             reference: IngestorReferenceKind::Client(ConnectorKind::Syslog),
         },
@@ -350,7 +358,13 @@ fn every_source_pair_declares_its_headers_metadata_execution_and_reference() {
         let declared = kind.capabilities();
         assert_eq!(declared.headers, expected.headers, "{kind:?}");
         assert_eq!(kind.reads_headers(), expected.headers.is_some(), "{kind:?}");
-        assert_eq!(declared.metadata, expected.metadata, "{kind:?}");
+        let metadata = declared
+            .metadata
+            .fields()
+            .iter()
+            .map(|field| (field.name(), field.ty()))
+            .collect::<Vec<_>>();
+        assert_eq!(metadata, expected.metadata, "{kind:?}");
         assert_eq!(
             declared.executes_on_every_cluster_node, expected.every_node,
             "{kind:?}"
@@ -540,38 +554,26 @@ fn a_source_references_the_client_or_endpoint_its_body_names() {
 }
 
 #[test]
-fn the_metadata_scopes_declare_their_fields_in_order() {
-    let described = |scope: IngestorMetadataScope| {
-        scope
-            .fields()
+fn declared_metadata_fields_read_as_optional_schema_fields_in_declared_order() {
+    for kind in IngestorEntityKind::all() {
+        let expected = source_declaration(kind)
+            .metadata
+            .iter()
+            .map(|(name, ty)| ((*name).to_owned(), ty.parse_as_type()))
+            .collect::<Vec<_>>();
+        let schema_fields = kind
+            .capabilities()
+            .metadata
+            .schema_fields()
             .into_iter()
             .map(|field| {
-                assert!(field.optional, "{field:?}");
-                assert!(!field.sensitive, "{field:?}");
+                assert!(field.optional, "{kind:?} {field:?}");
+                assert!(!field.sensitive, "{kind:?} {field:?}");
                 (field.name.as_str().to_owned(), field.ty)
             })
-            .collect::<Vec<_>>()
-    };
-    assert!(described(IngestorMetadataScope::Headers).is_empty());
-    assert_eq!(
-        described(IngestorMetadataScope::Http),
-        [
-            ("status".to_owned(), ParseAsType::U16),
-            ("polled_at".to_owned(), ParseAsType::Datetime),
-        ]
-    );
-    assert_eq!(
-        described(IngestorMetadataScope::Kafka),
-        [
-            ("topic".to_owned(), ParseAsType::String),
-            ("partition".to_owned(), ParseAsType::I32),
-            ("offset".to_owned(), ParseAsType::I64),
-        ]
-    );
-    assert_eq!(
-        described(IngestorMetadataScope::Syslog),
-        [("peer_addr".to_owned(), ParseAsType::String)]
-    );
+            .collect::<Vec<_>>();
+        assert_eq!(schema_fields, expected, "{kind:?}");
+    }
 }
 
 /// What one emitter pair declares, as the table below states it.

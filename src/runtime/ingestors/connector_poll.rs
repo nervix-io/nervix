@@ -15,7 +15,7 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
-use nervix_connector::{IngestorPollMessage, IngestorPollMetadata};
+use nervix_connector::IngestorPollMessage;
 
 use super::*;
 
@@ -50,18 +50,7 @@ impl Iterator for PollIntakeBatches {
             .by_ref()
             .take(self.bound.get())
             .map(|message| {
-                let metadata = match message.metadata {
-                    IngestorPollMetadata::Headers => {
-                        BufferedIngestMetadata::Headers(message.headers)
-                    }
-                    IngestorPollMetadata::Http { status, polled_at } => {
-                        BufferedIngestMetadata::Http {
-                            status,
-                            polled_at,
-                            headers: message.headers,
-                        }
-                    }
-                };
+                let metadata = BufferedIngestMetadata::polled(message.metadata, message.headers);
                 (message.payload, metadata)
             })
             .collect();

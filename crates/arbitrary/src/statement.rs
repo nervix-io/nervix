@@ -1227,10 +1227,10 @@ impl Arbitrary<'_> {
                 quiesce: self.quiesce_mode(),
             },
             2 => AlterIngestorOperation::SetTimestamp {
-                source: if self.entropy.flag() {
-                    nervix_models::IngestTimestampSource::Now
-                } else {
-                    nervix_models::IngestTimestampSource::At(self.name())
+                source: match self.entropy.byte() % 3 {
+                    0 => nervix_models::IngestTimestampSource::Now,
+                    1 => nervix_models::IngestTimestampSource::At(self.name()),
+                    _ => nervix_models::IngestTimestampSource::AtMetadata(self.name()),
                 },
             },
             3 => AlterIngestorOperation::DropTimestamp,

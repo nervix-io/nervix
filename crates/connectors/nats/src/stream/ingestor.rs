@@ -319,9 +319,7 @@ impl IngestorMessage for NatsStreamIngestorMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::Headers {
-            headers: &self.headers,
-        }
+        IngestMetadataRow::headers(&self.headers)
     }
 }
 

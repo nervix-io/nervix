@@ -487,7 +487,7 @@ use ingest_group::{
 };
 use ingest_metadata::{
     BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, IngestHeaderFunctionInjector,
-    IngestMetadataBuilders,
+    IngestMetadataBuilders, IngestMetadataError, IngestMetadataProjection,
 };
 pub(in crate::runtime) use ingestor_quiesce::{
     BufferedIngestMetadata, BufferedIngestPayload, IngestorQuiesceCause, IngestorQuiesceControl,
@@ -533,7 +533,7 @@ use message_error_plan::{
     BoundMessageErrorRoute, BoundMessageErrorRoutes, MessageErrorRouteBindingContext,
 };
 use nervix_connector_kafka::KafkaOffsetPosition;
-pub(in crate::runtime) use nervix_models::IngestorMetadataScope;
+pub(in crate::runtime) use nervix_models::IngestorMetadataDeclaration;
 use nervix_models::{DeduplicatorName, ReingestorName};
 pub(in crate::runtime) use node::RuntimeInner;
 use planning::{

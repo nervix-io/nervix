@@ -10,6 +10,11 @@ complete field; entity presentation distinguishes omission from an explicitly wr
 The registry's current archive signature and consensus keyspace namespace fence this shape before
 decoding; existing current-header corruption and namespace validation tests qualify those owners.
 
+Ingestor generators draw every timestamp source, `TIMESTAMP AT metadata.<field>` included, in
+`CREATE` and in `ALTER ... SET TIMESTAMP`. The Model/archive, registry, consensus and canonical
+Plexus properties preserve the metadata source distinctly from a payload field of the same name,
+and the same signature and namespace fence that shape.
+
 NATS ingestor generators draw both entities, `NATS SUBJECT` and `NATS STREAM`, the stream source
 with its stream and consumer names, both acknowledged modes and every quiesce mode it declares. The
 Model/archive, registry, consensus, canonical Plexus, presentation and console-draft properties
