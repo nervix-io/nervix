@@ -19,7 +19,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-from scripts import kache_remote
+from scripts import kache_remote, publish_kache_report
 from scripts.kache_remote import (
     ConfigurationError,
     DaemonState,
@@ -53,6 +53,15 @@ KACHE_JOBS = {
     "docker-build.yaml": {"benchmark", "build-book"},
     "bolero.yaml": {"bolero-random", "bolero-fuzz"},
 }
+# The jobs that build before they run, with the cache published and reported between the two, so the
+# run's outcome cannot lose what the build filled and each phase's time is visible on its own.
+BUILD_PHASE_JOBS = {
+    "check.yaml": {"tests", "scenarios", "client-conformance"},
+    "docker-build.yaml": set(),
+    "bolero.yaml": {"bolero-fuzz"},
+}
+BUILD_PUBLISH_COMMAND = 'python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"'
+BUILD_REPORT_COMMAND = 'python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"'
 # A kache-backed job reads the bucket in its runner's region: Boat's machines run in Europe, and
 # GitHub's hosted runners and Blacksmith's runners in the US.
 EU_REMOTE = {
@@ -197,6 +206,11 @@ class KacheWorkflowTests(unittest.TestCase):
                     for earlier in steps[:setup]:
                         self.assertNotIn("KACHE_", earlier.text, earlier.name)
 
+                    # The report's window holds the whole job, its build included.
+                    limit = re.search(r"^    timeout-minutes: (\d+)$", jobs[name], re.MULTILINE)
+                    self.assertIsNotNone(limit)
+                    self.assertLessEqual(int(limit.group(1)), publish_kache_report.REPORT_WINDOW_HOURS * 60)
+
                     self.assertEqual(names.count("Publish kache cache"), 1)
                     publish_index = names.index("Publish kache cache")
                     publish = steps[publish_index]
@@ -204,12 +218,31 @@ class KacheWorkflowTests(unittest.TestCase):
                     self.assertEqual(publish.field("timeout-minutes"), "4")
                     self.assertEqual(publish.mapping("env"), {"JOB_STATUS": "${{ job.status }}"})
                     self.assertEqual(publish.block("run"), PUBLISH_SCRIPT)
-                    if "Publish kache report" in names:
-                        # The report and its artifact carry the publication record.
-                        self.assertEqual(names[publish_index + 1], "Publish kache report")
-                        self.assertEqual(names[publish_index + 2], "Upload kache report")
-                    else:
-                        self.assertEqual(publish_index, len(steps) - 1)
+                    # Every kache-backed job reports, whatever its outcome: the report and its
+                    # artifact carry the publication record and where the compile time went.
+                    self.assertEqual(names[publish_index + 1], "Publish kache report")
+                    self.assertEqual(names[publish_index + 2], "Upload kache report")
+                    for reporting in (steps[publish_index + 1], steps[publish_index + 2]):
+                        self.assertEqual(reporting.field("if"), "always()", reporting.name)
+
+                    after_build = [index for index, step in enumerate(names) if step == "Publish kache cache after the build"]
+                    if name not in BUILD_PHASE_JOBS[path.name]:
+                        self.assertEqual(after_build, [])
+                        continue
+                    self.assertEqual(len(after_build), 1)
+                    build_publish = steps[after_build[0]]
+                    # Between the build and the run: after the remote starts, before the job's end.
+                    self.assertLess(setup + 1, after_build[0])
+                    self.assertLess(after_build[0], publish_index)
+                    # Only a build that succeeded publishes; a failed one leaves the end's record.
+                    self.assertIsNone(build_publish.field("if"))
+                    self.assertEqual(build_publish.field("timeout-minutes"), "4")
+                    self.assertEqual(build_publish.mapping("env"), {"JOB_STATUS": "${{ job.status }}"})
+                    self.assertEqual(build_publish.field("run"), BUILD_PUBLISH_COMMAND)
+                    build_report = steps[after_build[0] + 1]
+                    self.assertEqual(build_report.name, "Publish kache report after the build")
+                    self.assertEqual(build_report.field("run"), BUILD_REPORT_COMMAND)
+                    self.assertIn("            ${{ runner.temp }}/kache-build-report\n", steps[publish_index + 2].text)
         self.assertEqual(len(manifest_keys), len(set(manifest_keys)), manifest_keys)
 
     def test_a_job_takes_the_bucket_of_its_runners_region(self) -> None:
@@ -251,7 +284,52 @@ class KacheWorkflowTests(unittest.TestCase):
         report_script = Path("scripts/publish_kache_report.py").read_text()
         self.assertIn('run("kache", "doctor")', report_script)
         self.assertIn('run("kache", "why-miss", crate)', report_script)
-        self.assertIn('run("kache", "report", "--format", "json"', report_script)
+        self.assertIn('"kache", "report", "--format", "json", "--since", f"{REPORT_WINDOW_HOURS}h"', report_script)
+
+    def test_the_report_splits_compile_time_into_compilation_hits_and_kache_work(self) -> None:
+        report = {
+            "timeline": {
+                "event_count": 10,
+                "duration_ms": 120_000,
+                "start_time": "2026-10-29T21:43:35.902854025+00:00",
+                "end_time": "2026-10-29T21:45:35.100000000+00:00",
+            },
+            "summary": {"total_crates": 8, "misses": 2, "local_hits": 3, "prefetch_hits": 1, "remote_hits": 2},
+            "timing": {
+                "miss_compile_time_ms": 30_000,
+                "hit_time_ms": 6_000,
+                "avg_hit_ms": 1_000,
+                "total_key_ms": 12_000,
+                "avg_key_ms": 1_500,
+                "total_permit_wait_ms": 60_000,
+                "total_store_ms": 3_000,
+                "total_restore_ms": 2_400,
+            },
+            "suggestions": ["Average cache hit overhead is 1000ms — check disk I/O or consider faster storage"],
+        }
+        lines = publish_kache_report.report_lines(report)
+        self.assertIn(
+            "Kache saw 8 cacheable crates in a 2.0 min window from 21:43 to 21:45 UTC. Each total adds "
+            "up every parallel rustc, so together they exceed the window.",
+            lines,
+        )
+        self.assertIn("| Compiled after a cache miss | 2 | 0.5 min | 15.0 s |", lines)
+        self.assertIn("| Served from the cache: 3 local, 1 prefetched, 2 remote | 6 | 0.1 min | 1.0 s |", lines)
+        self.assertIn("| Computing cache keys | | 0.2 min | 1.5 s |", lines)
+        self.assertIn("| Waiting for a cache permit | | 1.0 min | |", lines)
+        self.assertIn("| Storing compiled outputs | | 0.1 min | |", lines)
+        self.assertIn("| Restoring cached outputs | | 0.0 min | |", lines)
+        self.assertIn("- Average cache hit overhead is 1000ms — check disk I/O or consider faster storage", lines)
+
+    def test_a_report_without_compilation_says_so_instead_of_a_breakdown(self) -> None:
+        lines = publish_kache_report.report_lines({"summary": {}, "timeline": {"event_count": 0}})
+        self.assertIn("Kache recorded no compilation in this report's window.", lines)
+        self.assertNotIn("### Where the compile time went", lines)
+        self.assertIn("Kache recorded no compilation in this report's window.", publish_kache_report.report_lines({}))
+
+    def test_a_build_report_names_its_phase(self) -> None:
+        self.assertEqual(publish_kache_report.heading("tests", "build"), "## Kache: tests, after the build")
+        self.assertEqual(publish_kache_report.heading("tests", "job"), "## Kache: tests")
 
     def test_image_builds_configure_and_publish_through_the_same_contract(self) -> None:
         workflow = Path(".github/workflows/docker-build.yaml").read_text()
@@ -695,10 +773,15 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(publication.manifest.output_tail, ["remote refused"])
 
     def test_a_job_whose_work_failed_or_was_cancelled_waits_for_nothing(self) -> None:
-        for status in ("failure", "cancelled"):
+        reasons = {
+            "failure": "The job's work ended with status `failure`; uploads still queued are left to the daemon's shutdown drain.",
+            "cancelled": "The job's work ended with status `cancelled`. The kache action's post step does not run for a cancelled job, so uploads still queued end with the machine.",
+        }
+        for status, reason in reasons.items():
             with self.subTest(status=status):
                 publication, kache, output = self.publish({}, job_status=status)
                 self.assertEqual(publication.outcome, Outcome.NOT_RUN)
+                self.assertEqual(publication.reasons, [reason])
                 self.assertEqual(kache.calls(), [])
                 self.assertEqual(self.clock.sleeps, [])
                 self.assertNotIn("::warning", output)

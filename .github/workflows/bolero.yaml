@@ -151,6 +151,24 @@ jobs:
             echo "::notice::Kache publication did not run because checkout did not provide its script"
           fi
 
+      - name: Publish kache report
+        if: always()
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          overwrite: true
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
   bolero-fuzz:
     name: bolero-fuzz (${{ matrix.shard }} of ${{ strategy.job-total }})
     if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
@@ -273,6 +291,18 @@ jobs:
           CARGO_BUILD_JOBS: "1"
         run: just prepare-bolero-shard ${{ matrix.shard }}/${{ strategy.job-total }}
 
+      # The cache the build filled is published before the run starts: the run's outcome cannot lose
+      # it, the jobs building beside this one can use it, and its report shows what the build
+      # compiled and what the cache served.
+      - name: Publish kache cache after the build
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Publish kache report after the build
+        run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
       - name: Runner diagnostics before Run this shard's sanitizer libFuzzer targets and qualify failures
         uses: ./.github/actions/runner-diagnostics
         with:
@@ -349,6 +379,26 @@ jobs:
           else
             echo "::notice::Kache publication did not run because checkout did not provide its script"
           fi
+
+      - name: Publish kache report
+        if: always()
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/kache-report
+            ${{ runner.temp }}/kache-build-report
+          if-no-files-found: warn
 
   bolero-fuzz-combined:
     name: bolero-fuzz-combined

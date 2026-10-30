@@ -520,11 +520,11 @@ and formatter, so a selection containing CLI scenarios needs no separate binary 
 CLI process coverage recipe exercises transaction inspection and the clock-following process
 scenarios.
 
-`test-scenarios-coverage`, `coverage-scenarios` and `coverage-scenarios-append` also build the paced
-simulation's Rust driver and the shared binding with coverage flags, and the scenario runner selects
-them through `NERVIX_PACED_SIMULATION_PATH` and `NERVIX_CLIENT_LIBRARY`. A driver process inherits
-the profile location of the scenario binary that starts it, so the Rust driver and the binding
-loaded by the Python driver write their profiles into the same report when they exit.
+`test-scenarios-coverage-build`, `coverage-scenarios` and `coverage-scenarios-append` also build the
+paced simulation's Rust driver and the shared binding with coverage flags, and the scenario runner
+selects them through `NERVIX_PACED_SIMULATION_PATH` and `NERVIX_CLIENT_LIBRARY`. A driver process
+inherits the profile location of the scenario binary that starts it, so the Rust driver and the
+binding loaded by the Python driver write their profiles into the same report when they exit.
 
 The CI `scenarios` job uses the shared native
 [CI linker](./developing-nervix.md#validation-and-tests) for the server, CLI and scenario harness,
@@ -690,12 +690,19 @@ physical SSD latency. Reported MHz and cpufreq policy values do not measure effe
 clocks. Low steal alone does not show a host is fast: CPU execution, cache/memory contention and
 storage can slow work without stolen time. The samples support comparison, not a specific cause.
 
-Every kache-backed job uses kache 1.2.1, records `doctor` output without making it a
-test failure, publishes a cache report, and diagnoses its five most expensive misses with
-`why-miss`. The shared S3 cache keeps executable and test-binary outputs, with stores sized for
-the full builds: every kache-backed job and Docker image build uses a 1 TiB store ceiling. This is
-an upper bound, not a disk reservation. The runner's actual disk capacity remains the practical
-limit.
+Every kache-backed job uses kache 1.2.1, records `doctor` output without making it a test failure,
+and publishes a cache report whatever its outcome, a timeout included. The report reads the last six
+hours of kache's events: no kache-backed job may run longer, and each runs on a machine of its own,
+so the report covers the whole job and nothing before it. It splits the compile time kache observed
+into compiling cache misses, serving cache hits, local, prefetched or remote, and kache's own work:
+computing cache keys, waiting for a cache permit, and storing and restoring outputs. It adds kache's
+own reading of that window and diagnoses the five most expensive misses with `why-miss`. A job that
+builds before it runs also reports right after its build, so its summary shows what the build
+compiled and what the cache served apart from what the run did, and a slow job reads as slow
+compilation, a cache that missed, cache hits that were slow, or a slow run. The shared S3 cache
+keeps executable and test-binary outputs, with stores sized for the full builds: every kache-backed
+job and Docker image build uses a 1 TiB store ceiling. This is an upper bound, not a disk
+reservation. The runner's actual disk capacity remains the practical limit.
 
 The shared remote is Cloudflare R2 through its S3 API. Kache reads the base `artifacts` prefix
 first. Pull-request jobs also read and publish entries, manifests, and shards under the shared
@@ -780,8 +787,19 @@ During the build the daemon publishes each entry the build stores: kache records
 intent, uploads the entry in the background, and retries an upload that failed for a retryable
 reason every five seconds.
 
-`Publish kache cache` runs `scripts/kache_remote.py publish` whatever the job's result: just before
-the kache report where the job publishes one, and as the job's last step otherwise. For a job whose
+The `tests`, `scenarios`, `client-conformance` and Bolero sanitizer jobs build before they run.
+The build step compiles every binary the run executes, under the same instrumentation and into the
+same target directory, so the run compiles nothing; `just test-coverage-build`,
+`just test-scenarios-coverage-build`, `just build-client-conformance-tests` and
+`just prepare-bolero-shard` are those build steps. `Publish kache cache after the build` then
+publishes the job's cache as described below, into `$RUNNER_TEMP/kache-build-report`, and
+`Publish kache report after the build` reports it. Both run only when the build succeeded. A run
+that then fails or reaches the job's time limit cannot lose what the build stored, the jobs
+building beside it already find it, and the step that was running when a job ended names the phase
+that took its time. The job's kache report artifact carries both reports.
+
+`Publish kache cache` runs `scripts/kache_remote.py publish` whatever the job's result, just before
+the kache report that every kache-backed job publishes. For a job whose
 work succeeded, it saves the build manifest with `kache save-manifest`, then reads the daemon's
 upload counters from `kache telemetry write` every two seconds until no upload is queued or in
 flight. It waits at most 120 seconds, its kache commands included. The step's 4-minute
@@ -793,7 +811,7 @@ document, and an answer outside its schema is reported rather than read. The out
 | `published` | The manifest is saved and the daemon reports every upload of the job finished | Nothing |
 | `incomplete` | The budget ended with uploads queued or in flight, the manifest failed or did not finish, an upload failed for good, or the daemon stopped answering during the wait | Queued uploads go to the daemon's shutdown drain, which kache bounds at 30 seconds |
 | `read-only` | Kache made the job's remote read-only, as for a scheduled or manually dispatched run | Nothing: such a job publishes nothing |
-| `not-run` | The job's work failed or was cancelled, so publication returns at once | Queued uploads go to the shutdown drain |
+| `not-run` | The job's work failed or was cancelled, so publication returns at once | After a failure, queued uploads go to the shutdown drain of the kache action's post step. That step does not run for a cancelled job, and a job that reaches its time limit is cancelled, so its queued uploads end with the machine |
 | `unavailable` | The job has no kache command or no manifest key, or its daemon does not answer | Whatever a stopped daemon left queued: publication asks `kache --json daemon status` first because `kache stats` would start a new daemon |
 | `cancelled` | The step received `SIGINT` or `SIGTERM` | The record names the first signal and the phase in which the step received it |
 
@@ -814,11 +832,11 @@ which the step received it. Once the record is written the step stops listening:
 until then ends the step with the first signal's status, and later ones are ignored, because
 Python's exit restores the default handlers and would let a later signal end the step with its own
 status. A signal that arrives before publication installs its handlers ends the step without a
-record. A job that failed before its checkout has no script to run, so its step
-adds only a notice. The record, `publication.json` and `publication.md`, lands in
-`$RUNNER_TEMP/kache-report`, which the kache report artifact uploads where the job has one, and in
-the job summary. An image build runs `publish --job-status success` as the last command of its
-build stage, which reaches it only when every artifact has been built.
+record. A job that failed before its checkout has no script to run, so its step adds only a notice.
+The record, `publication.json` and `publication.md`, lands in `$RUNNER_TEMP/kache-report`, which the
+kache report artifact uploads, and in the job summary. An image build runs `publish --job-status
+success` as the last command of its build stage, which reaches it only when every artifact has been
+built.
 
 No job runs `kache sync --push`. Kache's push-only sync lists every key under both prefixes before
 it decides what to push. On 2026-10-14 and 2026-10-15 that listing grew from 650,859 to 690,780
@@ -2742,10 +2760,11 @@ held by a consensus commit delay that only its scenario's cleanup releases.
 
 ### The CI Reserve
 
-The suite runs inside `just test-scenarios-coverage` in the CI `scenarios` job, after that job's
-instrumented server, CLI and paced simulation driver builds. The `tests` job runs at the same time
-on another runner. The `scenarios` job's `timeout-minutes` is 155, and the suite budget is derived
-from it so that the job ends on its own.
+The suite runs inside `just test-scenarios-coverage-run` in the CI `scenarios` job, after that job's
+build step, `just test-scenarios-coverage-build`, has built the instrumented server, CLI, paced
+simulation driver and scenario binary and the job has published its cache. The `tests` job runs at
+the same time on another runner. The `scenarios` job's `timeout-minutes` is 155, and the suite
+budget is derived from it so that the job ends on its own.
 
 For focused local coverage, `just coverage-scenarios <lcov-path> <scenario-options>` starts a
 fresh measurement. `just coverage-scenarios-append <lcov-path> <scenario-options>` retains the

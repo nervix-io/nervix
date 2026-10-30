@@ -1127,10 +1127,19 @@ build-client-conformance:
         ./node_modules/.bin/esbuild probe.ts --bundle --platform=node --format=esm \
             --target=es2022 --outfile="${artifacts}/node/probe.mjs")
 
+# Build the probes, the client library and the scenario suite the conformance run starts, so
+# `test-client-conformance-run` compiles nothing when it follows.
+build-client-conformance-tests: tests-deps build-client-conformance
+    cargo test --no-run --features testing --test scenarios
+
 # Run the cross-language client probes against in-process clusters. Every probe prints the same
 # report, which the scenario compares with its one expected report. Select runtimes with a tag
 # expression, for example `just test-client-conformance '@client_probe_python or @client_probe_java'`.
-test-client-conformance tags="@client_conformance_toolchain" *args: tests-deps build-client-conformance
+test-client-conformance tags="@client_conformance_toolchain" *args: build-client-conformance-tests
+    just test-client-conformance-run {{ quote(tags) }} {{ args }}
+
+# Run the conformance scenarios from what `build-client-conformance-tests` built.
+test-client-conformance-run tags="@client_conformance_toolchain" *args:
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -1171,7 +1180,21 @@ plexus-completion-walk-deep *args:
     cargo test -p nervix-plexus --test completion_walk -- \
       --report-only --signature-window 8 --max-states 1000000 {{ args }}
 
-test-coverage: tests-deps
+# Build every test binary the workspace coverage run executes, under the instrumentation of
+# `cargo llvm-cov` and into its target directory, so `test-coverage-run` compiles nothing. CI
+# publishes the job's cache between the two, so a slow or failed run leaves the build's cache
+# behind and a timeout names the phase it ended in.
+test-coverage-build: (test-coverage-phase "build")
+
+# Run the workspace's tests from the binaries `test-coverage-build` left, and write their coverage.
+test-coverage-run: (test-coverage-phase "run")
+
+test-coverage: test-coverage-build test-coverage-run
+
+# One list of the coverage invocations, so the build and the run cannot drift apart: a target the
+# build left out, or built with other flags, would compile during the run instead.
+[private]
+test-coverage-phase phase: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -1195,14 +1218,28 @@ test-coverage: tests-deps
     for package in "${mode_packages[@]}"; do
         workspace_exclusions+=(--exclude "${package}")
     done
-    cargo llvm-cov clean --workspace
-    cargo llvm-cov --no-report --all-targets --all-features --workspace \
-        "${workspace_exclusions[@]}"
+    case {{ quote(phase) }} in
+        build)
+            cargo llvm-cov clean --workspace
+            # The environment and target directory `cargo llvm-cov` builds with, so the run finds
+            # every binary current.
+            source <(cargo llvm-cov show-env --sh 2>/dev/null)
+            export CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }}
+            coverage() { cargo test --no-run "$@"; }
+            ;;
+        run)
+            coverage() { cargo llvm-cov --no-report "$@"; }
+            ;;
+        *)
+            echo "test-coverage-phase: phase must be build or run, not {{ phase }}" >&2
+            exit 2
+            ;;
+    esac
+    coverage --all-targets --all-features --workspace "${workspace_exclusions[@]}"
     # These server targets cover every server test except the scenario suite, which runs in its
     # own job.
-    cargo llvm-cov --no-report --lib --bins --benches --test harness_liveness \
-        --features testing --package nervix-server
-    cargo llvm-cov --no-report --all-targets \
+    coverage --lib --bins --benches --test harness_liveness --features testing --package nervix-server
+    coverage --all-targets \
         --package nervix-client-core \
         --package 'nervix-connector*' \
         --package nervix-consensus \
@@ -1212,25 +1249,38 @@ test-coverage: tests-deps
         --package nervix-model-harness \
         --package nervix-paced-simulation \
         --package nervix-wasm
-    cargo llvm-cov --no-report --all-targets --features native --package nervix-primitives
-    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
-    # The checkout path the report's sources lie below, which `coverage-merge` strips from them.
-    pwd -P > coverage-source-root.txt
+    coverage --all-targets --features native --package nervix-primitives
+    if [[ {{ quote(phase) }} == run ]]; then
+        cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
+        # The checkout path the report's sources lie below, which `coverage-merge` strips from them.
+        pwd -P > coverage-source-root.txt
+    fi
 
-test-scenarios-coverage: tests-deps
+# Build the scenario suite and the binaries its scenarios start, under the instrumentation of
+# `cargo llvm-cov` and into its target directory, so `test-scenarios-coverage-run` compiles nothing.
+test-scenarios-coverage-build: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov clean --workspace
     just coverage-cli-binary
     just coverage-deadlock-report-binary
-    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
-    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     just coverage-paced-simulation-binaries
-    export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
-    export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
+    source <(cargo llvm-cov show-env --sh 2>/dev/null)
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
+        cargo test --no-run --features testing --package nervix-server --test scenarios
+
+# Run the scenario suite from the binaries `test-scenarios-coverage-build` left, and write the
+# coverage of the suite and of the paced-simulation Python driver.
+test-scenarios-coverage-run: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
+    export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
     collection_dir="$(mktemp -d {{ quote(cargo_target_dir + "/paced-simulation-coverage.XXXXXX") }})"
     export COVERAGE_FILE="${collection_dir}/python.coverage"
     export PYTHONPATH="{{ justfile_directory() }}/scripts/paced_simulation_coverage${PYTHONPATH:+:${PYTHONPATH}}"
@@ -1243,6 +1293,8 @@ test-scenarios-coverage: tests-deps
         -o "{{ cargo_target_dir }}/paced-simulation/python.lcov"
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
     pwd -P > coverage-source-root.txt
+
+test-scenarios-coverage: test-scenarios-coverage-build test-scenarios-coverage-run
 
 # Remove collected profiles and instrumented workspace artifacts before collecting a new revision.
 # Append recipes retain artifacts, so a source move can otherwise leave stale line mappings beside

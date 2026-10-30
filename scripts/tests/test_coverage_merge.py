@@ -580,7 +580,7 @@ class WorkflowTests(unittest.TestCase):
                 self.assertIn("            coverage-source-root.txt\n", upload)
                 self.assertNotIn("            lcov.info\n", upload)
                 self.assertNotIn("pwd > coverage-source-root.txt", job)
-        for recipe in ("test-coverage", "test-scenarios-coverage", "coverage-report-workspace"):
+        for recipe in ("test-coverage-phase", "test-scenarios-coverage-run", "coverage-report-workspace"):
             with self.subTest(recipe=recipe):
                 body = recipe_body(self.justfile, recipe)
                 self.assertIn("--no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info", body)

@@ -566,6 +566,15 @@ class Publisher:
         return min(max(self.remaining(), 1.0), DAEMON_COMMAND_SECONDS)
 
     def publish(self, publication: Publication) -> None:
+        if publication.job_status == "cancelled":
+            # The kache action's post step, whose daemon stop drains queued uploads, runs only
+            # after a job that succeeded or failed, and a job that reaches its time limit is
+            # cancelled.
+            publication.finish(
+                Outcome.NOT_RUN,
+                ["The job's work ended with status `cancelled`. The kache action's post step does not run for a cancelled job, so uploads still queued end with the machine."],
+            )
+            return
         if publication.job_status != "success":
             publication.finish(
                 Outcome.NOT_RUN,

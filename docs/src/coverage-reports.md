@@ -226,10 +226,14 @@ ordinary producers' reports, and fails, writing no report, rather than publish a
 `just test-coverage` and `just test-scenarios-coverage` export `lcov-workspace.info` from every
 profile they collected with `--no-default-ignore-filename-regex`, which keeps every workspace crate
 and the test sources the run executed. Each writes the absolute checkout path it ran in to
-`coverage-source-root.txt` beside the report. `just coverage-report-workspace` writes the same pair
-from the profiles a focused recipe collected. CI uploads the pair as the `coverage-tests` and
-`coverage-scenarios` artifacts, the second with the Python paced drivers' report, and the
-extra-tests job uploads its native collections and Python tooling reports as
+`coverage-source-root.txt` beside the report. Each is a build recipe followed by a run recipe:
+`test-coverage-build` and `test-scenarios-coverage-build` compile every binary under the
+instrumentation and into the target directory of `cargo llvm-cov`, and `test-coverage-run` and
+`test-scenarios-coverage-run` run them and export the report, compiling nothing. CI runs the two as
+separate steps and publishes the job's cache between them. `just coverage-report-workspace` writes
+the same pair from the profiles a focused recipe collected. CI uploads the pair as the
+`coverage-tests` and `coverage-scenarios` artifacts, the second with the Python paced drivers'
+report, and the extra-tests job uploads its native collections and Python tooling reports as
 `coverage-native-extras`. The coverage job then runs:
 
 ```bash
