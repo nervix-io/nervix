@@ -190,16 +190,7 @@ coverage-bolero-restore duration="30": build-web-console
 
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
-# Everything a scenario starts. A test builds nothing itself: it starts what these recipes built.
-tests-deps: test-tools build-scenario-images
-
-# The tools the tests run, for a recipe whose tests start no container.
-test-tools: build-deps build-plexus-format build-test-cli build-paced-simulation build-deadlock-report
-
-# Build the images the scenarios start that no registry holds. The context is the one directory the
-# image copies, and `docker/mock-server/Dockerfile` names its files from the repository root.
-build-scenario-images:
-    tar --create docker/mock-server | docker build --tag nervix-cucumber-mock-server:scenario --file docker/mock-server/Dockerfile -
+tests-deps: build-deps build-plexus-format build-test-cli build-paced-simulation build-deadlock-report
 
 build-deadlock-report:
     CARGO_TARGET_DIR={{ cargo_target_dir }} cargo build --package nervix-deadlock --features report-tool --bin nervix-deadlock-report
@@ -404,7 +395,7 @@ test-diagnostic-scenarios selection feature *args: tests-deps
     fi
 
 # Run focused harness regressions against a diagnostic build without changing its execution mode.
-test-diagnostic-harness selection *args: test-tools
+test-diagnostic-harness selection *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     case {{ quote(selection) }} in
@@ -422,7 +413,7 @@ test-diagnostic-harness selection *args: test-tools
     fi
 
 # Run focused library owners in a diagnostic selection and qualify their retained process evidence.
-test-diagnostic-lib selection test *args: test-tools
+test-diagnostic-lib selection test *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     case {{ quote(selection) }} in
@@ -530,7 +521,7 @@ test-endpoint-intake *args: build-web-console download-onnxruntime
 test-web-console *args:
     CARGO_TARGET_DIR={{ cargo_target_dir }} cargo test --package nervix-web-console --bin nervix-web-console -- {{ args }}
 
-test-harness-liveness *args: test-tools
+test-harness-liveness *args: tests-deps
     cargo test --package nervix-scenarios --test harness_liveness -- {{ args }}
 
 # Measure native consensus transport regressions through the configured compiler cache.
@@ -586,14 +577,14 @@ docs-screenshots: build-web-console
       --cli "{{ cargo_target_dir }}/debug/nervix-cli" \
       --output "{{ cargo_target_dir }}/docs-screenshots"
 
-test-lib *args: test-tools
+test-lib *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --lib -- {{ args }}
 
 # Run the Arrow-to-Row correctness cases and print the typed encoding's allocation evidence.
-test-subscription-rows: test-tools
+test-subscription-rows: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -1244,7 +1235,7 @@ test-coverage: test-coverage-build test-coverage-run
 # One list of the coverage invocations, so the build and the run cannot drift apart: a target the
 # build left out, or built with other flags, would compile during the run instead.
 [private]
-test-coverage-phase phase: test-tools
+test-coverage-phase phase: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -1371,7 +1362,7 @@ test-scenarios-coverage-unpack archive:
 # Run one shard, written INDEX/COUNT, of the scenario suite from the executables a restored archive
 # holds, and write the coverage of the shard and of the paced-simulation Python driver. It compiles
 # nothing: it runs the scenario executable directly, so a shard needs neither the build nor a cache.
-test-scenarios-coverage-shard shard: build-scenario-images
+test-scenarios-coverage-shard shard:
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -1493,7 +1484,7 @@ coverage-patch base="origin/main" report="lcov-workspace.info" *args:
     python3 -m scripts.patch_coverage --base {{ quote(base) }} --report {{ quote(report) }} --output {{ quote(cargo_target_dir + "/patch-coverage.md") }} {{ args }}
 
 # Measure ordinary harness regressions separately from product coverage and diagnostic profiles.
-coverage-harness-liveness *args: test-tools
+coverage-harness-liveness *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"

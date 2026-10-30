@@ -4,6 +4,5 @@ disallowed-methods = [
 disallowed-types = [
   { path = "std::collections::HashMap", reason = "use ahash::HashMap instead" },
   { path = "std::collections::HashSet", reason = "use ahash::HashSet instead" },
-  { path = "testcontainers::GenericBuildableImage", reason = "a test builds nothing: `just build-scenario-images` builds the images a test starts", allow-invalid = true },
   { path = "humantime::Duration", reason = "its FromStr reads through humantime::parse_duration; read duration text through nervix_models::parse_duration_text", allow-invalid = true },
 ]

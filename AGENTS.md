@@ -1287,12 +1287,15 @@ build and the existing tests, and nothing in it changes behavior.
   process joins `ProcessProgram` the same way rather than becoming a binary. The one exception is a
   test whose subject is one particular build, such as the client protocol's release baseline: the
   recipe that runs it builds that server and names it to the test.
-- A test triggers no build. It never runs Cargo, a compiler, a package manager or `docker build`,
-  and never builds an image through testcontainers. `just` builds everything a test starts before
-  the test starts: a tool joins `test-tools`, an image joins `build-scenario-images`, and either
-  joins what `scripts/scenario_shards.py` packs or what `test-scenarios-coverage-shard` prepares,
-  because a shard has no toolchain. A failed build is then reported as a build failure, a test's
-  deadlines measure the test, and the suite runs from one build wherever it is restored.
+- A test compiles nothing. It never runs Cargo, a compiler or a package manager. `just` builds every
+  tool a test starts before the test starts: a tool joins `tests-deps` and what
+  `scripts/scenario_shards.py` packs, because a shard has no toolchain. A failed build is then
+  reported as a build failure, a test's deadlines measure the test, and the suite runs from one
+  build wherever it is restored.
+- Testcontainers fully handles every dependency a test needs. `crates/test-environment` declares
+  each service, and testcontainers pulls or builds its image and starts it on first use. A recipe,
+  workflow or CI step never prepares, starts or stops a dependency, and running the tests needs no
+  step before them for it.
 
 ### Repository commands and documentation
 

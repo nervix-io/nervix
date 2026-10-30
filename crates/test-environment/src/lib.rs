@@ -37,17 +37,18 @@ use nervix_primitives::sync::StdArc;
 use nervix_recovery::Discarded as _;
 use tempfile::{NamedTempFile, TempDir, tempdir, tempdir_in};
 use testcontainers::{
-    ContainerAsync, ContainerRequest, CopyTargetOptions, GenericImage, Image, ImageExt,
-    ReuseDirective, TestcontainersError,
+    ContainerAsync, ContainerRequest, CopyTargetOptions, GenericBuildableImage, GenericImage,
+    Image, ImageExt, ReuseDirective, TestcontainersError,
     bollard::{
         Docker, errors::Error as DockerError, query_parameters::RemoveContainerOptionsBuilder,
     },
     core::{
-        CmdWaitFor, ContainerPort, ContainerState, ExecCommand, IntoContainerPort, WaitFor,
+        BuildImageOptions, CmdWaitFor, ContainerPort, ContainerState, ExecCommand,
+        IntoContainerPort, WaitFor,
         client::ClientError,
         wait::{HttpWaitStrategy, LogWaitStrategy},
     },
-    runners::AsyncRunner,
+    runners::{AsyncBuilder, AsyncRunner},
 };
 use thiserror::Error;
 
@@ -1173,8 +1174,16 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             return Ok(());
         }
         let tls = self.ensure_tls()?.clone();
-        // `just build-scenario-images` builds this image: a test only starts what a recipe built.
-        let image = GenericImage::new("nervix-cucumber-mock-server", "scenario");
+        let workspace_root = workspace_root();
+        let image = GenericBuildableImage::new("nervix-cucumber-mock-server", "prometheus-vectors")
+            .with_dockerfile(workspace_root.join("docker/mock-server/Dockerfile"))
+            .with_file(
+                workspace_root.join("docker/mock-server/app.py"),
+                "docker/mock-server/app.py",
+            )
+            .build_image_with(BuildImageOptions::new().with_skip_if_exists(true))
+            .await
+            .map_err(testcontainers_error("mock server image build"))?;
         let container = self
             .start_container("mock-server", 8080.tcp(), "mock server", || {
                 image
