@@ -277,7 +277,10 @@ pub struct Application {
 
 /// Runs this process as the server, from its own command line to its exit. The `nervix-server`
 /// executable is this call, and a test process that re-executes itself under the server's name
-/// makes the same call, so a real process in a test starts the way a deployed one does.
+/// makes the same call, so a real process in a test starts the way a deployed one does. No Shuttle
+/// model runs a whole process and Shuttle's runtime has no stack size to set, so a Shuttle build has
+/// no such entry point.
+#[cfg(not(feature = "shuttle"))]
 pub fn run_server_process() -> Result<(), Report<AppError>> {
     let args = Args::parse();
     // Registered before any other thread exists, so neither SIGINT nor SIGTERM can end the process
