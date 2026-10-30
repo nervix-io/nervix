@@ -575,7 +575,8 @@ choose a backend.
   or reconfigures it for a node or a test. Every other family of the build stays ordinary.
 - A package that owns a `shuttle`, `loom`, `turmoil` or `deloxide` feature depends on
   `nervix-primitives` directly and forwards the mode to it and to every workspace dependency that
-  owns the same mode.
+  owns the same mode. A package of test targets alone does so through its dev-dependencies, which
+  are what its builds link.
   Cargo unifies features, so ordinary and modeled suites run in separate build invocations with
   explicit features; a workspace-wide `--all-features` command excludes every package that owns a
   mode.
@@ -1272,6 +1273,26 @@ build and the existing tests, and nothing in it changes behavior.
   an instant captured earlier only holds on an idle machine.
 - Browser behavior is tested through the standard web-console cucumber suite and Playwright-facing
   steps, not by bypassing the public browser flow.
+- The scenario suite and the harness regressions are the `nervix-scenarios` package rooted at
+  `tests/`, which has test targets only and dev-dependencies only. Cargo builds a package's binaries
+  for that package's integration tests, so a test target added to `nervix-server` links the whole
+  server a second time, and a normal dependency would carry the server's `testing` feature into
+  ordinary builds.
+- Scenarios run nodes in-process, as Rust values. A test whose subject is a process, such as its
+  signals, exit status, command line, open-file limit or crash, runs its own executable again:
+  `tests/common/process_program.rs` starts `current_exe` with `arg0` set to `nervix-server`, and
+  `main` reads `arg0` before anything else and calls `run_server_process`, the entry point the
+  `nervix-server` executable's own `main` calls. A test never uses `CARGO_BIN_EXE_nervix-server`,
+  looks for a server binary in a target directory, or needs a recipe to build one. A new helper
+  process joins `ProcessProgram` the same way rather than becoming a binary. The one exception is a
+  test whose subject is one particular build, such as the client protocol's release baseline: the
+  recipe that runs it builds that server and names it to the test.
+- A test triggers no build. It never runs Cargo, a compiler, a package manager or `docker build`,
+  and never builds an image through testcontainers. `just` builds everything a test starts before
+  the test starts: a tool joins `test-tools`, an image joins `build-scenario-images`, and either
+  joins what `scripts/scenario_shards.py` packs or what `test-scenarios-coverage-shard` prepares,
+  because a shard has no toolchain. A failed build is then reported as a build failure, a test's
+  deadlines measure the test, and the suite runs from one build wherever it is restored.
 
 ### Repository commands and documentation
 
