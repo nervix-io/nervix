@@ -3777,7 +3777,7 @@ docker-build-linux image_target llvm_version tag platform push cache_from cache_
         --target {{ quote(image_target) }} \
         --progress=plain \
         --platform "${normalized_platform}" \
-        --build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.1}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.2}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg LLVM_VERSION={{ quote(llvm_version) }} \
         --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}" \

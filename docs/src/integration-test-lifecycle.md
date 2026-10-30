@@ -690,7 +690,7 @@ physical SSD latency. Reported MHz and cpufreq policy values do not measure effe
 clocks. Low steal alone does not show a host is fast: CPU execution, cache/memory contention and
 storage can slow work without stolen time. The samples support comparison, not a specific cause.
 
-Every kache-backed job uses kache 1.2.1, records `doctor` output without making it a test failure,
+Every kache-backed job uses kache 1.2.2, records `doctor` output without making it a test failure,
 and publishes a cache report whatever its outcome, a timeout included. The report reads the last six
 hours of kache's events for every build on the machine: no kache-backed job may run longer, and each
 runs on a machine of its own, so the report covers the whole job, its tool builds included, and
@@ -703,7 +703,7 @@ compiling in another process, restoring and storing outputs, looking up the cach
 wrapper, and time kache attributes to no phase. It names what moved to and from the remote: the
 downloads with their sizes and their times on average, at the 95th percentile and at most, the wait
 for a transfer slot, and the uploads. It adds kache's own reading of the window and diagnoses the
-five most expensive misses with `why-miss`. A job that builds before it runs also reports right
+five most expensive misses with `kache explain`. A job that builds before it runs also reports right
 after its build, so its summary shows what the build compiled and what the cache served apart from
 what the run did, and a slow job reads as slow compilation, a cache that missed, cache hits that
 were slow, or a slow run. The shared S3 cache keeps executable and test-binary outputs. The report
@@ -782,7 +782,7 @@ lock, so Cargo recognizes it for guarded cleanup. Later phases rebuild any requi
 through the configured cache.
 
 Native CI jobs and the BuildKit builder also set `KACHE_AUTO_RECOVER_MIN_FREE_BYTES=68719476736`
-(64 GiB). Kache 1.2.1 otherwise disables free-space recovery in CI. This floor enables reclamation
+(64 GiB). Kache 1.2.2 otherwise disables free-space recovery in CI. This floor enables reclamation
 of eligible cached artifacts when free space falls below it, while the cache budget above scales
 with the actual cache filesystem. Artifacts still shared with active build targets are retained;
 target-directory recovery stays disabled. The floor is a trigger checked at kache's existing

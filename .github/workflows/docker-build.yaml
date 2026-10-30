@@ -27,7 +27,7 @@ env:
   LC_ALL: C.UTF-8
   # scripts/kache_remote.py lets each job's local store hold a quarter of its cache volume, so a
   # runner's disk still sets the store's budget.
-  KACHE_VERSION: "1.2.1"
+  KACHE_VERSION: "1.2.2"
   KACHE_REMOTE_KEY_LISTING: "false"
   # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
   KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "68719476736"

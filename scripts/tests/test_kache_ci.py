@@ -169,7 +169,7 @@ class KacheWorkflowTests(unittest.TestCase):
         manifest_keys = []
         for path in WORKFLOWS:
             workflow = path.read_text()
-            self.assertIn('KACHE_VERSION: "1.2.1"', workflow_env(workflow))
+            self.assertIn('KACHE_VERSION: "1.2.2"', workflow_env(workflow))
             self.assertIn('KACHE_REMOTE_KEY_LISTING: "false"', workflow_env(workflow))
             self.assertIn(
                 f'KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "{CACHE_RECOVERY_BYTES}"', workflow_env(workflow)
@@ -286,7 +286,7 @@ class KacheWorkflowTests(unittest.TestCase):
     def test_the_report_records_health_and_the_costliest_misses(self) -> None:
         report_script = Path("scripts/publish_kache_report.py").read_text()
         self.assertIn('run("kache", "doctor")', report_script)
-        self.assertIn('run("kache", "why-miss", crate)', report_script)
+        self.assertIn('run("kache", "explain", crate)', report_script)
         self.assertIn('"kache", "report", "--format", "json", "--since", f"{REPORT_WINDOW_HOURS}h"', report_script)
         # Kache leaves the remote transfers out of a report filtered by a build tree.
         self.assertNotIn('"--root"', report_script)
@@ -296,8 +296,9 @@ class KacheWorkflowTests(unittest.TestCase):
             "timeline": {
                 "event_count": 10,
                 "duration_ms": 120_000,
-                "start_time": "2026-10-29T21:43:35.902854025+00:00",
-                "end_time": "2026-10-29T21:45:35.100000000+00:00",
+                # 2026-10-29T21:43:35.902Z and 2026-10-29T21:45:35.100Z.
+                "start_unix_ms": 1_793_310_215_902,
+                "end_unix_ms": 1_793_310_335_100,
             },
             "summary": {
                 "total_crates": 9,
@@ -408,9 +409,9 @@ class KacheWorkflowTests(unittest.TestCase):
             self.assertIn(f'--build-arg "{name}=${{{name}}}"', justfile)
             self.assertIn(f'"${{{name}:?{name} is required}}"', justfile)
             self.assertIn(f"ARG {name}\n", dockerfile)
-        self.assertIn('--build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.1}"', justfile)
+        self.assertIn('--build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.2}"', justfile)
 
-        self.assertIn("ARG KACHE_VERSION=1.2.1", dockerfile)
+        self.assertIn("ARG KACHE_VERSION=1.2.2", dockerfile)
         self.assertIn("COPY scripts/kache_remote.py ./scripts/kache_remote.py", dockerfile)
         self.assertIn("COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py", dockerfile)
         self.assertIn("ENV RUSTC_WRAPPER=kache", dockerfile)

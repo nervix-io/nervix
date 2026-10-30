@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import datetime
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -57,10 +57,12 @@ def gibibytes(size: float) -> str:
     return f"{size / 1024**3:.1f} GiB"
 
 
-def clock_time(timestamp: str) -> str | None:
-    """The hour and minute of one of kache's RFC 3339 timestamps, which it writes in UTC."""
-    match = re.search(r"T(\d{2}:\d{2})", timestamp)
-    return match.group(1) if match else None
+def clock_time(unix_ms: object) -> str | None:
+    """The UTC hour and minute of one of kache's millisecond Unix timestamps."""
+    if not isinstance(unix_ms, int):
+        return None
+    moment = datetime.datetime.fromtimestamp(unix_ms / 1000, tz=datetime.UTC)
+    return moment.strftime("%H:%M")
 
 
 @dataclass(frozen=True)
@@ -108,8 +110,8 @@ class CompileTime:
             return None
         return cls(
             window_ms=float(timeline.get("duration_ms", 0)),
-            started=clock_time(str(timeline.get("start_time", ""))),
-            ended=clock_time(str(timeline.get("end_time", ""))),
+            started=clock_time(timeline.get("start_unix_ms")),
+            ended=clock_time(timeline.get("end_unix_ms")),
             cacheable=int(summary.get("total_crates", 0)),
             local_hits=int(summary.get("local_hits", 0)),
             prefetch_hits=int(summary.get("prefetch_hits", 0)),
@@ -319,8 +321,8 @@ def main(arguments: Sequence[str] | None = None) -> None:
             markdown.extend(["", "### Top misses", ""])
         for miss in misses:
             crate = miss["crate_name"]
-            diagnosis = run("kache", "why-miss", crate)
-            (destination / f"why-miss-{crate}.txt").write_text(
+            diagnosis = run("kache", "explain", crate)
+            (destination / f"explain-{crate}.txt").write_text(
                 diagnosis.stdout + diagnosis.stderr
             )
             markdown.extend(
