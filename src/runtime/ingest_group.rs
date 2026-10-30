@@ -53,8 +53,6 @@ pub(in crate::runtime) enum IngestGroupRecordOperation {
 
 #[derive(Debug, Clone, Copy, strum::Display)]
 pub(in crate::runtime) enum IngestMetadataOperation {
-    #[strum(serialize = "open ingest metadata")]
-    Open,
     #[strum(serialize = "append ingest metadata")]
     Append,
     #[strum(serialize = "finish ingest metadata")]
@@ -468,7 +466,8 @@ pub(super) struct IngestGroupRows {
 /// accepts the payloads that did decode, giving every message of each payload the payload's
 /// metadata row and a share of its ACK set.
 pub(super) struct PendingIngestGroup {
-    pub(super) scope: IngestorMetadataScope,
+    /// Which declared metadata fields the ingestor's programs read, so its builders build those.
+    pub(super) projection: Arc<IngestMetadataProjection>,
     /// The number of rows the group is expected to reach, used to size its builders.
     pub(super) row_bound: usize,
     pub(super) records: Option<RuntimeRecordBatchBuilder>,
@@ -484,9 +483,9 @@ pub(super) struct PendingIngestGroup {
 }
 
 impl PendingIngestGroup {
-    pub(super) fn new(scope: IngestorMetadataScope, row_bound: usize) -> Self {
+    pub(super) fn new(projection: Arc<IngestMetadataProjection>, row_bound: usize) -> Self {
         Self {
-            scope,
+            projection,
             row_bound,
             records: None,
             decoder: JsonDecoder::default(),
@@ -589,13 +588,10 @@ impl PendingIngestGroup {
         }
 
         if self.metadata.is_none() {
-            self.metadata = Some(
-                IngestMetadataBuilders::new(self.scope, self.row_bound).change_context(
-                    IngestGroupError::Metadata {
-                        operation: IngestMetadataOperation::Open,
-                    },
-                )?,
-            );
+            self.metadata = Some(IngestMetadataBuilders::new(
+                self.projection.clone(),
+                self.row_bound,
+            ));
         }
         let builders = self
             .metadata
@@ -783,10 +779,10 @@ pub(super) struct IngestorMessageError<'a> {
 ///
 /// A source decodes each payload into the open group with `decode_payload` and accepts the payloads
 /// that decoded with `collect`, so the group's records, metadata and ACKs stay row-aligned. The
-/// metadata schema is fixed by the source's scope when the ingestor starts, so every group the
-/// collector opens builds the same columns.
+/// metadata projection is fixed when the ingestor binds its programs, so every group the collector
+/// opens builds the same columns.
 pub(super) struct IngestRouteCollector {
-    pub(super) scope: IngestorMetadataScope,
+    pub(super) projection: Arc<IngestMetadataProjection>,
     /// The number of rows a group is expected to reach, used to size its metadata builders.
     pub(super) row_bound: usize,
     pub(super) context: Option<IngestGroupContext>,
@@ -801,22 +797,23 @@ pub(super) struct IngestRouteCollector {
 }
 
 impl IngestRouteCollector {
-    /// Opens a collector for a source of `scope` whose groups close at `row_bound` rows.
+    /// Opens a collector whose groups build the metadata columns `projection` reads and close at
+    /// `row_bound` rows.
     ///
     /// Sources that flush one group per message or per poll pass their own bound so a
     /// short group does not size its builders for a streaming one.
     pub(super) fn new(
-        scope: IngestorMetadataScope,
+        projection: Arc<IngestMetadataProjection>,
         row_bound: usize,
         metrics: MessageMetricsHandle,
     ) -> Self {
         Self {
-            scope,
+            pending: PendingIngestGroup::new(projection.clone(), row_bound),
+            projection,
             row_bound,
             context: None,
             metrics,
             routing: None,
-            pending: PendingIngestGroup::new(scope, row_bound),
             routed: IndexMap::with_hasher(RandomState::default()),
             flush_at: None,
             input_refused: false,
@@ -925,7 +922,7 @@ impl IngestRouteCollector {
         );
         let pending = std::mem::replace(
             &mut self.pending,
-            PendingIngestGroup::new(self.scope, self.row_bound),
+            PendingIngestGroup::new(self.projection.clone(), self.row_bound),
         );
         Ok(Some((context, pending.into_rows()?)))
     }
@@ -1681,7 +1678,12 @@ impl Runtime {
         // Resolve the event timestamp once from the decoded Arrow batch. The window kernel
         // produces one bit per row, so a rejected event does not discard its admitted neighbors.
         let event_timestamps = ingestion_time
-            .select_column(timestamp_source, &rows.batch, &rows.record_metadata)
+            .select_column(
+                timestamp_source,
+                &rows.batch,
+                &rows.record_metadata,
+                &rows.ingest_metadata,
+            )
             .change_context(IngestGroupError::IngestionTime {
                 domain: domain.clone(),
                 ingestor: ingestor.clone(),
@@ -1689,7 +1691,11 @@ impl Runtime {
         let admitted = ingestion_time.admit_column(&event_timestamps);
         let error_fields = match timestamp_source {
             Some(IngestTimestampSource::At(field)) => vec![FieldPath::new(field.as_str())],
-            _ => Vec::new(),
+            Some(IngestTimestampSource::AtMetadata(field)) => vec![FieldPath::new(format!(
+                "{INGEST_METADATA_NAMESPACE}.{}",
+                field.as_str()
+            ))],
+            Some(IngestTimestampSource::Now) | None => Vec::new(),
         };
         if admitted.count_set_bits() != rows.len() {
             for row in 0..rows.len() {
@@ -2110,7 +2116,7 @@ impl Runtime {
             filter_where: filter_where.cloned(),
         };
         let mut collector =
-            IngestRouteCollector::new(IngestorMetadataScope::Headers, row_count, metrics.clone());
+            IngestRouteCollector::new(IngestMetadataProjection::none(), row_count, metrics.clone());
         let routing =
             collector
                 .routing_snapshot(self, domain)

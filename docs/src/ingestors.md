@@ -41,7 +41,7 @@ ingestor and create it again. `DROP INGESTOR`, `DESCRIBE INGESTOR`, `SHOW CREATE
 CREATE [IF NOT EXISTS] <CONNECTOR> <ENTITY> INGESTOR <name>
   FROM <body>
   [DECODE USING <codec>]
-  [TIMESTAMP NOW | TIMESTAMP AT <field>]
+  [TIMESTAMP NOW | TIMESTAMP AT <field> | TIMESTAMP AT metadata.<field>]
   [FILTER WHERE <expression>]
   TO <relay> <route body>
   [TO <relay> <route body> ...]
@@ -112,8 +112,12 @@ acknowledgement of any of those records negatively acknowledges the payload.
 `ACK PARALLEL MAX <n>` windows count payloads. A client ingestor's payload is one submitted batch.
 
 Timestamp selection and admission use one domain execution snapshot when the source group is
-delivered. `TIMESTAMP NOW` records that snapshot. `TIMESTAMP AT <field>` and connector-owned event
-timestamps preserve the external instant exactly; `TIME RATE` never scales them. The internal low
+delivered. `TIMESTAMP NOW` records that snapshot. `TIMESTAMP AT <field>` reads a decoded payload
+field and `TIMESTAMP AT metadata.<field>` a metadata field the source's entity declares; the field
+must be `DATETIME`, and `CREATE` and `ALTER` refuse an undeclared metadata field or one of another
+type, naming the fields the entity declares. A message that carries no value for the field is
+rejected as a null payload timestamp is. These and connector-owned event timestamps preserve the
+external instant exactly; `TIME RATE` never scales them. The internal low
 and high watermarks initially equal the selected event time, so source event time remains distinct
 from delivery and observation time throughout the graph. The 5 ms source-idle close and the
 `FLUSH IMMEDIATE` 100 µs minimum are physical monotonic waits. `FLUSH EACH` and paced admission use
@@ -182,6 +186,7 @@ ALTER <CONNECTOR> <ENTITY> INGESTOR <ingestor>
   | SET DECODE USING <codec>
   | SET TIMESTAMP NOW
   | SET TIMESTAMP AT <field>
+  | SET TIMESTAMP AT metadata.<field>
   | DROP TIMESTAMP
   | SET FILTER WHERE <expression>
   | DROP FILTER WHERE
@@ -480,9 +485,18 @@ General notes:
 - nested predicates and nested/chained builtin calls are supported
 - leader-side validation requires every required output and branch field to be initialized
 - public Models store structured expressions; the runtime never reparses Plexus
-- source-specific transport metadata may be exposed through `metadata.<field>` when the ingestor
-  supports it; `KAFKA TOPIC` provides `metadata.topic`, `metadata.partition`, and
-  `metadata.offset`, while `SYSLOG LISTENER` provides `metadata.peer_addr`
+- each source entity declares the typed transport metadata its messages expose as
+  `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
+  `metadata.topic`, `metadata.partition`, and `metadata.offset`, `SYSLOG LISTENER` declares
+  `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`, and
+  `WEBSOCKETS CONNECTION` declares `metadata.frame_type`; every field is optional and none is
+  sensitive
+- a route expression may read any declared field; `CREATE` and `ALTER` refuse a route that reads a
+  field its entity does not declare, naming the ingestor, the route's relay and the fields the
+  entity does declare. `FILTER WHERE` reads headers but not `metadata.<field>`
+- an ingestor builds a metadata column only for the fields its route expressions or its
+  `TIMESTAMP AT metadata.<field>` read, so an ingestor that reads none spends nothing per message
+  on metadata
 - supported sources expose transport headers through `read_header(name)` and `read_headers(name)`;
   header names may be any `STRING` expression, and these functions may be used in both top-level
   `FILTER WHERE` and per-route expressions

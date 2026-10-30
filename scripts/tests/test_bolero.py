@@ -143,6 +143,7 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "clickhouse-client-tls-pairing",
             "client-config-schema",
             "connector-entity-presentation",
             "console-ingestor-source-drafts",
@@ -215,6 +216,7 @@ class InventoryTests(unittest.TestCase):
             "models-external-name-validation",
             "models-connector-declarations",
             "websocket-retained-metadata",
+            "ingest-metadata-projection",
             "websocket-client-config",
             "websocket-upgrade-headers",
             "models-timestamps",

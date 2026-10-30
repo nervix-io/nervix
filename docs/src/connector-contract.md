@@ -96,7 +96,10 @@ guarantee. An impossible mapped type is not a retryable connector initialization
 
 The registry checks these declarations against the candidate graph before accepting `CREATE` or
 `ALTER`. It rejects duplicate `VALUES` keys, unsupported or wrongly typed mappings, and invalid
-transport-ingestor delivery durations before any ingestor or emitter opens. ACK timeouts and retry
+transport-ingestor delivery durations before any ingestor or emitter opens. Expression inference
+precedes the mapped-type check. An expression that cannot infer a type, including a null-only
+mapping, is refused with its declared section and destination key and retains the typed VM cause.
+ACK timeouts and retry
 durations must be positive; a zero batch timeout gathers without waiting. Every duration must fit
 the shared schedulable deadline bound, and retry maximum must be at least its initial backoff.
 OTEL `RESOURCE` mappings remain literal-only. Required batching is established by validation, so
@@ -789,7 +792,7 @@ remain in their owning work records until that delivery.
 
 | Side | What the entity declares |
 | --- | --- |
-| Ingestor | Header reads, the typed metadata scope, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
+| Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
 | Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership. The declaration explicitly names delegated property namespaces and reserved keys. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
@@ -1108,9 +1111,9 @@ surfaces and parses its declared acknowledgement before any connector instance o
 that fails leaves nothing running.
 
 A source plan combines connector-specific settings, validated capabilities, and the host's ACK
-policy. Capabilities state whether header reads are available, which typed metadata scope exists,
-whether quiesce is supported, the nonzero instance count, the supported acknowledgement mode, and
-the position class the source's entity declares.
+policy. Capabilities state whether header reads are available, whether quiesce is supported, the
+nonzero instance count, the supported acknowledgement mode, and the position class the source's
+entity declares.
 The source owns `open`, `suspend`, `resume`, `close`, the next broker batch or scheduled poll, and
 the meaning of acknowledging or rejecting its own position. A broker message lends its payload,
 headers, typed metadata, and transport position to the host. Positions remain connector-owned;
@@ -1120,21 +1123,44 @@ returns; see [Confirmed acknowledgements](#confirmed-acknowledgements).
 
 A client source's plan is not a connector plan: it carries the input schema, its compiled form, the
 producer policy of window, ACK timeout, and retry backoff, and the endpoint contract digest producers
-attach to. It declares no header or metadata scope and supports only `SUSPEND`.
+attach to. It declares no header model or metadata field and supports only `SUSPEND`.
 
-The metadata boundary has distinct header, WebSockets, Kafka, and Syslog scopes. WebSockets carries
-the text or binary frame kind and upgrade-response headers; Kafka carries topic, partition, offset,
-and headers; Syslog carries the peer address. The scopes, and the fields of
-each with their exact types, are declared once in the vocabulary, and each source entity names the
-scope its messages expose. Registry validation reads that declaration for the fields an ingestor's
-programs may name, the host builds its metadata columns from the same fields, and a connector's
-metadata row names the scope it carries, so the three cannot disagree. Transport headers are visited
-from the borrowed message in the order the entity's [header model](#header-models) declares. The
-host copies them only when the quiesce control decides on a payload, which may retain it, or a
-WebSocket session must retain them after the source message ends. HTTP endpoint and polling headers,
-WebSocket upgrade headers, Kafka record headers, NATS headers, Pulsar properties, RabbitMQ AMQP
-headers, and SQS attributes keep their transport's own semantics; other connector and entity pairs
-carry no transport headers.
+Each source entity declares its typed metadata fields beside its other capabilities in the
+vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the response status and
+the poll's scheduled instant, `WEBSOCKETS CONNECTION` the frame kind, `KAFKA TOPIC` the topic,
+partition and offset, `SYSLOG LISTENER` the peer address, and every other entity none. Registry
+validation reads that declaration for the fields an ingestor's route programs and its
+`TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
+connector's message hands the host the value of every declared field in declared order, one typed
+call per field into the host's value sink, so the three cannot disagree. A value is a `STRING`,
+`BYTES`, `BOOL`, `U16`, `I32`, `I64` or `DATETIME`, or absent where the message carries none; a
+`STRING` such as a socket address may be written into the column in place instead of being
+allocated per message. A message that hands over another number of values than its entity declares,
+or a value of another type than its field's, is a connector defect the host refuses as a typed
+metadata error. A connector adds a field by declaring it and handing its value over: neither the
+contract nor the host names any connector's fields.
+
+The host projects metadata lazily. When an ingestor binds its programs, the host records which
+declared fields its route programs and its `TIMESTAMP AT metadata.<field>` read, and every ingest
+group of the ingestor builds Arrow columns for those fields and no others. A group of an ingestor
+that reads none visits no metadata value at all. Transport headers keep their projection whatever
+the programs read, because an ingestor's error-route programs may call `read_header` and are
+compiled with the domain's routing, outside the source host.
+
+Beside its fields and headers, a message names the position its transport gives it, where the
+transport has one: a Kafka record's topic, partition and offset, or a syslog frame's peer. It is the
+transport's own coordinate, never a header value its sender wrote, and a decode rejection names it.
+A paced source returns each polled message owned, its declared values already copied.
+
+Transport headers are visited from the borrowed message in the order the entity's
+[header model](#header-models) declares. The host copies them only when the quiesce control decides
+on a payload, which may retain it, or a WebSocket session must retain them after the source message
+ends. A retained payload keeps the value of every field its entity declares, whichever the programs
+read, and its position, so a replayed message builds the same columns a delivered one would; a
+WebSocket frame keeps its connection's exact header snapshot by reference rather than a copy. HTTP
+endpoint and polling headers, WebSocket upgrade headers, Kafka record headers, NATS headers, Pulsar
+properties, RabbitMQ AMQP headers, and SQS attributes keep their transport's own semantics; other
+connector and entity pairs carry no transport headers.
 `read_header` and `read_headers` are validated against that declaration, and header values do not
 travel through relays unless an ingestor writes them into schema-backed fields. See
 [Header Context](./ingestors.md#header-context) for the exact expression behavior. The session
@@ -1142,10 +1168,6 @@ completion resolver uses the same vocabulary source capability before the full i
 so it offers those functions only for sources that can read headers. Its emitter `INVOKE`
 completion similarly uses the vocabulary emitter capability to offer `write_header` only for emitters that
 can write headers. Runtime validation remains authoritative.
-
-The host checks the WebSockets frame-label byte capacity before opening its Arrow metadata builder.
-An unaddressable row-bound estimate returns a typed metadata error through the group's opening
-operation and its general-error policy.
 
 The source host decodes consecutive payloads into one ingest group's Arrow builders. For a
 schemaful JSON codec, that group also owns mutable payload scratch and simd-json parser buffers;
