@@ -7,7 +7,7 @@
 //!   convergence, cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
 //!   Iceberg-catalog-gate, backup phase, materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag,
 //!   runner-offload, Syslog TLS sender, server-executable, stallable-TCP-proxy, unaccepted-address,
-//!   process-observation, process-report, WebSocket close-reply, console-connection and WebSocket peer regressions
+//!   process-observation, process-program, process-report, WebSocket close-reply, console-connection and WebSocket peer regressions
 //!   with Rust's test runner, and the stand-in nodes, clients, images and processes those regressions
 //!   talk to.
 //!   It also owns registration of generator cadence, paced-interconnect cadence, bounded
@@ -16,7 +16,7 @@
 //!   port-pool, node-bound address, process-cluster convergence, cluster-teardown, scenario-phase,
 //!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, backup phase, gRPC-receiver,
 //!   NATS-observer, runner-lag, runner-offload, Syslog TLS sender, server-executable, stallable-TCP-proxy,
-//!   unaccepted-address, process-observation, process-report, WebSocket close-reply,
+//!   unaccepted-address, process-observation, process-program, process-report, WebSocket close-reply,
 //!   console-connection, WebSocket peer and materialized-state diagnostic harness modules, the product's shutdown
 //!   coordinator a stopping
 //!   node is read through, and the client wire session protocol the stand-in nodes answer status
