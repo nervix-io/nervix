@@ -2460,8 +2460,12 @@ sequenceDiagram
   reason from its connection's events, once for every channel it loses. The size refusal leaves the
   connection open, and the emitter opens its next channel on it; a message the broker had not
   confirmed ahead of the refused one may be in its queue, so the attempt then fails for the host's
-  retry. Any other loss is an infrastructure failure, and the host reopens the emitter. [RabbitMQ
-  emission](./emitters.md#rabbitmq) defines the public behavior.
+  retry. Any other loss is an infrastructure failure, and the host reopens the emitter. Lapin logs
+  every message the broker returns at `warn` with the whole message, its body and properties
+  included, so the node drops that event beneath every trace filter
+  ([The Node's Log](./errors-and-diagnostics.md#the-nodes-log)), and what the log carries about a
+  return is the emitter's own report of it, which names the broker's reply code and text and never
+  the record. [RabbitMQ emission](./emitters.md#rabbitmq) defines the public behavior.
 - **Client source.** Each client ingestor a node executes has one endpoint task that outlives
   a single execution of the ingestor. It owns the attached producers, the batches each queued,
   their round-robin admission into the execution's one acknowledgement window, and every batch's

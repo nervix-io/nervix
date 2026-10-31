@@ -2588,6 +2588,27 @@ administration, topology, and unusual transitions. A failure the caller recovere
 only witness of is recorded at `debug`. [Metrics And Observability](./metrics-and-observability.md)
 defines the available metrics and their aggregation.
 
+### The Node's Log
+
+A node writes its log to standard output through one subscriber, which also receives what its
+dependencies log through the `log` crate. Its trace filter is the operator's `RUST_LOG` when the
+variable is set and parses, and otherwise the node's default: `info` for every target, with
+OpenRaft's heartbeat worker and replication targets at `error`. Beneath whichever filter is in
+force, the subscriber drops every dependency event that carries a record's payload at `info` or
+above. No directive brings such an event back, a span-scoped or field-qualified one included, and
+every other event stays with the filter. The scenario run's subscriber, which writes
+`tests/logs/scenarios.log`, applies the same rule to its own default.
+
+The node drops one such event: Lapin's report of a message its broker returned. Lapin logs every
+returned message at `warn` under the target `lapin::returned_messages`, with the whole message, its
+body and properties included. The node drops that target's `info`, `warn` and `error` events; its
+`debug` and `trace` events carry no message and stay with the filter. What the log carries about a
+return is the RabbitMQ emitter's own report of it, which names the broker's reply code and text and
+never the record. A change that makes another payload-bearing dependency event reachable, through a
+dependency upgrade or a driver option a connector starts to use, adds it to the dropped events in
+the same change. Several drivers log messages, requests or frames at `debug` and `trace`; an
+operator who selects those levels for a driver's target chooses to see them.
+
 ## Recovery, Panics, And Enforcement
 
 ### Recovery Classes
