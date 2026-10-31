@@ -1065,6 +1065,8 @@ emitter plans, configurations and concrete types. `IngestorConnector::KIND` and
 `EmitterLifecycle::kind()` expose the vocabulary identity; composition asserts the declared kind
 at compile time. Shared private encoding or endpoint intake state does not add an entity selector
 to those public configurations. A new entity adds a typed variant and implementation.
+[Connector and entity kinds](./connector-contract.md#connector-and-entity-kinds) owns the head,
+reference, implementation declaration and composition contract.
 
 OTEL field rules carry their exact type with the constraint that requires it: a histogram count
 cannot be declared with a floating-point descriptor. Required, optional and required-for-DELTA
