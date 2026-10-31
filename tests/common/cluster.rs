@@ -24,7 +24,10 @@ use fjall::Database;
 use futures_util::{SinkExt, future::join_all};
 use lapin::{
     BasicProperties, Connection, ConnectionProperties,
-    options::{BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
+    options::{
+        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions,
+        QueueDeleteOptions,
+    },
     types::FieldTable,
 };
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -2204,13 +2207,6 @@ impl Cluster {
     pub(crate) async fn rabbitmq_queue_messages(&self, queue: &str) -> io::Result<usize> {
         let state = rabbitmq_queue_state(&self.dependencies, queue).await?;
         Ok(state.messages)
-    }
-
-    pub(crate) fn rabbitmq_queue_probe(
-        &self,
-        queue: &str,
-    ) -> io::Result<super::rabbitmq_queue::RabbitMqQueueProbe> {
-        super::rabbitmq_queue::RabbitMqQueueProbe::new(&self.dependencies, queue)
     }
 
     pub(crate) async fn wait_for_redis_channel_subscribers(
@@ -5290,7 +5286,12 @@ pub(crate) async fn publish_mqtt_burst_to_address(
     published
 }
 
-async fn ensure_rabbitmq_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
+/// Declares `queue` on the scenario's broker. The queue belongs to the broker, so a scenario whose
+/// nodes are server processes provisions it the same way as one with an in-process cluster.
+pub(crate) async fn ensure_rabbitmq_queue(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<()> {
     let connection = Connection::connect(
         dependencies.get(RABBITMQ_ADDR)?,
         ConnectionProperties::default(),
@@ -5302,6 +5303,29 @@ async fn ensure_rabbitmq_queue(dependencies: &DependencyEndpoints, queue: &str) 
         .await
         .map_err(io::Error::other)?;
     declare_rabbitmq_queue(&channel, queue).await
+}
+
+/// Deletes `queue` from the scenario's broker with whatever it holds, as an operator would, so a
+/// message later published to it has no route.
+pub(crate) async fn delete_rabbitmq_queue(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<()> {
+    let connection = Connection::connect(
+        dependencies.get(RABBITMQ_ADDR)?,
+        ConnectionProperties::default(),
+    )
+    .await
+    .map_err(io::Error::other)?;
+    let channel = connection
+        .create_channel()
+        .await
+        .map_err(io::Error::other)?;
+    channel
+        .queue_delete(queue.into(), QueueDeleteOptions::default())
+        .await
+        .map_err(io::Error::other)?;
+    Ok(())
 }
 
 async fn publish_rabbitmq(

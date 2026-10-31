@@ -8,9 +8,10 @@
 
 use std::time::Duration;
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::DomainName;
 use nervix_primitives::{task::JoinHandle, time::Instant};
+use strum::IntoEnumIterator as _;
 
 use super::{BackupCutBoundary, FaultInjection};
 
@@ -122,12 +123,14 @@ async fn a_boundary_no_scenario_armed_holds_no_cut() {
 #[nervix_primitives::test(start_paused = true)]
 async fn cleanup_releases_waiting_cuts_at_every_boundary_before_clearing_the_registry() {
     let faults = FaultInjection::default();
-    for boundary in [BackupCutBoundary::Lease, BackupCutBoundary::Capture] {
+    for boundary in BackupCutBoundary::iter() {
         faults.pause_backup_cut_on(domain(), boundary);
     }
-    let lease = arriving_cut(&faults, BackupCutBoundary::Lease);
-    let capture = arriving_cut(&faults, BackupCutBoundary::Capture);
-    for boundary in [BackupCutBoundary::Lease, BackupCutBoundary::Capture] {
+    let mut waiting = Vec::new();
+    for boundary in BackupCutBoundary::iter() {
+        waiting.push(arriving_cut(&faults, boundary));
+    }
+    for boundary in BackupCutBoundary::iter() {
         faults.wait_for_backup_cut_pause(&domain(), boundary).await;
     }
     // Cleanup releases a timed hold too, rather than waiting for its duration.
@@ -137,17 +140,18 @@ async fn cleanup_releases_waiting_cuts_at_every_boundary_before_clearing_the_reg
         Duration::from_secs(300),
     );
     let cleanup_started = Instant::now();
-    assert_eq!(faults.release_all_backup_cut_pauses(), 2);
+    assert_eq!(
+        faults.release_all_backup_cut_pauses(),
+        BackupCutBoundary::iter().count()
+    );
     assert!(faults.inner.backup_cut_gates.is_empty());
 
     nervix_primitives::time::timeout(Duration::from_secs(1), async {
-        lease
-            .await
-            .assured("cleanup releases the waiting lease cut");
-        capture
-            .await
-            .assured("cleanup releases the waiting capture cut");
-        for boundary in [BackupCutBoundary::Lease, BackupCutBoundary::Capture] {
+        for cut in waiting {
+            cut.await
+                .assured("cleanup releases the cut waiting at each boundary");
+        }
+        for boundary in BackupCutBoundary::iter() {
             arriving_cut(&faults, boundary)
                 .await
                 .assured("later cuts pass after cleanup");
@@ -163,17 +167,21 @@ async fn cleanup_releases_waiting_cuts_at_every_boundary_before_clearing_the_reg
 async fn cleanup_clears_unreached_gates_of_every_domain_and_is_idempotent() {
     let faults = FaultInjection::default();
     let other = DomainName::parse("another").assured("the other test domain name is valid");
+    let mut armed = 0_usize;
     for name in [&domain(), &other] {
-        for boundary in [BackupCutBoundary::Lease, BackupCutBoundary::Capture] {
+        for boundary in BackupCutBoundary::iter() {
             faults.pause_backup_cut_on(name.clone(), boundary);
+            armed = armed
+                .checked_add(1)
+                .assured("two domains arm one gate per boundary");
         }
     }
-    assert_eq!(faults.release_all_backup_cut_pauses(), 4);
+    assert_eq!(faults.release_all_backup_cut_pauses(), armed);
     assert_eq!(faults.release_all_backup_cut_pauses(), 0);
     assert!(faults.inner.backup_cut_gates.is_empty());
     nervix_primitives::time::timeout(Duration::from_secs(1), async {
         for name in [&domain(), &other] {
-            for boundary in [BackupCutBoundary::Lease, BackupCutBoundary::Capture] {
+            for boundary in BackupCutBoundary::iter() {
                 faults.pause_backup_cut_if_armed(name, boundary).await;
             }
         }
