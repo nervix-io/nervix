@@ -88,8 +88,8 @@ Feature: Visual connector choices follow the entity declarations
       | 3            | prometheus-query      | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-max-body-size |
       | 1            | zeromq-pull           | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-source-ref    |
       | 3            | zeromq-pull           | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-source-ref    |
-      | 1            | sqs-queue             | ack-sequential | ack-sequential | ack-sequential | 1     | .create-ingestor-queue         |
-      | 3            | sqs-queue             | ack-sequential | ack-sequential | ack-sequential | 1     | .create-ingestor-queue         |
+      | 1            | sqs-queue             | ack-sequential | ack-parallel   | ack-sequential | 2     | .create-ingestor-queue         |
+      | 3            | sqs-queue             | ack-sequential | ack-parallel   | ack-sequential | 2     | .create-ingestor-queue         |
       | 1            | websockets-connection | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-source-ref    |
       | 3            | websockets-connection | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-source-ref    |
       | 1            | websockets-endpoint   | no-ack         | ack            | no-ack         | 2     | .create-ingestor-source-ref    |
