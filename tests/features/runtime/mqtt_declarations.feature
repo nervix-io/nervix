@@ -81,17 +81,17 @@ Feature: MQTT TOPIC declarations
       """
 
     Examples:
-      | cluster_size | subscription                                                                                                  | quiesce | expected                                  |
-      | 1            | SESSION CLEAN QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                        | DROP    | MQTT ACK modes require SESSION PERSISTENT |
-      | 3            | SESSION CLEAN QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                        | DROP    | MQTT ACK modes require SESSION PERSISTENT |
-      | 1            | SESSION PERSISTENT MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | DROP    | MQTT ACK modes require QOS 1              |
-      | 3            | SESSION PERSISTENT MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | DROP    | MQTT ACK modes require QOS 1              |
-      | 1            | SESSION PERSISTENT QOS 2 MODE NO ACK                                                                          | DROP    | expected mqtt_qos                         |
-      | 3            | SESSION PERSISTENT QOS 2 MODE NO ACK                                                                          | DROP    | expected mqtt_qos                         |
-      | 1            | MODE NO ACK                                                                                                   | SUSPEND | BUFFER \| DROP                            |
-      | 3            | MODE NO ACK                                                                                                   | SUSPEND | BUFFER \| DROP                            |
-      | 1            | SESSION PERSISTENT QOS 0 MODE NO ACK                                                                          | SUSPEND | BUFFER \| DROP                            |
-      | 3            | SESSION PERSISTENT QOS 0 MODE NO ACK                                                                          | SUSPEND | BUFFER \| DROP                            |
+      | cluster_size | subscription                                                                                                  | quiesce | expected                                                  |
+      | 1            | SESSION CLEAN QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                        | DROP    | MQTT ACK modes require SESSION PERSISTENT                 |
+      | 3            | SESSION CLEAN QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                        | DROP    | MQTT ACK modes require SESSION PERSISTENT                 |
+      | 1            | SESSION PERSISTENT MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | DROP    | MQTT ACK modes require QOS 1                              |
+      | 3            | SESSION PERSISTENT MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | DROP    | MQTT ACK modes require QOS 1                              |
+      | 1            | SESSION PERSISTENT QOS 2 MODE NO ACK                                                                          | DROP    | MQTT ingestor QOS must be 0 or 1, found 2                 |
+      | 3            | SESSION PERSISTENT QOS 2 MODE NO ACK                                                                          | DROP    | MQTT ingestor QOS must be 0 or 1, found 2                 |
+      | 1            | MODE NO ACK                                                                                                   | SUSPEND | MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1 |
+      | 3            | MODE NO ACK                                                                                                   | SUSPEND | MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1 |
+      | 1            | SESSION PERSISTENT QOS 0 MODE NO ACK                                                                          | SUSPEND | MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1 |
+      | 3            | SESSION PERSISTENT QOS 0 MODE NO ACK                                                                          | SUSPEND | MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1 |
 
   Scenario Outline: MQTT TOPIC ingestors refuse a topic filter the filter rule excludes
     Given a <cluster_size> node nervix cluster is started
@@ -182,13 +182,13 @@ Feature: MQTT TOPIC declarations
       """
 
     Examples:
-      | cluster_size | publishing                                                          | expected                         |
-      | 1            | QOS 3 RETRY POLICY BACKOFF 1s MAX 30s                               | expected mqtt_qos                |
-      | 3            | QOS 3 RETRY POLICY BACKOFF 1s MAX 30s                               | expected mqtt_qos                |
-      | 1            | QOS 0 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | expected RETRY POLICY, found ACK |
-      | 3            | QOS 0 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | expected RETRY POLICY, found ACK |
-      | 1            | QOS 1 RETRY POLICY BACKOFF 1s MAX 30s                               | expected ACK, found RETRY        |
-      | 3            | QOS 1 RETRY POLICY BACKOFF 1s MAX 30s                               | expected ACK, found RETRY        |
+      | cluster_size | publishing                                                          | expected                                     |
+      | 1            | QOS 3 RETRY POLICY BACKOFF 1s MAX 30s                               | MQTT emitter QOS must be 0, 1, or 2, found 3 |
+      | 3            | QOS 3 RETRY POLICY BACKOFF 1s MAX 30s                               | MQTT emitter QOS must be 0, 1, or 2, found 3 |
+      | 1            | QOS 0 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | expected RETRY POLICY, found ACK             |
+      | 3            | QOS 0 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | expected RETRY POLICY, found ACK             |
+      | 1            | QOS 1 RETRY POLICY BACKOFF 1s MAX 30s                               | expected ACK, found RETRY                    |
+      | 3            | QOS 1 RETRY POLICY BACKOFF 1s MAX 30s                               | expected ACK, found RETRY                    |
 
   Scenario Outline: MQTT client addresses name a broker by its scheme, host and port
     Given a <cluster_size> node nervix cluster is started

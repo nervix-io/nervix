@@ -271,6 +271,7 @@ impl Runtime {
             state: RuntimeState::BranchAggregated,
             kind,
             identifier: identifier.into(),
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         };
         BranchMetricsMark(
@@ -582,6 +583,7 @@ impl Runtime {
             state: RuntimeState::BranchAggregated,
             kind,
             identifier: identifier.clone(),
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         };
         if !self
@@ -898,6 +900,7 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor.clone()),
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         };
         {
@@ -968,6 +971,7 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor.clone()),
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         };
         let db = Database::builder(dir.path())
@@ -1051,6 +1055,7 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor.clone()),
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         };
         let db = Database::builder(dir.path())

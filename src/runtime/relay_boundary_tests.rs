@@ -2133,6 +2133,7 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
             },
             kind: ModelKind::Relay,
             identifier: ModelName::from(&relay.clone()),
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         },
         schema.arrow_schema(),

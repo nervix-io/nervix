@@ -1,8 +1,9 @@
 //! Controlled backup cut boundaries for public backup scenarios.
 //!
 //! Layer: test harness, outside the product layer order.
-//! - **Owns.** Domain-scoped gates a backup cut reaches once it holds its lease and before its
-//!   owners capture state, and how each gate holds every cut that reaches it.
+//! - **Owns.** Domain-scoped gates a backup cut reaches once it holds its lease, once its domain
+//!   is paused, and before its owners capture state, and how each gate holds every cut that
+//!   reaches it.
 //! - **Depends on.** Execution-sensitive watch channels, timers and cooperative budget, and
 //!   vocabulary identities.
 //! - **Must not know.** Archive contents, the nodes a cut must reach or backup recovery policy.
@@ -38,6 +39,9 @@ pub enum BackupCutBoundary {
     /// Once a quiesced cut holds its domain's lease, before it checks the nodes it must reach and
     /// before it pauses the domain.
     Lease,
+    /// Once a quiesced cut paused its domain and every live node applied the pause, before the
+    /// drain's first poll.
+    Drain,
     /// Before any owner captures state: a quiesced cut after its drain, and a stopped cut once it
     /// holds its lease.
     Capture,
@@ -180,7 +184,7 @@ impl FaultInjection {
         self.backup_cut_gate(domain, boundary).release();
     }
 
-    /// Releases every armed lease and capture gate before forgetting them. Cuts that already
+    /// Releases every armed lease, drain and capture gate before forgetting them. Cuts that already
     /// borrowed a gate observe its release; cuts that arrive later find no gate to hold them.
     /// Returns how many gates cleanup released.
     pub fn release_all_backup_cut_pauses(&self) -> usize {

@@ -1,6 +1,7 @@
 Feature: Pulsar emission
   Scenario Outline: Pulsar emitter publishes JSON payloads from a relay
     Given Pulsar is running
+    Then Pulsar serves its default namespace
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands

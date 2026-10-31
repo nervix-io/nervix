@@ -730,6 +730,7 @@ mod tests {
             name: branch_name_for_relay("by_value"),
             schema: named("value_key"),
             ttl: "90s".to_string(),
+            partitions: nervix_models::BranchPartitions::ONE,
             eviction: Some(BranchEviction::Lru {
                 max_instances: NonZeroU64::new(8)
                     .assured("the fixture's branch capacity is a nonzero literal"),

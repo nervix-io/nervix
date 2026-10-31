@@ -164,13 +164,15 @@ fn delegated_properties_keep_their_namespace_and_reserved_key_boundary() {
         .client()
         .assured("Kafka declares a client")
         .config;
+    let brokers = entry("bootstrap.servers", "broker-1:9092");
     let property = entry("topic.metadata.refresh.interval.ms", "1000");
+    let entries = [brokers.clone(), property.clone()];
     schema
-        .validate(std::slice::from_ref(&property))
+        .validate(&entries)
         .assured("librdkafka owns this property namespace");
     assert_eq!(
-        schema.inspection_entries(std::slice::from_ref(&property)),
-        vec![entry(&property.key, CLIENT_CONFIG_REDACTION)]
+        schema.inspection_entries(&entries),
+        vec![brokers, entry(&property.key, CLIENT_CONFIG_REDACTION)]
     );
     let refusal = mqtt()
         .validate(&[entry("addr", "mqtt://broker.example.com:1883"), property])

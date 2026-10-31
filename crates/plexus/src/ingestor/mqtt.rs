@@ -22,7 +22,7 @@ use super::delivery::{
     quiesce_buffer_parser, quiesce_drop_parser, quiesce_suspend_parser,
 };
 use crate::{
-    lexer::{Identifier, Token},
+    lexer::{Identifier, Token, Word},
     parser_support::{ParseError, client_ref, external_name, kw, kw_phrase2},
 };
 
@@ -46,12 +46,15 @@ fn qos_clause<'src>()
 -> impl Parser<'src, &'src [Token], MqttQos, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Qos).ignore_then(
         select! { Token::NumberLiteral(raw) => raw }
+            .labelled("mqtt_qos")
             .try_map(|raw, span| match raw.as_str() {
                 "0" => Ok(MqttQos::AtMostOnce),
                 "1" => Ok(MqttQos::AtLeastOnce),
-                _ => Err(Rich::custom(span, "MQTT QOS must be 0 or 1")),
-            })
-            .labelled("mqtt_qos"),
+                _ => Err(Rich::custom(
+                    span,
+                    format!("MQTT ingestor QOS must be 0 or 1, found {raw}"),
+                )),
+            }),
     )
 }
 
@@ -127,11 +130,33 @@ where
 /// messages, a persistent session at QOS 1.
 fn quiesce_clause<'src>()
 -> impl Parser<'src, &'src [Token], IngestQuiesceMode, MqttQuiesceExtra<'src>> + Clone {
-    let suspend = with_mode_context(quiesce_suspend_parser())
-        .contextual()
-        .configure(|_, mode: &MqttIngestMode| {
-            mode.session() == MqttSession::Persistent && mode.qos() == MqttQos::AtLeastOnce
-        });
+    let suspend = custom::<_, _, _, MqttQuiesceExtra<'src>>(|input| {
+        let mode = input.ctx();
+        let allowed =
+            mode.session() == MqttSession::Persistent && mode.qos() == MqttQos::AtLeastOnce;
+
+        // Diagnose a supplied keyword through the shared parser. With no keyword, keep the
+        // contextual gate so completion offers only the modes this session can use.
+        if !allowed
+            && let Some(Token::Word(Word::KnownWord {
+                iden: Identifier::Suspend,
+                ..
+            })) = input.peek_ref()
+        {
+            let start = input.cursor();
+            input.parse(with_mode_context(quiesce_suspend_parser()))?;
+            return Err(Rich::custom(
+                input.span_since(&start),
+                "MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1",
+            ));
+        }
+
+        input.parse(
+            with_mode_context(quiesce_suspend_parser())
+                .contextual()
+                .configure(move |_, _: &MqttIngestMode| allowed),
+        )
+    });
     let body = choice((
         suspend,
         with_mode_context(quiesce_buffer_parser()),
@@ -169,7 +194,11 @@ mod tests {
     };
     use rstest::rstest;
 
-    use crate::conformance_support::{assert_offers_exactly, created_model, refused};
+    use crate::{
+        conformance_support::{assert_offers_exactly, created_model, refused},
+        parser_support::ParseFromSourceError,
+        statement::parse_statement,
+    };
 
     const ACK_SEQUENTIAL: &str = "SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s \
                                   RETRY POLICY BACKOFF 1s MAX 30s";
@@ -313,5 +342,77 @@ mod tests {
             "MODE NO ACK",
             "DROP"
         )));
+    }
+
+    fn clauses_statement(clauses: &str) -> String {
+        format!(
+            "CREATE MQTT TOPIC INGESTOR incoming FROM broker TOPIC 'events' {clauses} DECODE \
+             USING event_codec TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR \
+             LOG ON GENERAL ERROR LOG;"
+        )
+    }
+
+    #[rstest::rstest]
+    #[case("2")]
+    #[case("3")]
+    #[case("256")]
+    fn qos_refusal_names_the_value_and_its_exact_source_span(#[case] qos: &str) {
+        let source = clauses_statement(&format!(
+            "SESSION PERSISTENT QOS {qos} MODE NO ACK ON QUIESCE DROP"
+        ));
+        let error = parse_statement(&source).expect_err("the ingestor accepts only QoS 0 or 1");
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
+            panic!("expected a parse refusal, got {error:?}");
+        };
+        let expected = format!("MQTT ingestor QOS must be 0 or 1, found {qos}");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.message == expected && &source[diagnostic.span.clone()] == qos
+            }),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case("SESSION CLEAN QOS 0")]
+    #[case("SESSION CLEAN QOS 1")]
+    #[case("SESSION PERSISTENT QOS 0")]
+    fn suspend_refusal_names_the_session_requirement_and_source_span(#[case] session: &str) {
+        let source = clauses_statement(&format!("{session} MODE NO ACK ON QUIESCE SUSPEND"));
+        let error = parse_statement(&source).expect_err("the broker cannot retain this input");
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
+            panic!("expected a parse refusal, got {error:?}");
+        };
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.message == "MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1"
+                    && &source[diagnostic.span.clone()] == "SUSPEND"
+            }),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case("SESSION CLEAN QOS 0", &["BUFFER", "DROP"])]
+    #[case("SESSION CLEAN QOS 1", &["BUFFER", "DROP"])]
+    #[case("SESSION PERSISTENT QOS 0", &["BUFFER", "DROP"])]
+    #[case("SESSION PERSISTENT QOS 1", &["SUSPEND", "BUFFER", "DROP"])]
+    fn completion_and_valid_quiesce_modes_follow_the_session(
+        #[case] session: &str,
+        #[case] modes: &[&str],
+    ) {
+        let prefix = format!(
+            "CREATE MQTT TOPIC INGESTOR incoming FROM broker TOPIC 'events' {session} MODE NO ACK \
+             ON QUIESCE "
+        );
+        assert_offers_exactly(&prefix, modes);
+        for mode in modes {
+            let clause = match *mode {
+                "BUFFER" => "BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST",
+                clause => clause,
+            };
+            let source = clauses_statement(&format!("{session} MODE NO ACK ON QUIESCE {clause}"));
+            assert!(created_model(&source).is_some(), "{source}");
+        }
     }
 }

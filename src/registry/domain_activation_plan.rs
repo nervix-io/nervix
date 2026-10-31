@@ -453,6 +453,7 @@ mod tests {
                 name: branch_name.clone(),
                 schema: branch_schema.name.clone(),
                 ttl: "7m".to_string(),
+                partitions: nervix_models::BranchPartitions::ONE,
                 eviction: Some(BranchEviction::Lru {
                     max_instances: nonzero!(19u64),
                 }),
@@ -665,6 +666,7 @@ mod tests {
                 name: branch_name.clone(),
                 schema: branch_schema.name.clone(),
                 ttl: ttl.to_string(),
+                partitions: nervix_models::BranchPartitions::ONE,
                 eviction: None,
             })]));
             let error = DomainActivationPlan::from_scheduled_nodes(&domain, &branched_relay)

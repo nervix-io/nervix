@@ -201,7 +201,7 @@ impl Runtime {
         if let Some(lifecycle) = self.inner.replicated_branch_lifecycles.get(placement) {
             return lifecycle.clone();
         }
-        let assignment = self.state_assignment(&placement.entity());
+        let assignment = self.state_assignment_for_unit(&placement.unit_ref());
         let lifecycle = self
             .inner
             .replicated_branch_lifecycles
@@ -697,12 +697,18 @@ impl Runtime {
         let destination_incarnation = request.destination_incarnation;
         let domain = &request.domain;
         let entity = &request.entity;
+        let unit = request.unit;
         let base_schedule_fingerprint = request.base_schedule_fingerprint;
         let target_schedule_fingerprint = request.target_schedule_fingerprint;
         let scheduled = self
             .forced_recovery_node_until(domain, entity, base_schedule_fingerprint, deadline)
             .await?;
-        if scheduled.primary_node() != Some(source) {
+        if scheduled
+            .units
+            .get(&unit)
+            .and_then(|placement| placement.primary_node.as_ref())
+            != Some(source)
+        {
             return Err(OwnershipHandoffError::participant(format!(
                 "{} '{}' is no longer assigned to lost owner '{}'",
                 entity.kind.as_str(),
@@ -720,6 +726,9 @@ impl Runtime {
             )));
         }
         let recovery_sources = scheduled
+            .units
+            .get(&unit)
+            .ok_or_else(|| OwnershipHandoffError::participant("scheduled unit is unavailable"))?
             .assigned_nodes
             .iter()
             .filter(|node| *node != source && *node != destination)
@@ -730,11 +739,12 @@ impl Runtime {
 
         let branch_entries = if Self::node_has_branch_lifecycle(scheduled.kind()) {
             let placement = self
-                .state_placement(
+                .state_placement_for_unit(
                     domain,
                     RuntimeStateKind::BranchLru,
                     scheduled.kind(),
                     scheduled.identifier.clone(),
+                    unit,
                     None,
                 )
                 .change_context_lazy(|| OwnershipHandoffError::StatePlacement {
@@ -773,11 +783,12 @@ impl Runtime {
         for (component, state) in Self::global_recovery_state_components(&scheduled) {
             nervix_primitives::task::consume_budget().await;
             let placement = self
-                .state_placement(
+                .state_placement_for_unit(
                     domain,
                     state,
                     scheduled.kind(),
                     scheduled.identifier.clone(),
+                    unit,
                     None,
                 )
                 .change_context_lazy(|| OwnershipHandoffError::StatePlacement {
@@ -805,11 +816,12 @@ impl Runtime {
             for entry in entries {
                 nervix_primitives::task::consume_budget().await;
                 let placement = self
-                    .state_placement(
+                    .state_placement_for_unit(
                         domain,
                         state,
                         scheduled.kind(),
                         scheduled.identifier.clone(),
+                        unit,
                         entry.key,
                     )
                     .change_context_lazy(|| OwnershipHandoffError::StatePlacement {
@@ -851,6 +863,7 @@ impl Runtime {
             destination,
             destination_incarnation,
             entity: &entity_ref,
+            unit,
             target_schedule_fingerprint,
         };
         if let Some(store) = self.inner.state_store.as_ref() {
@@ -860,7 +873,7 @@ impl Runtime {
         }
         let recovery = transition.identity();
         self.inner.prepared_forced_runtime_state_recoveries.insert(
-            entity_ref,
+            DomainNodeUnitRef::new(entity_ref, unit),
             PreparedForcedRuntimeStateRecovery {
                 recovery,
                 destination_incarnation,
@@ -1043,7 +1056,7 @@ impl Runtime {
     pub(crate) fn ownership_handoff_entity_is_frozen(&self, entity: &DomainNodeRef) -> bool {
         self.inner
             .frozen_ownership_handoff_entities
-            .get(entity)
+            .get(&DomainNodeUnitRef::single(entity.clone()))
             .is_some_and(|state| state.is_frozen())
     }
 
@@ -1052,9 +1065,20 @@ impl Runtime {
         entity: &DomainNodeRef,
         coordination: &CoordinationIdentity,
     ) -> bool {
+        self.ownership_handoff_unit_is_frozen_by(
+            &DomainNodeUnitRef::single(entity.clone()),
+            coordination,
+        )
+    }
+
+    pub(crate) fn ownership_handoff_unit_is_frozen_by(
+        &self,
+        unit: &DomainNodeUnitRef,
+        coordination: &CoordinationIdentity,
+    ) -> bool {
         self.inner
             .frozen_ownership_handoff_entities
-            .get(entity)
+            .get(unit)
             .is_some_and(|owners| owners.contains(coordination))
     }
 
@@ -1212,6 +1236,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         node: &ExecutionNode,
+        unit: nervix_models::Unit,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> OwnershipHandoffResult<HashSet<RuntimeStatePlacement>> {
         let unplaceable = || OwnershipHandoffError::StatePlacement {
@@ -1221,7 +1246,14 @@ impl Runtime {
         let mut expected = HashSet::default();
         for (_, state) in Self::global_recovery_state_components(node) {
             let placement = self
-                .state_placement(domain, state, node.kind(), node.identifier.clone(), None)
+                .state_placement_for_unit(
+                    domain,
+                    state,
+                    node.kind(),
+                    node.identifier.clone(),
+                    unit,
+                    None,
+                )
                 .change_context_lazy(unplaceable)?;
             expected.insert(placement);
         }
@@ -1229,11 +1261,12 @@ impl Runtime {
             return Ok(expected);
         }
         let branch_lru = self
-            .state_placement(
+            .state_placement_for_unit(
                 domain,
                 RuntimeStateKind::BranchLru,
                 node.kind(),
                 node.identifier.clone(),
+                unit,
                 None,
             )
             .change_context_lazy(unplaceable)?;
@@ -1259,11 +1292,12 @@ impl Runtime {
                 .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?
             {
                 let placement = self
-                    .state_placement(
+                    .state_placement_for_unit(
                         domain,
                         state_kind,
                         node.kind(),
                         node.identifier.clone(),
+                        unit,
                         entry.key,
                     )
                     .change_context_lazy(unplaceable)?;
@@ -1286,6 +1320,7 @@ impl Runtime {
             destination_incarnation,
             domain,
             entity,
+            unit,
             base_schedule_fingerprint,
             target_schedule_fingerprint,
             checkpoints,
@@ -1314,6 +1349,7 @@ impl Runtime {
             if placement.domain != *domain
                 || placement.kind != entity.kind
                 || placement.identifier != entity.identifier
+                || placement.unit != unit
             {
                 return Err(OwnershipHandoffError::state(format!(
                     "checkpoint scope does not match {} '{}' in domain '{}'",
@@ -1349,7 +1385,8 @@ impl Runtime {
             decoded.push((placement, snapshot));
         }
         let scheduled = self.ownership_handoff_scheduled_node(domain, entity)?;
-        let expected = self.expected_ownership_handoff_placements(domain, &scheduled, &decoded)?;
+        let expected =
+            self.expected_ownership_handoff_placements(domain, &scheduled, unit, &decoded)?;
         if placements != expected {
             let missing = expected
                 .difference(&placements)
@@ -1386,7 +1423,7 @@ impl Runtime {
                         .cmp(&right.branch_key.as_ref().map(BranchKey::as_str))
                 })
         });
-        let entity_ref = entity.in_domain(domain);
+        let entity_ref = DomainNodeUnitRef::new(entity.in_domain(domain), unit);
         let (activation, _) = watch::channel(OwnershipHandoffActivation::Prepared);
         let replacement = PreparedRuntimeStateHandoff {
             coordination,
@@ -1395,6 +1432,7 @@ impl Runtime {
             destination,
             source_incarnation,
             destination_incarnation,
+            unit,
             base_schedule_fingerprint,
             target_schedule_fingerprint,
             activation_authorization:
@@ -1415,6 +1453,7 @@ impl Runtime {
                     && existing.destination == replacement.destination
                     && existing.source_incarnation == replacement.source_incarnation
                     && existing.destination_incarnation == replacement.destination_incarnation
+                    && existing.unit == replacement.unit
                     && existing.base_schedule_fingerprint == replacement.base_schedule_fingerprint
                     && existing.target_schedule_fingerprint
                         == replacement.target_schedule_fingerprint
@@ -1445,7 +1484,8 @@ impl Runtime {
                         destination: &existing.destination,
                         source_incarnation: existing.source_incarnation,
                         destination_incarnation: existing.destination_incarnation,
-                        entity: &entity_ref,
+                        entity: &entity_ref.entity,
+                        unit: existing.unit,
                         base_schedule_fingerprint: existing.base_schedule_fingerprint,
                         target_schedule_fingerprint: existing.target_schedule_fingerprint,
                     };
@@ -1456,7 +1496,8 @@ impl Runtime {
                         destination: &replacement.destination,
                         source_incarnation: replacement.source_incarnation,
                         destination_incarnation: replacement.destination_incarnation,
-                        entity: &entity_ref,
+                        entity: &entity_ref.entity,
+                        unit,
                         base_schedule_fingerprint: replacement.base_schedule_fingerprint,
                         target_schedule_fingerprint: replacement.target_schedule_fingerprint,
                     };
@@ -1479,7 +1520,8 @@ impl Runtime {
                         destination: &replacement.destination,
                         source_incarnation: replacement.source_incarnation,
                         destination_incarnation: replacement.destination_incarnation,
-                        entity: &entity_ref,
+                        entity: &entity_ref.entity,
+                        unit,
                         base_schedule_fingerprint: replacement.base_schedule_fingerprint,
                         target_schedule_fingerprint: replacement.target_schedule_fingerprint,
                     };
@@ -1541,14 +1583,36 @@ impl Runtime {
         schedule_fingerprint: [u8; 32],
         instantiate_now: bool,
     ) -> Result<(), Report<RuntimePersistenceError>> {
-        if !node.is_primary_on(local_node_id) {
-            return Ok(());
+        for (unit, placement) in &node.units {
+            if placement.primary_node.as_ref() == Some(local_node_id) {
+                self.activate_prepared_ownership_handoff_unit(
+                    domain,
+                    node,
+                    *unit,
+                    local_node_id,
+                    schedule_fingerprint,
+                    instantiate_now,
+                )?;
+            }
         }
+        Ok(())
+    }
+
+    fn activate_prepared_ownership_handoff_unit(
+        &self,
+        domain: &DomainName,
+        node: &ExecutionNode,
+        unit: nervix_models::Unit,
+        local_node_id: &ClusterNodeName,
+        schedule_fingerprint: [u8; 32],
+        instantiate_now: bool,
+    ) -> Result<(), Report<RuntimePersistenceError>> {
         let entity = DomainNodeRef::node_in(domain.clone(), node.kind(), node.identifier.clone());
+        let key = DomainNodeUnitRef::new(entity.clone(), unit);
         let Some(prepared) = self
             .inner
             .prepared_runtime_state_handoffs
-            .get(&entity)
+            .get(&key)
             .map(|prepared| prepared.clone())
         else {
             return Ok(());
@@ -1573,12 +1637,13 @@ impl Runtime {
                 source_incarnation: prepared.source_incarnation,
                 destination_incarnation: prepared.destination_incarnation,
                 entity: &entity,
+                unit: prepared.unit,
                 base_schedule_fingerprint: prepared.base_schedule_fingerprint,
                 target_schedule_fingerprint: prepared.target_schedule_fingerprint,
             };
             store.activate_handoff_preparation(&transition, &prepared.checkpoints)?;
         }
-        self.remove_runtime_state_for_entity(domain, node.kind(), &node.identifier);
+        self.remove_runtime_state_for_unit(&key);
         for (placement, snapshot) in &prepared.checkpoints {
             if instantiate_now {
                 self.inner.prepared_runtime_state_snapshots.insert(
@@ -1606,17 +1671,17 @@ impl Runtime {
         let remove = self
             .inner
             .prepared_runtime_state_handoffs
-            .get(&entity)
+            .get(&key)
             .is_some_and(|current| {
                 current.coordination == prepared.coordination
                     && current.operation_id == prepared.operation_id
             });
         if remove {
-            self.inner.prepared_runtime_state_handoffs.remove(&entity);
+            self.inner.prepared_runtime_state_handoffs.remove(&key);
         }
         let activation = prepared.activation.clone();
         self.inner.activated_runtime_state_handoffs.insert(
-            entity,
+            key,
             ActivatedRuntimeStateHandoff {
                 coordination: prepared.coordination,
                 operation_id: prepared.operation_id,
@@ -1624,6 +1689,7 @@ impl Runtime {
                 destination: prepared.destination,
                 source_incarnation: prepared.source_incarnation,
                 destination_incarnation: prepared.destination_incarnation,
+                unit: prepared.unit,
                 base_schedule_fingerprint: prepared.base_schedule_fingerprint,
                 target_schedule_fingerprint: prepared.target_schedule_fingerprint,
             },
@@ -1640,10 +1706,32 @@ impl Runtime {
         schedule_fingerprint: [u8; 32],
         instantiate_now: bool,
     ) -> Result<(), Report<RuntimePersistenceError>> {
-        if !node.is_primary_on(local_node_id) {
-            return Ok(());
+        for (unit, placement) in &node.units {
+            if placement.primary_node.as_ref() == Some(local_node_id) {
+                self.activate_prepared_forced_ownership_recovery_unit(
+                    domain,
+                    node,
+                    *unit,
+                    local_node_id,
+                    schedule_fingerprint,
+                    instantiate_now,
+                )?;
+            }
         }
-        let Some(transition) = node.ownership_transition.as_ref() else {
+        Ok(())
+    }
+
+    fn activate_prepared_forced_ownership_recovery_unit(
+        &self,
+        domain: &DomainName,
+        node: &ExecutionNode,
+        unit: nervix_models::Unit,
+        local_node_id: &ClusterNodeName,
+        schedule_fingerprint: [u8; 32],
+        instantiate_now: bool,
+    ) -> Result<(), Report<RuntimePersistenceError>> {
+        let scheduled = &node.units[&unit];
+        let Some(transition) = scheduled.ownership_transition.as_ref() else {
             return Ok(());
         };
         if transition.destination != *local_node_id {
@@ -1655,6 +1743,7 @@ impl Runtime {
             return Ok(());
         };
         let entity = DomainNodeRef::node_in(domain.clone(), node.kind(), node.identifier.clone());
+        let key = DomainNodeUnitRef::new(entity.clone(), unit);
         let dispatcher = self.inner.remote_dispatcher.load();
         let Some(dispatcher) = dispatcher.as_deref() else {
             return Err(Report::new(RuntimePersistenceError::MissingNodeIncarnation));
@@ -1666,21 +1755,22 @@ impl Runtime {
             destination: &transition.destination,
             destination_incarnation: local_incarnation,
             entity: &entity,
+            unit,
             target_schedule_fingerprint: schedule_fingerprint,
         };
         let prepared = self
             .inner
             .prepared_forced_runtime_state_recoveries
-            .get(&entity)
+            .get(&key)
             .map(|prepared| prepared.clone());
-        let generations = node.wasm_state_generations();
+        let generations = scheduled.wasm_state_generations.as_ref();
         let checkpoints = if let Some(store) = self.inner.state_store.as_ref() {
             let Some(checkpoints) =
                 store.activate_forced_recovery(&recovery, authorization, generations)?
             else {
                 self.inner
                     .prepared_forced_runtime_state_recoveries
-                    .remove_if(&entity, |_, current| current.recovery.matches(&recovery));
+                    .remove_if(&key, |_, current| current.recovery.matches(&recovery));
                 return Ok(());
             };
             checkpoints
@@ -1716,7 +1806,7 @@ impl Runtime {
                 }
             }
         };
-        self.remove_runtime_state_for_entity(domain, node.kind(), &node.identifier);
+        self.remove_runtime_state_for_unit(&key);
         for (placement, snapshot) in &checkpoints {
             if instantiate_now {
                 self.inner.prepared_runtime_state_snapshots.insert(
@@ -1740,7 +1830,7 @@ impl Runtime {
         }
         self.inner
             .prepared_forced_runtime_state_recoveries
-            .remove_if(&entity, |_, current| current.recovery.matches(&recovery));
+            .remove_if(&key, |_, current| current.recovery.matches(&recovery));
         Ok(())
     }
 
@@ -1749,7 +1839,10 @@ impl Runtime {
         request: &nervix_interconnect::ActivateOwnershipHandoffStateRequest,
     ) -> OwnershipHandoffResult<()> {
         let transition = OwnershipHandoffTransitionRef::from(request);
-        let key = transition.entity.in_domain(transition.domain);
+        let key = DomainNodeUnitRef::new(
+            transition.entity.in_domain(transition.domain),
+            transition.unit,
+        );
         let activated_in_memory = self
             .inner
             .activated_runtime_state_handoffs
@@ -1766,6 +1859,7 @@ impl Runtime {
                     transition.domain,
                     transition.entity.kind,
                     &transition.entity.identifier,
+                    transition.unit,
                 )
                 .change_context(OwnershipHandoffError::Persistence)?
                 .is_some_and(|activated| {
@@ -1778,6 +1872,7 @@ impl Runtime {
                         && activated.domain == *transition.domain
                         && activated.kind == transition.entity.kind
                         && activated.identifier == transition.entity.identifier
+                        && activated.unit == transition.unit
                         && activated.base_schedule_fingerprint
                             == transition.base_schedule_fingerprint
                         && activated.target_schedule_fingerprint
@@ -1819,7 +1914,10 @@ impl Runtime {
                 transition.entity.identifier.as_str()
             )));
         }
-        let key = transition.entity.in_domain(transition.domain);
+        let key = DomainNodeUnitRef::new(
+            transition.entity.in_domain(transition.domain),
+            transition.unit,
+        );
         let Some(prepared) = self.inner.prepared_runtime_state_handoffs.get(&key) else {
             return Err(OwnershipHandoffError::participant(format!(
                 "prepared ownership handoff state for {} '{}' is unavailable",
@@ -1856,7 +1954,10 @@ impl Runtime {
             }
             let transition = OwnershipHandoffTransitionRef::from(request);
             self.verify_ownership_handoff_preparation_transition(transition)?;
-            let key = transition.entity.in_domain(transition.domain);
+            let key = DomainNodeUnitRef::new(
+                transition.entity.in_domain(transition.domain),
+                transition.unit,
+            );
             let mut prepared = self
                 .inner
                 .prepared_runtime_state_handoffs
@@ -1890,24 +1991,9 @@ impl Runtime {
         self.verify_ownership_handoff_activation(request)
     }
 
-    fn remove_runtime_state_for_entity(
-        &self,
-        domain: &DomainName,
-        kind: ModelKind,
-        identifier: &ModelName,
-    ) {
-        self.inner
-            .state_replication_routing
-            .retire_entity(&DomainNodeRef::node_in(
-                domain.clone(),
-                kind,
-                identifier.clone(),
-            ));
-        let matches_entity = |placement: &RuntimeStatePlacement| {
-            placement.domain == *domain
-                && placement.kind == kind
-                && placement.identifier == *identifier
-        };
+    fn remove_runtime_state_for_unit(&self, unit: &DomainNodeUnitRef) {
+        self.inner.state_replication_routing.retire_unit(unit);
+        let matches_entity = |placement: &RuntimeStatePlacement| placement.unit_ref() == *unit;
         self.inner
             .replicated_deduplicator_states
             .retain(|placement, _| !matches_entity(placement));
@@ -1993,8 +2079,12 @@ impl Runtime {
         operation_id: &str,
         domain: &DomainName,
         entity: &NodeRef,
+        unit: nervix_models::Unit,
     ) -> Result<(), Report<RuntimePersistenceError>> {
-        let key = DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone()),
+            unit,
+        );
         self.inner
             .prepared_runtime_state_handoffs
             .remove_if(&key, |_, prepared| {
@@ -2019,6 +2109,7 @@ impl Runtime {
                 domain,
                 entity.kind,
                 &entity.identifier,
+                unit,
             )?;
         }
         Ok(())

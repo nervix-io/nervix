@@ -1,11 +1,14 @@
-//! Bounded HTTP/1.1 response heads for the outbound HTTP emitter.
+//! The final response that ends one request of the outbound HTTP emitter, read from the head hyper
+//! received.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Reading and validating each interim and final header block, classifying a
-//!   complete final status, and reading the one `Retry-After` value a final head states.
-//! - **Depends on.** Tokio streams, the HTTP/1.1 parser, the HTTP-date grammar, the vocabulary
+//! - **Owns.** Classifying a complete final status, refusing a status outside the range HTTP
+//!   defines, reading the one `Retry-After` value a final head states and the delay it asks for,
+//!   and reading the one `Location` a redirect states.
+//! - **Depends on.** The `http` types hyper hands back, the HTTP-date grammar, the vocabulary
 //!   timestamp and typed connector errors.
-//! - **Must not know.** Emitter buffers, acknowledgements or retry cadence.
+//! - **Must not know.** How the response was received, emitter buffers, acknowledgements or retry
+//!   cadence.
 
 #![cfg_attr(
     nervix_lint,
@@ -22,25 +25,18 @@
 use std::time::{Duration, UNIX_EPOCH};
 
 use error_stack::Report;
+use http::{
+    HeaderMap, Response,
+    header::{LOCATION, RETRY_AFTER},
+};
 use nervix_models::Timestamp;
 use thiserror::Error;
-use tokio::io::AsyncRead;
-
-const MAX_HEADER_FIELDS: usize = 128;
-const MAX_HEADER_BYTES: usize = 64 * 1024;
-const MAX_HEAD_BUFFER_BYTES: usize = MAX_HEADER_BYTES + MAX_HEADER_FIELDS * 4 + 8 * 1024;
-const READ_BYTES: usize = 4096;
 
 #[derive(Debug, Error)]
 pub(super) enum ResponseHeadError {
-    #[error("HTTP response headers are malformed")]
-    Malformed,
-    #[error("HTTP response headers exceed 128 fields or 64 KiB")]
-    Excessive,
-    #[error("HTTP connection closed before complete final response headers")]
-    Lost,
-    #[error("HTTP response header read failed")]
-    Read,
+    /// A status HTTP's grammar admits but its semantics leave undefined, so it has no class.
+    #[error("HTTP response status {status} is outside the range HTTP defines")]
+    StatusOutOfRange { status: u16 },
 }
 
 type ResponseHeadResult<T> = Result<T, Report<ResponseHeadError>>;
@@ -56,11 +52,13 @@ pub(super) enum Disposition {
     RetryableFailure,
 }
 
-/// A complete, valid final response head: its status and the one `Retry-After` value it states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A complete final response head: its status, the one `Retry-After` value it states, and the one
+/// `Location` a redirect states.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FinalResponse {
     status: FinalStatus,
     retry_after: Option<RetryAfter>,
+    location: Option<String>,
 }
 
 /// The one `Retry-After` value a final head states, in either form RFC 9110 defines.
@@ -73,8 +71,29 @@ enum RetryAfter {
 }
 
 impl FinalResponse {
-    pub(super) fn status(self) -> FinalStatus {
+    /// The final response `response` is, which hyper delivers once its head is complete; its body
+    /// is neither awaited nor read.
+    pub(super) fn read<B>(response: &Response<B>) -> ResponseHeadResult<Self> {
+        let status = response.status().as_u16();
+        if !(100..=599).contains(&status) {
+            return Err(Report::new(ResponseHeadError::StatusOutOfRange { status }));
+        }
+        let headers = response.headers();
+        Ok(Self {
+            status: FinalStatus(status),
+            retry_after: RetryAfter::stated(headers),
+            location: Self::location_stated(status, headers),
+        })
+    }
+
+    pub(super) fn status(&self) -> FinalStatus {
         self.status
+    }
+
+    /// The `Location` of a `3xx` head that states exactly one, as text. Its value is never
+    /// described in a failure: a server can put anything in it.
+    pub(super) fn location(&self) -> Option<&str> {
+        self.location.as_deref()
     }
 
     /// The delay this response asks for before the next attempt, measured from `received_at`, the
@@ -83,7 +102,7 @@ impl FinalResponse {
     /// Seconds ask for exactly that many, and a date for the time until it, which is none for a
     /// date already past. A head stating no single valid `Retry-After` asks for no delay, and so
     /// does one whose delay would end outside the instants a timestamp represents.
-    pub(super) fn retry_delay(self, received_at: Timestamp) -> Option<Duration> {
+    pub(super) fn retry_delay(&self, received_at: Timestamp) -> Option<Duration> {
         match self.retry_after? {
             RetryAfter::Seconds(seconds) => {
                 let delay = Duration::from_secs(seconds);
@@ -96,9 +115,35 @@ impl FinalResponse {
             RetryAfter::Date(at) => Some(at.duration_since(received_at).unwrap_or(Duration::ZERO)),
         }
     }
+
+    /// The one `Location` value `headers` state for a `3xx` `status`. Two such fields state none,
+    /// and so does any other status, whose `Location` no client follows.
+    fn location_stated(status: u16, headers: &HeaderMap) -> Option<String> {
+        if !(300..=399).contains(&status) {
+            return None;
+        }
+        let mut values = headers.get_all(LOCATION).iter();
+        let value = values.next()?;
+        if values.next().is_some() {
+            return None;
+        }
+        let text = std::str::from_utf8(value.as_bytes()).ok()?;
+        Some(text.to_string())
+    }
 }
 
 impl RetryAfter {
+    /// The one `Retry-After` value `headers` state. Two such fields state none, however valid either
+    /// one is.
+    fn stated(headers: &HeaderMap) -> Option<Self> {
+        let mut values = headers.get_all(RETRY_AFTER).iter();
+        let value = values.next()?;
+        if values.next().is_some() {
+            return None;
+        }
+        Self::parse(value.as_bytes())
+    }
+
     /// Reads the value of one `Retry-After` field: `1*DIGIT` seconds, or an IMF-fixdate, RFC 850
     /// or asctime date. Anything else, and a number or date no timestamp represents, is `None`.
     fn parse(value: &[u8]) -> Option<Self> {
@@ -131,196 +176,30 @@ impl FinalStatus {
     }
 }
 
-struct ParsedBlock {
-    length: usize,
-    status: u16,
-    retry_after: Option<RetryAfter>,
-}
-
-/// Reads through complete final headers. Any body bytes received with their terminating CRLF are
-/// discarded with the stream; the body is neither parsed nor awaited. Only the final head's
-/// `Retry-After` counts; an interim head's is read with its block and dropped with it.
-#[cfg_attr(
-    nervix_lint,
-    nervix::dispatch(reason = "the generic external stream reader owns its I/O effects")
-)]
-pub(super) async fn read_final_headers<S>(stream: &mut S) -> ResponseHeadResult<FinalResponse>
-where
-    S: AsyncRead + Unpin + ?Sized,
-{
-    let mut pending = Vec::with_capacity(READ_BYTES);
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        if let Some(block) = ParsedBlock::parse(&pending)? {
-            pending.drain(..block.length);
-            if block.status == 101 || block.status >= 200 {
-                return Ok(FinalResponse {
-                    status: FinalStatus(block.status),
-                    retry_after: block.retry_after,
-                });
-            }
-            continue;
-        }
-        if pending.len() >= MAX_HEAD_BUFFER_BYTES {
-            return Err(Report::new(ResponseHeadError::Excessive));
-        }
-        let mut chunk = [0_u8; READ_BYTES];
-        let read = tokio::io::AsyncReadExt::read(stream, &mut chunk)
-            .await
-            .map_err(|error| Report::new(error).change_context(ResponseHeadError::Read))?;
-        if read == 0 {
-            return Err(Report::new(ResponseHeadError::Lost));
-        }
-        pending.extend_from_slice(&chunk[..read]);
-    }
-}
-
-impl ParsedBlock {
-    fn parse(bytes: &[u8]) -> ResponseHeadResult<Option<Self>> {
-        let mut fields = [httparse::EMPTY_HEADER; MAX_HEADER_FIELDS];
-        let mut response = httparse::Response::new(&mut fields);
-        let parsed = response.parse(bytes).map_err(|error| match error {
-            httparse::Error::TooManyHeaders => Report::new(ResponseHeadError::Excessive),
-            _ => Report::new(ResponseHeadError::Malformed),
-        })?;
-        let httparse::Status::Complete(length) = parsed else {
-            return Ok(None);
-        };
-        let Some(status) = response.code else {
-            return Err(Report::new(ResponseHeadError::Malformed));
-        };
-        if !(100..=599).contains(&status) {
-            return Err(Report::new(ResponseHeadError::Malformed));
-        }
-        Self::validate_line_endings(&bytes[..length])?;
-        Self::validate_fields(status, response.headers)?;
-        let retry_after = Self::retry_after(response.headers);
-        Ok(Some(Self {
-            length,
-            status,
-            retry_after,
-        }))
-    }
-
-    /// The one `Retry-After` value `fields` state. Two such fields state none, however valid
-    /// either one is. The scan is bounded by the 128 fields one parsed block can hold.
-    fn retry_after(fields: &[httparse::Header<'_>]) -> Option<RetryAfter> {
-        let mut values = fields
-            .iter()
-            .filter(|field| field.name.eq_ignore_ascii_case("retry-after"));
-        let value = values.next()?;
-        if values.next().is_some() {
-            return None;
-        }
-        RetryAfter::parse(value.value)
-    }
-
-    fn validate_line_endings(bytes: &[u8]) -> ResponseHeadResult<()> {
-        for (index, byte) in bytes.iter().enumerate() {
-            if *byte == b'\n' && (index == 0 || bytes[index - 1] != b'\r') {
-                return Err(Report::new(ResponseHeadError::Malformed));
-            }
-            if *byte == b'\r' && bytes.get(index + 1) != Some(&b'\n') {
-                return Err(Report::new(ResponseHeadError::Malformed));
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_fields(status: u16, fields: &[httparse::Header<'_>]) -> ResponseHeadResult<()> {
-        let mut bytes = 0_usize;
-        let mut content_length = None;
-        let mut transfer_encoding = None;
-        for field in fields {
-            let Some(next) = bytes
-                .checked_add(field.name.len())
-                .and_then(|size| size.checked_add(field.value.len()))
-            else {
-                return Err(Report::new(ResponseHeadError::Excessive));
-            };
-            bytes = next;
-            if bytes > MAX_HEADER_BYTES {
-                return Err(Report::new(ResponseHeadError::Excessive));
-            }
-            if field.name.eq_ignore_ascii_case("content-length") {
-                Self::read_content_length(field.value, &mut content_length)?;
-            }
-            if field.name.eq_ignore_ascii_case("transfer-encoding") {
-                Self::read_transfer_encoding(field.value, &mut transfer_encoding)?;
-            }
-        }
-        if content_length.is_some() && transfer_encoding.is_some() {
-            return Err(Report::new(ResponseHeadError::Malformed));
-        }
-        if let Some(last_encoding) = transfer_encoding
-            && !last_encoding.eq_ignore_ascii_case("chunked")
-        {
-            return Err(Report::new(ResponseHeadError::Malformed));
-        }
-        if (status < 200 || status == 204)
-            && (content_length.is_some() || transfer_encoding.is_some())
-        {
-            return Err(Report::new(ResponseHeadError::Malformed));
-        }
-        Ok(())
-    }
-
-    fn read_content_length(value: &[u8], length: &mut Option<u64>) -> ResponseHeadResult<()> {
-        let text = std::str::from_utf8(value)
-            .map_err(|cause| Report::new(cause).change_context(ResponseHeadError::Malformed))?;
-        for item in text.split(',') {
-            let item = item.trim_matches([' ', '\t']);
-            if item.is_empty() || !item.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Err(Report::new(ResponseHeadError::Malformed));
-            }
-            let parsed = item
-                .parse::<u64>()
-                .map_err(|cause| Report::new(cause).change_context(ResponseHeadError::Malformed))?;
-            if let Some(existing) = length
-                && *existing != parsed
-            {
-                return Err(Report::new(ResponseHeadError::Malformed));
-            }
-            *length = Some(parsed);
-        }
-        Ok(())
-    }
-
-    fn read_transfer_encoding<'a>(
-        value: &'a [u8],
-        last: &mut Option<&'a str>,
-    ) -> ResponseHeadResult<()> {
-        let text = std::str::from_utf8(value)
-            .map_err(|cause| Report::new(cause).change_context(ResponseHeadError::Malformed))?;
-        for coding in text.split(',') {
-            let coding = coding.trim_matches([' ', '\t']);
-            if coding.is_empty()
-                || !coding
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
-            {
-                return Err(Report::new(ResponseHeadError::Malformed));
-            }
-            *last = Some(coding);
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use http::{HeaderValue, StatusCode};
+
     use super::*;
 
-    fn parsed(bytes: &[u8]) -> ParsedBlock {
-        match ParsedBlock::parse(bytes) {
-            Ok(Some(block)) => block,
-            Ok(None) => panic!("the fixture contains a complete response head"),
-            Err(error) => panic!("the fixture should have valid response headers: {error:#}"),
+    fn response(status: u16, fields: &[(&'static str, &[u8])]) -> Response<()> {
+        let mut response = Response::new(());
+        *response.status_mut() = StatusCode::from_u16(status).expect("the test status is valid");
+        for (name, value) in fields {
+            response.headers_mut().append(
+                *name,
+                HeaderValue::from_bytes(value).expect("the test field value is valid"),
+            );
         }
+        response
+    }
+
+    fn final_response(status: u16, fields: &[(&'static str, &[u8])]) -> FinalResponse {
+        FinalResponse::read(&response(status, fields)).expect("the test status is in range")
     }
 
     #[test]
@@ -345,6 +224,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_status_outside_the_range_http_defines_has_no_class() {
+        for status in [600, 999] {
+            let error = FinalResponse::read(&response(status, &[]))
+                .expect_err("a status above 599 has no class");
+            assert!(matches!(
+                error.current_context(),
+                ResponseHeadError::StatusOutOfRange { status: found } if *found == status
+            ));
+        }
+    }
+
     /// The RFC 9110 example instant, `Sun, 06 Nov 1994 08:49:37 GMT`.
     const EXAMPLE_DATE_SECONDS: i64 = 784_111_777;
 
@@ -352,18 +243,8 @@ mod tests {
         Timestamp::from_unix_nanos(seconds * 1_000_000_000)
     }
 
-    fn final_response(head: &[u8]) -> FinalResponse {
-        let block = parsed(head);
-        FinalResponse {
-            status: FinalStatus(block.status),
-            retry_after: block.retry_after,
-        }
-    }
-
     fn retry_delay(retry_after: &str, received_at: Timestamp) -> Option<Duration> {
-        let head =
-            format!("HTTP/1.1 503 Service Unavailable\r\nRetry-After: {retry_after}\r\n\r\n");
-        final_response(head.as_bytes()).retry_delay(received_at)
+        final_response(503, &[("retry-after", retry_after.as_bytes())]).retry_delay(received_at)
     }
 
     #[test]
@@ -424,131 +305,32 @@ mod tests {
                 "{unrepresentable}"
             );
         }
-        let repeated = final_response(
-            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 5\r\nretry-after: 5\r\n\r\n",
-        );
+        let repeated = final_response(429, &[("retry-after", b"5"), ("retry-after", b"5")]);
         assert_eq!(repeated.retry_delay(received_at), None);
-        let absent = final_response(b"HTTP/1.1 503 Service Unavailable\r\n\r\n");
+        let absent = final_response(503, &[]);
         assert_eq!(absent.retry_delay(received_at), None);
     }
 
-    #[nervix_primitives::test]
-    async fn only_the_final_head_states_its_retry_after() {
-        let (mut client, mut server) = tokio::io::duplex(256);
-        nervix_primitives::task::spawn(async move {
-            use tokio::io::AsyncWriteExt as _;
-            let head = b"HTTP/1.1 103 Early Hints\r\nRetry-After: 60\r\n\r\nHTTP/1.1 503 Service \
-                         Unavailable\r\nContent-Length: 0\r\n\r\n";
-            if let Err(error) = server.write_all(head).await {
-                panic!("the in-memory server must write its response: {error}");
-            }
-        });
-        let Ok(response) = read_final_headers(&mut client).await else {
-            panic!("a valid interim block precedes a valid final head");
-        };
-        assert_eq!(response.status(), FinalStatus(503));
+    #[test]
+    fn a_redirect_states_its_one_location_and_no_other_status_states_any() {
+        let moved = final_response(307, &[("location", b"/moved?a=1")]);
+        assert_eq!(moved.location(), Some("/moved?a=1"));
+        let absolute = final_response(301, &[("location", b"https://api.example.com/v2")]);
+        assert_eq!(absolute.location(), Some("https://api.example.com/v2"));
+        let repeated = final_response(302, &[("location", b"/first"), ("location", b"/second")]);
+        assert_eq!(repeated.location(), None);
+        assert_eq!(final_response(308, &[]).location(), None);
         assert_eq!(
-            response.retry_delay(unix_seconds(EXAMPLE_DATE_SECONDS)),
+            final_response(302, &[("location", b"/caf\xe9")]).location(),
             None
         );
-    }
-
-    #[test]
-    fn every_header_block_accepts_the_exact_field_limits() {
-        let mut fields = Vec::new();
-        for index in 0..127 {
-            fields.extend_from_slice(format!("x-{index}: a\r\n").as_bytes());
-        }
-        let used: usize = (0..127).map(|index| format!("x-{index}").len() + 1).sum();
-        let fill = MAX_HEADER_BYTES - used - "x-fill".len();
-        fields.extend_from_slice(b"x-fill: ");
-        fields.extend(std::iter::repeat_n(b'x', fill));
-        fields.extend_from_slice(b"\r\n");
-        let mut head = b"HTTP/1.1 200 OK\r\n".to_vec();
-        head.extend_from_slice(&fields);
-        head.extend_from_slice(b"\r\n");
-        assert_eq!(parsed(&head).status, 200);
-
-        let mut oversized = head;
-        let position = oversized.len() - 4;
-        oversized.insert(position, b'x');
-        let error = ParsedBlock::parse(&oversized)
-            .err()
-            .unwrap_or_else(|| panic!("one byte beyond the bound must fail"));
-        assert!(matches!(
-            error.current_context(),
-            ResponseHeadError::Excessive
-        ));
-    }
-
-    #[test]
-    fn too_many_fields_and_invalid_framing_fail_before_status_classification() {
-        let mut fields = Vec::new();
-        for index in 0..129 {
-            fields.extend_from_slice(format!("x-{index}: a\r\n").as_bytes());
-        }
-        let mut head = b"HTTP/1.1 200 OK\r\n".to_vec();
-        head.extend_from_slice(&fields);
-        head.extend_from_slice(b"\r\n");
-        let error = ParsedBlock::parse(&head)
-            .err()
-            .unwrap_or_else(|| panic!("129 fields must fail"));
-        assert!(matches!(
-            error.current_context(),
-            ResponseHeadError::Excessive
-        ));
-
-        for malformed in [
-            b"HTTP/1.1 200 OK\r\nContent-Length: nope\r\n\r\n".as_slice(),
-            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n",
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n",
-            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n",
-            b"HTTP/1.1 200 OK\nx: y\n\n",
-        ] {
-            let error = ParsedBlock::parse(malformed)
-                .err()
-                .unwrap_or_else(|| panic!("malformed framing must fail"));
-            assert!(
-                matches!(error.current_context(), ResponseHeadError::Malformed),
-                "{error:#}"
-            );
-        }
-    }
-
-    #[nervix_primitives::test]
-    async fn interim_headers_are_checked_separately_from_final_headers() {
-        let (mut client, mut server) = tokio::io::duplex(128);
-        nervix_primitives::task::spawn(async move {
-            use tokio::io::AsyncWriteExt as _;
-            let head =
-                b"HTTP/1.1 103 Early Hints\r\nx-hint: ready\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n";
-            if let Err(error) = server.write_all(head).await {
-                panic!("the in-memory server must write its response: {error}");
-            }
-        });
-        let result = read_final_headers(&mut client).await;
-        let Ok(response) = result else {
-            panic!("an interim block within the bounds precedes a valid final head");
-        };
-        assert_eq!(response.status(), FinalStatus(204));
-
-        let mut oversized = b"HTTP/1.1 103 Early Hints\r\nx-fill: ".to_vec();
-        oversized.extend(std::iter::repeat_n(b'x', MAX_HEADER_BYTES));
-        oversized.extend_from_slice(b"\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n");
-        let (mut client, mut server) = tokio::io::duplex(8192);
-        nervix_primitives::task::spawn(async move {
-            use tokio::io::AsyncWriteExt as _;
-            if let Err(error) = server.write_all(&oversized).await {
-                panic!("the in-memory server must write its response: {error}");
-            }
-        });
-        let error = read_final_headers(&mut client)
-            .await
-            .err()
-            .unwrap_or_else(|| panic!("oversized interim headers must fail the attempt"));
-        assert!(matches!(
-            error.current_context(),
-            ResponseHeadError::Excessive
-        ));
+        assert_eq!(
+            final_response(201, &[("location", b"/events/1")]).location(),
+            None
+        );
+        assert_eq!(
+            final_response(404, &[("location", b"/elsewhere")]).location(),
+            None
+        );
     }
 }

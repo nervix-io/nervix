@@ -98,6 +98,7 @@ impl WindowStateSchemas {
         for lifecycle in lifecycles {
             if lifecycle.owner_kind != ModelKind::WindowProcessor
                 || lifecycle.entity != window.entity
+                || lifecycle.unit != window.unit
             {
                 continue;
             }
