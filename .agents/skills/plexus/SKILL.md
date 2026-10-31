@@ -19,8 +19,9 @@ lowercase HTTP field names, and on an emitter that keeps one value per header na
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, response-header reads, frame metadata and the closed client CONFIG key set.
-For ClickHouse HTTP connection tuning, read the ClickHouse Emitters section and the generated
-client key reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured values;
+For ClickHouse HTTP connection tuning, client certificates, compression and which insert failures
+reject a row rather than retry, read the ClickHouse Emitters section and the generated client key
+reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured values;
 `SHOW CREATE CLIENT <name>` preserves authored configuration. Both redact secrets.
 
 For delivery durations and direct-value mappings, follow the Ingestors delivery-mode and Emitters
