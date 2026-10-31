@@ -490,6 +490,9 @@ fn client_key(key: &ClientConfigKey) -> Value {
         ClientConfigPresence::OptionalForScheme { address, scheme } => {
             format!("optional; requires `{address}` to use `{scheme}`")
         }
+        ClientConfigPresence::ExactlyForScheme { address, scheme } => {
+            format!("required when `{address}` uses `{scheme}`; refused otherwise")
+        }
         ClientConfigPresence::OptionalForQuery {
             address,
             option,
@@ -502,6 +505,10 @@ fn client_key(key: &ClientConfigKey) -> Value {
     };
     let value = match declared_value {
         ClientConfigValue::Url(schemes) => format!("URL ({})", schemes.join(" or ")),
+        ClientConfigValue::HostPortUrl(schemes) => format!(
+            "URL naming only a host and a port ({})",
+            schemes.join(" or ")
+        ),
         ClientConfigValue::DriverUrl(url) => {
             let mut owned_options = Vec::with_capacity(url.owned.len());
             for option in url.owned {

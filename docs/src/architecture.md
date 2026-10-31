@@ -14,16 +14,32 @@ The graph itself is built out of persisted Plexus models:
 - `WIRE CBOR SCHEMA`
 - `WIRE AVRO SCHEMA`
 - `CODEC`
-- `RESOURCE`
 - `RELAY`
+- `BRANCH`
 - `CLIENT`
 - `VHOST`
 - `ENDPOINT`
+- `SIGNALING PROTOCOL`
 - `INGESTOR`
 - `JUNCTION`
 - `DEDUPLICATOR`
+- `REORDERER`
+- `WINDOW PROCESSOR`
+- `CORRELATOR`
 - `REINGESTOR`
+- `GENERATOR`
+- `INFERENCER`
+- `WASM PROCESSOR`
+- `HASH MAP`
+- `UDF`
 - `EMITTER`
+- `PLACEMENT`
+
+These Model kinds identify named definitions in a domain. Inside an ingestor or emitter Model,
+the vocabulary nests connector then entity, with a distinct typed payload for each pair. A client
+Model names its connector. Plexus selects those identities in heads such as `KAFKA TOPIC INGESTOR`,
+`OTEL METRICS EMITTER` and `KAFKA CLIENT`; the chosen entity owns its grammar body and an alteration
+retains its kind. Capabilities and reference kinds are declared once per entity in the vocabulary.
 
 Those models are stored in the registry and scheduled into a `DomainSchedule`. The schedule says
 which nodes exist in a domain, which server is primary for each node, and which servers hold
@@ -86,8 +102,10 @@ validated typed plan with an integration-specific source or emitter, and its dat
 intake, routing, buffering, acknowledgements, and lifecycle. The
 [Connector Crates And The Connector Contract](./connector-contract.md) chapter defines that
 boundary, its ingestor and emitter families, delivery and commit points, special integrations, and
-failure semantics. The [Ingestors](./ingestors.md) and [Emitters](./emitters.md) manuals define the
-public Plexus forms.
+failure semantics. Its [connector and entity kinds](./connector-contract.md#connector-and-entity-kinds)
+section follows the selected kind through the Model, typed plan, concrete connector and compile-time
+composition assertion, and defines how a second entity extends a connector. The
+[Ingestors](./ingestors.md) and [Emitters](./emitters.md) manuals define the public Plexus forms.
 
 [HTTP Emitter Architecture](./http-emitter-architecture.md) traces one HTTP request from its
 validated configuration and Arrow source record through preparation, response classification,

@@ -547,17 +547,44 @@ class WorkflowTests(unittest.TestCase):
         self.workflow = (ROOT / ".github/workflows/check.yaml").read_text()
         self.justfile = (ROOT / "justfile").read_text()
 
+    def test_each_coverage_artifact_has_an_explicit_destination(self) -> None:
+        job = job_section(self.workflow, "coverage")
+        shards = int(re.search(r'  SCENARIO_SHARDS: "(\d+)"', self.workflow)[1])
+        expected = {"coverage-tests": "tests", "coverage-native-extras": "coverage-native-extras"}
+        expected.update({f"coverage-scenarios-{shard}": f"coverage-scenarios-{shard}" for shard in range(1, shards + 1)})
+        actual = {}
+        for step in job.split("\n      - name: "):
+            if "uses: actions/download-artifact" not in step:
+                continue
+            inputs = step.split("with:", 1)[1]
+            artifact = re.search(r"(?:name|pattern): (\S+)", inputs)[1]
+            destination = re.search(r"path: (\S+)", inputs)[1]
+            actual[artifact] = destination
+        self.assertEqual(actual, {name: f"coverage-inputs/{directory}" for name, directory in expected.items()})
+
+    def test_only_labels_that_collect_coverage_require_the_native_extras(self) -> None:
+        extras = job_section(self.workflow, "extra-tests")
+        selected = set()
+        for step in extras.split("\n      - name: "):
+            if "just coverage" in step:
+                selected.update(re.findall(r"contains\(github.event.pull_request.labels.\*.name, '(extra-[^']+)'\)", step))
+        merge = step_section(job_section(self.workflow, "coverage"), "Merge coverage")
+        output = extras.split("    outputs:\n", 1)[1].split("    # It runs", 1)[0]
+        required = set(re.findall(r"contains\(github.event.pull_request.labels.\*.name, '(extra-[^']+)'\)", output))
+        self.assertEqual(required, selected)
+        self.assertIn("EXTRA_COVERAGE_REQUIRED: ${{ needs.extra-tests.outputs.coverage-required }}", merge)
+        self.assertIn('${EXTRA_COVERAGE_REQUIRED}', merge)
+
+    def test_selected_native_extras_are_named_even_when_the_download_is_missing(self) -> None:
+        merge = step_section(job_section(self.workflow, "coverage"), "Merge coverage")
+        self.assertIn("EXTRA_TESTS_RESULT: ${{ needs.extra-tests.result }}", merge)
+        self.assertIn('if [[ "${EXTRA_TESTS_RESULT}" == "success" ]]; then', merge)
+        self.assertIn("extras+=(coverage-inputs/coverage-native-extras)", merge)
+
     def test_the_coverage_job_merges_the_ordinary_artifacts_through_the_recipe(self) -> None:
         job = job_section(self.workflow, "coverage")
         self.assertIn("needs: [tests, scenarios, extra-tests]", job)
-        downloads = [step for step in job.split("\n      - name: ") if "uses: actions/download-artifact" in step]
-        self.assertEqual(
-            [re.search(r"(?:name|pattern): (\S+)", step.split("with:")[1])[1] for step in downloads],
-            ["coverage-tests", "coverage-scenarios-*", "coverage-native-extras"],
-        )
-        # Every scenario shard's report lands in a directory named after its artifact, and the merge
-        # names each shard the workflow runs, so a missing report fails it.
-        self.assertIn("          path: coverage-inputs\n", step_section(job, "Download scenarios coverage"))
+        # The merge names each configured shard, so a missing report fails it.
         merge = step_section(job, "Merge coverage")
         self.assertIn('for shard in $(seq 1 "${SCENARIO_SHARDS}"); do\n', merge)
         self.assertIn('scenarios+=("coverage-inputs/coverage-scenarios-${shard}")\n', merge)

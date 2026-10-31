@@ -14,13 +14,17 @@ clause order or connector options from memory.
 For Plexus connector choices, read [Connector Capabilities](https://docs.nervix.io/connector-capabilities.md)
 alongside the entity's Ingestors or Emitters section. Its generated tables show modes, option
 requirements, metadata types, each side's header model, batching, buffer bounds, network waits and
-the reasons ingest and emit differ. Read headers the way the source's model records them, such as
+the reasons ingest and emit differ. Read `Plexus Overview` → `Statement catalog` for connector and
+entity heads, kind-preserving alterations, and name-based inspection. Choose the complete declared
+pair before assembling its body, including when its connector has one entity. Read headers the way
+the source's model records them, such as
 lowercase HTTP field names, and on an emitter that keeps one value per header name write each literal
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, response-header reads, frame metadata and the closed client CONFIG key set.
-For ClickHouse HTTP connection tuning, read the ClickHouse Emitters section and the generated
-client key reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured values;
+For ClickHouse HTTP connection tuning, client certificates, compression and which insert failures
+reject a row rather than retry, read the ClickHouse Emitters section and the generated client key
+reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured values;
 `SHOW CREATE CLIENT <name>` preserves authored configuration. Both redact secrets.
 
 For delivery durations and direct-value mappings, follow the Ingestors delivery-mode and Emitters
