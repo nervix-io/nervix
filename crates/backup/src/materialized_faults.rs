@@ -74,22 +74,34 @@ impl Case {
             })
             .assured("a stateful case has one unbranched materialized row");
         let descriptor = &value.descriptor;
-        let path = SectionPath::materialized_descriptor(&descriptor.domain, &descriptor.entity);
+        let path = SectionPath::materialized_descriptor(
+            &descriptor.domain,
+            &descriptor.entity,
+            descriptor.unit,
+        );
         let descriptor_index = self
             .sections
             .iter()
             .position(|section| section.entry.path == path)
             .assured("the materialized descriptor has a section");
         let group = &value.groups[0].identities;
-        let identity_path =
-            SectionPath::materialized_identities(&group.domain, &group.entity, group.group);
+        let identity_path = SectionPath::materialized_identities(
+            &group.domain,
+            &group.entity,
+            group.unit,
+            group.group,
+        );
         let identity_index = self
             .sections
             .iter()
             .position(|section| section.entry.path == identity_path)
             .assured("the identities have a section");
-        let columns_path =
-            SectionPath::materialized_columns(&group.domain, &group.entity, group.group);
+        let columns_path = SectionPath::materialized_columns(
+            &group.domain,
+            &group.entity,
+            group.unit,
+            group.group,
+        );
         let columns_index = self
             .sections
             .iter()
@@ -137,6 +149,7 @@ impl Case {
                     let path = SectionPath::materialized_identities(
                         &record.domain,
                         &record.entity,
+                        record.unit,
                         record.group,
                     );
                     sections[identity_index] = Section::record(path.clone(), &record);

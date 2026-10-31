@@ -86,6 +86,40 @@ fn tcp_keepalive_values_fit_the_socket_option_without_truncation() {
     }
 }
 
+#[test]
+fn a_level_template_admits_exactly_its_levels() {
+    let key = ClientConfigKey::optional("namespace", ClientConfigValue::Levels("tenant/namespace"));
+    assert_eq!(key.value.label(), "tenant/namespace");
+    for value in ["public/default", "tenant-a/orders", "t/n", "tenant:a/ns=eu"] {
+        key.validate(value)
+            .assured("two nonempty levels without whitespace match the template");
+    }
+    for value in [
+        "",
+        "tenant",
+        "tenant/",
+        "/namespace",
+        "tenant//namespace",
+        "tenant/namespace/topic",
+        "ten ant/namespace",
+        "tenant/name\u{a0}space",
+        "tenant/namespace\n",
+        "tenant/\u{7}",
+    ] {
+        let report = key
+            .validate(value)
+            .expect_err("a value that does not name exactly the template's levels is refused");
+        assert_eq!(
+            report.current_context(),
+            &ClientConfigSchemaError::InvalidValue {
+                key: "namespace".to_string(),
+                expected: "tenant/namespace",
+            },
+            "{value:?} does not name a tenant and a namespace"
+        );
+    }
+}
+
 fn mqtt() -> ClientConfigSchema {
     ConnectorKind::Mqtt
         .client()
@@ -164,13 +198,15 @@ fn delegated_properties_keep_their_namespace_and_reserved_key_boundary() {
         .client()
         .assured("Kafka declares a client")
         .config;
+    let brokers = entry("bootstrap.servers", "broker-1:9092");
     let property = entry("topic.metadata.refresh.interval.ms", "1000");
+    let entries = [brokers.clone(), property.clone()];
     schema
-        .validate(std::slice::from_ref(&property))
+        .validate(&entries)
         .assured("librdkafka owns this property namespace");
     assert_eq!(
-        schema.inspection_entries(std::slice::from_ref(&property)),
-        vec![entry(&property.key, CLIENT_CONFIG_REDACTION)]
+        schema.inspection_entries(&entries),
+        vec![brokers, entry(&property.key, CLIENT_CONFIG_REDACTION)]
     );
     let refusal = mqtt()
         .validate(&[entry("addr", "mqtt://broker.example.com"), property])
@@ -386,6 +422,40 @@ fn a_key_conditioned_on_an_owned_choice_requires_its_address_to_set_it() {
             ..
         }
     ));
+}
+
+#[test]
+fn a_key_is_read_by_every_entity_of_its_client_unless_declared_for_one_side() {
+    let shared = ClientConfigKey::optional("addr", ClientConfigValue::String);
+    assert_eq!(shared.readers, ClientConfigReaders::Every);
+    assert!(shared.readers.include_ingestors());
+    assert!(shared.readers.include_emitters());
+
+    let intake = ClientConfigKey::IDLE_TIMEOUT.read_by_ingestors();
+    assert_eq!(intake.readers, ClientConfigReaders::Ingestors);
+    assert!(intake.readers.include_ingestors());
+    assert!(!intake.readers.include_emitters());
+
+    let publication = ClientConfigKey::TIMEOUT.read_by_emitters();
+    assert_eq!(publication.readers, ClientConfigReaders::Emitters);
+    assert!(!publication.readers.include_ingestors());
+    assert!(publication.readers.include_emitters());
+
+    // The side that reads a key changes nothing else the key declares.
+    assert_eq!(
+        ClientConfigKey {
+            readers: ClientConfigReaders::Every,
+            ..intake
+        },
+        ClientConfigKey::IDLE_TIMEOUT
+    );
+    assert_eq!(
+        ClientConfigKey {
+            readers: ClientConfigReaders::Every,
+            ..publication
+        },
+        ClientConfigKey::TIMEOUT
+    );
 }
 
 #[test]
@@ -696,6 +766,13 @@ fn bolero_schema_checked_client_entries_round_trip() {
                     }
                     ClientConfigValue::File(_) => {
                         format!("/mount/{}.pem", arbitrary.entropy().byte())
+                    }
+                    ClientConfigValue::Levels(template) => {
+                        let mut levels = Vec::new();
+                        for name in template.split('/') {
+                            levels.push(format!("{name}{}", arbitrary.entropy().byte()));
+                        }
+                        levels.join("/")
                     }
                 };
                 entries.push(entry(key.name, &value));

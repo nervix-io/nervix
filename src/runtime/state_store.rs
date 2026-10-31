@@ -20,7 +20,7 @@ use nervix_execution::{Executor, MemoryClass, StorageClass};
 pub(crate) use nervix_interconnect::{RuntimeState, RuntimeStateKind, StateSchema};
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeIncarnation, ClusterNodeName, CoordinationIdentity,
-    DomainName, DomainNodeRef, ModelKind, ModelName, NodeRef, SchemaFingerprint,
+    DomainName, DomainNodeRef, ModelKind, ModelName, NodeRef, NodeUnitRef, SchemaFingerprint, Unit,
     WasmStateGeneration, WasmStateGenerations,
 };
 use nervix_primitives::{
@@ -82,6 +82,31 @@ const STATE_GENERATION_KEY_MARKER: u8 = b'g';
 /// schema-bound state carries it and no other key does, so a key without it fails to decode as
 /// schema-bound state instead of addressing state laid out by some schema.
 const STATE_SCHEMA_KEY_MARKER: u8 = b's';
+/// The current key's unit segment. A missing marker is an invalid stored shape.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "unit identity is part of the stored key format")
+)]
+const STATE_UNIT_KEY_MARKER: u8 = b'u';
+
+fn append_unit_key(key: &mut Vec<u8>, unit: Unit) {
+    key.push(0);
+    key.push(STATE_UNIT_KEY_MARKER);
+    match unit {
+        Unit::Single => {
+            key.push(0);
+            key.extend_from_slice(&0_u32.to_be_bytes());
+        }
+        Unit::Partition(partition) => {
+            key.push(1);
+            key.extend_from_slice(&partition.to_be_bytes());
+        }
+        Unit::Instance(instance) => {
+            key.push(2);
+            key.extend_from_slice(&instance.to_be_bytes());
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RuntimeStatePlacement {
@@ -89,6 +114,7 @@ pub(crate) struct RuntimeStatePlacement {
     pub(crate) state: RuntimeState,
     pub(crate) kind: ModelKind,
     pub(crate) identifier: ModelName,
+    pub(crate) unit: Unit,
     pub(in crate::runtime) branch_key: Option<BranchKey>,
 }
 
@@ -109,11 +135,14 @@ impl fmt::Display for RuntimeStatePlacement {
         }
         write!(
             formatter,
-            " for {} '{}' in domain '{}'",
+            " for {} '{}'",
             self.kind.as_str(),
-            self.identifier.as_str(),
-            self.domain.as_str()
-        )
+            self.identifier.as_str()
+        )?;
+        if self.unit != Unit::Single {
+            write!(formatter, " unit {:?}", self.unit)?;
+        }
+        write!(formatter, " in domain '{}'", self.domain.as_str())
     }
 }
 
@@ -805,6 +834,14 @@ pub(crate) enum StoredStateIssue {
     KeyIdentifierSeparator,
     #[error("runtime state key has an invalid identifier")]
     KeyIdentifier,
+    #[error("runtime state key has no execution unit marker")]
+    KeyUnitMarker,
+    #[error("runtime state key has a truncated execution unit")]
+    KeyUnitTruncated,
+    #[error("runtime state key has an invalid execution unit")]
+    KeyUnitInvalid,
+    #[error("runtime state key has no execution unit separator")]
+    KeyUnitSeparator,
     #[error("runtime state key continues after its unbranched scope")]
     KeyAfterUnbranchedScope,
     #[error("runtime state key has an invalid branch key")]
@@ -1013,6 +1050,7 @@ struct StoredHandoffPreparation {
     domain: DomainName,
     kind: ModelKind,
     identifier: ModelName,
+    unit: Unit,
     base_schedule_fingerprint: [u8; 32],
     target_schedule_fingerprint: [u8; 32],
     checkpoints: Vec<StoredHandoffCheckpoint>,
@@ -1052,6 +1090,7 @@ pub(in crate::runtime) struct ForcedRuntimeStateRecoveryIdentity {
     destination: ClusterNodeName,
     domain: DomainName,
     entity: NodeRef,
+    unit: Unit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1076,6 +1115,7 @@ impl ForcedRuntimeStateRecoveryIdentity {
             && self.destination == *transition.destination
             && self.domain == transition.entity.domain
             && self.entity == transition.entity.node
+            && self.unit == transition.unit
     }
 }
 
@@ -1090,6 +1130,7 @@ pub(in crate::runtime) struct PersistedRuntimeStateHandoffPreparation {
     pub(in crate::runtime) domain: DomainName,
     pub(in crate::runtime) kind: ModelKind,
     pub(in crate::runtime) identifier: ModelName,
+    pub(in crate::runtime) unit: Unit,
     pub(in crate::runtime) base_schedule_fingerprint: [u8; 32],
     pub(in crate::runtime) target_schedule_fingerprint: [u8; 32],
     pub(in crate::runtime) checkpoints: Vec<(
@@ -1107,6 +1148,7 @@ pub(in crate::runtime) struct RuntimeStateHandoffTransition<'a> {
     pub(in crate::runtime) source_incarnation: ClusterNodeIncarnation,
     pub(in crate::runtime) destination_incarnation: ClusterNodeIncarnation,
     pub(in crate::runtime) entity: &'a DomainNodeRef,
+    pub(in crate::runtime) unit: Unit,
     pub(in crate::runtime) base_schedule_fingerprint: [u8; 32],
     pub(in crate::runtime) target_schedule_fingerprint: [u8; 32],
 }
@@ -1118,6 +1160,7 @@ pub(in crate::runtime) struct ForcedRuntimeStateRecoveryTransition<'a> {
     pub(in crate::runtime) destination: &'a ClusterNodeName,
     pub(in crate::runtime) destination_incarnation: ClusterNodeIncarnation,
     pub(in crate::runtime) entity: &'a DomainNodeRef,
+    pub(in crate::runtime) unit: Unit,
     pub(in crate::runtime) target_schedule_fingerprint: [u8; 32],
 }
 
@@ -1129,6 +1172,7 @@ impl ForcedRuntimeStateRecoveryTransition<'_> {
             destination: self.destination.clone(),
             domain: self.entity.domain.clone(),
             entity: self.entity.node.clone(),
+            unit: self.unit,
         }
     }
 }
@@ -1143,6 +1187,7 @@ impl RuntimeStatePlacement {
         key.extend_from_slice(self.kind.as_str().as_bytes());
         key.push(0);
         key.extend_from_slice(self.identifier.as_str().as_bytes());
+        append_unit_key(&mut key, self.unit);
         key.push(0);
         if let StateSchema::Fingerprinted(schema) = self.state.schema() {
             key.push(STATE_SCHEMA_KEY_MARKER);
@@ -1193,6 +1238,7 @@ impl RuntimeStatePlacement {
             state: self.state,
             kind: self.kind,
             identifier: self.identifier.clone(),
+            unit: self.unit,
             branch_key: BranchKey::to_remote_key(&self.branch_key),
         }
     }
@@ -1214,6 +1260,7 @@ impl RuntimeStatePlacement {
             state: placement.state,
             kind: placement.kind,
             identifier: placement.identifier,
+            unit: placement.unit,
             branch_key,
         })
     }
@@ -1340,6 +1387,7 @@ impl RuntimeStateStore {
         domain: &DomainName,
         kind: ModelKind,
         identifier: &ModelName,
+        unit: Unit,
     ) -> Vec<u8> {
         let mut key = coordination.coordinator().as_str().as_bytes().to_vec();
         key.push(0);
@@ -1353,6 +1401,7 @@ impl RuntimeStateStore {
         key.extend_from_slice(kind.as_str().as_bytes());
         key.push(0);
         key.extend_from_slice(identifier.as_str().as_bytes());
+        append_unit_key(&mut key, unit);
         key
     }
 
@@ -1360,12 +1409,14 @@ impl RuntimeStateStore {
         domain: &DomainName,
         kind: ModelKind,
         identifier: &ModelName,
+        unit: Unit,
     ) -> Vec<u8> {
         let mut key = domain.as_str().as_bytes().to_vec();
         key.push(0);
         key.extend_from_slice(kind.as_str().as_bytes());
         key.push(0);
         key.extend_from_slice(identifier.as_str().as_bytes());
+        append_unit_key(&mut key, unit);
         key
     }
 
@@ -1383,6 +1434,7 @@ impl RuntimeStateStore {
             domain: transition.entity.domain.clone(),
             kind: transition.entity.kind(),
             identifier: transition.entity.identifier().clone(),
+            unit: transition.unit,
             base_schedule_fingerprint: transition.base_schedule_fingerprint,
             target_schedule_fingerprint: transition.target_schedule_fingerprint,
             checkpoints: checkpoints
@@ -1415,6 +1467,7 @@ impl RuntimeStateStore {
             domain: stored.domain,
             kind: stored.kind,
             identifier: stored.identifier,
+            unit: stored.unit,
             base_schedule_fingerprint: stored.base_schedule_fingerprint,
             target_schedule_fingerprint: stored.target_schedule_fingerprint,
             checkpoints: stored
@@ -1499,6 +1552,7 @@ impl RuntimeStateStore {
             &transition.entity.domain,
             transition.entity.kind(),
             transition.entity.identifier(),
+            transition.unit,
         );
         let encoded = Self::encode_handoff_preparation(transition, checkpoints)?;
         self.handoff_preparations
@@ -1524,6 +1578,7 @@ impl RuntimeStateStore {
             &replaced.entity.domain,
             replaced.entity.kind(),
             replaced.entity.identifier(),
+            replaced.unit,
         );
         let replacement_key = Self::handoff_preparation_key(
             replacement.coordination,
@@ -1531,6 +1586,7 @@ impl RuntimeStateStore {
             &replacement.entity.domain,
             replacement.entity.kind(),
             replacement.entity.identifier(),
+            replacement.unit,
         );
         let encoded = Self::encode_handoff_preparation(replacement, checkpoints)?;
         let mut batch = self.db.batch();
@@ -1555,6 +1611,7 @@ impl RuntimeStateStore {
             &transition.entity.domain,
             transition.entity.kind(),
             transition.entity.identifier(),
+            transition.unit,
         );
         if let Some(raw) = self
             .forced_recovery_completions
@@ -1596,6 +1653,7 @@ impl RuntimeStateStore {
             &transition.entity.domain,
             transition.entity.kind(),
             transition.entity.identifier(),
+            transition.unit,
         );
         if let Some(raw) = self
             .forced_recovery_completions
@@ -1644,6 +1702,7 @@ impl RuntimeStateStore {
             &transition.entity.domain,
             transition.entity.kind(),
             transition.entity.identifier(),
+            transition.unit,
             &checkpoints,
         )?;
         let encoded = Self::encode_forced_recovery_completion(transition)?;
@@ -1666,9 +1725,16 @@ impl RuntimeStateStore {
         domain: &DomainName,
         kind: ModelKind,
         identifier: &ModelName,
+        unit: Unit,
     ) -> Result<(), Report<RuntimePersistenceError>> {
-        let key =
-            Self::handoff_preparation_key(coordination, operation_id, domain, kind, identifier);
+        let key = Self::handoff_preparation_key(
+            coordination,
+            operation_id,
+            domain,
+            kind,
+            identifier,
+            unit,
+        );
         let mut batch = self.db.batch();
         batch.remove(&self.handoff_preparations, key.clone());
         batch.remove(&self.handoff_activations, key);
@@ -1704,10 +1770,17 @@ impl RuntimeStateStore {
         domain: &DomainName,
         kind: ModelKind,
         identifier: &ModelName,
+        unit: Unit,
     ) -> Result<Option<PersistedRuntimeStateHandoffPreparation>, Report<RuntimePersistenceError>>
     {
-        let key =
-            Self::handoff_preparation_key(coordination, operation_id, domain, kind, identifier);
+        let key = Self::handoff_preparation_key(
+            coordination,
+            operation_id,
+            domain,
+            kind,
+            identifier,
+            unit,
+        );
         let Some(raw) = self.handoff_activations.get(key).map_err(|cause| {
             Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
         })?
@@ -1742,6 +1815,7 @@ impl RuntimeStateStore {
             &transition.entity.domain,
             transition.entity.kind(),
             transition.entity.identifier(),
+            transition.unit,
         );
         let expected = Self::encode_handoff_preparation(transition, checkpoints)?;
         let stored = self
@@ -1770,8 +1844,9 @@ impl RuntimeStateStore {
                     }?;
                     let (_, stored) = physical_placement(&key)?;
                     Ok((stored.kind == transition.entity.kind()
-                        && stored.identifier == *transition.entity.identifier())
-                    .then_some(key))
+                        && stored.identifier == *transition.entity.identifier()
+                        && stored.unit == transition.unit)
+                        .then_some(key))
                 })
                 .collect::<Result<Vec<_>, Report<RuntimePersistenceError>>>()?
                 .into_iter()
@@ -1820,6 +1895,7 @@ impl RuntimeStateStore {
                 &transition.entity.domain,
                 transition.entity.kind(),
                 transition.entity.identifier(),
+                transition.unit,
             ),
             expected,
         );
@@ -1904,6 +1980,7 @@ impl RuntimeStateStore {
         domain: &DomainName,
         kind: ModelKind,
         identifier: &ModelName,
+        unit: Unit,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> Result<(), Report<RuntimePersistenceError>> {
         let _installation = self.replica_installs.lock();
@@ -1923,7 +2000,10 @@ impl RuntimeStateStore {
                         }
                     }?;
                     let (_, stored) = physical_placement(&key)?;
-                    Ok((stored.kind == kind && stored.identifier == *identifier).then_some(key))
+                    Ok((stored.kind == kind
+                        && stored.identifier == *identifier
+                        && stored.unit == unit)
+                        .then_some(key))
                 })
                 .collect::<Result<Vec<_>, Report<RuntimePersistenceError>>>()?
                 .into_iter()
@@ -2100,7 +2180,7 @@ impl RuntimeStateStore {
     pub(in crate::runtime) fn purge_stale_state_identities(
         &self,
         domain: &DomainName,
-        current: &HashMap<NodeRef, ScheduledStateIdentity>,
+        current: &HashMap<NodeUnitRef, ScheduledStateIdentity>,
     ) -> Result<(), Report<RuntimePersistenceError>> {
         let _installation = self.replica_installs.lock();
         let namespace =
@@ -2118,10 +2198,7 @@ impl RuntimeStateStore {
                 }
             }?;
             let (_, stored) = physical_placement(&key)?;
-            let node = NodeRef {
-                kind: stored.kind,
-                identifier: stored.identifier,
-            };
+            let node = NodeUnitRef::new(NodeRef::new(stored.kind, stored.identifier), stored.unit);
             let is_current = match current.get(&node) {
                 Some(identity) => identity.names(stored.state, stored.branch.as_ref()),
                 None => false,
@@ -2170,6 +2247,7 @@ pub(in crate::runtime) struct StoredPlacement {
     pub(in crate::runtime) state: RuntimeState,
     pub(in crate::runtime) kind: ModelKind,
     pub(in crate::runtime) identifier: ModelName,
+    pub(in crate::runtime) unit: Unit,
     pub(in crate::runtime) branch: Option<BranchKeyFingerprint>,
 }
 
@@ -2226,9 +2304,33 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
     let identifier = ModelName::decode(identifier)
         .change_context(StoredStateIssue::KeyIdentifier)
         .change_context(RuntimePersistenceError::DecodeState)?;
-    let lifetime_start = identifier_end
+    let unit_start = identifier_end
         .checked_add(1)
         .verified("the identifier separator position is an index into this key");
+    if key.get(unit_start) != Some(&STATE_UNIT_KEY_MARKER) {
+        return Err(StoredStateIssue::KeyUnitMarker.decode_failure());
+    }
+    let unit_end = unit_start
+        .checked_add(7)
+        .verified("an index into an allocated key leaves room for a seven-byte unit segment");
+    let unit_segment = key
+        .get(unit_start..unit_end)
+        .ok_or_else(|| StoredStateIssue::KeyUnitTruncated.decode_failure())?;
+    if unit_segment[6] != 0 {
+        return Err(StoredStateIssue::KeyUnitSeparator.decode_failure());
+    }
+    let ordinal = u32::from_be_bytes(
+        unit_segment[2..6]
+            .try_into()
+            .verified("the checked unit segment contains four ordinal bytes"),
+    );
+    let unit = match (unit_segment[1], ordinal) {
+        (0, 0) => Unit::Single,
+        (1, partition) => Unit::Partition(partition),
+        (2, instance) => Unit::Instance(instance),
+        _ => return Err(StoredStateIssue::KeyUnitInvalid.decode_failure()),
+    };
+    let lifetime_start = unit_end;
     let StoredRuntimeState {
         state,
         branch_start,
@@ -2260,6 +2362,7 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
         state,
         kind,
         identifier,
+        unit,
         branch,
     })
 }

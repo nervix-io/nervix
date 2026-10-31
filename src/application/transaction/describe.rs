@@ -50,7 +50,7 @@ impl SessionServiceImpl {
             }
             TransactionInspectionOutcome::Rejected { message, .. } => command_error(message),
             TransactionInspectionOutcome::NotLeader { leader } => {
-                self.not_leader_response(query, leader).await
+                self.not_leader_response(query, leader.into()).await
             }
         }
     }

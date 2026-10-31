@@ -95,6 +95,7 @@ mod tests {
                 domain: domain.clone(),
                 kind: ModelKind::WasmProcessor,
                 identifier: processor,
+                unit: nervix_models::Unit::Single,
                 branch_key: None,
                 state: RuntimeState::WasmProcessor {
                     schema,

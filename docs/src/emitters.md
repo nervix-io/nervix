@@ -314,8 +314,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | a request: name resolution within half of it, each address's connection within an equal share of what is left, TLS, writing it and its final response headers: `timeout_ms`; required |
-| Driver limits | A response head above 74,240 bytes or 128 fields fails the attempt. |
+| Network waits | a request and the redirects it follows: for each, name resolution within half of what is left, each address's connection within an equal share of what is left after it, the proxy's TLS and tunnel, TLS, writing it and its final response headers: `timeout_ms`; required |
+| Driver limits | HTTP/1.1 response heads above 100 fields or 417,792 bytes, and HTTP/2 header lists of 16,384 bytes or more as HTTP/2 counts them, are refused.<br>Redirects and proxies require the client's explicit opt-in. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-emit).
@@ -331,7 +331,10 @@ The referenced client must be a `HTTP CLIENT` in the same domain. Its `endpoint`
 query or fragment. It requires a positive, schedulable `timeout_ms`; the emitter's `METHOD` is its
 own expression. HTTPS retains certificate and hostname verification.
 The optional `tls_cert_file` and `tls_key_file` settings must be supplied together, and mounted TLS
-files use the client's pinned resource version. Validation does not probe the destination.
+files use the client's pinned resource version. The optional `follow_redirects` and `proxy`
+settings mean for the emitter what they mean for HTTP polling, as
+[HTTP client transport](#http-client-transport) describes. Validation does not probe the
+destination.
 
 Method, path and `write_header` name and value expressions must each be exact, non-null `STRING`
 values. Request expressions read the original `input` and, with a codec, finalized `output` and
@@ -436,40 +439,82 @@ source relays and branches it serves. It sends the requests a flush releases in 
 Independent executions have no total order, and an endpoint can apply a request after Nervix loses
 its response, so this order does not settle ambiguous remote effects.
 
-The HTTP emitter speaks HTTP/1.1. It creates a connection for each attempt and closes it after final
-headers, so an unread or stalled body cannot be reused as the next response. DNS resolution,
+The HTTP emitter sends each request through hyper, which speaks HTTP/2 when the endpoint's TLS
+negotiates it and HTTP/1.1 otherwise. It creates a connection for each request and closes it after
+final headers, so an unread or stalled body cannot be reused as the next response. DNS resolution,
 connection acquisition, TLS negotiation, the complete request send, interim responses and
-complete final headers share the client's physical `timeout_ms`; queueing behind an earlier
-request and host retry backoff do not consume the next attempt's timeout. Resolving the endpoint's
-host takes at most half of `timeout_ms`, whatever the name servers do, and each address it resolves
-to is tried in turn within an equal share of what is left, so an address that never answers leaves
-the next one time to connect and the request time to be sent and answered. HTTPS validates trust and
+complete final headers share the client's physical `timeout_ms`, and so do the requests of every
+redirect the client follows within one attempt; queueing behind an earlier request and host retry
+backoff do not consume the next attempt's timeout. Resolving the endpoint's host takes at most half
+of what is left of `timeout_ms` when a request starts, whatever the name servers do, and each
+address it resolves to is tried in turn within an equal share of what is left, so an address that
+never answers leaves the next one time to connect and the request time to be sent and answered. HTTPS validates trust and
 the destination hostname and uses the client's pinned CA and optional client certificate mounts.
 Starting the emitter reads local configuration and sends no probe.
 
-The transport writes `Host`, `Connection: close`, and `Content-Length`: the body's length when a
-body exists, and `0` for a `POST`, `PUT` or `PATCH` declared `WITHOUT BODY`, as servers that require
+Over HTTP/1.1 the transport writes `Host` and `Connection: close`, and over HTTP/2 hyper sends the
+authority as `:authority`. The request declares `Content-Length`: the body's length when a body
+exists, and `0` for a `POST`, `PUT` or `PATCH` declared `WITHOUT BODY`, as servers that require
 a length expect; any other method declared `WITHOUT BODY` carries no `Content-Length`. It adds
 `Accept: */*` only when the application did not write `Accept`. It adds no `Accept-Encoding` or
 `Content-Type`. The application may write `Accept`, `Content-Type`, `Authorization`, and `Cookie`
 with `write_header`. Response cookies are
-not retained; an authentication challenge sends no additional request. There is no redirect or
-library retry: every repeat is a separate emitter attempt under its declared policy.
+not retained; an authentication challenge sends no additional request. There is no library retry:
+every repeat is a separate emitter attempt under its declared policy, and a redirect is followed
+only as [HTTP client transport](#http-client-transport) describes.
 
-Each interim and final response header block may contain at most 128 fields and 64 KiB of field
-name and value bytes. Malformed headers or final framing and any exceeded bound fail the attempt,
-even when the final status line says `200`. Complete valid final `200`–`299` headers deliver the
+An HTTP/1.1 response head may carry at most 100 fields in 417,792 bytes, and an HTTP/2 header
+list stays under 16,384 bytes as HTTP/2 counts it, 32 bytes for each field beside its name and
+value; each interim and final head is held to them. Malformed headers or
+final framing, a status above `599` and any exceeded bound fail the attempt, even when the final
+status line says `200`. Complete valid final `200`–`299` headers deliver the
 record, including `202` and `204`; a stalled or failed body after those headers does not reverse
 delivery. The emitter never waits for a body or uses bodies and trailers as graph data.
 
 `408`, `425`, `429`, and `500`–`599` retain the current request and all later work for host retry.
 `401`, `403`, and `407` do the same and report an authentication or authorization infrastructure
 failure. DNS, connection, TLS, send, timeout, malformed response and loss before complete final
-headers are also infrastructure failures. Other `300`–`499` statuses and `101` reject only their
-record through `ON MESSAGE ERROR`; later records proceed after that policy completes. Redirects
-are never followed, `304` is not delivery, and `409` never implies an earlier delivery. Rejection
-diagnostics include the numeric status but no evaluated URL, header value, request body or response
-body.
+headers are also infrastructure failures, and so are a declared proxy that cannot be reached and a
+tunnel the proxy refuses. Other `300`–`499` statuses and `101` reject only their record through
+`ON MESSAGE ERROR`; later records proceed after that policy completes. A redirect the client does
+not follow is such a status, `304` is not delivery, and `409` never implies an earlier delivery.
+Rejection diagnostics include the numeric status but no evaluated URL, header value, request body
+or response body.
+
+#### HTTP client transport
+
+An `HTTP CLIENT` means the same transport for HTTP polling and for the HTTP emitter. Both speak
+HTTP through maintained implementations, Reqwest for polling and hyper for the emitter, over
+HTTP/2 when the endpoint's TLS negotiates it and HTTP/1.1 otherwise, and:
+
+- Without `follow_redirects`, or with `follow_redirects = false`, a redirect answer is the
+  response: an emitted record is rejected with its status, and a poll fails with it.
+- With `follow_redirects = true`, a `301`, `302`, `307` or `308` answer, and a `303` answer to a
+  `GET` or `HEAD`, whose one `Location` names the client's own origin, the same scheme, host and
+  port, sends the same request there again: the same method, headers and body, never turning a
+  `POST` into a `GET`. A relative `Location` is resolved against the request it answers, and its
+  fragment is dropped. One request follows at most 10 redirects, and every request of the chain
+  shares its one `timeout_ms`. A `Location` on another origin or carrying credentials, an answer
+  with no `Location` or with several, a `303` to any other method, which was handled where it was
+  sent, and the answer to the tenth repeat are the response.
+- `proxy` names an `http` or `https` proxy that every request of the client goes through. The node
+  resolves only the proxy's host; an `http` target is sent to the proxy in absolute form, and an
+  `https` target tunnels through it with `CONNECT`, after which TLS still verifies the configured
+  host. An `https` proxy is verified with the client's trust. User information in the URL, such as
+  `http://user:secret@proxy.internal:3128`, is sent as `Basic` proxy credentials, and
+  `SHOW CREATE CLIENT` redacts a proxy URL that carries it. For the emitter, a proxy it cannot reach
+  and a tunnel the proxy refuses, `407` included, keep the request pending for the next attempt.
+- No proxy environment variable, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` or their
+  lowercase forms, has any effect on either side.
+
+```plexus
+CREATE HTTP CLIENT partner CONFIG {
+  'endpoint' = 'https://partner.example.com',
+  'timeout_ms' = 5000,
+  'follow_redirects' = true,
+  'proxy' = 'http://egress.internal:3128'
+};
+```
 
 #### HTTP retries and acknowledgements
 
@@ -1124,7 +1169,7 @@ Transport-specific expectations:
 - `REDIS`: use `rediss://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
+- `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
 - `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
   An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses
   `tls_cert_file` and `tls_key_file`.
@@ -1221,6 +1266,12 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-emit).
 <!-- connector-matrix:emit-kafka-topic:end -->
+
+`TOPIC` uses the same rule as [Kafka ingestion](ingestors.md#kafka): 1 to 249 ASCII letters,
+digits, `.`, `_` and `-`, other than `.` and `..`, produced to exactly as written. `write_header`
+writes the record's headers in the order the program writes them, and the emitter declares no
+envelope clause or `PROPERTIES` block. The `KAFKA CLIENT` it names requires `bootstrap.servers` and
+refuses the Nervix-owned keys the [Kafka ingestion section](ingestors.md#kafka) lists.
 
 `ACK` waits for every record's delivery report through the shared confirmation window. If a publish
 attempt fails, the window first settles the answers already received and returns only unresolved
@@ -1333,10 +1384,16 @@ every message in flight on it. With `ACK`, a message the broker receives and ref
 Pulsar emitters use the same client config surface as Pulsar ingestors:
 
 - `'addr'`: broker address such as `'pulsar://127.0.0.1:6650'`
-- optional `'namespace'`: defaults short topic names to `persistent://public/default/<topic>`; fully qualified topic names are accepted as-is
+- optional `'namespace'`: the tenant and namespace, written `'tenant/namespace'`, that a short
+  topic name is placed in, so `TOPIC 'orders'` writes `persistent://<namespace>/orders`; defaults
+  to `public/default`. Fully qualified topic names are sent as written.
 - optional `'tls_ca_file'`: PEM-encoded CA bundle for `pulsar+ssl://...` connections
 - optional `'tls_allow_insecure_connection'`: `true` or `false`; defaults to `false`
 - optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
+
+As the [ingestor manual](ingestors.md#pulsar) states, `CREATE PULSAR CLIENT` refuses the three TLS
+keys with a plaintext `pulsar://...` address and a `namespace` that is not exactly a tenant and a
+namespace.
 
 Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
 
@@ -1602,6 +1659,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-emit).
 <!-- connector-matrix:emit-mqtt-topic:end -->
 
+CREATE refuses an unsupported QoS number with its value and accepted levels, such as
+`MQTT emitter QOS must be 0, 1, or 2, found 3`, underlining the supplied number.
+
 QoS 0 acknowledges client acceptance. When the emitter stops, it waits within the stop or shutdown
 deadline for its client to send the publishes it still holds, which a client cut off from its
 broker holds until it connects again; publishes still unsent at that deadline fail the stop and are
@@ -1818,7 +1878,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
-| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Protocol batch maximum | A batch is written as one frame within the frame limits below; general BATCH limits still apply. |
+| Frame limits | udp: one datagram carries at most 65507 payload bytes<br>tcp and tls with octet-counting framing: an octet count has at most 10 digits, so a frame carries at most 9999999999 payload bytes<br>tcp with non-transparent framing: a payload cannot contain `\n`, which ends each frame |
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
@@ -2020,14 +2081,13 @@ inherits its transport contract:
 - The DSN's host is resolved through the node's DNS resolver, and `timeout_ms` covers that lookup,
   connection setup, TLS, sending the envelope and the response headers. The response body is
   never read.
-- The proxy environment variables `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` are
-  honored, as [Connection Identity](name-resolution.md#connection-identity) describes.
-- Up to ten redirects are followed, each new host resolved like the first, and every followed
-  request carries the `X-Sentry-Auth` header. A `307` or `308` answer sends the envelope again to
-  its `Location`, but a `301`, `302` or `303` answer is followed with a `GET` that carries no
-  envelope. The answer at the end of the chain decides the event, so an endpoint that redirects
-  can acknowledge an event that Sentry never received: set `dsn` to the host that accepts
-  envelopes.
+- No proxy is used. A `SENTRY CLIENT` declares no `proxy`, and the proxy environment variables
+  `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and their lowercase forms are never read,
+  as [Connection Identity](name-resolution.md#connection-identity) describes.
+- No redirect is followed, so the envelope and its `X-Sentry-Auth` header go only to the DSN's
+  host. A `3xx` answer is the answer to its envelope and is retried, as the table below retries
+  every status it does not list, so a `dsn` whose host redirects holds the emitter in retry until
+  it names the host that accepts envelopes.
 
 #### Sentry events
 
@@ -2086,7 +2146,7 @@ A write sends its envelopes one at a time, in order, and the answer to each deci
 | A `2xx` status | The event is delivered and its records are acknowledged. |
 | `400`, `413` or `422` | Sentry rejected the event. Its records follow `ON MESSAGE ERROR` with an `external` message error of the `publish` operation naming the status, and the write continues with the next envelope. |
 | Any other status, such as `401`, `403`, `404`, `408`, `429` or a `5xx` | The write stops. This event and every later one stay retained and are sent again on the mode's `RETRY POLICY`, while the events delivered before it stay delivered. |
-| No answer within `timeout_ms`, or a failed lookup, connection, TLS handshake or redirect | As for a retried status. |
+| No answer within `timeout_ms`, or a failed lookup, connection or TLS handshake | As for a retried status. |
 
 Such an event is sent again until Sentry delivers or rejects it, so a revoked key or a deleted
 project holds the emitter in retry until an operator repairs its client. On every retried status,
@@ -3381,7 +3441,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
 | Redis Pub/Sub | Retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |
-| Sentry | Retry after an ambiguous HTTP result, which sends the same envelope and `event_id` again; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; a `301`, `302` or `303` redirect whose final answer is `2xx` acknowledges an event that was never sent; an accepted event can still be subject to Sentry service policy | None |
+| Sentry | Retry after an ambiguous HTTP result, which sends the same envelope and `event_id` again; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; an accepted event can still be subject to Sentry service policy | None |
 | OTEL | Retry after an ambiguous Export result, which resends the same request bytes; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; `partial_success` acknowledges the whole request, so receiver-rejected records in that response are lost | None |
 | HTTP | Retry after a lost response, failed connection, or timeout following an endpoint that applied the request; a lost ACK or attached sibling failure | Any failure after detached relay acceptance; a `2xx` delivers on its headers, so an endpoint that later fails its own processing loses the record | None; the endpoint can deduplicate by a stable key the emitter writes with `write_header` |
 | ClickHouse | Retry after an ambiguous insert result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a crash after insert but before acknowledgement can also leave an inserted batch that later retries | None |

@@ -808,7 +808,7 @@ impl SessionServiceImpl {
             .take_domain_clock_authority_proposal_rejection(self.inner.consensus.local_node_id())
         {
             return Err(error_stack::Report::new(ConsensusError::LeadershipLost {
-                leader_id: None,
+                observed: nervix_consensus::LeadershipObservation::NoLeader,
             }));
         }
         self.inner

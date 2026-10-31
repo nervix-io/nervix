@@ -29,7 +29,7 @@ use nervix_models::{
     DomainClockState, DomainName, DomainStartPoint, DomainState, DomainStatus, QuiesceLevel,
     StartDomain, StopDomain, TimestampError,
 };
-use nervix_primitives::time::interval;
+use nervix_primitives::time::{Instant, interval};
 use thiserror::Error;
 
 use super::{
@@ -103,10 +103,15 @@ pub(in crate::application) enum DomainAlterError {
     Rollback { domain: DomainName, reason: String },
 }
 
+/// How a paused domain's drain observes its work, and what bounds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::application) enum DomainDrainMode {
-    Alteration,
-    Backup,
+    /// A model alteration's drain, which gives every node `timeout` from when the drain begins.
+    Alteration { timeout: Duration },
+    /// A quiesced backup cut's drain, which polls until the cut's own `deadline`. The cut counts
+    /// its budget from before its lease, so the steps before the drain, the pause's application
+    /// included, have already spent part of it.
+    Backup { deadline: Instant },
 }
 
 pub(in crate::application) struct ResolvedDomainStart {
@@ -126,17 +131,21 @@ const REFUSED_WRITE_RETAINED_LOG_BYTES: u64 = REFUSED_WRITE_LOG_CAP_BYTES + 1;
 #[cfg(feature = "testing")]
 const REFUSED_WRITE_RECLAMATION_WAIT: Duration = Duration::from_secs(5);
 
-/// The error a leader's consensus refuses a write with, before appending it, when a test build
-/// armed a model publication refusal of this kind.
-#[cfg(feature = "testing")]
-impl From<crate::fault_injection::ModelPublicationRefusalKind> for ConsensusError {
-    fn from(refusal: crate::fault_injection::ModelPublicationRefusalKind) -> Self {
+impl SessionServiceImpl {
+    /// The error this leader's consensus refuses a write with, before appending it, when a test
+    /// build armed a model publication refusal of this kind. A lapsed lease is observed against the
+    /// node's current tenure, as a refusal Raft returned would be.
+    #[cfg(feature = "testing")]
+    pub(in crate::application) fn refused_write(
+        &self,
+        refusal: crate::fault_injection::ModelPublicationRefusalKind,
+    ) -> ConsensusError {
         match refusal {
             crate::fault_injection::ModelPublicationRefusalKind::LapsedLease => {
-                Self::LeadershipLost { leader_id: None }
+                self.inner.consensus.lapsed_lease_refusal()
             }
             crate::fault_injection::ModelPublicationRefusalKind::SaturatedLog => {
-                Self::LogRetentionSaturated {
+                ConsensusError::LogRetentionSaturated {
                     retained: REFUSED_WRITE_RETAINED_LOG_BYTES,
                     cap: REFUSED_WRITE_LOG_CAP_BYTES,
                     waited: REFUSED_WRITE_RECLAMATION_WAIT,
@@ -144,9 +153,7 @@ impl From<crate::fault_injection::ModelPublicationRefusalKind> for ConsensusErro
             }
         }
     }
-}
 
-impl SessionServiceImpl {
     pub(in crate::application) async fn apply_persistent_domain_creation(
         &self,
         if_not_exists: bool,
@@ -222,22 +229,22 @@ impl SessionServiceImpl {
         mutation: Option<&DomainMutationLease>,
         impact: Option<&TransactionStepImpactRecorder>,
     ) -> Result<Option<QuiescenceAttempt>, Report<DomainAlterError>> {
-        self.pause_and_drain_domain_for_alter_with_timeout(
+        self.pause_and_drain_domain(
             domain,
             mutation,
             impact,
-            self.inner.runtime.domain_drain_timeout(),
-            DomainDrainMode::Alteration,
+            DomainDrainMode::Alteration {
+                timeout: self.inner.runtime.domain_drain_timeout(),
+            },
         )
         .await
     }
 
-    pub(in crate::application) async fn pause_and_drain_domain_for_alter_with_timeout(
+    pub(in crate::application) async fn pause_and_drain_domain(
         &self,
         domain: &DomainName,
         mutation: Option<&DomainMutationLease>,
         impact: Option<&TransactionStepImpactRecorder>,
-        timeout: Duration,
         mode: DomainDrainMode,
     ) -> Result<Option<QuiescenceAttempt>, Report<DomainAlterError>> {
         let attempt = impact.map(|impact| {
@@ -292,11 +299,13 @@ impl SessionServiceImpl {
         }
 
         let drained = match mode {
-            DomainDrainMode::Alteration => {
+            DomainDrainMode::Alteration { timeout } => {
                 self.wait_for_paused_domain_drain_with_timeout(domain, timeout)
                     .await
             }
-            DomainDrainMode::Backup => self.wait_for_backup_domain_drain(domain, timeout).await,
+            DomainDrainMode::Backup { deadline } => {
+                self.wait_for_backup_domain_drain(domain, deadline).await
+            }
         };
         match drained {
             Ok(()) => Ok(attempt),
@@ -375,12 +384,18 @@ impl SessionServiceImpl {
     }
 
     /// Uses the shutdown drain's admitted-work view. After every node is quiet, a separate
-    /// cluster-wide confirming flush catches work moving between status reads.
+    /// cluster-wide confirming flush catches work moving between status reads. Polls until the
+    /// cut's `deadline`, however much of its budget the pause's application spent.
     async fn wait_for_backup_domain_drain(
         &self,
         domain: &DomainName,
-        timeout: Duration,
+        deadline: Instant,
     ) -> Result<(), Report<DomainAlterError>> {
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_backup_cut_if_armed(domain, crate::fault_injection::BackupCutBoundary::Drain)
+            .await;
         let coordination = self
             .inner
             .interconnect
@@ -398,7 +413,6 @@ impl SessionServiceImpl {
         let reach = CutReach::of(schedule.domain(domain));
         let mut nodes = self.cut_live_nodes().await;
         nodes.extend(reach.executors().cloned());
-        let deadline = nervix_primitives::time::Instant::now() + timeout;
         let mut polling = interval(Duration::from_millis(50));
         polling.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         let mut confirming = false;
@@ -618,7 +632,7 @@ impl SessionServiceImpl {
         // publication, the same way it refused that publication: before appending it.
         #[cfg(feature = "testing")]
         if let Some(refusal) = self.inner.runtime.take_model_pause_release_refusal(domain) {
-            return Err(Report::new(ConsensusError::from(refusal)).change_context(
+            return Err(Report::new(self.refused_write(refusal)).change_context(
                 DomainAlterError::ResumeDomain {
                     domain: domain.clone(),
                 },

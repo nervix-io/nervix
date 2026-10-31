@@ -70,6 +70,7 @@ fn bolero_stored_wasm_checkpoints_preserve_bytes_and_typed_placement() {
                     state: RuntimeState::WasmProcessor { schema, generation },
                     kind: ModelKind::WasmProcessor,
                     identifier: arbitrary.name(),
+                    unit: nervix_models::Unit::Single,
                     branch_key,
                 };
                 for namespace in [

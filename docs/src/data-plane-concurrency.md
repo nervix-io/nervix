@@ -335,6 +335,23 @@ loading instead of waiting while retaining earlier groups. A pinned database rea
 snapshot and one stored chunk through all section reads. Replica installation checks monotonic
 revision under the existing exclusive assignment barrier before replacing any entry.
 
+The interconnect's outer and nested rkyv receive decoders acquire overlapping memory only through
+immediate admission. A queued reservation that needs the retained input therefore cannot form a
+cycle with its decoder. A nested CPU job owns an independent charge for its encoded input as well
+as its decoded-value reservation, so cancelling the request cannot leave the job's bytes
+uncharged. Its private charged-input trait exposes a byte borrow with an explicit recurring
+execution contract; both concrete carriers return their retained slice without synchronization.
+Deloxide does not observe the asynchronous semaphore waits. The worker FIFO uses a
+tracked lock, so `scenario.snapshot-receive-admission` and its stressed restore twin cover actual
+decode admission and completion in the diagnostic selections. Queued callback cancellation uses
+that existing FIFO owner without acquiring a new lock; the explicit cancellation interleaving
+is covered by Shuttle. Explicit-poll owner regressions and public snapshot receive scenarios
+cover refusal, release and complete-checkpoint recovery. The registered Shuttle check
+`wire::admission_tests::shuttle_bulk_receive_admission_releases_held_input_and_cancelled_jobs`
+executes these production decoders with a queued budget reservation and an occupied CPU worker,
+checks the independent input charge after the outer envelope ends, cancels the queued decode and
+requires a fresh complete decode with every charge returned. It makes no memory-ordering claim.
+
 `RESUME` changes the domain to running at its archived lifecycle in the consensus effect that
 records complete publication and releases the installation gate. No atomic field or memory
 ordering in the capture epoch, assignment protocol or relay revision changed. Existing Loom
@@ -483,7 +500,7 @@ with the primitive publication boundary's reference update. Domain removal drops
 Domain-clock publication contains lifecycle pause, generation and start-point observations alongside
 its installation. Ingestion reads admission and time from that one publication; Kafka offset polls
 read its generation; generators, processors, materialized relay tasks and subscriptions use the
-clock or lifecycle handle bound at startup. Each WASM state retains its entity assignment slot,
+clock or lifecycle handle bound at startup. Each WASM state retains its unit assignment slot,
 which publishes state identity and checkpoint execution/replica owners together. A generation
 replacement or removal therefore fences a callback without a runtime registry lookup.
 
@@ -803,7 +820,9 @@ yet. On a replica, it carries the owner's announcements to the task that keeps t
 current. It lives and ends with the state it replicates, so a WASM checkpoint or a Kafka offset
 commit offers its revision through the state it already holds, and no checkpoint, commit,
 offer enters a node-wide announcement or progress map. State installation publishes a resolved
-route containing the actual state handle and the entity's existing assignment slot. Frames select
+route containing the actual state handle and the unit's existing assignment slot. Assignment,
+replica polls, materialized publication and freeze state use domain, node and unit keys; an owner
+swap retires only the moved unit's route and retained state. Frames select
 that route from one immutable publication, never from the state, execution or identity registries.
 An announcer retains its selected route for its whole lifetime and reads the current primary and
 replica set from the assignment slot.
@@ -1829,13 +1848,13 @@ and cleanup paths retain their tracked-lock coverage; phase timing itself establ
 interleaving or memory-ordering guarantee. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
 owns the diagnostic contract.
 
-The test-only backup cut registry releases its watch-held lease and capture gates before clearing
-the map during scenario cleanup. Existing borrowers observe release; later cuts encounter no
-gate. Gate-owner tests with a paused clock cover waiting cuts, timed holds and later arrivals.
-The supervised failed-body Cucumber fixture reaches both public boundaries on one and three nodes
-and requires every node to stop while every body retains its failure. These watch channels and
-concurrent-map accesses are outside Deloxide's tracked locks. This harness cleanup adds no
-data-plane synchronization or memory-ordering claim; [Integration Test Lifecycle](./integration-test-lifecycle.md#what-cleanup-releases)
+The test-only backup cut registry releases its watch-held lease, drain and capture gates before
+clearing the map during scenario cleanup. Existing borrowers observe release; later cuts encounter
+no gate. Gate-owner tests with a paused clock cover waiting cuts, timed holds and later arrivals,
+and cleanup at every boundary. The supervised failed-body Cucumber fixture reaches the lease and
+capture boundaries on one and three nodes and requires every node to stop while every body retains
+its failure. These watch channels and concurrent-map accesses are outside Deloxide's tracked locks.
+This harness cleanup adds no data-plane synchronization or memory-ordering claim; [Integration Test Lifecycle](./integration-test-lifecycle.md#what-cleanup-releases)
 owns its supervision verdict.
 
 A diagnostic node selects the `deloxide` mode. The `deloxide-order` feature adds historical order

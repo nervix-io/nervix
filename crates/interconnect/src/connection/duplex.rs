@@ -49,7 +49,7 @@ use nervix_primitives::{
 
 use super::{
     BODY_CHUNK_BYTES, ClientConnection, DUPLEX_PATH, RawDuplexRequest, StreamLease, TransportState,
-    read_body, send_static_error,
+    read_body, send_decode_refusal, send_static_error,
 };
 
 #[cfg(test)]
@@ -758,7 +758,15 @@ impl TransportState {
             class.cpu_class(),
             opening,
         )
-        .await?;
+        .await;
+        let opening = match opening {
+            Ok(opening) => opening,
+            Err(error) => {
+                send_decode_refusal(&mut respond, class, error, self.options.progress_timeout)
+                    .await?;
+                return Ok(());
+            }
+        };
         let (opening, _opening_reservation) = opening.into_parts();
         if opening.class != class {
             send_static_error(
@@ -789,7 +797,7 @@ impl TransportState {
             Err(error) => {
                 send_static_error(
                     &mut respond,
-                    StatusCode::BAD_REQUEST,
+                    error.status(),
                     &error.to_string(),
                     self.options.progress_timeout,
                 )

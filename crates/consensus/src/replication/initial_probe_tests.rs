@@ -29,8 +29,8 @@ use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, SanType};
 
 use super::AppendPath;
 use crate::{
-    AppendStreamOpenRecorder, CommittedLeaderIdOf, ConnectivityFault, LogIdOf, NetworkClient,
-    NetworkFactory, SnapshotTransferIds, TypeConfig, wire,
+    AppendStreamOpenRecorder, CommittedLeaderIdOf, ConnectivityFault, LeaseRefusal, LogIdOf,
+    NetworkClient, NetworkFactory, SnapshotTransferIds, TypeConfig, wire,
 };
 
 #[derive(Clone, Default)]
@@ -50,6 +50,10 @@ impl AppendStreamOpenRecorder for ProbeRecorder {
 
     fn connectivity_fault(&self) -> ConnectivityFault {
         ConnectivityFault::default()
+    }
+
+    fn lease_refusal(&self) -> LeaseRefusal {
+        LeaseRefusal::default()
     }
 }
 

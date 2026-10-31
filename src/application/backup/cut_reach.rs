@@ -48,13 +48,14 @@ impl CutReach {
             return reach;
         };
         for (entity, scheduled) in &schedule.nodes {
-            let candidates = scheduled
-                .primary_node()
-                .into_iter()
-                .chain(&scheduled.assigned_nodes);
-            for candidate in candidates {
-                if scheduled.executes_on(candidate) {
-                    reach.executors.require(candidate, entity);
+            for unit in scheduled.units.values() {
+                for candidate in unit.primary_node.iter().chain(&unit.assigned_nodes) {
+                    if (scheduled.config.executes_on_every_cluster_node()
+                        && unit.assigned_nodes.contains(candidate))
+                        || unit.is_primary_on(candidate)
+                    {
+                        reach.executors.require(candidate, entity);
+                    }
                 }
             }
             let components = scheduled.ownership_state_components();
@@ -67,11 +68,13 @@ impl CutReach {
             // Only a placement's scheduled primary stages its state, so the primary is the one
             // node whose absence leaves the archive without it. An entity the schedule places on
             // no node has no owner a cut could ask, while its last state may still lie on a node.
-            match scheduled.primary_node() {
-                Some(owner) => reach.state_owners.require(owner, entity),
-                None => {
-                    if reach.unplaced_state.is_none() {
-                        reach.unplaced_state = Some(entity.clone());
+            for unit in scheduled.units.values() {
+                match unit.primary_node.as_ref() {
+                    Some(owner) => reach.state_owners.require(owner, entity),
+                    None => {
+                        if reach.unplaced_state.is_none() {
+                            reach.unplaced_state = Some(entity.clone());
+                        }
                     }
                 }
             }
@@ -151,7 +154,7 @@ mod tests {
         EndpointIngestMode, GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor,
         IngestQuiesceMode, IngestorEntity, IngestorInput, MaterializedRelayState, Model, ModelKind,
         NodeRef, ProcessorOutputs, RelayBranching, ScheduledNode, SchemaFingerprint,
-        TransportIngestorInput,
+        TransportIngestorInput, Unit,
     };
     use nonzero_ext::nonzero;
 
@@ -239,6 +242,30 @@ mod tests {
             reach.unreached_state_owner(&live(&["node-1", "node-2"])),
             None
         );
+    }
+
+    #[test]
+    fn each_partition_primary_is_required_for_a_complete_cut() {
+        let mut node = placed(
+            scheduled_node("unique_payment_filter", ModelKind::Deduplicator),
+            Some("node-1"),
+            &["node-1", "node-3"],
+        );
+        let first = node.single_unit().clone();
+        node.units.clear();
+        node.units.insert(Unit::Partition(0), first.clone());
+        node.units.insert(
+            Unit::Partition(1),
+            nervix_models::ScheduledUnit {
+                primary_node: Some(node_named("node-2")),
+                assigned_nodes: vec![node_named("node-2"), node_named("node-3")],
+                ..first
+            },
+        );
+        let reach = CutReach::of(Some(&domain_schedule(vec![node])));
+
+        assert_eq!(names(reach.state_owners()), vec!["node-1", "node-2"]);
+        assert_eq!(names(reach.executors()), vec!["node-1", "node-2"]);
     }
 
     #[test]

@@ -2062,6 +2062,7 @@ mod tests {
                 let descriptor = MaterializedRelayDescriptor {
                     domain: nervix_models::DomainName::parse("prod").assured("domain is valid"),
                     entity: nervix_models::ModelName::parse("state").assured("relay is valid"),
+                    unit: nervix_models::Unit::Single,
                     schema: SchemaFingerprint::from_digest(std::array::from_fn(|_| {
                         arbitrary.entropy().byte()
                     })),
@@ -2079,6 +2080,7 @@ mod tests {
                 let identities = MaterializedIdentitiesRecord {
                     domain: descriptor.domain.clone(),
                     entity: descriptor.entity.clone(),
+                    unit: descriptor.unit,
                     group: 0,
                     identities: generation
                         .records()

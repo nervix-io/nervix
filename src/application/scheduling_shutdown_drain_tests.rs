@@ -421,7 +421,7 @@ fn a_leader_that_lost_its_leadership_while_releasing_the_cordon_answers_as_not_l
     let lost = SessionServiceImpl::cordon_release_response(
         &stopping_node,
         Err(Report::new(ConsensusError::LeadershipLost {
-            leader_id: Some(node_named("node-1")),
+            observed: nervix_consensus::LeadershipObservation::Leader(node_named("node-1")),
         })),
     );
     let failed = SessionServiceImpl::cordon_release_response(

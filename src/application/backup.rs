@@ -607,21 +607,11 @@ impl SessionServiceImpl {
             .map_err(|_| Report::new(progress.timeout()))??;
             progress.enter_within(CutPhase::Drain, deadline)?;
             let engaged_at = current_timestamp();
-            let now = nervix_primitives::time::Instant::now();
-            let remaining = if deadline > now {
-                deadline - now
-            } else {
-                std::time::Duration::ZERO
-            };
-            if remaining.is_zero() {
-                return Err(Report::new(progress.timeout()));
-            }
-            self.pause_and_drain_domain_for_alter_with_timeout(
+            self.pause_and_drain_domain(
                 domain,
                 Some(&mutation),
                 None,
-                remaining,
-                DomainDrainMode::Backup,
+                DomainDrainMode::Backup { deadline },
             )
             .await
             .map_err(|error| progress.drain_failure(error))?;

@@ -8,7 +8,7 @@
 //! - **Depends on.** The harness's own session client and the scenario cluster.
 //! - **Must not know.** How the server correlates, admits or cancels a request.
 
-use cucumber::{then, when};
+use cucumber::{given, then, when};
 use nervix_client_wire::{
     CancelState, CancellationStage, ClientMessage, ClientRequest, CommandDisposition,
     CommandRequest, DomainList, InspectTransactionRequest, InspectionOutcome, ReplyBody, RequestId,
@@ -500,6 +500,107 @@ async fn then_background_command_request_reports_unknown_outcome(world: &mut Sce
         result.disposition,
         CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::LeadershipLost),
         "leadership lost after durable admission leaves the outcome unknown: {result:?}"
+    );
+    assert_reports_moved_leadership(&result.message);
+}
+
+/// A leadership transfer the scenario completed is reported as a move, never as a lease the leader
+/// could not confirm.
+pub(crate) fn assert_reports_moved_leadership(message: &str) {
+    assert!(
+        message.starts_with("leadership moved"),
+        "a completed leadership transfer must be reported as a move: {message}"
+    );
+    assert!(
+        !message.contains("could not confirm its lease"),
+        "a completed leadership transfer is not an unconfirmed lease: {message}"
+    );
+}
+
+/// The proposal of a command execution a scenario names.
+fn command_write(write: &str) -> nervix_consensus::CommandWrite {
+    match write {
+        "admission" => nervix_consensus::CommandWrite::Admission,
+        "finalization" => nervix_consensus::CommandWrite::Finalization,
+        other => panic!("a scenario names a command's admission or finalization, not '{other}'"),
+    }
+}
+
+/// The reference a scenario's reference name stands for.
+fn scenario_execution_reference(
+    world: &mut ScenarioWorld,
+    name: &str,
+) -> CommandExecutionReference {
+    let reference = command_execution_reference(world, name);
+    CommandExecutionReference::parse(reference)
+        .assured("the scenario maps every reference name to a UUIDv7 execution reference")
+}
+
+#[given(
+    expr = "the leader refuses the {word} of execution reference {string} as a leader whose lease \
+            lapsed"
+)]
+async fn given_leader_refuses_command_write_as_lapsed_lease(
+    world: &mut ScenarioWorld,
+    write: String,
+    execution_reference: String,
+) {
+    let reference = scenario_execution_reference(world, &execution_reference);
+    world
+        .fault_injection
+        .refuse_command_write_as_lapsed_lease(reference, command_write(&write))
+        .await;
+}
+
+#[then(
+    expr = "the leader refused the {word} of execution reference {string} as a leader whose lease \
+            lapsed"
+)]
+async fn then_leader_refused_command_write_as_lapsed_lease(
+    world: &mut ScenarioWorld,
+    write: String,
+    execution_reference: String,
+) {
+    let reference = scenario_execution_reference(world, &execution_reference);
+    assert!(
+        world
+            .fault_injection
+            .command_write_refused_as_lapsed_lease(&reference, command_write(&write))
+            .await,
+        "no node refused the {write} of execution reference '{reference}' as armed"
+    );
+}
+
+#[then(
+    "the background command request reports an unknown outcome because the leader could not \
+     confirm its lease"
+)]
+async fn then_background_command_request_reports_unconfirmed_lease(world: &mut ScenarioWorld) {
+    let task = world
+        .background_command_result
+        .take()
+        .expect("a background command request must be active");
+    let result = nervix_primitives::time::timeout(Duration::from_secs(60), task)
+        .await
+        .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
+        .unwrap_or_else(|error| panic!("background command request task failed: {error}"))
+        .unwrap_or_else(|error| panic!("background command request transport failed: {error}"));
+    assert_eq!(
+        result.disposition,
+        CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::LeadershipLost),
+        "a leader that could not confirm its lease leaves the outcome unknown: {result:?}"
+    );
+    assert!(
+        result
+            .message
+            .starts_with("the leader could not confirm its lease in term "),
+        "the outcome must say the leader could not confirm its lease: {}",
+        result.message
+    );
+    assert!(
+        !result.message.contains("moved"),
+        "a leader that kept its term did not move: {}",
+        result.message
     );
 }
 

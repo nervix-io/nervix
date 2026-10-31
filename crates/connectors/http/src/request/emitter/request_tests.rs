@@ -1,12 +1,13 @@
-//! The request head the emitter writes, read back by an HTTP/1.1 parser.
+//! The requests the emitter hands hyper, against every prepared field and route.
 //!
 //! Layer: test harness.
 //! - **Owns.** A bounded domain of valid prepared requests, built only from valid methods, origins,
-//!   targets, application headers and bodies, and the complete oracle of the head each one is
-//!   written as: request line, generated transport fields, every application field in order, and
-//!   the declared framing.
-//! - **Depends on.** The emitter's request-head encoding, the vocabulary's request fields and the
-//!   `httparse` request grammar.
+//!   targets, application headers, bodies and routes, and the complete oracle of the request each
+//!   one becomes: its method, its target in origin or absolute form, the transport's fields, the
+//!   proxy's credentials, every application field in order, the declared empty length and the exact
+//!   body; and of the tunnel request that opens a proxy's way to its target.
+//! - **Depends on.** The emitter's conversion into hyper's request type and the vocabulary's
+//!   request fields.
 //! - **Must not know.** Connections, DNS, TLS, responses or the host.
 
 #![cfg_attr(
@@ -14,7 +15,10 @@
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 
-use meticulous::ResultExt as _;
+use bytes::Bytes;
+use http::Request;
+use http_body_util::{BodyExt as _, Full};
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{EmitterHttpRequest, EmitterRecordId};
 use nervix_models::{
     HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
@@ -22,7 +26,7 @@ use nervix_models::{
 };
 use url::Position;
 
-use super::HttpRequestEmitter;
+use super::{HttpRequestEmitter, HttpVersion, RequestForm};
 
 /// Spellings whose framing the property must cover deliberately: the methods that define request
 /// content, those that define none, their ASCII case variants, and extension methods.
@@ -51,10 +55,26 @@ const NAME_BYTES: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789-";
 /// ends with whitespace.
 const VALUE_BYTES: &[u8] = b"!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
 
-/// One generated prepared request.
+/// The bytes of generated proxy credentials, after their `Basic ` scheme: the Base64 alphabet.
+const CREDENTIAL_BYTES: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+
+/// How a generated request travels, which decides how it names its target and what it carries.
+#[derive(Debug, Clone, Copy, bolero::TypeGenerator)]
+enum RequestRoute {
+    /// Straight to its endpoint, or inside a proxy's tunnel to it, over HTTP/1.1.
+    Http1,
+    /// Straight to its endpoint, or inside a proxy's tunnel to it, over HTTP/2.
+    Http2,
+    /// To a proxy that forwards it over HTTP/1.1, with or without the proxy's credentials.
+    Forwarded { authenticated: bool },
+}
+
+/// One generated prepared request, with the route it travels. The route's fields come last, so a
+/// corpus input written before routes existed still spells the same request.
 #[derive(Debug, bolero::TypeGenerator)]
-struct HeadCase {
-    /// An index into [`METHODS`], or past it for an extension method of [`HeadCase::extension`].
+struct RequestCase {
+    /// An index into [`METHODS`], or past it for an extension method of [`RequestCase::extension`].
     method: u8,
     #[generator(bolero::generator::produce_with::<Vec<u8>>().len(1_usize..=8))]
     extension: Vec<u8>,
@@ -67,6 +87,11 @@ struct HeadCase {
     #[generator(bolero::generator::produce_with::<Vec<(Vec<u8>, Vec<u8>)>>().len(0_usize..=6))]
     headers: Vec<(Vec<u8>, Vec<u8>)>,
     body: Option<Vec<u8>>,
+    route: RequestRoute,
+    /// The proxy's credentials, after their `Basic ` scheme, for a route that carries them and for
+    /// the tunnel request.
+    #[generator(bolero::generator::produce_with::<Vec<u8>>().len(1_usize..=24))]
+    credentials: Vec<u8>,
 }
 
 /// `bytes` mapped into `alphabet`, at least one byte long and at most `limit` bytes long.
@@ -82,7 +107,7 @@ fn spelled(bytes: &[u8], alphabet: &[u8], limit: usize) -> String {
     spelled
 }
 
-impl HeadCase {
+impl RequestCase {
     fn method_spelling(&self) -> String {
         if let Some(spelling) = METHODS.get(usize::from(self.method)) {
             return (*spelling).to_string();
@@ -93,6 +118,35 @@ impl HeadCase {
             return format!("X{extension}");
         }
         extension
+    }
+
+    /// The proxy's `Proxy-Authorization` value.
+    fn authorization(&self) -> String {
+        format!("Basic {}", spelled(&self.credentials, CREDENTIAL_BYTES, 24))
+    }
+
+    /// The version and form the route sends the request in.
+    fn sent_as<'a>(&self, authorization: &'a str) -> (HttpVersion, RequestForm<'a>) {
+        match self.route {
+            RequestRoute::Http1 => (HttpVersion::Http1, RequestForm::Direct),
+            RequestRoute::Http2 => (HttpVersion::Http2, RequestForm::Direct),
+            RequestRoute::Forwarded {
+                authenticated: true,
+            } => (
+                HttpVersion::Http1,
+                RequestForm::Forwarded {
+                    authorization: Some(authorization),
+                },
+            ),
+            RequestRoute::Forwarded {
+                authenticated: false,
+            } => (
+                HttpVersion::Http1,
+                RequestForm::Forwarded {
+                    authorization: None,
+                },
+            ),
+        }
     }
 
     fn target_text(&self) -> String {
@@ -165,14 +219,29 @@ impl HeadCase {
     }
 }
 
-/// Every field the head of `request` carries, in the order the transport writes them.
-fn expected_fields(request: &EmitterHttpRequest) -> Vec<(String, Vec<u8>)> {
+/// Every field the request carries in `version` along `form`, in the order the transport adds
+/// them.
+fn expected_fields(
+    request: &EmitterHttpRequest,
+    version: HttpVersion,
+    form: RequestForm<'_>,
+) -> Vec<(String, Vec<u8>)> {
     let url = request.target.url();
-    let authority = url[Position::BeforeHost..Position::AfterPort].to_string();
-    let mut fields = vec![
-        ("host".to_string(), authority.into_bytes()),
-        ("connection".to_string(), b"close".to_vec()),
-    ];
+    let mut fields = Vec::new();
+    if version == HttpVersion::Http1 {
+        let authority = url[Position::BeforeHost..Position::AfterPort].to_string();
+        fields.push(("host".to_string(), authority.into_bytes()));
+        fields.push(("connection".to_string(), b"close".to_vec()));
+    }
+    if let RequestForm::Forwarded {
+        authorization: Some(authorization),
+    } = form
+    {
+        fields.push((
+            "proxy-authorization".to_string(),
+            authorization.as_bytes().to_vec(),
+        ));
+    }
     let mut writes_accept = false;
     for (name, _) in request.headers.iter() {
         if name.as_str().eq_ignore_ascii_case("accept") {
@@ -188,46 +257,88 @@ fn expected_fields(request: &EmitterHttpRequest) -> Vec<(String, Vec<u8>)> {
             value.as_str().as_bytes().to_vec(),
         ));
     }
-    match &request.body {
-        Some(body) => fields.push((
-            "content-length".to_string(),
-            body.len().to_string().into_bytes(),
-        )),
-        None if request.method.defines_content() => {
-            fields.push(("content-length".to_string(), b"0".to_vec()));
-        }
-        None => {}
+    if request.body.is_none() && request.method.defines_content() {
+        fields.push(("content-length".to_string(), b"0".to_vec()));
     }
     fields
 }
 
+/// Every field `request` carries, by name and exact value bytes, in order.
+fn carried_fields(request: &Request<Full<Bytes>>) -> Vec<(String, Vec<u8>)> {
+    let mut fields = Vec::new();
+    for (name, value) in request.headers() {
+        fields.push((name.as_str().to_string(), value.as_bytes().to_vec()));
+    }
+    fields
+}
+
+/// The bytes of `request`'s body, which a full body yields at once.
+fn carried_body(request: Request<Full<Bytes>>) -> Vec<u8> {
+    let collected = request.into_body().collect();
+    let polled = std::pin::pin!(collected);
+    let waker = std::task::Waker::noop();
+    let mut context = std::task::Context::from_waker(waker);
+    match std::future::Future::poll(polled, &mut context) {
+        std::task::Poll::Ready(collected) => collected
+            .assured("a full body cannot fail")
+            .to_bytes()
+            .to_vec(),
+        std::task::Poll::Pending => panic!("a full body is ready at once"),
+    }
+}
+
+/// The tunnel request a proxy receives for `request`: `CONNECT` to its host and port, which it
+/// also names as its `Host`, with the proxy's credentials.
+fn assert_tunnel_request(request: &EmitterHttpRequest, authorization: &str) {
+    let url = request.target.url();
+    let tunnel = HttpRequestEmitter::tunnel_request(url, Some(authorization))
+        .assured("every generated target has a host and a known port");
+    let host = url.host_str().assured("every generated target has a host");
+    let port = url
+        .port_or_known_default()
+        .assured("every generated target has a known port");
+    let authority = format!("{host}:{port}");
+    assert_eq!(tunnel.method(), http::Method::CONNECT);
+    assert_eq!(tunnel.uri().to_string(), authority);
+    assert_eq!(
+        carried_fields(&tunnel),
+        vec![
+            ("host".to_string(), authority.into_bytes()),
+            (
+                "proxy-authorization".to_string(),
+                authorization.as_bytes().to_vec()
+            ),
+        ]
+    );
+}
+
 #[test]
-fn bolero_request_heads_carry_every_prepared_field_and_their_declared_framing() {
+fn bolero_requests_carry_every_prepared_field_on_every_route() {
     bolero::check!()
         .with_iterations(256)
         .with_max_len(512)
-        .with_type::<HeadCase>()
+        .with_type::<RequestCase>()
         .for_each(|case| {
             let request = case.request();
-            let head = HttpRequestEmitter::request_head(&request);
+            let authorization = case.authorization();
+            let (version, form) = case.sent_as(&authorization);
+            let url = request.target.url();
+            let sent = HttpRequestEmitter::http_request(&request, url, version, form)
+                .assured("every prepared request converts");
 
-            let mut parsed_fields = [httparse::EMPTY_HEADER; 16];
-            let mut parsed = httparse::Request::new(&mut parsed_fields);
-            let status = parsed
-                .parse(&head)
-                .assured("the transport writes a valid HTTP/1.1 request head");
+            let expected_target = if version == HttpVersion::Http2 || form != RequestForm::Direct {
+                &url[..Position::AfterQuery]
+            } else {
+                request.target.as_str()
+            };
+            assert_eq!(sent.method().as_str(), request.method.as_str());
+            assert_eq!(sent.uri().to_string(), expected_target);
             assert_eq!(
-                status,
-                httparse::Status::Complete(head.len()),
-                "the head is exactly one complete request head and carries no body"
+                carried_fields(&sent),
+                expected_fields(&request, version, form)
             );
-            assert_eq!(parsed.method, Some(request.method.as_str()));
-            assert_eq!(parsed.path, Some(request.target.as_str()));
-            assert_eq!(parsed.version, Some(1));
-            let mut fields = Vec::new();
-            for field in parsed.headers.iter() {
-                fields.push((field.name.to_string(), field.value.to_vec()));
-            }
-            assert_eq!(fields, expected_fields(&request));
+            let expected_body = request.body.clone().unwrap_or_default();
+            assert_eq!(carried_body(sent), expected_body);
+            assert_tunnel_request(&request, &authorization);
         });
 }

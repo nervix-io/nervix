@@ -1,5 +1,6 @@
 mod byte_pace;
 mod paced_interconnect;
+mod snapshot_receive;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -2209,13 +2210,6 @@ impl Cluster {
         Ok(state.messages)
     }
 
-    pub(crate) fn rabbitmq_queue_probe(
-        &self,
-        queue: &str,
-    ) -> io::Result<super::rabbitmq_queue::RabbitMqQueueProbe> {
-        super::rabbitmq_queue::RabbitMqQueueProbe::new(&self.dependencies, queue)
-    }
-
     pub(crate) async fn wait_for_redis_channel_subscribers(
         &self,
         channel: &str,
@@ -2407,27 +2401,6 @@ impl Cluster {
 
     pub(crate) async fn ensure_rabbitmq_queue(&self, queue: &str) -> io::Result<()> {
         ensure_rabbitmq_queue(&self.dependencies, queue).await
-    }
-
-    pub(crate) async fn ensure_rabbitmq_exchange(
-        &self,
-        exchange: &str,
-        kind: lapin::ExchangeKind,
-    ) -> io::Result<()> {
-        ensure_rabbitmq_exchange(&self.dependencies, exchange, kind).await
-    }
-
-    pub(crate) async fn bind_rabbitmq_queue(
-        &self,
-        queue: &str,
-        exchange: &str,
-        routing_key: &str,
-    ) -> io::Result<()> {
-        bind_rabbitmq_queue(&self.dependencies, queue, exchange, routing_key).await
-    }
-
-    pub(crate) async fn delete_rabbitmq_queue(&self, queue: &str) -> io::Result<()> {
-        delete_rabbitmq_queue(&self.dependencies, queue).await
     }
 
     pub(crate) async fn publish_rabbitmq(&self, queue: &str, payload: &str) -> io::Result<()> {
@@ -5314,7 +5287,12 @@ pub(crate) async fn publish_mqtt_burst_to_address(
     published
 }
 
-async fn ensure_rabbitmq_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
+/// Declares `queue` on the scenario's broker. The queue belongs to the broker, so a scenario whose
+/// nodes are server processes provisions it the same way as one with an in-process cluster.
+pub(crate) async fn ensure_rabbitmq_queue(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<()> {
     let connection = Connection::connect(
         dependencies.get(RABBITMQ_ADDR)?,
         ConnectionProperties::default(),
@@ -5330,7 +5308,7 @@ async fn ensure_rabbitmq_queue(dependencies: &DependencyEndpoints, queue: &str) 
 
 /// Declares `exchange` as an exchange of `kind`, as an operator provisions it before an emitter
 /// publishes to it.
-async fn ensure_rabbitmq_exchange(
+pub(crate) async fn ensure_rabbitmq_exchange(
     dependencies: &DependencyEndpoints,
     exchange: &str,
     kind: lapin::ExchangeKind,
@@ -5358,7 +5336,7 @@ async fn ensure_rabbitmq_exchange(
 
 /// Declares `queue` and binds it to `exchange` under `routing_key`, so the exchange routes to it
 /// every message its binding matches.
-async fn bind_rabbitmq_queue(
+pub(crate) async fn bind_rabbitmq_queue(
     dependencies: &DependencyEndpoints,
     queue: &str,
     exchange: &str,
@@ -5387,8 +5365,12 @@ async fn bind_rabbitmq_queue(
         .map_err(io::Error::other)
 }
 
-/// Deletes `queue` with the messages it holds, as an operator removes it under a running emitter.
-async fn delete_rabbitmq_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
+/// Deletes `queue` from the scenario's broker with whatever it holds, as an operator would, so a
+/// message later published to it has no route.
+pub(crate) async fn delete_rabbitmq_queue(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<()> {
     let connection = Connection::connect(
         dependencies.get(RABBITMQ_ADDR)?,
         ConnectionProperties::default(),

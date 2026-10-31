@@ -230,6 +230,16 @@ retain encoded input from that pool. The report preserves `AdmissionError` benea
 context, and refusal releases the input. A generator reports the failed read and tries a complete
 read again on its next occurrence; memory pressure never becomes absent or corrupt state.
 
+Interconnect rkyv decoders also refuse overlapping admission without waiting while retaining
+encoded input. Their local reports preserve `AdmissionError` beneath `TransportError`; a nested
+decoder owns its input charge through CPU completion even if the enclosing request is cancelled.
+At request dispatch, memory exhaustion, a request above the whole memory budget, a closed memory
+budget, a full execution queue and a closed execution pool are distinct `RemoteRequestFailure`
+variants. They preserve the traffic class and applicable byte or queue bounds. Temporary memory
+or queue exhaustion is recognized by `RequestError::is_capacity_exhaustion`; a stream opening answers
+503 for temporary refusal and 413 for a request above its budget. Malformed archive validation
+retains `InvalidPayload` with its complete rendered cause chain.
+
 ### Outcomes That Are Not Reports
 
 An ordinary outcome is a typed value, never an error report. Waiting for or skipping a message
@@ -430,6 +440,11 @@ answers a Model canonical Plexus cannot spell with a fixed diagnostic.
 
 ### Plexus Language And Formatter
 
+MQTT QoS refusals identify the supplied number, its source span, and the levels that the ingestor
+or emitter accepts. A refused `ON QUIESCE SUSPEND` identifies `SUSPEND` and its required
+`SESSION PERSISTENT QOS 1` pairing. Completion offers the quiesce modes the written session can
+use; a clean session or QoS 0 offers `BUFFER` and `DROP`.
+
 The language layer reports rejected source the same way. Lexing and parsing each create the report
 at the stage that failed, and its context names that stage and holds the rejected text with every
 diagnostic's message and byte span into it. A batch of statements is lexed once and each statement
@@ -607,7 +622,11 @@ stored bytes have, such as a key without its domain separator or a restore whose
 differs, beneath `EncodeState` or `DecodeState`, so the rendered chain still reads `failed to decode
 runtime state: runtime state key has no domain separator`. A memory or storage refusal while a
 materialized relay's restored snapshot is opened is a storage admission or execution failure, never
-a decoding failure. A caller keeps the storage report beneath its own context:
+a decoding failure. The required execution-unit marker, tag and ordinal in a state key report a
+missing marker, truncation, invalid unit or missing separator as distinct `StoredStateIssue` causes under
+`DecodeState`; no unit is inferred from an incomplete key.
+
+A caller keeps the storage report beneath its own context:
 `RuntimeStateOperationError::Persistence` for a replica's installation or a snapshot task,
 `OwnershipHandoffError::Persistence` for a handoff, and the domain build's `ExecutionBuildError`
 step, which names the node and the state kind, for a state assignment.
@@ -701,17 +720,21 @@ Deadline failures are infrastructure outcomes and leave pending rows on the host
 they do not become definite record rejections.
 
 An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP emitter: a timeout, a
-DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
-authentication status with its number. The emitter keeps the resolver's `DnsLookupError`, the
-response-header failure, the socket or TLS error, or the `AddressShareElapsed` of an address that
-accepted no connection within its share of `timeout_ms` as the context beneath it, and attaches the
+DNS, connection, TLS, send or response-header failure, an invalid destination, a declared proxy that
+could not be reached, a tunnel request the proxy did not answer or refused with its status, or a
+retryable or authentication status with its number. A failure to reach the proxy keeps its own DNS,
+connection or TLS failure beneath `HttpAttemptError::Proxy`. The emitter keeps the resolver's
+`DnsLookupError`, hyper's error for an exchange or a response head hyper could not complete, the
+socket or TLS error, or the `AddressShareElapsed` of an address that accepted no connection within
+its share of `timeout_ms` as the context beneath it, and attaches the
 description of the whole chain, such as
 `HTTP TLS handshake failed: invalid peer certificate: UnknownIssuer`, to its publish failure. The
 emitter reports that description as its transient error and runtime event for as long as the
 request stays pending, which `DESCRIBE EMITTER` shows. It names the status or the cause of the
-connection and never the evaluated target, a header value, a credential or a body. A refused
-request is not an attempt failure: it is a record rejection with code `external`, operation
-`publish` and its numeric status.
+connection and never the evaluated target, a redirect's `Location`, a header value, a credential,
+the proxy's credentials or a body. A refused request is not an attempt failure: it is a record
+rejection with code `external`, operation `publish` and its numeric status, and so is a redirect
+its client does not follow.
 
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
 and attaches its safe message for diagnostics; an invalid request program never starts the emitter.
@@ -1668,9 +1691,9 @@ failure, which the host does not retry.
 
 An HTTP polling request whose response exceeds `MAX BODY SIZE` fails that poll with a typed
 `ResponseTooLarge` cause. DNS, connection, TLS, response-body and timeout failures retain their
-typed transport causes with the request URL removed. A non-`2xx` answer reports its numeric status
-without target or header values. The ingestor host applies its general-error policy and may poll
-again on its next cadence.
+typed transport causes with the request URL removed. A non-`2xx` answer, a redirect the client
+does not follow included, reports its numeric status without target, `Location` or header values.
+The ingestor host applies its general-error policy and may poll again on its next cadence.
 
 An HTTP emitter rejects a record at the first request field that fails, in the order it evaluates
 them: `METHOD`, `PATH`, and then each header write. A failed expression keeps the `evaluation`
@@ -1684,13 +1707,14 @@ completes, so every rejection of it after admission gives the handler the same i
 attempted codec record that a request-field failure does.
 
 An HTTP endpoint's complete final `2xx` headers deliver the record. Other `3xx`/`4xx` statuses,
-except `401`, `403`, `407`, `408`, `425` and `429`, reject only their record with code `external`
-and operation `publish`; `101` has the same outcome. The rejection message includes the numeric
+except `401`, `403`, `407`, `408`, `425` and `429` and a redirect the client follows, reject only
+their record with code `external` and operation `publish`; `101` has the same outcome. The rejection message includes the numeric
 status but no evaluated destination, headers or body. The exception statuses and `5xx` keep the
 request pending as infrastructure failures; `401`, `403` and `407` name authentication or
 authorization in their typed cause. DNS, connection, TLS, timeout, malformed or oversized response
-headers, invalid final framing and loss before complete final headers are infrastructure failures
-as well. The connector reports them without a request URL or sensitive response value. The emitter
+headers, invalid final framing, loss before complete final headers, and a declared proxy that
+cannot be reached or refuses its tunnel are infrastructure failures as well. The connector reports
+them without a request URL or sensitive response value. The emitter
 host owns their retry schedule and keeps the prepared request and ACK lease while they are pending.
 A valid `Retry-After` on a retained status can only lengthen that schedule: it never turns a
 delivered or rejected record into a retry, and an invalid one is ignored rather than reported.
@@ -2006,21 +2030,32 @@ replicas, and the existing replica-confirmation failure when its deadline expire
 ### Consensus
 
 A proposal, a linearizable read or a membership change returns a `ConsensusError` report, and its
-variants are the classes a caller routes on. `LeadershipLost` carries the leader this node
-observes, when it knows one. `RaftStorage` is a fatal storage error Raft reported for a write, and
+variants are the classes a caller routes on. `LeadershipLost` carries what this node observed
+about leadership when it could not propose as the leader: another node that leads, no known leader,
+or its own lease it could not confirm in its term. `RaftStorage` is a fatal storage error Raft
+reported for a write, and
 `Storage` a failure of the node's own consensus store. `RaftWrite` is any other failed write,
 `Conflict` a change the replicated state machine refused, and startup, transport, linearizable-read
 and membership failures have variants of their own. The class of a failed write is decided once,
 from the type of the Raft error: an answer that forwards to a leader is `LeadershipLost`, a fatal
-storage error is `RaftStorage`, and everything else is `RaftWrite`. A leader whose lease lapsed
-refuses a write before appending it with an answer that forwards to no leader, so that refusal is
-`LeadershipLost` without a leader, although the node may still lead. The Raft or I/O error stays
-beneath the context as the report's cause.
+storage error is `RaftStorage`, and everything else is `RaftWrite`. An answer that names the
+leader it forwards to observes that leader. A leader whose lease lapsed refuses a write before
+appending it with an answer that forwards to no one, and so does a node that knows no leader, such
+as during an election. The two are told apart by the leader and term the node observes when it
+proposes the write and again after the refusal. When the node led the same term both times, the
+refusal is an unconfirmed lease in that term, because a node that stops leading can lead again only
+in a later term; otherwise no leader is known. An unconfirmed lease is never reported as a move,
+and a move never as an unconfirmed lease: the context's text says which, so an operator reading a
+rendered report or log line tells lease trouble from an election without a separate counter. The
+Raft or I/O error stays beneath the context as the report's cause.
 
 The session edge reads the current context of a proposal's report. `LeadershipLost` becomes a
 `NotLeader` disposition with a redirect to the observed leader when nothing of the command was
-admitted, and `OutcomeUnknown` with leadership loss as its cause when leadership moved while the
-command's admission was being decided or after it. Any other class fails the command with the
+admitted, and `OutcomeUnknown` with leadership loss as its cause when leadership moved, or the
+leader could not confirm its lease, while the command's admission was being decided or after it.
+The redirect names a leader only when another node is known to lead. The message and diagnostic say
+which happened: a move names the leader when the node knows it, and an unconfirmed lease names its
+term and says the node may still lead. Any other class fails the command with the
 operation and the consensus owner's message: the context's text, followed by the storage or Raft
 error beneath it for a storage or write failure.
 
@@ -2506,7 +2541,8 @@ digest-mismatched current chunk set or a conflicting publication inventory. `Res
 `Cancelled`, `Synchronize` and storage admission preserve their owning failure boundary.
 `CheckpointPlacementTooLarge` rejects an encoding beyond the bounded storage key allowance.
 `InvalidStorageFormat` requires recreation of the node state directory when the required current
-format marker is missing or invalid.
+format marker is missing or invalid. The unit-keyed checkpoint format uses a distinct marker, so
+state written under an earlier key shape fails at open rather than disappearing from a read.
 
 `RestoreStagingQuota` carries the node's unpublished checkpoint limit, current usage and incoming
 checkpoint footprint; `RestoreStagingSize` rejects an unrepresentable accounting sum. A quota
@@ -2606,6 +2642,29 @@ Per-message and per-batch detail belongs at `debug` or `trace`; `info` is for li
 administration, topology, and unusual transitions. A failure the caller recovered from and is the
 only witness of is recorded at `debug`. [Metrics And Observability](./metrics-and-observability.md)
 defines the available metrics and their aggregation.
+
+### The Node's Log
+
+A node writes its log to standard output through one subscriber, which also receives what its
+dependencies log through the `log` crate. Its trace filter is the operator's `RUST_LOG` when the
+variable is set and parses, and otherwise the node's default: `info` for every target, with
+OpenRaft's heartbeat worker and replication targets at `error`. Beneath whichever filter is in
+force, the subscriber drops every dependency event that carries a record's payload at `info` or
+above. No directive brings such an event back, a span-scoped or field-qualified one included, and
+every other event stays with the filter. The rule takes no decision away from the filter: the
+subscriber's maximum level stays the filter's, and an event the filter refuses costs what it would
+without the rule. The scenario run's subscriber, which writes
+`tests/logs/scenarios.log`, applies the same rule to its own default.
+
+The node drops one such event: Lapin's report of a message its broker returned. Lapin logs every
+returned message at `warn` under the target `lapin::returned_messages`, with the whole message, its
+body and properties included. The node drops that target's `info`, `warn` and `error` events; its
+`debug` and `trace` events carry no message and stay with the filter. What the log carries about a
+return is the RabbitMQ emitter's own report of it, which names the broker's reply code and text and
+never the record. A change that makes another payload-bearing dependency event reachable, through a
+dependency upgrade or a driver option a connector starts to use, adds it to the dropped events in
+the same change. Several drivers log messages, requests or frames at `debug` and `trace`; an
+operator who selects those levels for a driver's target chooses to see them.
 
 ## Recovery, Panics, And Enforcement
 

@@ -210,10 +210,10 @@ impl SessionServiceImpl {
             Ok(transaction) => return standalone_transaction_result(&transaction),
             Err(error) => error,
         };
-        if let Some(ConsensusError::LeadershipLost { leader_id }) =
+        if let Some(ConsensusError::LeadershipLost { observed }) =
             error.downcast_ref::<ConsensusError>()
         {
-            return self.not_leader_response("", leader_id.clone()).await;
+            return self.not_leader_response("", observed.clone()).await;
         }
         let message = transaction_commit_error_message(&error);
         let attempt = self
