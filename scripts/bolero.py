@@ -714,17 +714,32 @@ def metadata(
     (path / "metadata.json").write_text(json.dumps(data, indent=2) + "\n")
 
 
+def build_harness(target: Target, built: set[tuple[str, ...]]) -> None:
+    """Compile the ordinary harness that runs `target`, unless `built` already holds it."""
+    harness = tuple(cargo_test_args(target))
+    if harness in built:
+        return
+    print(f"{target.id}: ordinary build deadline 1800s", flush=True)
+    command([*harness, "--no-run"], timeout=1800)
+    built.add(harness)
+
+
+def build_targets(selected: tuple[Target, ...]) -> None:
+    """Compile every ordinary harness the selected targets run, as `test` builds them, and run
+    none of them, so a later `test` compiles nothing."""
+    built: set[tuple[str, ...]] = set()
+    for target in selected:
+        build_harness(target, built)
+    print(f"Bolero ordinary builds: {len(built)} harnesses for {len(selected)} targets", flush=True)
+
+
 def test_targets(inventory: Inventory, selected: tuple[Target, ...]) -> None:
     executed = 0
     completed = 0
     prepared: set[tuple[str, ...]] = set()
     for target in selected:
+        build_harness(target, prepared)
         args = cargo_test_args(target)
-        harness = tuple(args)
-        if harness not in prepared:
-            print(f"{target.id}: ordinary build deadline 1800s", flush=True)
-            command(args + ["--no-run"], timeout=1800)
-            prepared.add(harness)
         args += ["--", "--exact", target.test, "--nocapture"]
         env = {
             "BOLERO_RANDOM_ITERATIONS": str(target.random_iterations),
@@ -1584,6 +1599,8 @@ def main() -> int:
     prepare_shard_parser.add_argument("shard", type=Shard.parse)
     test = subparsers.add_parser("test")
     test.add_argument("filter", nargs="?")
+    build = subparsers.add_parser("build")
+    build.add_argument("filter", nargs="?")
     fuzz = subparsers.add_parser("fuzz")
     fuzz.add_argument("target")
     fuzz.add_argument("duration", nargs="?", type=int)
@@ -1629,6 +1646,9 @@ def main() -> int:
         return 0
     if args.action == "test":
         test_targets(inventory, select(inventory, args.filter))
+        return 0
+    if args.action == "build":
+        build_targets(select(inventory, args.filter))
         return 0
     if args.action in ("fuzz", "fuzz-all"):
         duration = (

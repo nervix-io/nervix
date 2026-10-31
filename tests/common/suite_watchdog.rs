@@ -29,10 +29,10 @@
 //!
 //! # Why the budget is the length it is
 //!
-//! The suite runs inside one workflow job whose own [`WORKFLOW_JOB_LIMIT`] kills everything it
-//! owns wherever it is, so the logs such a job leaves end mid-scenario without the suite's own
-//! diagnostic. The budget therefore has to leave that job enough time to finish the work around
-//! the suite and to upload the diagnostics the suite just produced:
+//! Each shard of the suite runs inside one workflow job whose own [`WORKFLOW_JOB_LIMIT`] kills
+//! everything it owns wherever it is, so the logs such a job leaves end mid-scenario without the
+//! suite's own diagnostic. The budget therefore has to leave that job enough time to finish the
+//! work around the suite and to upload the diagnostics the suite just produced:
 //! [`SLOWEST_JOB_WORK_BEFORE_SUITE`] before the scenario binary starts and
 //! [`SUITE_CLEANUP_RESERVE`] after its budget expires. What is left is the budget, and a healthy
 //! suite finishes inside it with [`SUITE_SLACK`] to spare.
@@ -57,22 +57,22 @@ use super::{
     scenario_phase::{ActiveScenario, ScenarioIdentity},
 };
 
-/// The `timeout-minutes` of the workflow job that runs the scenario suite. A policy input: keep it
-/// in step with the `scenarios` job in `.github/workflows/check.yaml`, which is the emergency guard
-/// outside this budget rather than the mechanism that ends a wedged run.
-pub(crate) const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(155 * 60);
-/// The `scenarios` job's setup and instrumented server and CLI build before the suite starts.
-/// Across the scenarios jobs of 22 Check runs of 21-27 October 2026 it took 5m42s to 16m54s,
-/// the slowest in run 40419254390, the first build after the build profile changed. Thirty-five
-/// minutes funds twice the slowest, rounded up, including variation in cold builds and
-/// dependency setup.
-const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(35 * 60);
+/// The `timeout-minutes` of the workflow job that runs one shard of the scenario suite. A policy
+/// input: keep it in step with the `scenarios` job in `.github/workflows/check.yaml`, which is the
+/// emergency guard outside this budget rather than the mechanism that ends a wedged run.
+pub(crate) const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(115 * 60);
+/// A shard's work before the suite starts: its setup, and the download and restore of the archive
+/// the `scenarios-build` job packed, which holds about 1.4 GiB of compressed executables. A shard
+/// compiles nothing. Before sharding, the same job's setup steps took up to five minutes on Boat in
+/// Check 41010408001. Fifteen minutes funds twice that setup with the archive's transfer and
+/// restore beside it.
+const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(15 * 60);
 /// What the job keeps for itself once the suite budget has expired: the bounded cleanup the
 /// watchdog drives, the dependency containers the suite then stops, and the artifact upload that
 /// follows. Cleanup, dependency stop and runtime shutdown can consume four minutes together.
-/// Retain eleven further minutes for coverage export, uploads and bounded cache publication on
-/// a slow runner; those steps share this reserve after a successful run too, where they took
-/// 0.7 to 1.9 minutes in the same 22 jobs. A policy input.
+/// Retain eleven further minutes for coverage export and uploads on a slow runner; those steps
+/// share this reserve after a successful run too, where they took 0.7 to 1.9 minutes in the
+/// unsharded scenarios jobs of 22 Check runs of 21-27 October 2026. A policy input.
 const SUITE_CLEANUP_RESERVE: Duration = Duration::from_secs(15 * 60);
 /// The one budget a whole scenario run has: what the job limit leaves once the work before the
 /// suite and the reserve after it are both paid for.
@@ -84,10 +84,13 @@ pub(crate) const SUITE_BUDGET: Duration =
         },
         None => panic!("the workflow job limit must cover the work that precedes the suite"),
     };
-/// Run 40419254390 completed 3703 attempts in 49m31s, once the scenario build optimized the
-/// parser that had held the runner thread. Round up to 50 minutes for the measured healthy
-/// ceiling. One run measures one runner, so the measuring runner's speed cannot be assumed.
-const SLOWEST_HEALTHY_SUITE: Duration = Duration::from_secs(50 * 60);
+/// The longest a healthy shard of three runs. Unsharded on Boat, Check 41010408001 ran 4406
+/// attempts, 240,698 slot-seconds of work, in 85.5 minutes at 97.8% utilization of its 48 run
+/// slots, and its longest attempt ran 37.5 minutes. A third of that work fills 48 slots for 28.5
+/// minutes, so a shard is bounded by its longest attempt instead: 40 minutes funds that attempt and
+/// the work queued before it starts. One run measures one runner, so the measuring runner's speed
+/// cannot be assumed. Fewer shards make each one longer and need this re-derived.
+const SLOWEST_HEALTHY_SUITE: Duration = Duration::from_secs(40 * 60);
 /// A policy input funding a runner at half the measured throughput. Across 17 runs of 21-26
 /// October on one inventory, the slowest runners ran every scenario 1.7 times as long as the
 /// fastest.

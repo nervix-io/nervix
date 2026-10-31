@@ -212,8 +212,8 @@ storage, resource requests, NodePort exposure, and Secret management appropriate
 
 Nervix's Docker Build workflow deploys every publishable Debian server revision through the shipped
 operator on native amd64 and arm64 minikube runners. Both checks must pass before the workflow can
-update `debian-latest`. They run for image-building pull requests from this repository, manual builds
-and nightly builds; a pull request marked `no-docker` builds no image and runs no deployment check.
+update `debian-latest`. They run for image-building pull requests from this repository and manual
+builds; a pull request marked `no-docker` builds no image and runs no deployment check.
 
 Each check resolves the server image built by that run and the published operator image to registry
 digests, records the chart and example's `main` revision, and changes only the example's server

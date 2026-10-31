@@ -54,6 +54,30 @@ mod worker;
             "syntax/src/lib.rs": layer("vocabulary") + "pub struct Plan;",
         }, dependencies='values = { package = "syntax-engine", path = "syntax" }'), [])
 
+    def test_a_package_of_tests_is_checked_from_its_test_targets(self) -> None:
+        manifest = (
+            '[package]\nname="suite"\nversion="0.1.0"\n'
+            '[[test]]\nname="suite"\npath="suite.rs"\n'
+            '[dev-dependencies]\nsyntax = { package = "syntax-engine", path = "../syntax" }'
+        )
+        declared = {"tests/Cargo.toml": manifest, "tests/suite.rs": layer("harness") + "mod steps;\n",
+                    "tests/steps.rs": "use syntax::Token;"}
+        self.assertEqual(self.check(layer("engine"), declared, dependencies=""), [])
+        undeclared = {**declared, "tests/suite.rs": "mod steps;\n"}
+        problems = self.check(layer("engine"), undeclared, dependencies="")
+        self.assertTrue(any("tests/steps.rs:" in problem for problem in problems), problems)
+        self.assertTrue(any("tests/Cargo.toml:" in problem for problem in problems), problems)
+
+    def test_a_test_target_of_a_package_with_a_library_is_not_a_root(self) -> None:
+        manifest = (
+            '[package]\nname="plain"\nversion="0.1.0"\n'
+            '[[test]]\nname="plain"\npath="tests/plain.rs"\n'
+            '[dev-dependencies]\nsyntax = { package = "syntax-engine", path = "../syntax" }'
+        )
+        files = {"plain/Cargo.toml": manifest, "plain/src/lib.rs": layer("harness"),
+                 "plain/tests/plain.rs": "use syntax::Token;"}
+        self.assertEqual(self.check(layer("engine"), files, dependencies=""), [])
+
     def test_comments_and_literals_do_not_declare_an_owner(self) -> None:
         problems = self.check(layer("engine") + '''
 // #[cfg_attr(nervix_lint, nervix::layer(edge, reason="fake owner"))]
