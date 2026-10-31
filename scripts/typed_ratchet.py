@@ -16,8 +16,11 @@ import pathlib
 import re
 import subprocess
 import sys
+import threading
 import tomllib
 import uuid
+from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from scripts import analysis_admission
@@ -562,6 +565,34 @@ def render_finding(site: dict[str, Any]) -> str:
     return text
 
 
+# How many configurations analyze at once unless --jobs or the environment says otherwise. The
+# admission queue, not this bound, keeps their server analyses within the host's memory; the bound
+# keeps the Cargo processes of every configuration's small crates from crowding the CPUs.
+DEFAULT_ANALYSIS_JOBS = 4
+JOBS_VARIABLE = "NERVIX_TYPED_RATCHET_JOBS"
+
+
+def positive_jobs(value: str) -> int:
+    try:
+        jobs = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value} is not a number of configurations") from None
+    if jobs < 1:
+        raise argparse.ArgumentTypeError(f"{value} is not a positive number of configurations")
+    return jobs
+
+
+def analysis_jobs(environment: Mapping[str, str]) -> int:
+    """How many configurations analyze at once: the environment's setting, else the default."""
+    configured = environment.get(JOBS_VARIABLE)
+    if not configured:
+        return DEFAULT_ANALYSIS_JOBS
+    try:
+        return positive_jobs(configured)
+    except argparse.ArgumentTypeError as error:
+        raise AnalysisError(f"{JOBS_VARIABLE}: {error}") from None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=pathlib.Path, default=ROOT)
@@ -574,6 +605,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--inventory", action="store_true", help="report acquisitions using ordinary warning levels; requires the full matrix for the diagnostic gate")
     parser.add_argument("--output", type=pathlib.Path)
     parser.add_argument("--show", action="store_true", help="print every compiler finding and its source contract")
+    parser.add_argument("--jobs", type=positive_jobs, help=f"configurations analyzed at once (default: {JOBS_VARIABLE}, else {DEFAULT_ANALYSIS_JOBS})")
     args = parser.parse_args(argv)
     try:
         runner = Runner(args.root, args.target_dir, inventory=args.inventory)
@@ -592,8 +624,9 @@ def main(argv: list[str] | None = None) -> int:
                     raise AnalysisError("unknown requested configuration")
         if args.turmoil_child and (args.fixture_mode or not args.configuration or len(configurations) != 1 or "turmoil" not in configurations[0].features or "--cfg tokio_unstable" not in os.environ.get("RUSTFLAGS", "")):
             raise AnalysisError("Turmoil child requires its single declared configuration and the just recipe's tokio_unstable setting")
-        evidence = []
-        for configuration in configurations:
+
+        def analyze_configuration(configuration: Configuration) -> list[dict[str, Any]]:
+            """The evidence of one configuration: its own analysis, or the Turmoil child's."""
             if args.recompile:
                 runner.clean_authored_artifacts(configuration, runner.expected_targets(configuration), runner.target / "typed-ratchet/build" / configuration.name)
             if "turmoil" in configuration.features:
@@ -618,9 +651,30 @@ def main(argv: list[str] | None = None) -> int:
                         raise AnalysisError("Turmoil evidence covers different configurations")
                     if separate.get("diagnostics_checked") != (not args.inventory) or separate.get("source_identity") != source_identity:
                         raise AnalysisError("Turmoil evidence has a different diagnostic mode or source/dependency inputs")
-                    evidence.extend(separate["evidence"])
-                    continue
-            evidence.append(runner.analyze(configuration, fresh=args.fresh or args.recompile))
+                    return list(separate["evidence"])
+            return [runner.analyze(configuration, fresh=args.fresh or args.recompile)]
+
+        # Every configuration builds in a directory of its own, so configurations analyze beside
+        # each other; the admission queue keeps their server analyses within the host's memory.
+        # The evidence keeps the declared order whatever order the analyses end in. Once one
+        # analysis fails, no configuration starts another; the running ones end before the error
+        # is reported.
+        jobs = args.jobs or analysis_jobs(os.environ)
+        failed = threading.Event()
+
+        def analyze_unless_failed(configuration: Configuration) -> list[dict[str, Any]]:
+            if failed.is_set():
+                return []
+            try:
+                return analyze_configuration(configuration)
+            except BaseException:
+                failed.set()
+                raise
+
+        with ThreadPoolExecutor(max_workers=min(jobs, len(configurations))) as executor:
+            futures = [executor.submit(analyze_unless_failed, configuration) for configuration in configurations]
+            results = [future.result() for future in futures]
+        evidence = [entry for result in results for entry in result]
         sites = summarize(runner, evidence)
         if source_inputs(runner.root) != runner.inputs:
             raise AnalysisError("source/configuration/dependency inputs changed during matrix analysis")

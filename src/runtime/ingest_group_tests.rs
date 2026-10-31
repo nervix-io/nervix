@@ -124,7 +124,7 @@ fn accept_decoded_payloads(
 ) -> Result<(), String> {
     let headers = NoIngestHeaders;
     let metadata = (0..acks.len())
-        .map(|_| IngestMetadataRow::Headers { headers: &headers })
+        .map(|_| IngestMetadataRow::headers(&headers))
         .collect::<Vec<_>>();
     collector
         .collect(IngestGroupContribution {
@@ -132,7 +132,10 @@ fn accept_decoded_payloads(
             domain: &domain("default"),
             ingestor: &named("grouped_event_source"),
             timestamp_source: None,
-            output_routes: &Arc::new(BoundIngestorRoutes { routes: Vec::new() }),
+            output_routes: &Arc::new(BoundIngestorRoutes {
+                routes: Vec::new(),
+                metadata: IngestMetadataProjection::none(),
+            }),
             filter_where: None,
             metadata: &metadata,
             acks,
@@ -154,14 +157,10 @@ fn two_ingest_rows() -> IngestGroupRows {
             RuntimeRecordMetadata::test(),
         ]),
         ingest_metadata: ingest_metadata_for_test(
-            IngestorMetadataScope::Headers,
+            IngestMetadataProjection::none(),
             &[
-                IngestMetadataRow::Headers {
-                    headers: &NoIngestHeaders,
-                },
-                IngestMetadataRow::Headers {
-                    headers: &NoIngestHeaders,
-                },
+                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(&NoIngestHeaders),
             ],
         ),
         acks: vec![AckSet::empty(), AckSet::empty()],
@@ -198,7 +197,7 @@ fn expect_failure<T, E>(result: Result<T, E>, reason: &str) -> E {
 async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -261,7 +260,7 @@ async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
 async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         3,
         grouped_event_ingestor_metrics(),
     );
@@ -307,7 +306,7 @@ async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
 async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -382,7 +381,7 @@ async fn a_batch_keeps_decoding_after_its_codec_refuses_a_payload() {
     let runtime = Runtime::default();
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -440,7 +439,7 @@ async fn a_batch_the_node_cannot_unfold_is_refused_whole() {
     let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
     let codec = unfolding_event_codec(".");
     let mut collector = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -478,7 +477,7 @@ async fn a_batch_the_node_cannot_unfold_is_refused_whole() {
 async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_ack_share() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -542,7 +541,7 @@ async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_a
 async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
     let codec = unfolding_event_codec(".[] | select(.keep)");
     let mut collector = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -584,7 +583,7 @@ async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
 async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_unfolding() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -649,7 +648,7 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
 async fn ingest_group_releases_the_rows_a_rejected_payload_abandoned_in_an_empty_group() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -693,9 +692,9 @@ fn ingest_group_rows_share_the_group_batch_allocation() {
 #[test]
 fn pending_ingest_group_rejects_misaligned_payload_sidecars() {
     let headers = NoIngestHeaders;
-    let metadata = [IngestMetadataRow::Headers { headers: &headers }];
+    let metadata = [IngestMetadataRow::headers(&headers)];
     let ingested_at = Timestamp::from_unix_nanos(1);
-    let mut pending = PendingIngestGroup::new(IngestorMetadataScope::Headers, 1);
+    let mut pending = PendingIngestGroup::new(IngestMetadataProjection::none(), 1);
 
     let missing_ack = expect_failure(
         pending.append(&metadata, Vec::new(), ingested_at),
@@ -724,7 +723,7 @@ fn pending_ingest_group_rejects_misaligned_payload_sidecars() {
 
 #[test]
 fn pending_ingest_group_reports_structural_close_errors() {
-    let mut timestamp_mismatch = PendingIngestGroup::new(IngestorMetadataScope::Headers, 1);
+    let mut timestamp_mismatch = PendingIngestGroup::new(IngestMetadataProjection::none(), 1);
     timestamp_mismatch.acks.push(AckSet::empty());
     let timestamp_error = expect_failure(
         timestamp_mismatch.into_rows(),
@@ -739,7 +738,7 @@ fn pending_ingest_group_reports_structural_close_errors() {
     ));
 
     let missing_metadata = expect_failure(
-        PendingIngestGroup::new(IngestorMetadataScope::Headers, 1).into_rows(),
+        PendingIngestGroup::new(IngestMetadataProjection::none(), 1).into_rows(),
         "a closed group must have opened metadata builders",
     );
     assert!(matches!(
@@ -747,11 +746,11 @@ fn pending_ingest_group_reports_structural_close_errors() {
         IngestGroupError::MissingMetadataBuilders
     ));
 
-    let mut missing_records = PendingIngestGroup::new(IngestorMetadataScope::Headers, 1);
-    missing_records.metadata = Some(
-        IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
-            .expect("one header metadata row fits"),
-    );
+    let mut missing_records = PendingIngestGroup::new(IngestMetadataProjection::none(), 1);
+    missing_records.metadata = Some(IngestMetadataBuilders::new(
+        IngestMetadataProjection::none(),
+        1,
+    ));
     let missing_record_error = expect_failure(
         missing_records.into_rows(),
         "a closed group must have opened a record builder",
@@ -761,13 +760,10 @@ fn pending_ingest_group_reports_structural_close_errors() {
         IngestGroupError::MissingRecordBuilder
     ));
 
-    let mut metadata_mismatch = PendingIngestGroup::new(IngestorMetadataScope::Headers, 1);
-    let mut metadata = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
-        .expect("one header metadata row fits");
+    let mut metadata_mismatch = PendingIngestGroup::new(IngestMetadataProjection::none(), 1);
+    let mut metadata = IngestMetadataBuilders::new(IngestMetadataProjection::none(), 1);
     metadata
-        .append(&IngestMetadataRow::Headers {
-            headers: &NoIngestHeaders,
-        })
+        .append(&IngestMetadataRow::headers(&NoIngestHeaders))
         .expect("the headers fixture must append");
     metadata_mismatch.metadata = Some(metadata);
     let metadata_error = expect_failure(
@@ -782,13 +778,10 @@ fn pending_ingest_group_reports_structural_close_errors() {
         }
     ));
 
-    let mut decoded_mismatch = PendingIngestGroup::new(IngestorMetadataScope::Headers, 1);
-    let mut metadata = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
-        .expect("one header metadata row fits");
+    let mut decoded_mismatch = PendingIngestGroup::new(IngestMetadataProjection::none(), 1);
+    let mut metadata = IngestMetadataBuilders::new(IngestMetadataProjection::none(), 1);
     metadata
-        .append(&IngestMetadataRow::Headers {
-            headers: &NoIngestHeaders,
-        })
+        .append(&IngestMetadataRow::headers(&NoIngestHeaders))
         .expect("the headers fixture must append");
     decoded_mismatch.metadata = Some(metadata);
     decoded_mismatch.records = Some(grouped_event_schema().batch_builder(1));
@@ -875,7 +868,7 @@ fn ingest_group_rows_validate_views_and_selection_alignment() {
 async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     let codec = grouped_event_codec();
     let mut undispatched = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -899,7 +892,7 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     assert_eq!(undispatched.pending.undispatched_payloads(), 0);
 
     let mut collector = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         2,
         grouped_event_ingestor_metrics(),
     );
@@ -926,10 +919,11 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
 
     let other_domain = domain("other");
     let ingestor: IngestorName = named("grouped_event_source");
-    let routes = Arc::new(BoundIngestorRoutes { routes: Vec::new() });
-    let metadata = [IngestMetadataRow::Headers {
-        headers: &NoIngestHeaders,
-    }];
+    let routes = Arc::new(BoundIngestorRoutes {
+        routes: Vec::new(),
+        metadata: IngestMetadataProjection::none(),
+    });
+    let metadata = [IngestMetadataRow::headers(&NoIngestHeaders)];
     let identity_error = expect_failure(
         collector.collect(IngestGroupContribution {
             handles: &IngestTaskHandles::detached(&domain("default")),
@@ -976,7 +970,7 @@ async fn ingest_collector_flush_reports_missing_route_dependencies() {
     };
 
     let mut missing_schema_collector = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -1010,7 +1004,7 @@ async fn ingest_collector_flush_reports_missing_route_dependencies() {
             ..DomainRoutingSnapshot::default()
         }));
     let mut missing_entrypoint_collector = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -1528,7 +1522,7 @@ async fn an_unfolding_payload_runs_on_the_extension_workers() {
     let executor = Executor::default();
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -1593,7 +1587,7 @@ async fn a_node_without_room_to_unfold_a_payload_refuses_it_without_judging_it()
     let codec = unfolding_event_codec(".[]");
     let payload = br#"[{"user_id":1},{"user_id":2}]"#;
     let mut collector = IngestRouteCollector::new(
-        IngestorMetadataScope::Headers,
+        IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
     );

@@ -1607,7 +1607,7 @@ mod tests {
             }
         );
 
-        let empty_ingest_metadata = ingest_metadata_for_test(IngestorMetadataScope::Headers, &[]);
+        let empty_ingest_metadata = ingest_metadata_for_test(IngestMetadataProjection::none(), &[]);
         let error = evaluate_filter_map_on_batch(
             &Executor::default(),
             &program,
@@ -2617,7 +2617,7 @@ mod tests {
         }));
         let program = bind_ingestor_route_for_test(
             &named::<ModelName>("logic_ingestor"),
-            IngestorMetadataScope::Headers,
+            IngestorMetadataDeclaration::NONE,
             true,
             &construction(
                 "INHERIT tenant SET u8_next = input.u8 + (1 AS U8), i8_abs = abs(input.i8), \

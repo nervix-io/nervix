@@ -37,7 +37,7 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         self.assertIn("pull-requests: write", reporter)
         self.assertNotIn("issues: write", reporter)
         self.assertNotIn("actions/checkout", reporter)
-        self.assertIn("actions/download-artifact@v4", reporter)
+        self.assertIn("actions/download-artifact@v8", reporter)
         self.assertIn("continue-on-error: true", reporter)
         self.assertIn("<!-- nervix-benchmark-comparison -->", reporter)
         self.assertIn("needs.benchmark.result", reporter)
