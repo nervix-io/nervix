@@ -425,6 +425,7 @@ impl BranchDraft {
             name,
             schema: schema.clone(),
             ttl: ttl.to_string(),
+            partitions: nervix_models::BranchPartitions::ONE,
             eviction,
         })
     }

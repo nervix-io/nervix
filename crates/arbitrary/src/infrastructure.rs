@@ -65,6 +65,7 @@ impl Arbitrary<'_> {
             name,
             schema,
             ttl,
+            partitions: nervix_models::BranchPartitions::ONE,
             eviction,
         }
     }

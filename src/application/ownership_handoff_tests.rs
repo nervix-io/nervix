@@ -42,6 +42,7 @@ async fn a_terminating_destination_refuses_to_prepare_a_planned_handoff() {
         source_incarnation: incarnation,
         destination_incarnation: incarnation,
         domain: DomainName::parse("default").assured("the test domain name is valid"),
+        unit: nervix_models::Unit::Single,
         entity: NodeRef::new(
             ModelKind::Junction,
             ModelName::parse("moved_route").assured("the test entity name is valid"),

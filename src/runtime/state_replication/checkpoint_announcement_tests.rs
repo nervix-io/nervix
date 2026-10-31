@@ -33,6 +33,7 @@ fn placement(
         state,
         kind,
         identifier: named(identifier),
+        unit: nervix_models::Unit::Single,
         branch_key,
     }
 }

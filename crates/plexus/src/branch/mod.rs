@@ -40,6 +40,7 @@ pub fn create_branch_parser<'src>()
                     name,
                     schema,
                     ttl,
+                    partitions: nervix_models::BranchPartitions::ONE,
                     eviction,
                 },
                 if_not_exists,

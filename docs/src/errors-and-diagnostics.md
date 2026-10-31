@@ -612,7 +612,11 @@ stored bytes have, such as a key without its domain separator or a restore whose
 differs, beneath `EncodeState` or `DecodeState`, so the rendered chain still reads `failed to decode
 runtime state: runtime state key has no domain separator`. A memory or storage refusal while a
 materialized relay's restored snapshot is opened is a storage admission or execution failure, never
-a decoding failure. A caller keeps the storage report beneath its own context:
+a decoding failure. The required execution-unit marker, tag and ordinal in a state key report a
+missing marker, truncation, invalid unit or missing separator as distinct `StoredStateIssue` causes under
+`DecodeState`; no unit is inferred from an incomplete key.
+
+A caller keeps the storage report beneath its own context:
 `RuntimeStateOperationError::Persistence` for a replica's installation or a snapshot task,
 `OwnershipHandoffError::Persistence` for a handoff, and the domain build's `ExecutionBuildError`
 step, which names the node and the state kind, for a state assignment.
@@ -2497,7 +2501,8 @@ digest-mismatched current chunk set or a conflicting publication inventory. `Res
 `Cancelled`, `Synchronize` and storage admission preserve their owning failure boundary.
 `CheckpointPlacementTooLarge` rejects an encoding beyond the bounded storage key allowance.
 `InvalidStorageFormat` requires recreation of the node state directory when the required current
-format marker is missing or invalid.
+format marker is missing or invalid. The unit-keyed checkpoint format uses a distinct marker, so
+state written under an earlier key shape fails at open rather than disappearing from a read.
 
 `RestoreStagingQuota` carries the node's unpublished checkpoint limit, current usage and incoming
 checkpoint footprint; `RestoreStagingSize` rejects an unrepresentable accounting sum. A quota

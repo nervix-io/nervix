@@ -36,8 +36,8 @@ pub(crate) fn assign_server_listener_nodes(
     let live_nodes = SortedSet::from_unsorted(live_nodes.to_vec()).into_vec();
     for node in schedule.nodes.values_mut() {
         if node.config.executes_on_every_cluster_node() {
-            node.primary_node = live_nodes.first().cloned();
-            node.assigned_nodes = live_nodes.clone();
+            node.single_unit_mut().primary_node = live_nodes.first().cloned();
+            node.single_unit_mut().assigned_nodes = live_nodes.clone();
         }
     }
 }
@@ -525,11 +525,12 @@ impl ActiveGraph {
                 let primary_node = if let Some(first) = members.first()
                     && let Some(node) = scheduled_nodes.get(first)
                 {
-                    node.primary_node.clone()
+                    node.single_unit().primary_node.clone()
                 } else {
                     None
                 };
                 PlacementGroupSchedule {
+                    unit: nervix_models::Unit::Single,
                     members: runtime_members,
                     primary_node,
                 }
@@ -782,11 +783,15 @@ mod tests {
         );
 
         assert_eq!(
-            scheduled_node(&schedule, ModelKind::Ingestor, "ing_a").assigned_nodes,
+            scheduled_node(&schedule, ModelKind::Ingestor, "ing_a")
+                .single_unit()
+                .assigned_nodes,
             vec![named::<ClusterNodeName>("node-1")]
         );
         assert_eq!(
-            scheduled_node(&schedule, ModelKind::Ingestor, "ing_b").assigned_nodes,
+            scheduled_node(&schedule, ModelKind::Ingestor, "ing_b")
+                .single_unit()
+                .assigned_nodes,
             vec![named::<ClusterNodeName>("node-2")]
         );
 
@@ -961,7 +966,7 @@ mod tests {
         let schedule =
             graph.schedule_for_domain(&domain, &cluster_nodes, 0, PlacementPolicy::Neutral);
         let ingestor = scheduled_node(&schedule, ModelKind::Ingestor, "ing");
-        assert_eq!(ingestor.assigned_nodes, cluster_nodes);
+        assert_eq!(ingestor.single_unit().assigned_nodes, cluster_nodes);
         assert_eq!(ingestor.execution_node(), None);
         assert!(cluster_nodes.iter().all(|node| ingestor.executes_on(node)));
 
@@ -1071,20 +1076,28 @@ mod tests {
         );
 
         assert_eq!(
-            scheduled_node(&schedule, ModelKind::Ingestor, "ing_a").assigned_nodes,
+            scheduled_node(&schedule, ModelKind::Ingestor, "ing_a")
+                .single_unit()
+                .assigned_nodes,
             vec![named::<ClusterNodeName>("node-1")]
         );
         assert_eq!(
-            scheduled_node(&schedule, ModelKind::Ingestor, "ing_b").assigned_nodes,
+            scheduled_node(&schedule, ModelKind::Ingestor, "ing_b")
+                .single_unit()
+                .assigned_nodes,
             vec![named::<ClusterNodeName>("node-2")]
         );
         assert_eq!(
-            scheduled_node(&schedule, ModelKind::Ingestor, "ing_c").assigned_nodes,
+            scheduled_node(&schedule, ModelKind::Ingestor, "ing_c")
+                .single_unit()
+                .assigned_nodes,
             vec![named::<ClusterNodeName>("node-1")]
         );
 
         assert_eq!(
-            scheduled_node(&schedule, ModelKind::Emitter, "emit_shared").assigned_nodes,
+            scheduled_node(&schedule, ModelKind::Emitter, "emit_shared")
+                .single_unit()
+                .assigned_nodes,
             vec![named::<ClusterNodeName>("node-1")]
         );
 
@@ -1154,7 +1167,9 @@ mod tests {
         );
 
         assert_eq!(
-            scheduled_node(&schedule, ModelKind::Ingestor, "http_ing").assigned_nodes,
+            scheduled_node(&schedule, ModelKind::Ingestor, "http_ing")
+                .single_unit()
+                .assigned_nodes,
             vec![
                 named::<ClusterNodeName>("node-1"),
                 named::<ClusterNodeName>("node-2"),
@@ -1168,15 +1183,19 @@ mod tests {
                 graph.schedule_for_domain(&domain, &eligible, 0, PlacementPolicy::Neutral);
             super::assign_server_listener_nodes(&mut schedule, &live_nodes);
             let listener = scheduled_node(&schedule, ModelKind::Ingestor, "http_ing");
-            assert_eq!(listener.assigned_nodes, live_nodes);
+            assert_eq!(listener.single_unit().assigned_nodes, live_nodes);
             assert!(live_nodes.iter().all(|node| listener.executes_on(node)));
             assert_eq!(
-                scheduled_node(&schedule, ModelKind::Relay, "notifications").assigned_nodes,
+                scheduled_node(&schedule, ModelKind::Relay, "notifications")
+                    .single_unit()
+                    .assigned_nodes,
                 eligible
             );
             super::assign_server_listener_nodes(&mut schedule, &live_nodes[..2]);
             assert_eq!(
-                scheduled_node(&schedule, ModelKind::Ingestor, "http_ing").assigned_nodes,
+                scheduled_node(&schedule, ModelKind::Ingestor, "http_ing")
+                    .single_unit()
+                    .assigned_nodes,
                 live_nodes[..2]
             );
         }
@@ -1256,7 +1275,9 @@ mod tests {
         );
 
         assert_eq!(
-            scheduled_node(&initial_schedule, ModelKind::Ingestor, "ws_ing").assigned_nodes,
+            scheduled_node(&initial_schedule, ModelKind::Ingestor, "ws_ing")
+                .single_unit()
+                .assigned_nodes,
             vec![
                 named::<ClusterNodeName>("node-1"),
                 named::<ClusterNodeName>("node-2"),
@@ -1264,7 +1285,9 @@ mod tests {
             ]
         );
         assert_eq!(
-            scheduled_node(&reduced_schedule, ModelKind::Ingestor, "ws_ing").assigned_nodes,
+            scheduled_node(&reduced_schedule, ModelKind::Ingestor, "ws_ing")
+                .single_unit()
+                .assigned_nodes,
             vec![
                 named::<ClusterNodeName>("node-1"),
                 named::<ClusterNodeName>("node-3")

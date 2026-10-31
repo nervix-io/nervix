@@ -13,8 +13,8 @@
 )]
 
 use nervix_models::{
-    DomainSchedule, DynamicModelUpdate, ModelKind, NodeRef, QuiesceLevel, ScheduledNode,
-    WasmStateResetPhase,
+    DomainSchedule, DynamicModelUpdate, ModelKind, NodeRef, NodeUnitRef, QuiesceLevel,
+    ScheduledNode, WasmStateResetPhase,
 };
 use sorted_vec::SortedSet;
 
@@ -26,7 +26,7 @@ pub(crate) enum ScheduleDelta {
     Dynamic(Vec<DynamicModelUpdate>),
     EntitySwap {
         entities: Vec<NodeRef>,
-        reassignments: Vec<NodeRef>,
+        reassignments: Vec<NodeUnitRef>,
         dynamic_updates: Vec<DynamicModelUpdate>,
     },
     Rebuild,
@@ -82,15 +82,46 @@ impl ScheduleDelta {
                 }
                 continue;
             };
-            if !existing_node.has_same_assignment_as(desired_node) {
-                reassignments.push(desired_node.identity());
+            for (unit, placement) in &desired_node.units {
+                if existing_node.units.get(unit).is_none_or(|existing| {
+                    existing.primary_node != placement.primary_node
+                        || existing.assigned_nodes != placement.assigned_nodes
+                }) {
+                    reassignments.push(NodeUnitRef::new(desired_node.identity(), *unit));
+                }
+            }
+            if existing_node
+                .units
+                .keys()
+                .any(|unit| !desired_node.units.contains_key(unit))
+            {
+                return Self::Rebuild;
             }
             let aspects = existing_node
                 .config
                 .change_aspects_against(&desired_node.config);
             let level = aspects.quiesce_level();
-            let reset_changed = existing_node.wasm_state_reset() != desired_node.wasm_state_reset();
-            if reset_changed && let Some(reset) = desired_node.wasm_state_reset() {
+            let reset_changed = desired_node.units.iter().any(|(unit, desired)| {
+                existing_node
+                    .units
+                    .get(unit)
+                    .is_some_and(|existing| existing.wasm_state_reset != desired.wasm_state_reset)
+            });
+            let partition_reset_changed = desired_node.units.iter().any(|(unit, desired)| {
+                *unit != nervix_models::Unit::Single
+                    && existing_node.units.get(unit).is_some_and(|existing| {
+                        existing.wasm_state_reset != desired.wasm_state_reset
+                    })
+            });
+            if partition_reset_changed {
+                entities.push(desired_node.identity());
+            }
+            if reset_changed
+                && let Some(reset) = desired_node
+                    .units
+                    .get(&nervix_models::Unit::Single)
+                    .and_then(|unit| unit.wasm_state_reset.as_ref())
+            {
                 updates.push(DynamicModelUpdate::WasmStateReset {
                     processor: desired_node.identifier.clone(),
                     reset: reset.clone(),
@@ -100,9 +131,13 @@ impl ScheduleDelta {
             // A coordinated reset carries its exact scope as a dynamic update, so the runtime can
             // replace only those branch tasks and keep sibling branches live.
             let coordinated_reset = Self::is_coordinated_wasm_reset(existing_node, desired_node);
-            if existing_node.wasm_state_generations() != desired_node.wasm_state_generations()
-                && !coordinated_reset
-            {
+            let generations_changed = desired_node.units.iter().any(|(unit, desired)| {
+                existing_node.units.get(unit).is_some_and(|existing| {
+                    existing.wasm_state_generations != desired.wasm_state_generations
+                        && (*unit != nervix_models::Unit::Single || !coordinated_reset)
+                })
+            });
+            if generations_changed {
                 entities.push(desired_node.identity());
             }
             let emitter_schema_fingerprint_may_change =
@@ -160,19 +195,31 @@ impl ScheduleDelta {
     }
 
     fn is_coordinated_wasm_reset(existing: &ScheduledNode, desired: &ScheduledNode) -> bool {
-        let Some(reset) = desired.wasm_state_reset() else {
+        let Some(reset) = desired
+            .units
+            .get(&nervix_models::Unit::Single)
+            .and_then(|unit| unit.wasm_state_reset.as_ref())
+        else {
             return false;
         };
         if reset.phase() != WasmStateResetPhase::Publishing
             || existing
-                .wasm_state_reset()
+                .units
+                .get(&nervix_models::Unit::Single)
+                .and_then(|unit| unit.wasm_state_reset.as_ref())
                 .is_some_and(|current| current.request() == reset.request())
         {
             return false;
         }
         let (Some(existing_generations), Some(desired_generations)) = (
-            existing.wasm_state_generations(),
-            desired.wasm_state_generations(),
+            existing
+                .units
+                .get(&nervix_models::Unit::Single)
+                .and_then(|unit| unit.wasm_state_generations.as_ref()),
+            desired
+                .units
+                .get(&nervix_models::Unit::Single)
+                .and_then(|unit| unit.wasm_state_generations.as_ref()),
         ) else {
             return false;
         };
@@ -198,7 +245,14 @@ impl ScheduleDelta {
         else {
             return Vec::new();
         };
-        SortedSet::from_unsorted(entities.iter().chain(reassignments).cloned().collect()).into_vec()
+        SortedSet::from_unsorted(
+            entities
+                .iter()
+                .cloned()
+                .chain(reassignments.iter().map(|unit| unit.node.clone()))
+                .collect(),
+        )
+        .into_vec()
     }
 
     fn same_schedule_residue(
@@ -266,9 +320,9 @@ mod tests {
         CreateWasmProcessor, DomainName, DomainSchedule, DynamicModelUpdate, EmitterEntity,
         EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy, GeneralErrorPolicy,
         HttpEndpointIngestor, HttpIngestor, IngestorEntity, Literal, Model, ModelKind, NodeRef,
-        OutputBranch, PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        QuiesceLevel, RelayBranching, ResolvedBranching, RetryPolicy, RouteConstruction,
-        ScheduledNode, SchemaFingerprint, VhostTlsResource, WasmProcessorLimits,
+        NodeUnitRef, OutputBranch, PlacementPolicy, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, QuiesceLevel, RelayBranching, ResolvedBranching, RetryPolicy,
+        RouteConstruction, ScheduledNode, SchemaFingerprint, VhostTlsResource, WasmProcessorLimits,
         WasmStateResetScope, ZeroMqEmitter, ZeroMqPushEmitter,
     };
     use nonzero_ext::nonzero;
@@ -600,8 +654,9 @@ mod tests {
         let existing = ingestor_schedule("ingress_a");
         let mut desired = ingestor_schedule("ingress_b");
         desired.nodes[0].schema_fingerprint = SchemaFingerprint::from_digest([2; 32]);
-        desired.nodes[0].primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
-        desired.nodes[0].assigned_nodes =
+        desired.nodes[0].single_unit_mut().primary_node =
+            Some(ClusterNodeName::parse("node-2").expect("valid name"));
+        desired.nodes[0].single_unit_mut().assigned_nodes =
             vec![ClusterNodeName::parse("node-2").expect("valid name")];
 
         let ScheduleDelta::EntitySwap {
@@ -615,7 +670,13 @@ mod tests {
         assert_eq!(entities.len(), 1);
         assert_eq!(entities[0].kind, ModelKind::Ingestor);
         assert_eq!(entities[0].identifier, named("event_source"));
-        assert_eq!(reassignments, entities);
+        assert_eq!(
+            reassignments,
+            entities
+                .into_iter()
+                .map(|node| NodeUnitRef::new(node, nervix_models::Unit::Single))
+                .collect::<Vec<_>>()
+        );
         assert!(dynamic_updates.is_empty());
     }
 
@@ -709,18 +770,22 @@ mod tests {
     fn owner_change_alone_reassigns_without_a_rebuild() {
         let existing = ingestor_schedule("ingress_a");
         let mut desired = ingestor_schedule("ingress_a");
-        desired.nodes[0].primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
-        desired.nodes[0].assigned_nodes =
+        desired.nodes[0].single_unit_mut().primary_node =
+            Some(ClusterNodeName::parse("node-2").expect("valid name"));
+        desired.nodes[0].single_unit_mut().assigned_nodes =
             vec![ClusterNodeName::parse("node-2").expect("valid name")];
 
         assert_eq!(
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::EntitySwap {
                 entities: Vec::new(),
-                reassignments: vec![NodeRef {
-                    kind: ModelKind::Ingestor,
-                    identifier: named("event_source"),
-                }],
+                reassignments: vec![NodeUnitRef::new(
+                    NodeRef {
+                        kind: ModelKind::Ingestor,
+                        identifier: named("event_source"),
+                    },
+                    nervix_models::Unit::Single
+                )],
                 dynamic_updates: Vec::new(),
             }
         );
@@ -730,7 +795,7 @@ mod tests {
     fn replica_set_change_alone_reassigns_without_a_rebuild() {
         let existing = ingestor_schedule("ingress_a");
         let mut desired = ingestor_schedule("ingress_a");
-        desired.nodes[0].assigned_nodes = vec![
+        desired.nodes[0].single_unit_mut().assigned_nodes = vec![
             ClusterNodeName::parse("node-1").expect("valid name"),
             ClusterNodeName::parse("node-3").expect("valid name"),
         ];
@@ -739,10 +804,13 @@ mod tests {
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::EntitySwap {
                 entities: Vec::new(),
-                reassignments: vec![NodeRef {
-                    kind: ModelKind::Ingestor,
-                    identifier: named("event_source"),
-                }],
+                reassignments: vec![NodeUnitRef::new(
+                    NodeRef {
+                        kind: ModelKind::Ingestor,
+                        identifier: named("event_source"),
+                    },
+                    nervix_models::Unit::Single
+                )],
                 dynamic_updates: Vec::new(),
             }
         );
@@ -752,8 +820,9 @@ mod tests {
     fn adding_a_placement_only_applies_the_assignments_it_changes() {
         let existing = ingestor_schedule("ingress_a");
         let mut desired = ingestor_schedule("ingress_a");
-        desired.nodes[0].primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
-        desired.nodes[0].assigned_nodes =
+        desired.nodes[0].single_unit_mut().primary_node =
+            Some(ClusterNodeName::parse("node-2").expect("valid name"));
+        desired.nodes[0].single_unit_mut().assigned_nodes =
             vec![ClusterNodeName::parse("node-2").expect("valid name")];
         push_scheduled(
             &mut desired,
@@ -764,10 +833,13 @@ mod tests {
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::EntitySwap {
                 entities: Vec::new(),
-                reassignments: vec![NodeRef {
-                    kind: ModelKind::Ingestor,
-                    identifier: named("event_source"),
-                }],
+                reassignments: vec![NodeUnitRef::new(
+                    NodeRef {
+                        kind: ModelKind::Ingestor,
+                        identifier: named("event_source"),
+                    },
+                    nervix_models::Unit::Single
+                )],
                 dynamic_updates: Vec::new(),
             }
         );
@@ -781,8 +853,9 @@ mod tests {
             placement_node(PlacementPolicy::PreferColocation),
         );
         let mut desired = ingestor_schedule("ingress_a");
-        desired.nodes[0].primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
-        desired.nodes[0].assigned_nodes =
+        desired.nodes[0].single_unit_mut().primary_node =
+            Some(ClusterNodeName::parse("node-2").expect("valid name"));
+        desired.nodes[0].single_unit_mut().assigned_nodes =
             vec![ClusterNodeName::parse("node-2").expect("valid name")];
         push_scheduled(
             &mut desired,
@@ -793,10 +866,13 @@ mod tests {
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::EntitySwap {
                 entities: Vec::new(),
-                reassignments: vec![NodeRef {
-                    kind: ModelKind::Ingestor,
-                    identifier: named("event_source"),
-                }],
+                reassignments: vec![NodeUnitRef::new(
+                    NodeRef {
+                        kind: ModelKind::Ingestor,
+                        identifier: named("event_source"),
+                    },
+                    nervix_models::Unit::Single
+                )],
                 dynamic_updates: Vec::new(),
             }
         );
@@ -811,18 +887,23 @@ mod tests {
         );
         let mut desired = schedule(nonzero!(5usize));
         let mut moved_ingestor = first_scheduled(ingestor_schedule("ingress_a"));
-        moved_ingestor.primary_node = Some(ClusterNodeName::parse("node-3").expect("valid name"));
-        moved_ingestor.assigned_nodes = vec![ClusterNodeName::parse("node-3").expect("valid name")];
+        moved_ingestor.single_unit_mut().primary_node =
+            Some(ClusterNodeName::parse("node-3").expect("valid name"));
+        moved_ingestor.single_unit_mut().assigned_nodes =
+            vec![ClusterNodeName::parse("node-3").expect("valid name")];
         push_scheduled(&mut desired, moved_ingestor);
 
         assert_eq!(
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::EntitySwap {
                 entities: Vec::new(),
-                reassignments: vec![NodeRef {
-                    kind: ModelKind::Ingestor,
-                    identifier: named("event_source"),
-                }],
+                reassignments: vec![NodeUnitRef::new(
+                    NodeRef {
+                        kind: ModelKind::Ingestor,
+                        identifier: named("event_source"),
+                    },
+                    nervix_models::Unit::Single
+                )],
                 dynamic_updates: vec![DynamicModelUpdate::RelayCapacity {
                     relay: named("events"),
                     capacity: nonzero!(5usize),
@@ -849,6 +930,36 @@ mod tests {
         assert_eq!(
             ScheduleDelta::classify(&every_branch, &every_branch),
             ScheduleDelta::Unchanged
+        );
+    }
+
+    #[test]
+    fn a_partition_guest_state_lifetime_change_swaps_without_a_single_unit() {
+        let mut existing = wasm_processor_schedule("node-1");
+        let single = existing.nodes[0]
+            .units
+            .shift_remove(&nervix_models::Unit::Single)
+            .expect("the fixture starts with one unit");
+        existing.nodes[0]
+            .units
+            .insert(nervix_models::Unit::Partition(0), single.clone());
+        existing.nodes[0]
+            .units
+            .insert(nervix_models::Unit::Partition(1), single);
+        let mut desired = existing.clone();
+        desired.nodes[0].units[&nervix_models::Unit::Partition(1)]
+            .wasm_state_generations
+            .as_mut()
+            .expect("the processor has guest-state generations")
+            .begin_every_branch();
+
+        assert_eq!(
+            ScheduleDelta::classify(&existing, &desired),
+            ScheduleDelta::EntitySwap {
+                entities: vec![wasm_processor_ref()],
+                reassignments: Vec::new(),
+                dynamic_updates: Vec::new(),
+            }
         );
     }
 
@@ -901,7 +1012,10 @@ mod tests {
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::EntitySwap {
                 entities: vec![wasm_processor_ref()],
-                reassignments: vec![wasm_processor_ref()],
+                reassignments: vec![NodeUnitRef::new(
+                    wasm_processor_ref(),
+                    nervix_models::Unit::Single
+                )],
                 dynamic_updates: Vec::new(),
             }
         );

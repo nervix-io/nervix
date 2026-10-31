@@ -30,9 +30,9 @@ type Routes = GenericHashMap<
     DefaultSharedPtr,
 >;
 type Assignments =
-    GenericHashMap<DomainNodeRef, SharedStateAssignment, ahash::RandomState, DefaultSharedPtr>;
+    GenericHashMap<DomainNodeUnitRef, SharedStateAssignment, ahash::RandomState, DefaultSharedPtr>;
 type MaterializedRelays = GenericHashMap<
-    DomainNodeRef,
+    DomainNodeUnitRef,
     MaterializedRelayPublication,
     ahash::RandomState,
     DefaultSharedPtr,
@@ -296,7 +296,7 @@ impl StateReplicationRouting {
         local: &ClusterNodeName,
     ) -> Option<StateReplicationRequest> {
         let published = self.current.load();
-        let slot = published.assignments.get(&placement.entity())?;
+        let slot = published.assignments.get(&placement.unit_ref())?;
         let assignment = slot.load();
         let assignment = assignment.as_deref()?;
         if !assignment.names(placement) || !assignment.assigned_to(local) {
@@ -359,21 +359,28 @@ impl StateReplicationRouting {
         &self,
         placement: &RuntimeStatePlacement,
     ) -> Option<SharedStateAssignment> {
-        self.assignment_for_entity(&placement.entity())
+        self.assignment_for_unit(&placement.unit_ref())
     }
 
-    pub(in crate::runtime) fn assignment_for_entity(
+    pub(in crate::runtime) fn assignment_for_unit(
         &self,
-        entity: &DomainNodeRef,
+        unit: &DomainNodeUnitRef,
     ) -> Option<SharedStateAssignment> {
-        self.current.load().assignments.get(entity).cloned()
+        self.current.load().assignments.get(unit).cloned()
     }
 
     pub(in crate::runtime) fn materialized(
         &self,
         entity: &DomainNodeRef,
     ) -> Option<MaterializedRelayPublication> {
-        self.current.load().materialized.get(entity).cloned()
+        self.materialized_unit(&DomainNodeUnitRef::single(entity.clone()))
+    }
+
+    pub(in crate::runtime) fn materialized_unit(
+        &self,
+        unit: &DomainNodeUnitRef,
+    ) -> Option<MaterializedRelayPublication> {
+        self.current.load().materialized.get(unit).cloned()
     }
 
     #[cfg_attr(
@@ -383,17 +390,26 @@ impl StateReplicationRouting {
             reason = "assignment registration publishes the existing slot before tasks bind"
         )
     )]
+    #[cfg(test)]
     pub(in crate::runtime) fn register_assignment(
         &self,
         entity: &DomainNodeRef,
         assignment: &SharedStateAssignment,
     ) {
+        self.register_unit_assignment(&DomainNodeUnitRef::single(entity.clone()), assignment);
+    }
+
+    pub(in crate::runtime) fn register_unit_assignment(
+        &self,
+        unit: &DomainNodeUnitRef,
+        assignment: &SharedStateAssignment,
+    ) {
         self.current.rcu(|current| {
             let mut next = current.as_ref().clone();
-            next.assignments.insert(entity.clone(), assignment.clone());
-            if entity.kind() == ModelKind::Relay && !next.materialized.contains_key(entity) {
+            next.assignments.insert(unit.clone(), assignment.clone());
+            if unit.entity.kind() == ModelKind::Relay && !next.materialized.contains_key(unit) {
                 next.materialized
-                    .insert(entity.clone(), MaterializedRelayPublication::new());
+                    .insert(unit.clone(), MaterializedRelayPublication::new());
             }
             next
         });
@@ -427,15 +443,15 @@ impl StateReplicationRouting {
                 previous.end();
             }
             if materialized {
-                let entity = placement.entity();
-                if !next.materialized.contains_key(&entity) {
+                let unit = placement.unit_ref();
+                if !next.materialized.contains_key(&unit) {
                     next.materialized
-                        .insert(entity.clone(), MaterializedRelayPublication::new());
+                        .insert(unit, MaterializedRelayPublication::new());
                 }
             }
             next
         });
-        if materialized && let Some(published) = self.materialized(&placement.entity()) {
+        if materialized && let Some(published) = self.materialized_unit(&placement.unit_ref()) {
             published.install(&route);
         }
     }
@@ -456,7 +472,7 @@ impl StateReplicationRouting {
             next
         });
         if let Some(ended) = preceding.routes.get(placement)
-            && let Some(published) = self.materialized(&placement.entity())
+            && let Some(published) = self.materialized_unit(&placement.unit_ref())
         {
             published.retire(ended);
         }
@@ -488,7 +504,7 @@ impl StateReplicationRouting {
                 false
             });
             for (entity, published) in next.materialized.iter() {
-                if &entity.domain == domain {
+                if &entity.entity.domain == domain {
                     published.purge_stale();
                 }
             }
@@ -503,6 +519,7 @@ impl StateReplicationRouting {
             reason = "entity teardown ends every route before withdrawing its assignment"
         )
     )]
+    #[cfg(test)]
     pub(in crate::runtime) fn retire_entity(&self, entity: &DomainNodeRef) {
         self.current.rcu(|current| {
             let mut next = current.as_ref().clone();
@@ -513,7 +530,33 @@ impl StateReplicationRouting {
                 route.end();
                 false
             });
-            if let Some(published) = next.materialized.get(entity) {
+            for (unit, published) in next.materialized.iter() {
+                if &unit.entity == entity {
+                    published.purge_stale();
+                }
+            }
+            next
+        });
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "unit retirement ends its retained routes before replacing the publication"
+        )
+    )]
+    pub(in crate::runtime) fn retire_unit(&self, unit: &DomainNodeUnitRef) {
+        self.current.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.routes.retain(|placement, route| {
+                if &placement.unit_ref() != unit {
+                    return true;
+                }
+                route.end();
+                false
+            });
+            if let Some(published) = next.materialized.get(unit) {
                 published.purge_stale();
             }
             next
@@ -527,12 +570,38 @@ impl StateReplicationRouting {
             reason = "entity removal withdraws its assignment after retiring its routes"
         )
     )]
+    #[cfg(test)]
     pub(in crate::runtime) fn withdraw_entity(&self, entity: &DomainNodeRef) {
         self.retire_entity(entity);
         self.current.rcu(|current| {
             let mut next = current.as_ref().clone();
-            next.assignments.remove(entity);
-            next.materialized.remove(entity);
+            next.assignments.retain(|unit, _| &unit.entity != entity);
+            next.materialized.retain(|unit, _| &unit.entity != entity);
+            next
+        });
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "unit withdrawal ends its retained routes and removes its assignment"
+        )
+    )]
+    pub(in crate::runtime) fn withdraw_unit(&self, unit: &DomainNodeUnitRef) {
+        self.current.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.routes.retain(|placement, route| {
+                if &placement.unit_ref() != unit {
+                    return true;
+                }
+                route.end();
+                false
+            });
+            next.assignments.remove(unit);
+            if let Some(published) = next.materialized.remove(unit) {
+                published.purge_stale();
+            }
             next
         });
     }
@@ -555,7 +624,7 @@ impl StateReplicationRouting {
                 false
             });
             for (entity, published) in next.materialized.iter() {
-                if &entity.domain == domain {
+                if &entity.entity.domain == domain {
                     published.purge_stale();
                 }
             }
@@ -584,6 +653,10 @@ impl RuntimeStatePlacement {
     pub(in crate::runtime) fn entity(&self) -> DomainNodeRef {
         DomainNodeRef::node_in(self.domain.clone(), self.kind, self.identifier.clone())
     }
+
+    pub(in crate::runtime) fn unit_ref(&self) -> DomainNodeUnitRef {
+        DomainNodeUnitRef::new(self.entity(), self.unit)
+    }
 }
 
 impl Runtime {
@@ -599,7 +672,7 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         state: ReplicatedState,
     ) {
-        let assignment = self.state_assignment(&placement.entity());
+        let assignment = self.state_assignment_for_unit(&placement.unit_ref());
         self.inner
             .state_replication_routing
             .install(placement.clone(), assignment, state);

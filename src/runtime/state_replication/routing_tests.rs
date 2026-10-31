@@ -11,6 +11,30 @@
 use super::*;
 
 #[test]
+fn retiring_one_partition_keeps_the_sibling_route_and_assignment() {
+    let routes = StateReplicationRouting::default();
+    let mut first = placed(0, 0, 1);
+    first.unit = nervix_models::Unit::Partition(0);
+    let mut second = first.clone();
+    second.unit = nervix_models::Unit::Partition(1);
+    let first_slot = Arc::new(ArcSwapOption::from(Some(assigned(1))));
+    let second_slot = Arc::new(ArcSwapOption::from(Some(assigned(1))));
+    routes.register_unit_assignment(&first.unit_ref(), &first_slot);
+    routes.register_unit_assignment(&second.unit_ref(), &second_slot);
+    install(&routes, &first_slot, &first);
+    install(&routes, &second_slot, &second);
+
+    routes.retire_unit(&first.unit_ref());
+    assert!(routes.resolve(&first).is_none());
+    assert!(routes.resolve(&second).is_some());
+    assert!(routes.assignment(&second).is_some());
+
+    routes.withdraw_unit(&first.unit_ref());
+    assert!(routes.assignment(&first).is_none());
+    assert!(routes.assignment(&second).is_some());
+}
+
+#[test]
 fn materialized_relay_publication_retains_exact_routes_and_reclaims_ended_branches() {
     use crate::{
         runtime::materialized_state::ReplicatedMaterializedRelayState,
@@ -30,6 +54,7 @@ fn materialized_relay_publication_retains_exact_routes_and_reclaims_ended_branch
         state: RuntimeState::MaterializedRelay {
             schema: SchemaFingerprint::from_digest([1; 32]),
         },
+        unit: nervix_models::Unit::Single,
         branch_key,
         ..placed(0, 0, 1)
     });
@@ -137,6 +162,7 @@ fn a_materialized_branch_publication_owns_absence_beside_the_relay_snapshot() {
         state: RuntimeState::MaterializedRelay {
             schema: SchemaFingerprint::from_digest([1; 32]),
         },
+        unit: nervix_models::Unit::Single,
         branch_key: None,
         ..placed(0, 0, 1)
     };
@@ -161,6 +187,7 @@ fn a_materialized_branch_publication_owns_absence_beside_the_relay_snapshot() {
         ReplicatedState::MaterializedRelay(root),
     );
     let branch_placement = RuntimeStatePlacement {
+        unit: nervix_models::Unit::Single,
         branch_key: acme.clone(),
         ..root_placement.clone()
     };
@@ -214,6 +241,7 @@ pub(super) fn placed(entity: usize, branch: usize, generation: u8) -> RuntimeSta
         domain: domain("routes"),
         kind: ModelKind::Deduplicator,
         identifier: named::<ModelName>(&format!("dedup_{entity}")),
+        unit: nervix_models::Unit::Single,
         branch_key: string_branch_key("tenant", &format!("tenant-{branch}")),
         state: RuntimeState::Deduplicator {
             schema: SchemaFingerprint::from_digest([generation; 32]),
