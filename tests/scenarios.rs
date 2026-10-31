@@ -132,8 +132,8 @@ use crate::common::{
         InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
         TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
         assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
-        command_connect_options, delete_rabbitmq_queue, ensure_rabbitmq_queue,
-        observe_kafka_through, publish_kafka_record_through,
+        command_connect_options, delete_rabbitmq_queue, ensure_rabbitmq_queue, ensure_sqs_queue,
+        observe_kafka_through, observe_sqs, publish_kafka_record_through, publish_sqs,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
@@ -3595,6 +3595,60 @@ async fn given_server_process_cluster_is_started(
     ];
     world.server_process_cluster = Some(
         ServerProcessCluster::start(&options)
+            .await
+            .unwrap_or_else(|error| panic!("failed to start the real-process cluster: {error}")),
+    );
+}
+
+/// Starts a real-process cluster whose every member's environment names the endpoint `name` as its
+/// HTTP, HTTPS and fallback proxy under both spellings of each variable, and clears the exclusions
+/// the suite's own environment may set, so a client that followed the environment would send every
+/// request to that endpoint.
+#[given(
+    expr = "a {int} node nervix-server process cluster is started with its proxy environment \
+            naming the endpoint {string}"
+)]
+async fn given_server_process_cluster_is_started_with_proxy_environment(
+    world: &mut ScenarioWorld,
+    node_count: usize,
+    name: String,
+) {
+    assert!(
+        world.server_process_cluster.is_none(),
+        "a scenario starts at most one real-process cluster"
+    );
+    assert!(
+        world.server_process_held_ports.is_none(),
+        "this real-process cluster start holds no ports"
+    );
+    initialize_scenario_identity(world);
+    let endpoint = world
+        .placeholders
+        .get(&name)
+        .unwrap_or_else(|| panic!("no endpoint '{name}' was stood"));
+    let proxy = format!("http://{endpoint}");
+    let mut options = Vec::new();
+    for variable in [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        options.push(ServerProcessOption::Environment {
+            variable: variable.to_string(),
+            value: proxy.clone(),
+        });
+    }
+    for variable in ["NO_PROXY", "no_proxy"] {
+        options.push(ServerProcessOption::Environment {
+            variable: variable.to_string(),
+            value: String::new(),
+        });
+    }
+    world.server_process_cluster = Some(
+        ServerProcessCluster::start_sized(node_count, &options)
             .await
             .unwrap_or_else(|error| panic!("failed to start the real-process cluster: {error}")),
     );
@@ -25386,9 +25440,7 @@ async fn when_mock_kafka_message_is_published(
 #[given(expr = "SQS queue {string} exists")]
 async fn given_sqs_queue_exists(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
-    world
-        .cluster()
-        .ensure_sqs_queue(&queue)
+    ensure_sqs_queue(world.dependencies.endpoints(), &queue)
         .await
         .expect("failed to declare sqs queue");
 }
@@ -25525,9 +25577,7 @@ async fn given_mqtt_topic_is_observed(world: &mut ScenarioWorld, topic: String) 
 async fn given_sqs_queue_is_observed(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
     world.broker_observer = Some(
-        world
-            .cluster()
-            .observe_sqs(&queue)
+        observe_sqs(world.dependencies.endpoints(), &queue)
             .await
             .expect("failed to observe sqs queue"),
     );
@@ -25794,7 +25844,7 @@ impl EmissionTargetFixture {
                 observe_zeromq_emission_endpoint(world, destination).await;
                 return;
             }
-            Self::Sqs => world.cluster().observe_sqs(&destination).await,
+            Self::Sqs => observe_sqs(world.dependencies.endpoints(), &destination).await,
         };
         let observer = observed
             .unwrap_or_else(|error| panic!("failed to observe {self:?} '{destination}': {error}"));
@@ -26763,9 +26813,7 @@ async fn when_sqs_message_is_published(
 ) {
     let queue = expand_placeholders(world, &queue);
     let payload = expand_placeholders(world, docstring(step));
-    world
-        .cluster()
-        .publish_sqs(&queue, &payload)
+    publish_sqs(world.dependencies.endpoints(), &queue, &payload)
         .await
         .expect("failed to publish sqs message");
 }
@@ -29236,9 +29284,7 @@ async fn then_within_duration_repeatedly_publishing_sqs_message_yields_subscript
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        world
-            .cluster()
-            .publish_sqs(&queue, &payload)
+        publish_sqs(world.dependencies.endpoints(), &queue, &payload)
             .await
             .expect("failed to publish sqs message");
 
