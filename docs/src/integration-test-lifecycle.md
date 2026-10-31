@@ -1114,7 +1114,28 @@ The harness keeps these boundaries explicit.
   as it records the outcome; a single-node leader is its own quorum, and its lease never lapses. A
   raw probe therefore stays only where the answer is the subject: a repetition joining an applying
   restore or returning its recorded outcome, a reference conflict, a redirect, a controlled
-  leadership loss, or an interrupted upload sent again. The room and idle-lifetime scenarios hold
+  leadership loss, or an interrupted upload sent again. When a raw background probe must reach an
+  armed restore step or finalization pause, a redirect may repeat the raw request before its first
+  observed pause. A `LeadershipLost` reply stays the raw answer, including its actual origin and
+  execution reference. A separate completion observer may drive only setup to the armed execution
+  pause under the same reference, statement and immutable archive; its recovered answer never
+  replaces the retained raw reply. This matters after an applying loss: the admitted execution can
+  resume through reconciliation, and a repetition can answer `StillApplying` or `Recovered` rather
+  than execute a new command. The complete pause observation, including all setup attempts, keeps
+  its original 120-second bound. Upload refusals, terminal failures, raw `StillApplying` and other
+  unknown causes fail that observation. Reaching the first pause disables further raw redirects;
+  observing a later armed pause can still advance the execution after retaining a raw leadership
+  loss. The stale-route, held-admission and applying-loss regressions exercise these boundaries and
+  require the exact raw `LeadershipLost`/`Executed` answer followed by `Completed`/`Recovered` under
+  the same reference. The applying-loss case explicitly retains the reply received before the
+  later finalization hold; it does not attribute that earlier reply to the second transfer.
+  The interrupted-upload and repeated-reference outlines hold finalization too. Their one-node
+  raw streams answer `Completed`/`Executed`. Their three-node executions transfer leadership before
+  release; the raw `LeadershipLost`/`Executed` reply either already arrived during admission or
+  application, or arrives after that release. Both topologies then require
+  `Completed`/`Recovered`; the applying repetition and reference-conflict replies remain raw and
+  exact. The durable-failure outline retains its raw leadership-loss reply and recovered failure.
+  The room and idle-lifetime scenarios hold
   the restore's outcome before its coordinator records it and transfer leadership on three nodes
   before releasing it, so their three-node examples always learn the outcome under the same
   reference as recovered, and their one-node examples report it as executed. The staging scenario
