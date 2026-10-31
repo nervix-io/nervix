@@ -769,9 +769,66 @@ scenarios = [
 
 [[capability]]
 capability = "BATCH"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_exchange_emission.feature", scenario = "A RabbitMQ exchange batch message carries the routing key its members share" },
+]
+
+[[capability]]
+capability = "MANDATORY"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_exchange_emission.feature", scenario = "MANDATORY rejects a record its exchange cannot route in every mode" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_exchange_emission.feature", scenario = "A RabbitMQ exchange emitter routes every record by the key it computes" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_exchange_emission.feature", scenario = "A RabbitMQ exchange emitter routes every record by the key it computes" },
+]
+
+[[capability]]
+capability = "ROUTING KEY"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_exchange_emission.feature", scenario = "A RabbitMQ exchange emitter routes every record by the key it computes" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ emitter whose broker never answers its TLS handshake is reported within connect_timeout_ms" },
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ emitter whose broker never answers its AMQP handshake is reported within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ NO ACK emitter whose broker stops answering its round trip is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "BATCH"
 entity = "RABBITMQ QUEUE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
+]
+
+[[capability]]
+capability = "MANDATORY"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_exchange_emission.feature", scenario = "MANDATORY rejects a record its deleted queue can no longer receive" },
 ]
 
 [[capability]]

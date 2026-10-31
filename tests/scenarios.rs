@@ -24994,6 +24994,57 @@ async fn given_rabbitmq_queue_exists(world: &mut ScenarioWorld, queue: String) {
         .expect("failed to declare rabbitmq queue");
 }
 
+/// An exchange of one of the types RabbitMQ routes by: `direct`, `topic` or `fanout`.
+#[given(expr = "RabbitMQ exchange {string} of type {word} exists")]
+#[when(expr = "the operator provisions RabbitMQ exchange {string} of type {word}")]
+async fn given_rabbitmq_exchange_exists(world: &mut ScenarioWorld, exchange: String, kind: String) {
+    let exchange = expand_placeholders(world, &exchange);
+    let kind = match kind.as_str() {
+        "direct" => lapin::ExchangeKind::Direct,
+        "topic" => lapin::ExchangeKind::Topic,
+        "fanout" => lapin::ExchangeKind::Fanout,
+        _ => {
+            panic!("a RabbitMQ exchange in these scenarios is direct, topic or fanout, not {kind}")
+        }
+    };
+    world
+        .cluster()
+        .ensure_rabbitmq_exchange(&exchange, kind)
+        .await
+        .expect("failed to declare rabbitmq exchange");
+}
+
+#[given(expr = "RabbitMQ queue {string} is bound to exchange {string} with routing key {string}")]
+#[when(
+    expr = "the operator binds RabbitMQ queue {string} to exchange {string} with routing key \
+            {string}"
+)]
+async fn given_rabbitmq_queue_is_bound(
+    world: &mut ScenarioWorld,
+    queue: String,
+    exchange: String,
+    routing_key: String,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let exchange = expand_placeholders(world, &exchange);
+    let routing_key = expand_placeholders(world, &routing_key);
+    world
+        .cluster()
+        .bind_rabbitmq_queue(&queue, &exchange, &routing_key)
+        .await
+        .expect("failed to bind rabbitmq queue");
+}
+
+#[when(expr = "RabbitMQ queue {string} is deleted")]
+async fn when_rabbitmq_queue_is_deleted(world: &mut ScenarioWorld, queue: String) {
+    let queue = expand_placeholders(world, &queue);
+    world
+        .cluster()
+        .delete_rabbitmq_queue(&queue)
+        .await
+        .expect("failed to delete rabbitmq queue");
+}
+
 #[given(expr = "Kafka topic {string} exists with {int} partitions")]
 #[when(expr = "the operator provisions Kafka topic {string} with {int} partitions")]
 async fn given_kafka_topic_exists_with_partitions(
@@ -25324,7 +25375,10 @@ async fn given_pulsar_tls_topic_is_observed(world: &mut ScenarioWorld, topic: St
     );
 }
 
+/// Declares the queue, which creates it again after it was deleted, and observes what it receives
+/// from now on.
 #[given(expr = "RabbitMQ queue {string} is observed")]
+#[when(expr = "the operator recreates RabbitMQ queue {string} and observes it")]
 async fn given_rabbitmq_queue_is_observed(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
     world.broker_observer = Some(

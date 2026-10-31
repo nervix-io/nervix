@@ -67,9 +67,20 @@ single_client_emitter_plan! {
 }
 
 single_client_emitter_plan! {
-    /// A RabbitMQ emitter: the queue it publishes to, and how it learns that a record was accepted.
+    /// A RabbitMQ queue emitter: the queue it publishes to through the default exchange, and how it
+    /// learns that a record was accepted.
     RabbitMqQueueEmitterPlan {
         queue: nervix_models::RabbitMqQueueName,
+        mode: BrokerPublishingMode,
+        batch: Option<EmitterBatchPolicy>,
+    }
+}
+
+single_client_emitter_plan! {
+    /// A RabbitMQ exchange emitter: the exchange it publishes to, and how it learns that a record
+    /// was accepted. The key each record is routed by travels with the record's envelope.
+    RabbitMqExchangeEmitterPlan {
+        exchange: nervix_models::RabbitMqExchangeName,
         mode: BrokerPublishingMode,
         batch: Option<EmitterBatchPolicy>,
     }
