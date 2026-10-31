@@ -828,6 +828,16 @@ pool with `RedisClientError::InvalidPoolLifetime`, naming the key above the sche
 `ClientConfigSchemaError::InvalidValue`, which the node reports as
 `OpenClientError::InvalidPoolLifetime`. It is a configuration failure, not a record rejection.
 
+A Postgres client's pool keys are refused at `CREATE CLIENT` unless `pool_acquire_timeout_ms`,
+`pool_idle_timeout_ms` and `pool_max_lifetime_ms` are positive, schedulable whole milliseconds and
+`pool_test_before_acquire` is a boolean. The pool reads them from the client's effective entries and
+checks them again: an invalid value fails opening the pool with
+`EmitterOpenError::InvalidConfiguration` above the `ClientConfigError` that names the key, and it is a
+configuration failure, not a record rejection. A checkout that runs out of
+`pool_acquire_timeout_ms` keeps the shared `DeadlineElapsed` with the key and its bound, beneath
+`EmitterOpenError::Initialize` while the pool opens and beneath `EmitterWriteError::NotInitialized`
+on a write, which the host retries on its policy.
+
 Redis subscription protocol and read failures retain their driver causes beneath
 `RedisPubSubIngestorError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
 the shared `DeadlineElapsed` with `idle_timeout_ms` and its configured bound beneath `IdleProbe`

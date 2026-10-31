@@ -776,6 +776,7 @@ deadline keys mean the same thing for every connector:
 | `timeout_ms` | The whole of one request or operation: name resolution, connection setup, TLS and the answer. |
 | `connect_timeout_ms` | Establishing a connection: name resolution, the address attempts, TLS and the protocol's own handshake. |
 | `idle_timeout_ms` | Silence while waiting for peer activity on an established connection, including its liveness probe; expiry closes the connection. Each entity declares its activity and whether cancellation or handoff backpressure retains the activity deadline. |
+| `pool_acquire_timeout_ms` | One checkout from a connection pool: the wait for the pool, then opening or testing the connection it hands over, with name resolution, TLS and authentication. How long an accepted operation then runs is outside it. |
 
 A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or by
 `idle_timeout_ms`, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
@@ -893,8 +894,10 @@ query option before commit. Its table declaration admits one or two nonempty, ca
 identifier parts, which the connector quotes separately in the insert and its catalog lookup. Its
 declared batch maximum is the largest protocol message the server reads, the same bound the
 statement divider keeps every insert within, and its conflict rule is the vocabulary's, which the
-grammar applies at `CREATE`. The [Postgres manual](emitters.md#postgres) gives its text binding
-and conflict semantics.
+grammar applies at `CREATE`. The pool reads `pool_acquire_timeout_ms`, `pool_idle_timeout_ms`,
+`pool_max_lifetime_ms` and `pool_test_before_acquire` from the client's effective entries, so each
+default is written once, in the client schema, and the same value reaches inspection and the pool.
+The [Postgres manual](emitters.md#postgres) gives its text binding and conflict semantics.
 
 Offline refusals keep their driver cause beneath `OfflineClientConfigError`; lapin's URI parser
 exposes only a string, which remains an attached diagnostic. Public command outcomes select reviewed

@@ -671,6 +671,39 @@ Feature: Stalled peers
       | 1            |
       | 3            |
 
+  Scenario Outline: A Postgres emitter whose server never answers is reported within pool_acquire_timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "postgres_peer" is listening
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE POSTGRES CLIENT db POOL SIZE MIN 0 MAX 1 CONFIG {
+        'addr' = 'postgres://nervix@{{postgres_peer}}/nervix?sslmode=disable',
+        'pool_acquire_timeout_ms' = '1000'
+      };
+      CREATE POSTGRES TABLE EMITTER outgoing FROM notifications TO db TABLE 'notifications'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        VALUES { 'postgres_user_id' = input.user_id }
+        BATCH MAX MESSAGES 1 MAX SIZE 1MiB FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the silent endpoint "postgres_peer" eventually accepts a connection
+    And within "30s" DESCRIBE EMITTER "outgoing" on the leader node contains
+      """
+      within pool_acquire_timeout_ms 1s
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: An SQS QUEUE emitter whose service stops answering is reported within timeout_ms
     Given SQS is running
     And a <cluster_size> node nervix cluster is started
