@@ -431,7 +431,7 @@ class WorkflowTests(unittest.TestCase):
             ("pull_request", ["fuzz"], "false", "skipped", "true", "success"),
             ("pull_request", ["bolero-random"], "true", "success", "false", "skipped"),
             ("pull_request", [], "false", "skipped", "false", "skipped"),
-            ("schedule", ["fuzz"], "true", "success", "false", "skipped"),
+            ("workflow_dispatch", ["fuzz"], "true", "success", "false", "skipped"),
             ("workflow_dispatch", [], "true", "success", "false", "skipped"),
         ):
             with self.subTest(event=event, labels=labels), tempfile.TemporaryDirectory() as directory:

@@ -379,7 +379,7 @@ class SourceSelectionTests(unittest.TestCase):
                     self.assertEqual(actual.action, action)
 
     def test_non_pr_events_require_execution_without_a_prose_exclusion(self) -> None:
-        for event in ("schedule", "workflow_dispatch", "push"):
+        for event in ("workflow_dispatch", "push"):
             with self.subTest(event=event):
                 actual = selection.TestSelection.read(event, {}, "a" * 40)
                 self.assertFalse(actual.documentation_only)
@@ -454,11 +454,14 @@ class CheckWorkflowSelectionTests(unittest.TestCase):
         return re.split(r"\n  [a-z][a-z-]*:\n", self.check.split(f"\n  {name}:\n", 1)[1], maxsplit=1)[0]
 
     def test_ordinary_producers_wait_for_the_same_verified_selection(self) -> None:
-        for name in ("tests", "scenarios", "extra-tests", "diagnostic-evidence"):
+        for name in ("scenarios-build", "extra-tests", "diagnostic-evidence"):
             with self.subTest(job=name):
                 job = self.job(name)
                 self.assertIn("needs: [test-selection]", job)
-                self.assertIn("if: needs.test-selection.outputs.tests-required == 'true'", job)
+                self.assertIn("needs.test-selection.outputs.tests-required == 'true'", job)
+        # The tests and the scenario shards run only from a build the selection required.
+        self.assertIn("needs: [scenarios-build]", self.job("tests"))
+        self.assertIn("needs: [scenarios-build]", self.job("scenarios"))
         self.assertIn("needs: [tests, scenarios, extra-tests]", self.job("coverage"))
         for name in ("checks", "conventional-pr-title"):
             with self.subTest(job=name):

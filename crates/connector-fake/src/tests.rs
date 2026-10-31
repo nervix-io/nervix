@@ -239,18 +239,28 @@ async fn queued_messages_keep_headers_metadata_positions_and_the_batch_bound() {
     let message = &messages[0];
     assert_eq!(*message.position(), 5);
     assert_eq!(message.payload(), [0, 255]);
-    let IngestMetadataRow::Kafka {
-        topic,
-        partition,
-        offset,
-        headers,
-    } = message.metadata()
-    else {
-        panic!("the metadata stays typed");
-    };
-    assert_eq!((topic, partition, offset), ("Orders", 3, 9));
+    let metadata = message.metadata();
+    assert_eq!(
+        RetainedIngestMetadata::capture(metadata.fields).values(),
+        [
+            RetainedIngestMetadataValue::String("Orders".to_string()),
+            RetainedIngestMetadataValue::I32(3),
+            RetainedIngestMetadataValue::I64(9),
+        ]
+    );
+    assert_eq!(
+        metadata.position,
+        Some(IngestTransportPosition::Kafka {
+            topic: "Orders",
+            partition: 3,
+            offset: 9,
+        })
+    );
     let mut values = Vec::new();
-    headers.visit(&mut |name, value| values.push((name.to_string(), value.to_string())));
+    metadata
+        .headers
+        .headers()
+        .visit(&mut |name, value| values.push((name.to_string(), value.to_string())));
     assert_eq!(
         values,
         [
@@ -338,20 +348,32 @@ fn transport_metadata_preserves_peer_frame_and_ordered_headers() {
     ];
     let mut plain = FakeMessage::new(16, vec![255, 0]);
     plain.transport = MessageTransport::Headers(RetainedIngestHeaders::capture(&Headers));
-    let IngestMetadataRow::Headers { headers } = plain.metadata() else {
-        panic!("the message keeps its typed headers");
-    };
+    let metadata = plain.metadata();
+    assert!(
+        RetainedIngestMetadata::capture(metadata.fields)
+            .values()
+            .is_empty()
+    );
+    assert!(metadata.position.is_none());
     let mut actual = Vec::new();
-    headers.visit(&mut |name, value| actual.push((name.to_string(), value.to_string())));
+    metadata
+        .headers
+        .headers()
+        .visit(&mut |name, value| actual.push((name.to_string(), value.to_string())));
     assert_eq!(actual, expected);
 
     let peer_addr = std::net::SocketAddr::from(([192, 0, 2, 7], 514));
     let mut syslog = FakeMessage::new(17, vec![0, 255]);
     syslog.transport = MessageTransport::Syslog { peer_addr };
-    let IngestMetadataRow::Syslog { peer_addr: actual } = syslog.metadata() else {
-        panic!("the peer keeps its typed metadata");
-    };
-    assert_eq!(actual, peer_addr);
+    let metadata = syslog.metadata();
+    assert_eq!(
+        RetainedIngestMetadata::capture(metadata.fields).values(),
+        [RetainedIngestMetadataValue::String(peer_addr.to_string())]
+    );
+    assert_eq!(
+        metadata.position,
+        Some(IngestTransportPosition::Syslog { peer: peer_addr })
+    );
     let mut syslog_headers = Vec::new();
     syslog.headers().visit(&mut |name, value| {
         syslog_headers.push((name.to_string(), value.to_string()));
@@ -364,14 +386,19 @@ fn transport_metadata_preserves_peer_frame_and_ordered_headers() {
         frame_type: nervix_models::WebsocketsFrameType::Binary,
         headers: retained.clone(),
     };
-    let IngestMetadataRow::Websockets {
-        frame_type,
-        headers,
-    } = websocket.metadata()
-    else {
-        panic!("the frame keeps its typed metadata");
+    let metadata = websocket.metadata();
+    assert_eq!(
+        RetainedIngestMetadata::capture(metadata.fields).values(),
+        [RetainedIngestMetadataValue::String(
+            nervix_models::WebsocketsFrameType::Binary
+                .as_ref()
+                .to_string()
+        )]
+    );
+    assert!(metadata.position.is_none());
+    let IngestRowHeaders::Shared(headers) = metadata.headers else {
+        panic!("the frame shares its connection's header snapshot");
     };
-    assert_eq!(frame_type, nervix_models::WebsocketsFrameType::Binary);
     assert!(Arc::ptr_eq(headers, &retained));
     for boundary in [websocket.headers(), headers.as_ref()] {
         let mut actual = Vec::new();

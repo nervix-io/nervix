@@ -1099,3 +1099,40 @@ async fn an_oversized_datagram_is_dropped_and_the_next_one_received() {
         sender.local_addr().assured("the sender is bound")
     );
 }
+
+/// A listener message hands over the one metadata value SYSLOG LISTENER declares, its peer address
+/// as STRING, and names that peer as its position.
+#[test]
+fn a_message_hands_over_its_peer_as_declared_metadata_and_names_it_as_its_position() {
+    use nervix_connector::{
+        IngestTransportPosition, RetainedIngestMetadata, RetainedIngestMetadataValue as Value,
+    };
+    use nervix_models::{IngestorEntityKind, SyslogIngestorEntity};
+
+    let peer = std::net::SocketAddr::from(([192, 0, 2, 7], 5514));
+    let message = SyslogListenerIngestorMessage::new(b"<13>event".to_vec(), peer);
+    let metadata = message.metadata();
+
+    let retained = RetainedIngestMetadata::capture(metadata.fields);
+    assert_eq!(
+        retained.values(),
+        [Value::String("192.0.2.7:5514".to_string())]
+    );
+    let declared = IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener)
+        .capabilities()
+        .metadata;
+    let declared_types = declared
+        .fields()
+        .iter()
+        .map(|field| Some(field.ty()))
+        .collect::<Vec<_>>();
+    let handed_types = retained.values().iter().map(Value::ty).collect::<Vec<_>>();
+    assert_eq!(handed_types, declared_types);
+    assert_eq!(
+        metadata.position,
+        Some(IngestTransportPosition::Syslog { peer })
+    );
+    let mut headers = 0;
+    metadata.headers.headers().visit(&mut |_, _| headers += 1);
+    assert_eq!(headers, 0);
+}

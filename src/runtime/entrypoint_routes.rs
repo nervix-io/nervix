@@ -70,6 +70,8 @@ pub(crate) enum EntrypointBindingError {
     },
     #[error("reingestor '{node}' input relay '{relay}' could not be prepared on this node")]
     PrepareInput { node: ModelName, relay: RelayName },
+    #[error("ingestor '{node}' could not project the metadata its programs read")]
+    ProjectMetadata { node: ModelName },
 }
 
 /// The ingestor or reingestor one binding compiles programs for.
@@ -115,6 +117,9 @@ pub(super) struct BoundEntryRoute {
 pub(super) struct BoundIngestorRoutes {
     /// Every route in declared order, which is never empty.
     pub(super) routes: Vec<BoundEntryRoute>,
+    /// The declared metadata fields these routes and the ingestor's `TIMESTAMP AT` read, whose
+    /// columns, and no others, every ingest group of the ingestor builds.
+    pub(super) metadata: Arc<IngestMetadataProjection>,
 }
 
 /// An ingestor's node filter and routes, compiled for this node.
@@ -263,7 +268,7 @@ impl ExecutionBuildDeps<'_> {
             };
             let program = bind_ingestor_filter_map_program(
                 &identifier,
-                ingestor.metadata_scope(),
+                ingestor.metadata_declaration(),
                 ingestor.reads_headers(),
                 &route.construction,
                 RuntimeVmSchemaPair {
@@ -296,10 +301,41 @@ impl ExecutionBuildDeps<'_> {
                 message_error_policy: route.message_error_policy().clone(),
             });
         }
+        let metadata = Self::metadata_projection(ingestor).map_err(|error| {
+            error.change_context(EntrypointBindingError::ProjectMetadata {
+                node: identifier.clone(),
+            })
+        })?;
         Ok(BoundIngestorPrograms {
             filter_where,
-            routes: Arc::new(BoundIngestorRoutes { routes }),
+            routes: Arc::new(BoundIngestorRoutes { routes, metadata }),
         })
+    }
+
+    /// The declared metadata fields `ingestor`'s route programs and its `TIMESTAMP AT` read.
+    ///
+    /// A route program is the only program that binds the `metadata` namespace, and the clause is
+    /// the only other reader, so an ingestor reading neither builds no metadata column.
+    fn metadata_projection(
+        ingestor: &IngestorSpec,
+    ) -> Result<Arc<IngestMetadataProjection>, Report<IngestMetadataError>> {
+        let mut read = Vec::new();
+        for route in &ingestor.routes {
+            for (namespace, field) in
+                collect_program_field_refs(&route.construction.program().inner)
+            {
+                if namespace == INGEST_METADATA_NAMESPACE {
+                    read.push(field);
+                }
+            }
+        }
+        if let Some(IngestTimestampSource::AtMetadata(field)) = &ingestor.timestamp_source {
+            read.push(field.as_str().to_string());
+        }
+        IngestMetadataProjection::reading(
+            ingestor.metadata_declaration(),
+            read.iter().map(String::as_str),
+        )
     }
 
     /// Compiles everything one reingestor runs for the messages of one input relay.

@@ -138,7 +138,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
     let metadata: Vec<_> = metadata
         .fields()
         .iter()
-        .map(|field| format!("metadata.{}: {} OPTIONAL", field.name, field.ty))
+        .map(|field| format!("metadata.{}: {} OPTIONAL", field.name(), field.ty()))
         .collect();
     let options: Vec<_> = declared_options.iter().map(option).collect();
     let from = match source_reference {
