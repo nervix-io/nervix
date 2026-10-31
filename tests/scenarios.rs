@@ -11876,6 +11876,26 @@ async fn when_runtime_installation_is_released(world: &mut ScenarioWorld, node_i
         .release_runtime_installation_pause(&crate::common::cluster::node_name(&node_id));
 }
 
+/// Holds the next runtime installation every node begins. A held installation keeps its node's
+/// installation sequence, so no later installation on that node proceeds until it is released.
+#[when("runtime installation on every node is paused")]
+async fn when_runtime_installation_is_paused_on_every_node(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .pause_runtime_installation_on(crate::common::cluster::node_name(&node_id));
+    }
+}
+
+#[when("runtime installation on every node is released")]
+async fn when_runtime_installation_is_released_on_every_node(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .release_runtime_installation_pause(&crate::common::cluster::node_name(&node_id));
+    }
+}
+
 #[when(expr = "runtime preparation on node {string} is paused")]
 async fn when_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
