@@ -15,8 +15,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from scripts.check_primitive_boundary import (UseTreeError, binary_roots, load_packages,
-                                              tracked_files, use_leaves)
+from scripts.check_primitive_boundary import (UseTreeError, _module_directory, binary_roots,
+                                              load_packages, tracked_files, use_leaves)
 from scripts.rust_source import RustFile, _end_of_block, _end_of_item
 
 
@@ -67,7 +67,7 @@ def owner_at(scopes: list[Owner], offset: int, inherited: str | None) -> str | N
 def module_children(file: RustFile, paths: frozenset[str]) -> list[tuple[str, int]]:
     """Include inactive and #[path] modules, with inline module directories preserved."""
     declaring = PurePosixPath(file.path)
-    directory = declaring.parent if declaring.name in {"lib.rs", "main.rs", "mod.rs", "build.rs"} else declaring.parent / declaring.stem
+    directory = _module_directory(declaring)
     inline: list[tuple[int, int, PurePosixPath]] = []
     children: list[tuple[str, int]] = []
     for match in MODULE.finditer(file.literals):
@@ -101,8 +101,13 @@ def check(root: Path, paths: list[str] | None = None) -> list[str]:
     for package in packages:
         document = tomllib.loads((root / package.manifest).read_text())
         library = package.directory + document.get("lib", {}).get("path", "src/lib.rs")
-        roots[package.name] = [path for path in [library, *binary_roots(package, frozenset(sources)).values()]
-                               if path in sources]
+        entries = [path for path in [library, *binary_roots(package, frozenset(sources)).values()]
+                   if path in sources]
+        # A package of tests alone is built from nothing else, so its test targets are its roots.
+        if not entries:
+            declared = (target.get("path", "") for target in document.get("test", []))
+            entries = [package.directory + path for path in declared if package.directory + path in sources]
+        roots[package.name] = entries
     language = {name for name, entries in roots.items()
                 if any(owner_at(scopes[path], 0, None) == "language" for path in entries)}
     problems: set[str] = set()

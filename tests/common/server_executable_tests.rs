@@ -4,8 +4,8 @@
 //! - **Owns.** Stand-in ELF images written to temporary files, and the checks that a preparation
 //!   reads exactly the ranges an image maps, refuses what it cannot read, and ends at its
 //!   deadline.
-//! - **Depends on.** The server executable owner, the phase deadline, and the server executable
-//!   Cargo builds beside this test target.
+//! - **Depends on.** The server executable owner, the phase deadline, and the executable that
+//!   runs this test.
 //! - **Must not know.** How a launch spawns the executable or waits for its readiness.
 
 use std::{path::PathBuf, time::Duration};
@@ -16,6 +16,7 @@ use tempfile::TempDir;
 
 use crate::{
     phase_deadline::PhaseDeadline,
+    process_program::scenario_executable,
     server_executable::{PreparedExecutable, ServerExecutable, ServerExecutableError},
 };
 
@@ -146,14 +147,14 @@ async fn a_preparation_reads_each_mapped_range_once_and_nothing_else() {
 
 #[nervix_primitives::test]
 async fn the_server_executable_maps_less_than_its_whole_file() {
-    let path = PathBuf::from(env!("CARGO_BIN_EXE_nervix-server"));
+    let path = scenario_executable();
     let length = std::fs::metadata(&path)
-        .assured("Cargo builds the server executable before this test")
+        .assured("this test runs from that file")
         .len();
 
     let prepared = Preparation::of(path)
         .await
-        .assured("the server executable Cargo built is a readable ELF image");
+        .assured("the executable that runs this test is a readable ELF image");
 
     // A debug executable's debug information is never mapped, and its symbol and section tables
     // are not either, so the mapped bytes are fewer than the file's.

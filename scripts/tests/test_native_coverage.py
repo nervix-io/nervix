@@ -168,6 +168,34 @@ class InventoryTests(unittest.TestCase):
             with self.subTest(case=case), self.assertRaisesRegex(RunnerError, message):
                 native_coverage.validate_composition(producer, recipes)
 
+        built = Producer("check", "ordinary", ("prepare",), "body", ("finish",), build="compile")
+        native_coverage.validate_composition(built, complete | {"compile": recipe(body=True)})
+        with self.assertRaisesRegex(RunnerError, "no `compile` recipe, which builds `check`"):
+            native_coverage.validate_composition(built, complete)
+        with self.assertRaisesRegex(RunnerError, "`compile` depends on prepare, which would run inside"):
+            native_coverage.validate_composition(built, complete | {"compile": recipe("prepare", body=True)})
+
+    def test_ci_builds_the_model_turmoil_and_lane_checks_before_it_runs_them(self) -> None:
+        built = [producer.name for producer in native_coverage.PRODUCERS if producer.build is not None]
+        self.assertEqual(
+            built,
+            ["test-shuttle", "test-loom", "test-turmoil", "test-deloxide", "test-deloxide-order",
+             "test-deloxide-stress", "test-deloxide-stress-restore"],
+        )
+        workflow = (REPOSITORY / ".github/workflows/check.yaml").read_text(encoding="utf-8")
+        for job, producer in (
+            ("shuttle", "test-shuttle"),
+            ("loom", "test-loom"),
+            ("turmoil", "test-turmoil"),
+            ("deloxide", '"test-${SELECTION}"'),
+        ):
+            with self.subTest(job=job):
+                section = job_section(workflow, job)
+                build = section.index(f"just coverage-native-extras-build {producer}")
+                run = section.index(f"just coverage-native-extras {producer}")
+                self.assertLess(build, section.index("- name: Publish kache cache after the build"))
+                self.assertLess(section.index("- name: Publish kache cache after the build"), run)
+
     def test_a_check_that_is_its_own_instrumented_recipe_has_no_other_part(self) -> None:
         walk = Producer("walk", "ordinary", (), "walk", ())
         native_coverage.validate_composition(walk, {"walk": recipe(body=True)})
@@ -1551,6 +1579,72 @@ class CollectTests(unittest.TestCase):
             native_coverage.publish_step_summary({"GITHUB_STEP_SUMMARY": step_summary.name}, lines)
             self.assertIn("native coverage: check (ordinary) complete", step_summary.read())
         native_coverage.publish_step_summary({}, lines)
+
+
+BUILT_PRODUCER = Producer("check", "ordinary", ("prepare",), "instrumented", ("finish",), build="compile")
+
+
+class BuildTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name).resolve()
+        self.workspace = Workspace(root=self.root, target=self.root / "target")
+
+    def build(self, commands: FakeCommands, producer: Producer = BUILT_PRODUCER) -> int:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return native_coverage.build(
+                commands, self.workspace, toolchain(), {"RUSTC_WRAPPER": "kache"}, producer
+            )
+
+    def test_a_build_prepares_then_compiles_in_the_instrumented_build_and_collects_nothing(self) -> None:
+        commands = FakeCommands(self.root)
+        self.assertEqual(self.build(commands), 0)
+        self.assertEqual(
+            [streamed.arguments for streamed in commands.streamed], [["just", "prepare"], ["just", "compile"]]
+        )
+        prepare, compile_ = (streamed.environment for streamed in commands.streamed)
+        self.assertEqual(prepare, {"RUSTC_WRAPPER": "kache"})
+        # The environment a collection gives its instrumented recipe, apart from the attempt.
+        self.assertEqual(compile_["RUSTC_WRAPPER"], "kache")
+        self.assertEqual(compile_["CARGO_TARGET_DIR"], str(self.workspace.build()))
+        self.assertEqual(compile_["LLVM_PROFILE_FILE"], "/dev/null")
+        self.assertIn("-C instrument-coverage", compile_["RUSTFLAGS"])
+        self.assertIn(RUNNER, compile_)
+        self.assertEqual(compile_[native_coverage.PREPARED_TARGET_VARIABLE], str(self.root / "target"))
+        # The temporary attempt is gone, and no collection was made.
+        self.assertFalse(Path(compile_[native_coverage.ATTEMPT_VARIABLE]).exists())
+        self.assertFalse((self.root / "target" / "native-coverage").exists())
+
+    def test_a_build_that_runs_an_executable_fails(self) -> None:
+        commands = FakeCommands(self.root)
+
+        def ran_an_executable() -> int:
+            attempt = Path(commands.streamed[-1].environment[native_coverage.ATTEMPT_VARIABLE])
+            (attempt / "executions.jsonl").write_text('{"executable": "/bin/true"}\n')
+            return 0
+
+        commands.outcomes["compile"] = ran_an_executable
+        with self.assertRaisesRegex(RunnerError, "`just compile` ran an executable through Cargo's runner"):
+            self.build(commands)
+
+    def test_a_failing_part_ends_the_build_with_its_status(self) -> None:
+        commands = FakeCommands(self.root, {"prepare": 3})
+        self.assertEqual(self.build(commands), 3)
+        self.assertEqual([streamed.arguments for streamed in commands.streamed], [["just", "prepare"]])
+        self.assertEqual(self.build(FakeCommands(self.root, {"compile": 101})), 101)
+
+    def test_the_build_holds_the_instrumented_build(self) -> None:
+        with self.workspace.build_lock(), self.assertRaisesRegex(RunnerError, "another native coverage run is using"):
+            self.build(FakeCommands(self.root))
+
+    def test_only_a_producer_with_a_build_recipe_builds(self) -> None:
+        with self.assertRaisesRegex(RunnerError, "has no build recipe"):
+            self.build(FakeCommands(self.root), PRODUCER)
+        with self.assertRaisesRegex(RunnerError, "check build and run in one step"):
+            native_coverage.build_producers(
+                FakeCommands(self.root), self.workspace, ["check"], [PRODUCER], {"RUSTC_WRAPPER": "kache"}
+            )
 
 
 class CommandLineTests(unittest.TestCase):
