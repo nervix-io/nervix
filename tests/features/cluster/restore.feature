@@ -1,5 +1,86 @@
 Feature: Restore configuration, users and resources from a backup archive
 
+  Scenario: A restore keeps its raw applying loss while reaching a later finalization hold
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "first_route"
+    And a node other than placeholder "first_route" is saved as placeholder "successor"
+    When the CLI backs up "domain {{domain}}" from node "{{first_route}}" into "applying.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given restore step "import resources" of domain "{{domain}}_copy" on node "{{first_route}}" pauses before it applies
+    And command finalization on node "{{successor}}" pauses before its outcome is recorded
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "applying.nvxb" is streamed to node "{{first_route}}" under execution reference "applying-restore" in the background
+    Then the restore pauses at step "import resources" of domain "{{domain}}_copy" on node "{{first_route}}"
+    When leadership is transferred from node "{{first_route}}" to node "{{successor}}"
+    Then node "{{successor}}" eventually reports a leader other than "{{first_route}}"
+    And node "{{first_route}}" eventually reports a leader other than "{{first_route}}"
+    When the restore step pause on node "{{first_route}}" is released
+    Then the background restore's outcome is held on node "{{successor}}" before it is recorded
+    When leadership is transferred from node "{{successor}}" to node "{{first_route}}"
+    Then node "{{first_route}}" eventually reports a leader other than "{{successor}}"
+    And node "{{successor}}" eventually reports a leader other than "{{successor}}"
+    When the command finalization pause on node "{{successor}}" is released
+    Then the background restore stream's outcome is "leadership lost" as "executed"
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "applying.nvxb" is streamed to node "{{first_route}}" under execution reference "applying-restore" with outcome recovery
+    Then the restore stream's outcome is "completed" as "recovered"
+
+  Scenario: A restore reaches its finalization hold after admission loses its first leader
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "first_route"
+    And a node other than placeholder "first_route" is saved as placeholder "successor"
+    When the CLI backs up "domain {{domain}}" from node "{{first_route}}" into "admission.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given command reference lookup on node "{{first_route}}" pauses before proposal
+    And command finalization on node "{{successor}}" pauses before its outcome is recorded
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "admission.nvxb" is streamed to node "{{first_route}}" under execution reference "admission-restore" in the background
+    Then the background restore's reference lookup is held on node "{{first_route}}" before admission
+    When leadership is transferred from node "{{first_route}}" to node "{{successor}}"
+    Then node "{{successor}}" eventually reports a leader other than "{{first_route}}"
+    And node "{{first_route}}" eventually reports a leader other than "{{first_route}}"
+    When the command reference lookup pause on node "{{first_route}}" is released
+    Then the background restore's outcome is held on node "{{successor}}" before it is recorded
+    When leadership is transferred from node "{{successor}}" to node "{{first_route}}"
+    Then node "{{first_route}}" eventually reports a leader other than "{{successor}}"
+    And node "{{successor}}" eventually reports a leader other than "{{successor}}"
+    When the command finalization pause on node "{{successor}}" is released
+    Then the background restore stream's outcome is "leadership lost" as "executed"
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "admission.nvxb" is streamed to node "{{first_route}}" under execution reference "admission-restore" with outcome recovery
+    Then the restore stream's outcome is "completed" as "recovered"
+
+  Scenario: A restore reaches its finalization hold after its first route stops leading
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "first_route"
+    And a node other than placeholder "first_route" is saved as placeholder "successor"
+    When the CLI backs up "domain {{domain}}" from node "{{first_route}}" into "route.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When leadership is transferred from node "{{first_route}}" to node "{{successor}}"
+    Then node "{{successor}}" eventually reports a leader other than "{{first_route}}"
+    And node "{{first_route}}" eventually reports a leader other than "{{first_route}}"
+    Given command finalization on node "{{successor}}" pauses before its outcome is recorded
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "route.nvxb" is streamed to node "{{first_route}}" under execution reference "route-restore" in the background
+    Then the background restore's outcome is held on node "{{successor}}" before it is recorded
+    When leadership is transferred from node "{{successor}}" to node "{{first_route}}"
+    Then node "{{first_route}}" eventually reports a leader other than "{{successor}}"
+    And node "{{successor}}" eventually reports a leader other than "{{successor}}"
+    When the command finalization pause on node "{{successor}}" is released
+    Then the background restore stream's outcome is "leadership lost" as "executed"
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "route.nvxb" is streamed to node "{{first_route}}" under execution reference "route-restore" with outcome recovery
+    Then the restore stream's outcome is "completed" as "recovered"
+
   Scenario Outline: A fresh cluster whose nodes are named differently restores a cluster archive
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -341,8 +422,14 @@ Feature: Restore configuration, users and resources from a backup archive
       """
       {{domain}}_copy
       """
-    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "bulk.nvxb" is streamed to node "{{leader}}" under execution reference "restore_reference"
-    Then the restore stream's outcome is "completed" as "executed"
+    Given command finalization on node "{{leader}}" pauses before its outcome is recorded
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "bulk.nvxb" is streamed to node "{{leader}}" under execution reference "restore_reference" in the background
+    Then the background restore's outcome is held on node "{{leader}}" before it is recorded
+    When restore coordinator "{{leader}}" yields leadership in a multi-node cluster
+    And the command finalization pause on node "{{leader}}" is released
+    Then the background restore stream's outcome is "<first_outcome>" as "executed"
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "bulk.nvxb" is streamed to node "{{leader}}" under execution reference "restore_reference" with outcome recovery
+    Then the restore stream's outcome is "completed" as "recovered"
     Given the active domain is "{{domain}}_copy"
     When these Plexus commands are executed on the leader node
       """
@@ -354,9 +441,9 @@ Feature: Restore configuration, users and resources from a backup archive
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | first_outcome   |
+      | 1            | completed       |
+      | 3            | leadership lost |
 
   Scenario Outline: A restore repeated under its execution reference joins it or returns its recorded outcome
     Given a <cluster_size> node nervix cluster is started
@@ -377,6 +464,7 @@ Feature: Restore configuration, users and resources from a backup archive
     When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "domain.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     Given restore step "import resources" of domain "{{domain}}_copy" on node "{{leader}}" pauses before it applies
+    And command finalization on node "{{leader}}" pauses before its outcome is recorded
     When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "domain.nvxb" is streamed to node "{{leader}}" under execution reference "restore_reference" in the background
     Then the restore pauses at step "import resources" of domain "{{domain}}_copy" on node "{{leader}}"
     When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "domain.nvxb" is streamed to node "{{leader}}" under execution reference "restore_reference"
@@ -384,15 +472,18 @@ Feature: Restore configuration, users and resources from a backup archive
     When restore "domain {{domain}} AS {{domain}}_other" of backup archive "domain.nvxb" is streamed to node "{{leader}}" under execution reference "restore_reference"
     Then the restore stream's outcome is "reference conflict" as "executed"
     When the restore step pause on node "{{leader}}" is released
-    Then the background restore stream's outcome is "completed" as "executed"
-    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "domain.nvxb" is streamed to node "{{leader}}" under execution reference "restore_reference"
+    Then the background restore's outcome is held on node "{{leader}}" before it is recorded
+    When restore coordinator "{{leader}}" yields leadership in a multi-node cluster
+    And the command finalization pause on node "{{leader}}" is released
+    Then the background restore stream's outcome is "<first_outcome>" as "executed"
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "domain.nvxb" is streamed to node "{{leader}}" under execution reference "restore_reference" with outcome recovery
     Then the restore stream's outcome is "completed" as "recovered"
     And the restore stream's report shows every step applied
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | first_outcome   |
+      | 1            | completed       |
+      | 3            | leadership lost |
 
   Scenario: A leader change while a restore applies resumes it on the new leader
     Given a 3 node nervix cluster is started

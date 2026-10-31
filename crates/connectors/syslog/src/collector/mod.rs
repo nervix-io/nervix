@@ -24,6 +24,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use arch_into::ArchInto as _;
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
@@ -32,7 +33,7 @@ use nervix_connector::{
     EmitterWriteResult, PerRecordOutcome, RecordEmitter,
 };
 use nervix_dns::{DnsResolver, LookupShare, OperationBudget};
-use nervix_models::ClientConfigEntry;
+use nervix_models::{ClientConfigEntry, SYSLOG_FRAME_LIMITS};
 use nervix_primitives::{
     net::{TcpStream, UdpSocket},
     time::{Instant, timeout},
@@ -42,9 +43,7 @@ use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
-use crate::config::{
-    MAX_UDP_PAYLOAD_SIZE, SyslogClientConfig, SyslogDirection, SyslogFraming, SyslogProtocol,
-};
+use crate::config::{SyslogClientConfig, SyslogDirection, SyslogFraming, SyslogProtocol};
 
 const SYSLOG: &str = "syslog";
 
@@ -70,11 +69,11 @@ enum SyslogSender {
 #[derive(Debug, Error)]
 enum SyslogPayloadError {
     #[error("encoded Syslog UDP payload is {size} bytes; maximum is {maximum}")]
-    OversizedUdp { size: usize, maximum: usize },
+    OversizedUdp { size: u64, maximum: u64 },
     #[error(
         "encoded Syslog payload is {size} bytes; RFC 6587 octet count permits at most {maximum}"
     )]
-    OversizedOctetCount { size: usize, maximum: usize },
+    OversizedOctetCount { size: u64, maximum: u64 },
     #[error(
         "encoded Syslog payload contains LF, which is not allowed with non-transparent framing"
     )]
@@ -276,33 +275,37 @@ impl SyslogCollectorEmitter {
         }
     }
 
+    /// Refuses a payload no frame of the client's transport carries, as the declared frame limits
+    /// state them.
     fn validate_payload(&self, payload: &[u8]) -> error_stack::Result<(), SyslogPayloadError> {
-        if self.config.protocol == SyslogProtocol::Udp && payload.len() > MAX_UDP_PAYLOAD_SIZE {
+        let size: u64 = payload.len().arch_into();
+        let datagram_payload = SYSLOG_FRAME_LIMITS.datagram_payload();
+        if self.config.protocol == SyslogProtocol::Udp && size > datagram_payload {
             return Err(Report::new(SyslogPayloadError::OversizedUdp {
-                size: payload.len(),
-                maximum: MAX_UDP_PAYLOAD_SIZE,
+                size,
+                maximum: datagram_payload,
             }));
         }
         if self.config.protocol == SyslogProtocol::Tcp
             && self.config.framing == SyslogFraming::NonTransparent
-            && payload.contains(&b'\n')
+            && payload.contains(&SYSLOG_FRAME_LIMITS.non_transparent_trailer())
         {
             return Err(Report::new(SyslogPayloadError::NonTransparentLf));
         }
         if self.config.protocol != SyslogProtocol::Udp
             && self.config.framing == SyslogFraming::OctetCounting
         {
-            Self::validate_octet_count_size(payload.len())?;
+            Self::validate_octet_count_size(size)?;
         }
         Ok(())
     }
 
-    fn validate_octet_count_size(size: usize) -> error_stack::Result<(), SyslogPayloadError> {
-        const MAX_OCTET_COUNT: usize = 9_999_999_999;
-        if size > MAX_OCTET_COUNT {
+    fn validate_octet_count_size(size: u64) -> error_stack::Result<(), SyslogPayloadError> {
+        let maximum = SYSLOG_FRAME_LIMITS.largest_octet_count();
+        if size > maximum {
             return Err(Report::new(SyslogPayloadError::OversizedOctetCount {
                 size,
-                maximum: MAX_OCTET_COUNT,
+                maximum,
             }));
         }
         Ok(())
@@ -1016,14 +1019,27 @@ mod tests {
     #[nervix_primitives::test]
     async fn emitter_rejects_udp_oversize_and_non_transparent_lf() {
         let udp = connector(config("udp", None)).await;
-        let oversized = vec![0_u8; MAX_UDP_PAYLOAD_SIZE + 1];
-        let maximum = vec![0_u8; MAX_UDP_PAYLOAD_SIZE];
+        let datagram_payload = usize::try_from(SYSLOG_FRAME_LIMITS.datagram_payload())
+            .assured("a datagram payload fits a 64-bit usize");
+        let oversized = vec![
+            0_u8;
+            datagram_payload
+                .checked_add(1)
+                .assured("a datagram payload is far below usize::MAX")
+        ];
+        let maximum = vec![0_u8; datagram_payload];
         assert!(udp.validate_payload(&oversized).is_err());
         assert!(udp.validate_payload(&maximum).is_ok());
 
         let tcp = connector(config("tcp", Some("non-transparent"))).await;
         assert!(tcp.validate_payload(b"line one\nline two").is_err());
         assert!(tcp.validate_payload(b"one line").is_ok());
+    }
+
+    #[nervix_primitives::test]
+    async fn octet_counting_carries_a_payload_that_contains_lf() {
+        let tcp = connector(config("tcp", Some("octet-counting"))).await;
+        assert!(tcp.validate_payload(b"line one\nline two").is_ok());
     }
 
     #[test]

@@ -30,7 +30,7 @@ use nervix_models::{
     DomainClockState, DomainName, DomainStartPoint, DomainState, DomainStatus, QuiesceLevel,
     StartDomain, StopDomain, TimestampError,
 };
-use nervix_primitives::time::interval;
+use nervix_primitives::time::{Instant, interval};
 use thiserror::Error;
 
 use super::{
@@ -104,10 +104,15 @@ pub(in crate::application) enum DomainAlterError {
     Rollback { domain: DomainName, reason: String },
 }
 
+/// How a paused domain's drain observes its work, and what bounds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::application) enum DomainDrainMode {
-    Alteration,
-    Backup,
+    /// A model alteration's drain, which gives every node `timeout` from when the drain begins.
+    Alteration { timeout: Duration },
+    /// A quiesced backup cut's drain, which polls until the cut's own `deadline`. The cut counts
+    /// its budget from before its lease, so the steps before the drain, the pause's application
+    /// included, have already spent part of it.
+    Backup { deadline: Instant },
 }
 
 pub(in crate::application) struct ResolvedDomainStart {
@@ -223,22 +228,22 @@ impl SessionServiceImpl {
         mutation: Option<&DomainMutationLease>,
         impact: Option<&TransactionStepImpactRecorder>,
     ) -> Result<Option<QuiescenceAttempt>, Report<DomainAlterError>> {
-        self.pause_and_drain_domain_for_alter_with_timeout(
+        self.pause_and_drain_domain(
             domain,
             mutation,
             impact,
-            self.inner.runtime.domain_drain_timeout(),
-            DomainDrainMode::Alteration,
+            DomainDrainMode::Alteration {
+                timeout: self.inner.runtime.domain_drain_timeout(),
+            },
         )
         .await
     }
 
-    pub(in crate::application) async fn pause_and_drain_domain_for_alter_with_timeout(
+    pub(in crate::application) async fn pause_and_drain_domain(
         &self,
         domain: &DomainName,
         mutation: Option<&DomainMutationLease>,
         impact: Option<&TransactionStepImpactRecorder>,
-        timeout: Duration,
         mode: DomainDrainMode,
     ) -> Result<Option<QuiescenceAttempt>, Report<DomainAlterError>> {
         let attempt = impact.map(|impact| {
@@ -293,11 +298,13 @@ impl SessionServiceImpl {
         }
 
         let drained = match mode {
-            DomainDrainMode::Alteration => {
+            DomainDrainMode::Alteration { timeout } => {
                 self.wait_for_paused_domain_drain_with_timeout(domain, timeout)
                     .await
             }
-            DomainDrainMode::Backup => self.wait_for_backup_domain_drain(domain, timeout).await,
+            DomainDrainMode::Backup { deadline } => {
+                self.wait_for_backup_domain_drain(domain, deadline).await
+            }
         };
         match drained {
             Ok(()) => Ok(attempt),
@@ -376,11 +383,12 @@ impl SessionServiceImpl {
     }
 
     /// Uses the shutdown drain's admitted-work view. After every node is quiet, a separate
-    /// cluster-wide confirming flush catches work moving between status reads.
+    /// cluster-wide confirming flush catches work moving between status reads. Polls until the
+    /// cut's `deadline`, however much of its budget the pause's application spent.
     async fn wait_for_backup_domain_drain(
         &self,
         domain: &DomainName,
-        timeout: Duration,
+        deadline: Instant,
     ) -> Result<(), Report<DomainAlterError>> {
         #[cfg(feature = "testing")]
         self.inner
@@ -404,7 +412,6 @@ impl SessionServiceImpl {
         let reach = CutReach::of(schedule.domain(domain));
         let mut nodes = self.cut_live_nodes().await;
         nodes.extend(reach.executors().cloned());
-        let deadline = nervix_primitives::time::Instant::now() + timeout;
         let mut polling = interval(Duration::from_millis(50));
         polling.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         let mut confirming = false;

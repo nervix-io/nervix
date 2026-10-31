@@ -978,11 +978,11 @@ archive must retain both quiesced cuts and the measured first hold.
 The paced branch-buffering outline runs its domain at rate 1200 with one-minute logical input
 flush and collection, a six-second period and skew, and a five-hour branch TTL. Each of these is
 sixty times the physical time it takes, so the flush and the collection each still close 50 ms
-after they open, while a physical clock would hold each for a minute. The receive budget is five
-seconds: twelve times shorter than the wrong clock's first window, and many times longer than
-relay delivery takes on a loaded runner. With one-second windows at rate 20, the budget had to
-stay below a one-second physical cadence, and its 800 ms then measured relay delivery as much as
-the clock. A relay owner fans out one batch at a time, across every branch of the relay, and waits
+after they open, while a physical clock would hold each for a minute. The receive budget is ten
+seconds: six times shorter than the wrong clock's first window, and longer than relay delivery
+takes on a loaded runner. With one-second windows at rate 20, the budget had to stay below a
+one-second physical cadence, and its 800 ms then measured relay delivery as much as the clock. A
+relay owner fans out one batch at a time, across every branch of the relay, and waits
 for each remote receiver to admit the batch before it takes the next one. On three nodes the
 placement puts other nodes between a row's ingestor, both relay owners, the reingestor and the
 session, so each owner fan-out and each delivery to a remote owner waits for an admission between
@@ -990,32 +990,49 @@ nodes; on one node every hop is local. In a loaded parallel run the first rows o
 arrived 269 ms apart and both second rows missed the 800 ms deadline. A relay owner that spends
 that long on each batch produces exactly that pattern. A companion outline makes every relay owner
 wait 250 ms before each batch: at the 800 ms budget that wait failed the same way on one and three
-nodes, while the outline requires every row within the five-second budget.
+nodes, while the outline requires every row within the ten-second budget. A five-second budget
+held at 48 run slots on 16 runtime workers, with last receipts up to 3.4 seconds, but not in a
+full CI shard, where the first row took 3.6 seconds and the other three missed the deadline.
 
 Each outline's bounded payload sample owns the raw session on a runtime task and records every
 receipt instant, while Cucumber only awaits the completed sample. Checking the deadline between
 rows on the runner task could fail after the first tenant rows even when both second rows were
 already queued within the budget. A paused-clock regression supplies those rows at 100 ms and
-delays the caller past five seconds; another requires a missing second row to expire at exactly
-five seconds despite a duplicate first row. A transport disconnect instead fails immediately with
+delays the caller past ten seconds; another requires a missing second row to expire at exactly
+ten seconds despite a duplicate first row. A transport disconnect instead fails immediately with
 its cause. The public outlines check each concrete tenant key and both exact payloads while
-deliberately delaying collection of the result for six seconds, beyond the unchanged receive
+deliberately delaying collection of the result for eleven seconds, beyond the unchanged receive
 budget. That delay yields to the runtime and other scenarios; it does not block the shared runner.
-A scripted one-minute physical cadence still expires the same five-second sample. Every returned
+A scripted one-minute physical cadence still expires the same ten-second sample. Every returned
 row must also have a receipt instant strictly before the original deadline: a paused-clock reader
-that resumes at or beyond either the 500 ms or five-second bound must fail even when its final row
-is ready. Offloading removes runner polling gaps; it neither extends the budget nor proves that
-runtime workers cannot be delayed.
+that resumes at or beyond the ten-second bound must fail even when its final row is ready.
+Offloading removes runner polling gaps; it neither extends the budget nor proves that runtime
+workers cannot be delayed.
 
-The slow historical-domain Immediate-flush outline keeps its 500 ms receipt budget, physical
-batching minimum, both exact tenant keys and payloads, and one- and three-node topology. It
-delays only collection of the observation result for one second. The reader must start and
-capture its deadline before the caller first polls the result. Its paused-clock control
-supplies both rows at 100 ms and requires receipt signals inside the original 500 ms window
-before the caller resumes after one second. A missing or late row still fails, and the
-wrong-clock control expires this 500 ms budget with a one-second cadence, as it expires the paced
-outlines' five-second budget with a one-minute cadence. The public receive bound qualifies the
-physical clock choice without changing domain time or the batching minimum.
+The slow historical-domain Immediate-flush outline runs its domain at rate 0.000001, where its
+100-microsecond batching minimum would hold each route for a hundred physical seconds if it were
+scaled as logical time. The receive budget is ten seconds: ten times shorter than the wrong
+clock's window, and longer than relay delivery takes on a loaded runner. At rate 0.0001 the wrong
+clock took one second, so the budget had to stay below it, and its 500 ms then measured relay
+delivery instead of the clock. On three nodes a row can cross four admissions between nodes, and
+each one exchanges a grant, a body and an outcome through the shared runtime, about five
+milliseconds on an idle machine. With 48 run slots on 16 runtime workers, 88% busy, 11 of 48
+samples failed that 500 ms budget with neither row, or with either tenant's row alone. Given a
+longer budget under the same load, every sample received both rows, the last up to 1.4 seconds
+after it began and the two tenants' rows up to half a second apart.
+
+The outline keeps its physical batching minimum, both exact tenant keys and payloads, and one- and
+three-node topology. It delays collection of the observation result for eleven seconds, beyond
+its receive budget. The reader must start and capture its deadline before the caller first polls
+the result. Its paused-clock control supplies both rows at 100 ms and requires receipt signals
+inside the budget before the caller resumes after eleven seconds. A missing or late row still
+fails, and the wrong-clock control expires the same ten-second budget with a hundred-second
+cadence, as it does with the paced outlines' one-minute cadence. The public receive bound
+qualifies the physical clock choice without changing domain time or the batching minimum.
+
+The slow-branch collection outline holds each branch for one physical second at rate 0.0001, and
+its lower bound measures that hold. Its ten-second upper bound only has to outlast the hold and
+the same relay delivery, because a row left to the outline's one-hour flush would never arrive.
 
 The duration window outline establishes its observation boundary through a public subscription:
 it first waits for a probe branch's window to emit, then submits all four interleaved tenant rows
@@ -1114,7 +1131,28 @@ The harness keeps these boundaries explicit.
   as it records the outcome; a single-node leader is its own quorum, and its lease never lapses. A
   raw probe therefore stays only where the answer is the subject: a repetition joining an applying
   restore or returning its recorded outcome, a reference conflict, a redirect, a controlled
-  leadership loss, or an interrupted upload sent again. The room and idle-lifetime scenarios hold
+  leadership loss, or an interrupted upload sent again. When a raw background probe must reach an
+  armed restore step or finalization pause, a redirect may repeat the raw request before its first
+  observed pause. A `LeadershipLost` reply stays the raw answer, including its actual origin and
+  execution reference. A separate completion observer may drive only setup to the armed execution
+  pause under the same reference, statement and immutable archive; its recovered answer never
+  replaces the retained raw reply. This matters after an applying loss: the admitted execution can
+  resume through reconciliation, and a repetition can answer `StillApplying` or `Recovered` rather
+  than execute a new command. The complete pause observation, including all setup attempts, keeps
+  its original 120-second bound. Upload refusals, terminal failures, raw `StillApplying` and other
+  unknown causes fail that observation. Reaching the first pause disables further raw redirects;
+  observing a later armed pause can still advance the execution after retaining a raw leadership
+  loss. The stale-route, held-admission and applying-loss regressions exercise these boundaries and
+  require the exact raw `LeadershipLost`/`Executed` answer followed by `Completed`/`Recovered` under
+  the same reference. The applying-loss case explicitly retains the reply received before the
+  later finalization hold; it does not attribute that earlier reply to the second transfer.
+  The interrupted-upload and repeated-reference outlines hold finalization too. Their one-node
+  raw streams answer `Completed`/`Executed`. Their three-node executions transfer leadership before
+  release; the raw `LeadershipLost`/`Executed` reply either already arrived during admission or
+  application, or arrives after that release. Both topologies then require
+  `Completed`/`Recovered`; the applying repetition and reference-conflict replies remain raw and
+  exact. The durable-failure outline retains its raw leadership-loss reply and recovered failure.
+  The room and idle-lifetime scenarios hold
   the restore's outcome before its coordinator records it and transfer leadership on three nodes
   before releasing it, so their three-node examples always learn the outcome under the same
   reference as recovered, and their one-node examples report it as executed. The staging scenario
@@ -2321,7 +2359,8 @@ captures its standard output and error in one log. It removes every `NERVIX_*` v
 the server. The options and environment variables a scenario gives the process are applied after
 that removal, written exactly as the scenario states them, so a scenario can hand the node a value
 it must refuse; such a scenario starts the process without waiting for readiness and asserts how it
-exits. A claim about a
+exits. A scenario about what the node's log records hands it an operator's trace filter as
+`RUST_LOG` and waits for readiness as usual. A claim about a
 node process dying while its peers keep running, such as what a client producer is told when the
 node that executes its ingestor or serves its session is killed or frozen, runs the three-process
 cluster and faults one member, because only a real process death closes, or stops answering on,
