@@ -3858,11 +3858,10 @@ selections = [
 bound_seconds = 900
 concurrency = 1
 evidence = true
-features = ["testing"]
 id = "cluster-parameters"
 inputs = ["tests/features/cluster/cluster_parameters.feature"]
 kind = "cucumber"
-package = "nervix-server"
+package = "nervix-scenarios"
 selections = [
   "deloxide",
   "deloxide-order",
