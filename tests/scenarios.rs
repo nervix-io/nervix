@@ -178,7 +178,7 @@ use crate::common::{
     },
     scenario_schedule::{
         FeatureLimit, SCENARIO_RETRIES, ScenarioAdmission, ScenarioLength, ScenarioRunSlots,
-        prioritize_features,
+        ScenarioWeight, prioritize_features,
     },
     scenario_shard::{ScenarioShard, ScenarioShardArgs},
     server_process::{
@@ -33939,6 +33939,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
             };
             let declared_tags = feature.tags.iter().chain(rule_tags).chain(&scenario.tags);
             let length = ScenarioLength::declared_by(declared_tags.map(String::as_str));
+            let declared_weight = ScenarioWeight::for_scenario(feature, rule, scenario);
             let run_slots = run_slots.clone();
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
@@ -33951,9 +33952,15 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 );
                 let run = registration.run();
                 world.active_scenario = Some(registration);
+                let weight = declared_weight.unwrap_or_else(|error| {
+                    panic!(
+                        "invalid run-slot declaration for feature {feature_name:?}, scenario \
+                         {scenario_name:?}, line {scenario_line}: {error}"
+                    )
+                });
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, length, &feature_name, run, |reason| {
+                    .admit_with(limit, length, weight, &feature_name, run, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;

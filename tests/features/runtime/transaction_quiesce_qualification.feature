@@ -1,6 +1,6 @@
 @transaction_quiesce_qualification
 Feature: Transaction quiesce qualification
-  @long_running
+  @long_running @slots_6
   Scenario: A multi-mebibyte report replicates without truncation and survives replay and restart
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started

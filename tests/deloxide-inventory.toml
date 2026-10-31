@@ -1439,6 +1439,16 @@ scenario = "A capture timeout reports its active phase and completed drain"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "A quiesced cut whose pause every node is slow to ready: the cut's deadline ends its own application of the pause, and the resume runs through every node's runtime installation and reconciliation while their waits for the paused revision are held, then the public CLI refusal reports the drain phase."
+examples = 2
+feature = "tests/features/cluster/backup_cut_diagnostics.feature"
+id = "scenario.backup-pause-application-deadline"
+invariant = "A cut whose pause application is held beyond its budget is refused within its deadline and the resume that follows, creates no archive and leaves the domain running and delivering on one and three nodes."
+invocation = "scenarios"
+scenario = "A pause the cluster applies slowly ends at its cut's deadline"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Diagnostic node capture and retained-result recovery through a raw session, followed by ordinary CLI archive download to stdout."
 examples = 2
 feature = "tests/features/cluster/backup_wait.feature"
@@ -2136,6 +2146,16 @@ id = "stress.backup-cut-diagnostics"
 invariant = "A capture held beyond the cut budget reports capture and the elapsed completed drain, creates no archive and resumes the domain on one and three nodes."
 invocation = "stress-restore-scenarios"
 scenario = "A capture timeout reports its active phase and completed drain"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: a cut's deadline ending its own application of a pause every node is slow to ready, and the resume through every node's runtime installation and reconciliation, while the public CLI verifies the drain phase and its elapsed budget."
+examples = 2
+feature = "tests/features/cluster/backup_cut_diagnostics.feature"
+id = "stress.backup-pause-application-deadline"
+invariant = "A cut whose pause application is held beyond its budget is refused within its deadline and the resume that follows, creates no archive and leaves the domain running and delivering on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A pause the cluster applies slowly ends at its cut's deadline"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]

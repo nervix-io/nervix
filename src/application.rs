@@ -126,8 +126,8 @@ use scheduling::{
 use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
 use session_service::{
-    RuntimeStateApplication, SESSION_EVENT_CAPACITY, SessionEvents, SessionServiceInner,
-    apply_current_cluster_runtime_state,
+    ApplicationBound, RuntimeStateApplication, SESSION_EVENT_CAPACITY, SessionEvents,
+    SessionServiceInner, apply_current_cluster_runtime_state,
 };
 use startup::ApplicationStartup;
 use subscription::{SubscriptionInterests, SubscriptionSampler};
@@ -1837,7 +1837,11 @@ impl Application {
                 let cluster = &cluster_for_schedule;
                 let consensus = &consensus_for_schedule;
                 async move {
-                    let outcome = apply_current_cluster_runtime_state(application).await;
+                    let outcome = apply_current_cluster_runtime_state(
+                        application,
+                        ApplicationBound::ClusterBudget,
+                    )
+                    .await;
                     if outcome.is_ok() {
                         cluster_parameters::announce_parameter_installation(
                             events,
