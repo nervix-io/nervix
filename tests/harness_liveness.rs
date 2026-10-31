@@ -11,7 +11,8 @@
 //!   with Rust's test runner, and the stand-in nodes, clients, images and processes those regressions
 //!   talk to.
 //!   It also owns registration of generator cadence, paced-interconnect cadence, bounded
-//!   subscription payload observations and the per-node execution readings of timed probes.
+//!   subscription payload observations, declared scenario weights, admission fairness and the
+//!   per-node execution readings of timed probes.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, node-bound address, process-cluster convergence, cluster-teardown, scenario-phase,
 //!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, backup phase, gRPC-receiver,
@@ -138,6 +139,8 @@ mod scenario_schedule;
 mod scenario_shard;
 #[path = "common/scenario_shard_tests.rs"]
 mod scenario_shard_tests;
+#[path = "common/scenario_weight_tests.rs"]
+mod scenario_weight_tests;
 #[path = "common/server_executable.rs"]
 mod server_executable;
 #[path = "common/server_executable_tests.rs"]
@@ -248,6 +251,7 @@ mod tests {
         scenario_phase::{
             ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
         },
+        scenario_schedule::ScenarioWeight,
         status_request::{
             STATUS_REQUEST_TIMEOUT, STATUS_WAIT_BUDGET, StatusEndpoint, StatusOperation,
             StatusRequestError, StatusTransport,
@@ -270,6 +274,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::Unlimited,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "current",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -278,6 +283,7 @@ mod tests {
         let mut first = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
             ScenarioLength::Ordinary,
+            ScenarioWeight::ONE,
             "queued first attempt",
             ScenarioRun::FIRST,
             |_| {},
@@ -286,6 +292,7 @@ mod tests {
         let mut retry = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
             ScenarioLength::Ordinary,
+            ScenarioWeight::ONE,
             "retry",
             first_retry(),
             |_| {},
@@ -314,6 +321,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::Unlimited,
                     ScenarioLength::Ordinary,
+                    ScenarioWeight::ONE,
                     "current",
                     ScenarioRun::FIRST,
                     |_| {},
@@ -322,6 +330,7 @@ mod tests {
             let mut first = Box::pin(slots.admit_with(
                 limit,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "limited first attempt",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -330,6 +339,7 @@ mod tests {
             let mut retry = Box::pin(slots.admit_with(
                 FeatureLimit::Unlimited,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "retry",
                 first_retry(),
                 |_| {},
@@ -356,6 +366,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::WebConsole,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "console",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -365,6 +376,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::WebConsole,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "console",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -373,6 +385,7 @@ mod tests {
         let mut retry = Box::pin(slots.admit_with(
             FeatureLimit::WebConsole,
             ScenarioLength::Ordinary,
+            ScenarioWeight::ONE,
             "console retry",
             first_retry(),
             |_| {},
@@ -381,6 +394,7 @@ mod tests {
         let mut ordinary = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
             ScenarioLength::Ordinary,
+            ScenarioWeight::ONE,
             "ordinary first attempt",
             ScenarioRun::FIRST,
             |_| {},
@@ -411,6 +425,7 @@ mod tests {
                 .admit_with(
                     limit,
                     ScenarioLength::Ordinary,
+                    ScenarioWeight::ONE,
                     "current",
                     ScenarioRun::FIRST,
                     |_| {},
@@ -419,6 +434,7 @@ mod tests {
             let mut retry = Box::pin(slots.admit_with(
                 limit,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "cancelled retry",
                 first_retry(),
                 |_| {},
@@ -428,6 +444,7 @@ mod tests {
             let mut successor = Box::pin(slots.admit_with(
                 limit,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "successor",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -450,27 +467,27 @@ mod tests {
         // In CI's 48 slots a first run holds one, the first retry a sixteenth and the second retry
         // an eighth of the pool.
         assert_eq!(SCENARIO_RETRIES, 2);
-        assert_eq!(run(1).run_slots(48), 1);
-        assert_eq!(run(2).run_slots(48), 3);
-        assert_eq!(run(3).run_slots(48), 6);
+        assert_eq!(run(1).run_slots(48, ScenarioWeight::ONE), 1);
+        assert_eq!(run(2).run_slots(48, ScenarioWeight::ONE), 3);
+        assert_eq!(run(3).run_slots(48, ScenarioWeight::ONE), 6);
         // A run past the configured retries, as a `--retry` override allows, keeps the last share.
-        assert_eq!(run(4).run_slots(48), 6);
-        assert_eq!(run(9).run_slots(48), 6);
+        assert_eq!(run(4).run_slots(48, ScenarioWeight::ONE), 6);
+        assert_eq!(run(9).run_slots(48, ScenarioWeight::ONE), 6);
         // A pool too small for a sixteenth still gives every run one slot.
-        assert_eq!(run(2).run_slots(4), 1);
-        assert_eq!(run(3).run_slots(4), 1);
-        assert_eq!(run(2).run_slots(16), 1);
-        assert_eq!(run(3).run_slots(16), 2);
-        assert_eq!(run(3).run_slots(1), 1);
+        assert_eq!(run(2).run_slots(4, ScenarioWeight::ONE), 1);
+        assert_eq!(run(3).run_slots(4, ScenarioWeight::ONE), 1);
+        assert_eq!(run(2).run_slots(16, ScenarioWeight::ONE), 1);
+        assert_eq!(run(3).run_slots(16, ScenarioWeight::ONE), 2);
+        assert_eq!(run(3).run_slots(1, ScenarioWeight::ONE), 1);
 
         for slots in 1..=512 {
-            let mut previous = run(1).run_slots(slots);
+            let mut previous = run(1).run_slots(slots, ScenarioWeight::ONE);
             assert_eq!(
                 previous, 1,
                 "a first run of a {slots}-slot pool holds one slot"
             );
             for number in 2..=8 {
-                let share = run(number).run_slots(slots);
+                let share = run(number).run_slots(slots, ScenarioWeight::ONE);
                 assert!(
                     share >= previous,
                     "run {number} of a {slots}-slot pool holds {share}, less than the run before \
@@ -496,6 +513,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::Unlimited,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "first retry",
                 first_retry(),
                 |_| {},
@@ -509,6 +527,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::Unlimited,
                     ScenarioLength::Ordinary,
+                    ScenarioWeight::ONE,
                     "first attempt beside the retry",
                     ScenarioRun::FIRST,
                     |_| {},
@@ -523,6 +542,7 @@ mod tests {
             let mut waiting = Box::pin(slots.admit_with(
                 FeatureLimit::Unlimited,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "first attempt waiting for a slot",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -558,6 +578,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::Unlimited,
                     ScenarioLength::Ordinary,
+                    ScenarioWeight::ONE,
                     "running first attempt",
                     ScenarioRun::FIRST,
                     |_| {},
@@ -571,6 +592,7 @@ mod tests {
         let mut retry = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
             ScenarioLength::Ordinary,
+            ScenarioWeight::ONE,
             "second retry",
             second_retry,
             |_| {},
@@ -579,6 +601,7 @@ mod tests {
         let mut behind = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
             ScenarioLength::Ordinary,
+            ScenarioWeight::ONE,
             "first attempt behind the retry",
             ScenarioRun::FIRST,
             |_| {},
@@ -618,6 +641,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::Unlimited,
                     ScenarioLength::Ordinary,
+                    ScenarioWeight::ONE,
                     "running first attempt",
                     ScenarioRun::FIRST,
                     |_| {},
@@ -629,6 +653,7 @@ mod tests {
         let mut retry = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
             ScenarioLength::Ordinary,
+            ScenarioWeight::ONE,
             "cancelled first retry",
             first_retry(),
             |_| {},
@@ -641,6 +666,7 @@ mod tests {
             let mut successor = Box::pin(slots.admit_with(
                 FeatureLimit::Unlimited,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "successor",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -671,6 +697,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::WebConsole,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "Web console execution graph",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -680,6 +707,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::WebConsole,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "Web console execution graph",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -691,6 +719,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::WebConsole,
                     ScenarioLength::Ordinary,
+                    ScenarioWeight::ONE,
                     "Web console execution graph",
                     ScenarioRun::FIRST,
                     |_| {},
@@ -703,6 +732,7 @@ mod tests {
             slots.admit_with(
                 FeatureLimit::Unlimited,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "ordinary",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -731,6 +761,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::Unlimited,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "ordinary",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -744,6 +775,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::Unlimited,
                     ScenarioLength::Ordinary,
+                    ScenarioWeight::ONE,
                     "ordinary",
                     ScenarioRun::FIRST,
                     |reason| {
@@ -769,6 +801,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::WebConsole,
                     ScenarioLength::Ordinary,
+                    ScenarioWeight::ONE,
                     "Web console execution graph",
                     ScenarioRun::FIRST,
                     |reason| {
@@ -811,6 +844,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::WebConsole,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "Web console execution graph",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -820,6 +854,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::WebConsole,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "Web console execution graph",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -834,6 +869,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::WebConsole,
                     ScenarioLength::Ordinary,
+                    ScenarioWeight::ONE,
                     "Web console execution graph",
                     ScenarioRun::FIRST,
                     |reason| {
@@ -858,6 +894,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::Unlimited,
                     ScenarioLength::Ordinary,
+                    ScenarioWeight::ONE,
                     "ordinary",
                     ScenarioRun::FIRST,
                     |reason| {
@@ -900,6 +937,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::WebConsole,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "Web console execution graph",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -909,6 +947,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::WebConsole,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "Web console execution graph",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -923,6 +962,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::WebConsole,
                     ScenarioLength::Ordinary,
+                    ScenarioWeight::ONE,
                     "Web console execution graph",
                     ScenarioRun::FIRST,
                     |reason| {
@@ -947,6 +987,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::WebConsole,
                     ScenarioLength::Ordinary,
+                    ScenarioWeight::ONE,
                     "Web console Plexus REPL",
                     ScenarioRun::FIRST,
                     |reason| {
@@ -971,6 +1012,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::WebConsole,
                     ScenarioLength::Ordinary,
+                    ScenarioWeight::ONE,
                     "Web console transaction inspector",
                     ScenarioRun::FIRST,
                     |reason| {
@@ -1019,6 +1061,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::Unlimited,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "current",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -1027,6 +1070,7 @@ mod tests {
         let mut ordinary = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
             ScenarioLength::Ordinary,
+            ScenarioWeight::ONE,
             "ordinary first attempt queued earlier",
             ScenarioRun::FIRST,
             |_| {},
@@ -1035,6 +1079,7 @@ mod tests {
         let mut long = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
             ScenarioLength::LongRunning,
+            ScenarioWeight::ONE,
             "long-running first attempt queued later",
             ScenarioRun::FIRST,
             |_| {},
@@ -1061,6 +1106,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::Unlimited,
                 ScenarioLength::Ordinary,
+                ScenarioWeight::ONE,
                 "current",
                 ScenarioRun::FIRST,
                 |_| {},
@@ -1069,6 +1115,7 @@ mod tests {
         let mut long = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
             ScenarioLength::LongRunning,
+            ScenarioWeight::ONE,
             "long-running first attempt",
             ScenarioRun::FIRST,
             |_| {},
@@ -1077,6 +1124,7 @@ mod tests {
         let mut retry = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
             ScenarioLength::Ordinary,
+            ScenarioWeight::ONE,
             "ordinary retry",
             first_retry(),
             |_| {},
@@ -1118,6 +1166,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::Unlimited,
                     length,
+                    ScenarioWeight::ONE,
                     "Suite tail",
                     ScenarioRun::FIRST,
                     |_| {},
@@ -5713,17 +5762,59 @@ mod tests {
     }
 
     #[nervix_primitives::test(start_paused = true)]
+    async fn scenario_weight_summary_counts_a_first_attempts_extra_reservation() {
+        use crate::{scenario_phase::suite_summary, scenario_schedule::ScenarioLength};
+
+        let _serialized = WATCHDOG_REGRESSIONS.lock().await;
+        let extra_slot_seconds = || {
+            let summary = suite_summary();
+            let Some((_, held)) = summary.split_once("Reservations: ") else {
+                panic!("the summary must account for every attempt's reservation:\n{summary}");
+            };
+            let Some((seconds, _)) = held.split_once(" slot-seconds beyond one slot per attempt")
+            else {
+                panic!("the summary must measure extra reservation work:\n{summary}");
+            };
+            seconds
+                .parse::<f64>()
+                .unwrap_or_else(|error| panic!("{error}: the reservation cost in\n{summary}"))
+        };
+        let before = extra_slot_seconds();
+        let first = ActiveScenarioRegistration::start(
+            "Harness liveness",
+            "a weighted first attempt",
+            STAND_IN_SCENARIO_LINE,
+            ScenarioLength::Ordinary,
+        );
+        assert_eq!(first.run(), crate::scenario_schedule::ScenarioRun::FIRST);
+        first.start_running(4);
+        nervix_primitives::time::advance(Duration::from_secs(10)).await;
+        let running = extra_slot_seconds();
+        first.enter(ScenarioPhase::Finished);
+        let finished = extra_slot_seconds();
+        assert!(
+            (running - before - 30.0).abs() < 0.05,
+            "{before} then {running}"
+        );
+        assert!(
+            (finished - before - 30.0).abs() < 0.05,
+            "{before} then {finished}"
+        );
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
     async fn the_suite_summary_counts_the_slot_time_a_retry_holds_beyond_one_slot() {
         use crate::{scenario_phase::suite_summary, scenario_schedule::ScenarioLength};
 
         let _serialized = WATCHDOG_REGRESSIONS.lock().await;
         let extra_slot_seconds = || {
             let summary = suite_summary();
-            let Some((_, held)) = summary.split_once("holding ") else {
-                panic!("the summary must say how long retries held extra slots:\n{summary}");
+            let Some((_, held)) = summary.split_once("Reservations: ") else {
+                panic!("the summary must say how long reservations held extra slots:\n{summary}");
             };
-            let Some((seconds, _)) = held.split_once(" slot-seconds beyond one slot each") else {
-                panic!("the summary must say how long retries held extra slots:\n{summary}");
+            let Some((seconds, _)) = held.split_once(" slot-seconds beyond one slot per attempt")
+            else {
+                panic!("the summary must say how long reservations held extra slots:\n{summary}");
             };
             seconds
                 .parse::<f64>()
