@@ -1,13 +1,95 @@
+use nervix_arbitrary::{Arbitrary, Domain};
 use nonzero_ext::nonzero;
 
 use crate::{
     AckMode, BranchSelection, ClusterNodeName, ClusterSchedule, CreateIngestor, CreateJunction,
-    CreateSchema, DomainName, DomainSchedule, EndpointIngestMode, FlushPolicy, GeneralErrorPolicy,
-    HttpEndpointIngestor, HttpIngestor, IngestQuiesceMode, IngestorEntity, KafkaPartitionSchedule,
-    Model, OwnershipStateComponent, ParseAsType, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint,
-    SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor,
+    CreateSchema, CreateWasmProcessor, DomainName, DomainSchedule, EndpointIngestMode, FlushPolicy,
+    GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor, IngestQuiesceMode, IngestorEntity,
+    KafkaPartitionSchedule, Model, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
+    OwnershipTransition, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint, SyslogIngestMode,
+    SyslogIngestor, SyslogListenerIngestor, Unit, WasmProcessorLimits,
 };
+
+#[test]
+fn bolero_scheduled_units_round_trip_through_current_storage_shape() {
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(128)
+        .for_each(|bytes: &[u8]| {
+            let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+            let owner = named::<ClusterNodeName>("node-a");
+            let config = if arbitrary.entropy().flag() {
+                Model::WasmProcessor(CreateWasmProcessor {
+                    name: named("guest"),
+                    from: ProcessorInputs::single(named("input")),
+                    output_routes: ProcessorOutputs::single(named("output")),
+                    branched_by: BranchSelection::unbranched(),
+                    resource: named("guest_bundle"),
+                    resource_version: u64::from(arbitrary.entropy().byte()).max(1),
+                    file: "processors/guest.wasm".to_string(),
+                    limits: WasmProcessorLimits {
+                        max_fuel: nonzero!(1_000_000u64),
+                        max_memory_bytes: nonzero!(67_108_864u64),
+                    },
+                    global_error_policy: GeneralErrorPolicy::Log,
+                    rejected_state_policy: Default::default(),
+                    mode: AckMode::Attached,
+                    filter_where: None,
+                    materialized_state: Vec::new(),
+                })
+            } else {
+                Model::Schema(CreateSchema {
+                    name: named("orders"),
+                    fields: Vec::new(),
+                })
+            };
+            let mut node = ScheduledNode::new(
+                config,
+                SchemaFingerprint::from_digest([arbitrary.entropy().byte(); 32]),
+            )
+            .placed_on(Some(owner.clone()), vec![owner.clone()]);
+            if matches!(node.config.as_ref(), Model::WasmProcessor(_)) {
+                if arbitrary.entropy().flag() {
+                    node.begin_wasm_state_generation();
+                }
+                if arbitrary.entropy().flag() {
+                    node.single_unit_mut().ownership_transition = Some(OwnershipTransition {
+                        id: "unit-handoff".to_string(),
+                        source: named("node-b"),
+                        destination: owner.clone(),
+                        state_recovery: OwnershipStateRecoveryOutcome::Complete,
+                        resets: Vec::new(),
+                    });
+                }
+            }
+            let base = node.single_unit().clone();
+            let ordinal = u32::from(arbitrary.entropy().byte());
+            for unit in [Unit::Partition(ordinal), Unit::Instance(ordinal)] {
+                if arbitrary.entropy().flag() {
+                    let mut placement = base.clone();
+                    placement.primary_node = Some(named("node-b"));
+                    placement.assigned_nodes = vec![named("node-b")];
+                    if let Some(transition) = placement.ownership_transition.as_mut() {
+                        transition.source = owner.clone();
+                        transition.destination = named("node-b");
+                    }
+                    if arbitrary.entropy().flag()
+                        && let Some(generations) = placement.wasm_state_generations.as_mut()
+                    {
+                        generations.begin_every_branch();
+                    }
+                    node.units.insert(unit, placement);
+                }
+            }
+            let schedule = DomainSchedule::new(domain("prod"), [node], Vec::new());
+            let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&schedule)
+                .expect("a current schedule archives");
+            let decoded = rkyv::from_bytes::<DomainSchedule, rkyv::rancor::Error>(&archived)
+                .expect("a current schedule reads from its archive");
+            assert_eq!(decoded, schedule);
+        });
+}
 
 fn named<N>(raw: &str) -> N
 where
@@ -286,7 +368,7 @@ fn placed_schema(raw: &str, primary: &str, assigned: &[&str]) -> ScheduledNode {
 }
 
 #[test]
-fn a_domain_schedule_names_the_entities_a_node_is_the_primary_of_in_schedule_order() {
+fn a_domain_schedule_names_the_units_a_node_is_the_primary_of_in_schedule_order() {
     let schedule = DomainSchedule::new(
         domain("alpha"),
         vec![
@@ -297,13 +379,16 @@ fn a_domain_schedule_names_the_entities_a_node_is_the_primary_of_in_schedule_ord
         Vec::new(),
     );
 
-    let primaries = schedule.primary_entities_on(&named("node-b"));
+    let primaries = schedule.primary_units_on(&named("node-b"));
     let names = primaries
         .iter()
-        .map(|entity| entity.identifier.as_str())
+        .map(|unit| (unit.node.identifier.as_str(), unit.unit))
         .collect::<Vec<_>>();
-    assert_eq!(names, vec!["orders", "refunds"]);
-    assert!(schedule.primary_entities_on(&named("node-c")).is_empty());
+    assert_eq!(
+        names,
+        vec![("orders", Unit::Single), ("refunds", Unit::Single)]
+    );
+    assert!(schedule.primary_units_on(&named("node-c")).is_empty());
 }
 
 #[test]

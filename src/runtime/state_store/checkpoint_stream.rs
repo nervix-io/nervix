@@ -213,6 +213,7 @@ pub(super) mod tests {
             state: RuntimeState::MaterializedRelay {
                 schema: nervix_models::SchemaFingerprint::from_digest([7; 32]).materialized_at(37),
             },
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         };
         let initial = vec![7; 2 * RESTORE_STATE_CHUNK_BYTES + 17];

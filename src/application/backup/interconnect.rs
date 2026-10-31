@@ -27,7 +27,7 @@ use nervix_interconnect::{
     HandlerRegistrationError, RemoteOperationFailure, RemoteOperationSubject,
     StatePlacementEnvelope, StreamHandlerError, StreamingResponse, Transport,
 };
-use nervix_models::{DomainName, DomainStatus, NodeRef, RestoreStateAuthority};
+use nervix_models::{DomainName, DomainStatus, NodeUnitRef, RestoreStateAuthority};
 use nervix_primitives::{
     sync::{Arc, Mutex as AsyncMutex, watch},
     time::Instant,
@@ -276,7 +276,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         quiesced: bool,
         status: DomainStatus,
-        primaries: ahash::HashSet<NodeRef>,
+        primaries: ahash::HashSet<NodeUnitRef>,
         progress: &mut CutProgress,
     ) -> Result<CapturedDomainState, Report<RemoteOperationFailure>> {
         let runtime = self.inner.runtime.clone();
@@ -370,8 +370,7 @@ impl SessionServiceImpl {
             // admission or storage refusal could only fail the cut.
             let mut primaries = ahash::HashSet::default();
             if let Some(schedule) = capture.schedule.domain(&request.domain) {
-                primaries
-                    .extend(schedule.primary_entities_on(self.inner.consensus.local_node_id()));
+                primaries.extend(schedule.primary_units_on(self.inner.consensus.local_node_id()));
             }
             let state = self
                 .capture_local_state(

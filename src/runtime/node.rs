@@ -101,7 +101,7 @@ pub(in crate::runtime) struct RuntimeInner {
     /// Also held by the entity gate deadline task so a failed handoff resumes state timers when
     /// its lease expires.
     pub(in crate::runtime) frozen_ownership_handoff_entities:
-        Arc<DashMap<DomainNodeRef, Arc<OwnershipHandoffFreezeState>, RandomState>>,
+        Arc<DashMap<DomainNodeUnitRef, Arc<OwnershipHandoffFreezeState>, RandomState>>,
     /// Owns the tasks that finish entity-gate engagements and releases and end each lease, so
     /// teardown can end every lease this node holds once its domains have stopped and wait for
     /// them, rather than leave one to a deadline past the node's stop.
@@ -110,7 +110,7 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) active_domain_alters:
         Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
     pub(in crate::runtime) state_identities:
-        DashMap<DomainNodeRef, SharedStateAssignment, RandomState>,
+        DashMap<DomainNodeUnitRef, SharedStateAssignment, RandomState>,
     /// Immutable routes retain the state installed for each replication relationship. Frames and
     /// announcers share those handles with the executing tasks until cold teardown retires them.
     pub(in crate::runtime) state_replication_routing:
@@ -168,11 +168,11 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) replicated_branch_lifecycles:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchLifecycle>, RandomState>,
     pub(in crate::runtime) prepared_runtime_state_handoffs:
-        DashMap<DomainNodeRef, PreparedRuntimeStateHandoff, RandomState>,
+        DashMap<DomainNodeUnitRef, PreparedRuntimeStateHandoff, RandomState>,
     pub(in crate::runtime) activated_runtime_state_handoffs:
-        DashMap<DomainNodeRef, ActivatedRuntimeStateHandoff, RandomState>,
+        DashMap<DomainNodeUnitRef, ActivatedRuntimeStateHandoff, RandomState>,
     pub(in crate::runtime) prepared_forced_runtime_state_recoveries:
-        DashMap<DomainNodeRef, PreparedForcedRuntimeStateRecovery, RandomState>,
+        DashMap<DomainNodeUnitRef, PreparedForcedRuntimeStateRecovery, RandomState>,
     pub(in crate::runtime) prepared_runtime_state_snapshots:
         DashMap<RuntimeStatePlacement, PreparedRuntimeStateSnapshot, RandomState>,
     pub(in crate::runtime) relay_branch_presences:

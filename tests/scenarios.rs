@@ -145,9 +145,10 @@ use crate::common::{
         SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
+    http_proxy::{HttpProxy, PROXY_STOP_BUDGET},
     http_receiver::{
         CapturedRequest, ClientCertificatePolicy, HttpReceiver, LengthPolicy, RECEIVER_STOP_BUDGET,
-        ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
+        ReceiverFault, ReceiverProtocols, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
     iceberg_catalog_gate::IcebergCatalogGate,
     kafka_group_member::ExternalKafkaGroupMember,
@@ -208,6 +209,7 @@ mod domain_resume;
 mod emitter_finish;
 mod endpoint_intake;
 mod generated_http_payloads;
+mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
 mod mqtt_fixtures;
@@ -621,6 +623,8 @@ struct ScenarioWorld {
     unaccepted_addresses: Vec<UnacceptedAddress>,
     /// The HTTP receivers a scenario started, by the name its steps give them.
     http_receivers: BTreeMap<String, HttpReceiver>,
+    /// The forward HTTP proxies a scenario started, by the name its steps give them.
+    http_proxies: BTreeMap<String, HttpProxy>,
     /// The gRPC receivers a scenario started, by the name its steps give them.
     grpc_receivers: BTreeMap<String, GrpcReceiver>,
     /// The transport each OTLP receiver a scenario started serves, by the name its steps give it.
@@ -756,6 +760,7 @@ impl fmt::Debug for ScenarioWorld {
             .field("tcp_forwarders", &self.tcp_forwarders)
             .field("unaccepted_addresses", &self.unaccepted_addresses)
             .field("http_receivers", &self.http_receivers)
+            .field("http_proxies", &self.http_proxies)
             .field("grpc_receivers", &self.grpc_receivers)
             .field("otlp_receivers", &self.otlp_receivers)
             .field(
@@ -1835,9 +1840,12 @@ async fn given_strict_http_receiver_is_running(world: &mut ScenarioWorld, name: 
 
 #[given(expr = "HTTPS receiver {string} is running with a certificate for {string}")]
 async fn given_https_receiver_is_running(world: &mut ScenarioWorld, name: String, hosts: String) {
+    // The certificate's names may name the scenario, so its identity exists before they expand.
+    initialize_scenario_identity(world);
     let options = ReceiverTlsOptions {
         certificate_hosts: certificate_hosts(world, &hosts),
         client_certificate: ClientCertificatePolicy::NotRequested,
+        protocols: ReceiverProtocols::Http1,
     };
     start_http_receiver(
         world,
@@ -1857,9 +1865,12 @@ async fn given_https_receiver_requiring_client_certificates_is_running(
     name: String,
     hosts: String,
 ) {
+    // The certificate's names may name the scenario, so its identity exists before they expand.
+    initialize_scenario_identity(world);
     let options = ReceiverTlsOptions {
         certificate_hosts: certificate_hosts(world, &hosts),
         client_certificate: ClientCertificatePolicy::Required,
+        protocols: ReceiverProtocols::Http1,
     };
     start_http_receiver(
         world,
@@ -16077,19 +16088,38 @@ async fn then_the_background_plexus_execution_fails_with(
     expected: String,
 ) {
     let expected = expand_placeholders(world, &expected);
-    let task = world
-        .background_plexus
-        .take()
-        .expect("a background Plexus execution must be active");
-    let error = task
-        .await
-        .expect("background Plexus task must not panic")
-        .expect_err("background Plexus execution must fail");
+    let error = take_background_plexus_failure(world).await;
     assert!(
         error.contains(&expected),
         "background Plexus error must contain '{expected}', got: {error}"
     );
     world.last_command_error = Some(error);
+}
+
+#[then(expr = "the background Plexus execution fails because either {string} or {string}")]
+async fn then_the_background_plexus_execution_fails_because_either(
+    world: &mut ScenarioWorld,
+    first: String,
+    second: String,
+) {
+    let first = expand_placeholders(world, &first);
+    let second = expand_placeholders(world, &second);
+    let error = take_background_plexus_failure(world).await;
+    assert!(
+        error.contains(&first) || error.contains(&second),
+        "background Plexus error must contain '{first}' or '{second}', got: {error}"
+    );
+    world.last_command_error = Some(error);
+}
+
+async fn take_background_plexus_failure(world: &mut ScenarioWorld) -> String {
+    let task = world
+        .background_plexus
+        .take()
+        .expect("a background Plexus execution must be active");
+    task.await
+        .expect("background Plexus task must not panic")
+        .expect_err("background Plexus execution must fail")
 }
 
 #[then("the background Plexus execution is discarded")]
@@ -33497,15 +33527,16 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
     std::future::pending::<SuiteOutcome>().await
 }
 
-/// Stops every HTTP and gRPC receiver the scenario started, together under one budget, and records
-/// how each stop went. A receiver's port goes back with the scenario's other fixture ports at the
-/// end of cleanup.
+/// Stops every HTTP and gRPC receiver and every HTTP proxy the scenario started, together under one
+/// budget, and records how each receiver's stop went. A receiver's or proxy's port goes back with
+/// the scenario's other fixture ports at the end of cleanup.
 async fn stop_receivers(world: &mut ScenarioWorld) {
     if let Some(peer) = world.websocket_peer.take() {
         peer.stop().await;
     }
     let http_receivers = std::mem::take(&mut world.http_receivers);
     let grpc_receivers = std::mem::take(&mut world.grpc_receivers);
+    let http_proxies = std::mem::take(&mut world.http_proxies);
     world.otlp_receivers.clear();
     let http_stops = join_all(
         http_receivers
@@ -33523,7 +33554,8 @@ async fn stop_receivers(world: &mut ScenarioWorld) {
                 (name, stop)
             }),
     );
-    let (http_stops, grpc_stops) = tokio::join!(http_stops, grpc_stops);
+    let proxy_stops = join_all(http_proxies.into_values().map(HttpProxy::stop));
+    let (http_stops, grpc_stops, _) = tokio::join!(http_stops, grpc_stops, proxy_stops);
     for (name, stop) in http_stops {
         append_cucumber_log_line(&format!("HTTP receiver cleanup: {name}: {stop}"));
         if stop.was_forced() {
@@ -33545,6 +33577,10 @@ async fn stop_receivers(world: &mut ScenarioWorld) {
 const _: () = assert!(
     RECEIVER_STOP_BUDGET.as_nanos() < CLUSTER_TEARDOWN_BUDGET.as_nanos(),
     "stopping the HTTP and gRPC receivers must cost less than stopping the cluster"
+);
+const _: () = assert!(
+    PROXY_STOP_BUDGET.as_nanos() < CLUSTER_TEARDOWN_BUDGET.as_nanos(),
+    "stopping the HTTP proxies must cost less than stopping the cluster"
 );
 
 /// Everything a scenario run may be configured with beyond cucumber's own options.

@@ -55,10 +55,13 @@ impl SessionServiceImpl {
             let RuntimeState::WasmProcessor { schema, generation } = save.placement.state else {
                 continue;
             };
-            let current = node
-                .wasm_state_generations()
-                .map(|generations| generations.of_branch(save.branch_fingerprint.as_ref()));
-            if current != Some(generation) {
+            let Some(unit) = node.units.get(&save.placement.unit) else {
+                continue;
+            };
+            let Some(generations) = unit.wasm_state_generations.as_ref() else {
+                continue;
+            };
+            if generations.of_branch(save.branch_fingerprint.as_ref()) != generation {
                 continue;
             }
             let placement = save.placement.clone();
@@ -67,6 +70,7 @@ impl SessionServiceImpl {
             let descriptor = WasmStateDescriptor {
                 domain: placement.domain.clone(),
                 entity: placement.identifier.clone(),
+                unit: placement.unit,
                 schema,
                 branch_fingerprint,
                 branch: placement
@@ -78,6 +82,7 @@ impl SessionServiceImpl {
             let descriptor_path = SectionPath::wasm_state_descriptor(
                 &placement.domain,
                 &placement.identifier,
+                placement.unit,
                 branch_fingerprint.as_ref(),
             );
             let descriptor_bytes = descriptor.encode().map_err(|error| {
@@ -113,6 +118,7 @@ impl SessionServiceImpl {
             let blob_path = SectionPath::wasm_guest_blob(
                 &placement.domain,
                 &placement.identifier,
+                placement.unit,
                 branch_fingerprint.as_ref(),
             );
             staged.push(CapturedSection {
@@ -202,7 +208,12 @@ pub(super) fn archived_node<'schedule>(
     let node = schedule
         .nodes
         .get(&NodeRef::new(placement.kind, placement.identifier.clone()))?;
-    if node.primary_node.as_ref() != Some(local_node) {
+    if node
+        .units
+        .get(&placement.unit)
+        .and_then(|unit| unit.primary_node.as_ref())
+        != Some(local_node)
+    {
         return None;
     }
     if let StateSchema::Fingerprinted(schema) = placement.state.schema()

@@ -168,8 +168,13 @@ impl Case {
 
         let descriptor = &deduplicator.descriptor;
         let branch = descriptor.branch_fingerprint.as_ref();
-        let keys_path =
-            SectionPath::deduplicator_keys(&descriptor.domain, &descriptor.entity, branch, 0);
+        let keys_path = SectionPath::deduplicator_keys(
+            &descriptor.domain,
+            &descriptor.entity,
+            descriptor.unit,
+            branch,
+            0,
+        );
         let keys_index = self.section_index(&keys_path);
         self.assert_refused(
             |manifest, sections| {
@@ -181,6 +186,7 @@ impl Case {
         let misplaced = SectionPath::deduplicator_keys(
             &descriptor.domain,
             &descriptor.entity,
+            descriptor.unit,
             branch,
             descriptor.groups,
         );
@@ -200,8 +206,13 @@ impl Case {
 
         let descriptor = &window.descriptor;
         let branch = descriptor.branch_fingerprint.as_ref();
-        let arguments_path =
-            SectionPath::window_argument_columns(&descriptor.domain, &descriptor.entity, branch, 0);
+        let arguments_path = SectionPath::window_argument_columns(
+            &descriptor.domain,
+            &descriptor.entity,
+            descriptor.unit,
+            branch,
+            0,
+        );
         let arguments_index = self.section_index(&arguments_path);
         self.assert_refused(
             |manifest, sections| {
@@ -210,8 +221,13 @@ impl Case {
             },
             incomplete("window argument columns"),
         );
-        let input_path =
-            SectionPath::window_input_rows(&descriptor.domain, &descriptor.entity, branch, 0);
+        let input_path = SectionPath::window_input_rows(
+            &descriptor.domain,
+            &descriptor.entity,
+            descriptor.unit,
+            branch,
+            0,
+        );
         let input_index = self.section_index(&input_path);
         self.assert_refused(
             |manifest, sections| {
@@ -220,8 +236,12 @@ impl Case {
             },
             incomplete("window input rows"),
         );
-        let window_descriptor_path =
-            SectionPath::window_descriptor(&descriptor.domain, &descriptor.entity, branch);
+        let window_descriptor_path = SectionPath::window_descriptor(
+            &descriptor.domain,
+            &descriptor.entity,
+            descriptor.unit,
+            branch,
+        );
         let window_descriptor_index = self.section_index(&window_descriptor_path);
         self.assert_refused(
             |manifest, sections| {
@@ -278,6 +298,7 @@ fn missing_window_group_is_refused_when_sequence_ends_at_u64_max() {
     let path = SectionPath::window_descriptor(
         &descriptor.domain,
         &descriptor.entity,
+        descriptor.unit,
         descriptor.branch_fingerprint.as_ref(),
     );
     let index = case.section_index(&path);

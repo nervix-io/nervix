@@ -772,10 +772,14 @@ impl OwnershipHandoffFreezeWatch {
         )
     )]
     pub(in crate::runtime) fn new(runtime: &Runtime, entity: DomainNodeRef) -> Self {
+        Self::for_unit(runtime, DomainNodeUnitRef::single(entity))
+    }
+
+    pub(in crate::runtime) fn for_unit(runtime: &Runtime, unit: DomainNodeUnitRef) -> Self {
         let state = runtime
             .inner
             .frozen_ownership_handoff_entities
-            .entry(entity)
+            .entry(unit)
             .or_default()
             .clone();
         Self::over(state)
@@ -1169,11 +1173,20 @@ impl Runtime {
         );
         if status.is_drained() {
             for entity in affected_entities {
-                self.inner
-                    .frozen_ownership_handoff_entities
-                    .entry(entity.in_domain(domain))
-                    .or_default()
-                    .insert(coordination.clone());
+                let units = if let Some(execution) = self.inner.executions.get(domain)
+                    && let Some(node) = execution.revision.nodes.get(entity)
+                {
+                    node.units.keys().copied().collect::<Vec<_>>()
+                } else {
+                    vec![nervix_models::Unit::Single]
+                };
+                for unit in units {
+                    self.inner
+                        .frozen_ownership_handoff_entities
+                        .entry(DomainNodeUnitRef::new(entity.in_domain(domain), unit))
+                        .or_default()
+                        .insert(coordination.clone());
+                }
             }
         }
         status
@@ -1294,7 +1307,7 @@ impl Runtime {
         ingestors: &DashMap<DomainNodeRef, IngestorRuntime, RandomState>,
         ingestor_quiescence: &DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>,
         frozen_ownership_handoff_entities: &DashMap<
-            DomainNodeRef,
+            DomainNodeUnitRef,
             Arc<OwnershipHandoffFreezeState>,
             RandomState,
         >,
@@ -1326,7 +1339,7 @@ impl Runtime {
         ingestors: &DashMap<DomainNodeRef, IngestorRuntime, RandomState>,
         ingestor_quiescence: &DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>,
         frozen_ownership_handoff_entities: &DashMap<
-            DomainNodeRef,
+            DomainNodeUnitRef,
             Arc<OwnershipHandoffFreezeState>,
             RandomState,
         >,
@@ -1337,10 +1350,12 @@ impl Runtime {
             // The freeze is lifted before the wake, because a waiter that rereads a freeze this
             // release has not lifted yet parks again on a change that has already happened.
             for entity in &hold.affected_entities {
-                let key =
+                let identity =
                     DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
-                if let Some(state) = frozen_ownership_handoff_entities.get(&key) {
-                    state.remove(&hold.coordination);
+                for entry in frozen_ownership_handoff_entities.iter() {
+                    if entry.key().entity == identity {
+                        entry.value().remove(&hold.coordination);
+                    }
                 }
             }
             // Each retained entity slot publishes and wakes its own observers.
@@ -2629,8 +2644,10 @@ mod tests {
             .values_mut()
             .find(|node| node.kind() == ModelKind::Emitter)
             .expect("test schedule must contain its emitter");
-        emitter_node.primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
-        emitter_node.assigned_nodes = vec![ClusterNodeName::parse("node-2").expect("valid name")];
+        emitter_node.single_unit_mut().primary_node =
+            Some(ClusterNodeName::parse("node-2").expect("valid name"));
+        emitter_node.single_unit_mut().assigned_nodes =
+            vec![ClusterNodeName::parse("node-2").expect("valid name")];
         let entity = NodeRef {
             kind: ModelKind::Emitter,
             identifier: ModelName::from(&emitter.name),

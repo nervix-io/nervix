@@ -1689,9 +1689,13 @@ fn add_schedule_impact(
             reassignments,
             dynamic_updates,
         } => {
+            let reassigned_nodes = reassignments
+                .iter()
+                .map(|unit| unit.node.clone())
+                .collect::<Vec<_>>();
             for (nodes, reason) in [
                 (entities.as_slice(), RebuildReason::Configuration),
-                (reassignments.as_slice(), RebuildReason::Ownership),
+                (reassigned_nodes.as_slice(), RebuildReason::Ownership),
             ] {
                 for node in nodes {
                     let attribution = attribution_for_node(
@@ -1725,7 +1729,7 @@ fn add_schedule_impact(
                 }
             }
             for (node, action) in dynamic_update_activations(dynamic_updates) {
-                if entities.contains(&node) || reassignments.contains(&node) {
+                if entities.contains(&node) || reassigned_nodes.contains(&node) {
                     continue;
                 }
                 let attribution = attribution_for_node(
