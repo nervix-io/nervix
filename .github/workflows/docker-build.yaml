@@ -325,6 +325,11 @@ jobs:
         with:
           label: run-benchmarks
 
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
       - name: Run benchmarks
         run: >-
           just benchmark-ci
