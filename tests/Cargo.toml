@@ -1,0 +1,167 @@
+[package]
+description = "The public scenario suite and the harness regressions of Nervix, run against the server library."
+edition.workspace = true
+name = "nervix-scenarios"
+publish = false
+version.workspace = true
+
+[lints]
+workspace = true
+
+[[test]]
+harness = false
+name = "scenarios"
+path = "scenarios.rs"
+
+[[test]]
+name = "harness_liveness"
+path = "harness_liveness.rs"
+
+[features]
+default = []
+# The suite's own process and every server process it starts run as diagnostic nodes. A diagnostic
+# artifact, never a release product.
+deloxide = [
+  "nervix-deadlock/deloxide",
+  "nervix-primitives/deloxide",
+  "nervix-server/deloxide",
+]
+# The same diagnostic mode with compile-time historical lock-order instrumentation.
+deloxide-order = [
+  "deloxide",
+  "nervix-deadlock/deloxide-order",
+  "nervix-primitives/deloxide-order",
+  "nervix-server/deloxide-order",
+]
+# The same diagnostic mode with Deloxide's bounded scheduling disturbance before nested acquisitions
+# of tracked locks.
+deloxide-stress = [
+  "deloxide",
+  "nervix-deadlock/deloxide-stress",
+  "nervix-primitives/deloxide-stress",
+  "nervix-server/deloxide-stress",
+]
+
+# This package has test targets only, and every dependency stays a dev-dependency so that the
+# `testing` feature of the server, which injects faults and weakens password hashing, reaches no
+# ordinary build of the workspace.
+[dev-dependencies]
+ahash = { workspace = true }
+anyhow = { workspace = true }
+apache-avro = { workspace = true }
+arch-into = { workspace = true }
+arrow-array = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
+async-nats = { workspace = true }
+aws-config = { workspace = true }
+aws-credential-types = { workspace = true }
+aws-sdk-sqs = { workspace = true }
+# The SDK crates disable their TLS defaults below; select AWS-LC on their shared client.
+aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
+base64 = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+ciborium = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+cucumber = { workspace = true, features = ["libtest"] }
+error-stack = { workspace = true }
+fjall = { workspace = true }
+flatbuffers = { workspace = true }
+flate2 = { workspace = true }
+futures-util = { workspace = true }
+h2 = { workspace = true }
+hdrhistogram = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+httparse = { workspace = true }
+humantime = { workspace = true }
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, features = [
+  "server",
+  "client-legacy",
+  "tokio",
+  "http1",
+] }
+iceberg = { workspace = true }
+iceberg-catalog-rest = { workspace = true }
+iceberg-storage-opendal = { workspace = true }
+lapin = { workspace = true }
+meticulous = { workspace = true }
+mongodb = { workspace = true }
+# This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
+mysql_async = { workspace = true, features = ["default-rustls"] }
+nervix-approx-into = { workspace = true }
+nervix-backup = { workspace = true }
+nervix-client-core = { workspace = true, features = ["arrow"] }
+nervix-client-ffi = { workspace = true }
+nervix-client-wire = { workspace = true, features = ["grpc"] }
+nervix-connector-kafka = { workspace = true }
+nervix-consensus = { workspace = true }
+# The scenarios read the deadlock evidence diagnostic nodes record.
+nervix-deadlock = { workspace = true }
+nervix-dns = { workspace = true }
+nervix-execution = { workspace = true }
+nervix-interconnect = { workspace = true }
+nervix-models = { workspace = true, features = ["arrow"] }
+nervix-plexus = { workspace = true }
+# The runtime's timer tests advance a paused clock.
+nervix-primitives = { workspace = true, features = ["native", "test-util"] }
+nervix-recovery = { workspace = true }
+nervix-server = { workspace = true, features = ["testing"] }
+nervix-test-environment = { workspace = true }
+nervix-wasm = { workspace = true }
+nix = { workspace = true, features = ["fs", "signal", "term"] }
+# The features the OTEL connector builds the crate with, so the scenarios decode the Export
+# requests it sends without compiling the crate a second time.
+opentelemetry-proto = { workspace = true, features = [
+  "gen-tonic",
+  "logs",
+  "metrics",
+  "trace",
+] }
+ort = { workspace = true, features = [
+  "api-28",
+  "cuda",
+  "load-dynamic",
+  "ndarray",
+  "rocm",
+  "std",
+  "tracing",
+  "webgpu",
+] }
+otel-prost = { workspace = true }
+playwright-rs = { workspace = true }
+pulsar = { workspace = true }
+rcgen = { workspace = true }
+redis = { workspace = true }
+reqwest = { workspace = true, features = [
+  "json",
+  "rustls",
+  "gzip",
+  "brotli",
+  "deflate",
+  "hickory-dns",
+] }
+rstest = { workspace = true }
+rumqttc = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+strum = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tikv-jemalloc-ctl = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-rustls = { workspace = true }
+tokio-tungstenite = { workspace = true, features = ["__rustls-tls", "connect"] }
+tokio-util = { workspace = true, features = ["codec"] }
+tonic = { workspace = true }
+tracing = { workspace = true }
+ubyte = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
+zeromq = { workspace = true }

@@ -5,14 +5,21 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
 env:
+  # Boat machines set en_US.UTF-8, whose collation orders `sort` output differently. Keep the
+  # C.UTF-8 locale of GitHub's runner image, which the scripts and their tests expect.
+  LC_ALL: C.UTF-8
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-  # Kache sizes its local store from the cache volume (5%, rounded and bounded).
-  # Keep the default so a runner disk change also changes its cache budget.
-  KACHE_VERSION: "1.2.1"
+  # scripts/kache_remote.py lets each job's local store hold a quarter of its cache volume, so a
+  # runner's disk still sets the store's budget.
+  KACHE_VERSION: "1.2.2"
   KACHE_REMOTE_KEY_LISTING: "false"
   # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
   KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "68719476736"
   TINYGO_VERSION: "0.41.1"
+  # How many shards run the scenario suite: scenarios-build plans a matrix of this many, and each
+  # shard runs its share of the scenario runs. More shards shorten each shard down to its longest
+  # scenario; see the shards in docs/src/integration-test-lifecycle.md.
+  SCENARIO_SHARDS: "3"
 
 permissions:
   contents: read
@@ -26,7 +33,7 @@ jobs:
   # rerun retains this decision; cancellation is never interpreted as completed test evidence.
   test-selection:
     name: test-selection
-    runs-on: ubicloud-standard-2-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       tests-required: ${{ steps.selection.outputs.tests-required }}
@@ -65,7 +72,7 @@ jobs:
 
   conventional-pr-title:
     if: github.event_name == 'pull_request'
-    runs-on: ubicloud-standard-2-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
@@ -81,7 +88,7 @@ jobs:
 
   checks:
     name: checks
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    runs-on: boat-xlarge
     # Cold validation includes Clippy and the complete compiler matrix.
     timeout-minutes: 120
     steps:
@@ -102,8 +109,8 @@ jobs:
         with:
           components: rustfmt
 
-      # GitHub's runner image, which Ubicloud runs, has no ripgrep, and `just validate-dns-dependencies`
-      # needs it. install-action has no package of its own for ripgrep, so cargo-binstall installs it.
+      # `just validate-dns-dependencies` needs ripgrep, which a runner image need not provide.
+      # install-action has no package of its own for ripgrep, so cargo-binstall installs it.
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
@@ -118,6 +125,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -147,6 +156,13 @@ jobs:
       - name: Install ghokin
         run: python3 scripts/install_go_ci_tool.py ghokin "${RUNNER_TEMP}/go-tool-bootstrap"
 
+      # Boat's base image has Ubuntu's git 2.43, and the test selection passes `--no-lazy-fetch`,
+      # which git 2.44 added. GitHub's runner image takes the current git from this PPA too.
+      - name: Install the current git
+        run: |
+          sudo add-apt-repository --yes ppa:git-core/ppa
+          sudo apt-get install --yes --no-install-recommends git
+
       - name: Install apt deps and current GitHub CLI
         run: |
           set -euo pipefail
@@ -160,7 +176,8 @@ jobs:
           sudo apt install -y \
             gh \
             libcurl4-openssl-dev \
-            protobuf-compiler
+            protobuf-compiler \
+            zstd
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -178,29 +195,51 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
+
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
 
       - name: Runner diagnostics before Validate
         uses: ./.github/actions/runner-diagnostics
         with:
           label: validate
 
+      # Memory limits this job, not CPUs: each recipe's Cargo already uses every CPU, so a recipe
+      # per CPU adds no speed, and on a run that compiled the server cold it overlapped enough
+      # Clippy compilations to pass the runner's 32 GB. Four recipes run at a time.
       - name: Validate
         run: |
           just toolchains-install
-          just validate-ci
+          just validate-ci 4
         env:
           GH_TOKEN: ${{ github.token }}
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-checks
 
       # Every script test, the book tooling's and the docs worker's included, for every pull request:
       # the book build that also runs them runs only for a pull request labeled `book`.
       - name: Setup uv for the script tests
         uses: astral-sh/setup-uv@v6
+
+      # The docs worker's tests run under Node.js. Boat's own Node.js comes from nvm, which a job's
+      # shell may not load.
+      - name: Setup Node.js for the docs worker's tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
 
       - name: Script tests
         run: just test-docs
@@ -247,7 +286,7 @@ jobs:
     name: diagnostic-evidence
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    runs-on: boat-xlarge
     timeout-minutes: 45
     permissions:
       contents: read
@@ -281,6 +320,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -298,11 +339,11 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       - name: Start recording runner load
@@ -353,6 +394,24 @@ jobs:
             echo "::notice::Kache publication did not run because checkout did not provide its script"
           fi
 
+      - name: Publish kache report
+        if: always()
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          overwrite: true
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
   # The Deloxide diagnostic lane, only for a pull request labeled `deloxide`: every workload
   # tests/deloxide-inventory.toml registers, each selection on a runner of its own in the
   # instrumented build of the feature it compiles under the native coverage collector, then the
@@ -363,10 +422,10 @@ jobs:
   deloxide:
     name: deloxide (${{ matrix.selection }})
     if: contains(github.event.pull_request.labels.*.name, 'deloxide')
-    runs-on: ubicloud-standard-16-ubuntu-2404
+    runs-on: boat-xlarge
     # Setup, then at most the lane's bound, the qualification's bound and the reserve the uploads
-    # and the kache report keep after them.
-    timeout-minutes: 200
+    # and the kache report keep after them, within the six hours a Boat CI job may run.
+    timeout-minutes: 360
     strategy:
       # Each selection's verdict and evidence stand on their own.
       fail-fast: false
@@ -399,6 +458,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -450,11 +511,11 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ matrix.selection }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       # The bound covers prerequisites, the inventory's separate build and workload budgets,
@@ -470,10 +531,33 @@ jobs:
         with:
           label: diagnostic-lane
 
-      - name: Diagnostic lane
+      # The lane's 335 minutes begin with its build and end with its coverage export.
+      - name: Build the diagnostic lane
         run: |
           just toolchains-install
-          timeout --signal=TERM --kill-after=60 175m just coverage-native-extras "test-${SELECTION}"
+          echo "LANE_DEADLINE=$(( $(date +%s) + 335 * 60 ))" >> "${GITHUB_ENV}"
+          timeout --signal=TERM --kill-after=60 335m just coverage-native-extras-build "test-${SELECTION}"
+
+      # The cache the build filled is published before the run starts: the run's outcome cannot lose
+      # it, the jobs building beside this one can use it, and its report shows what the build
+      # compiled and what the cache served.
+      - name: Publish kache cache after the build
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Publish kache report after the build
+        run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Diagnostic lane
+        run: |
+          remaining=$(( LANE_DEADLINE - $(date +%s) ))
+          if (( remaining <= 0 )); then
+            echo "::error::The diagnostic lane's build used its whole 335-minute bound"
+            exit 124
+          fi
+          timeout --signal=TERM --kill-after=60 "${remaining}s" just coverage-native-extras "test-${SELECTION}"
 
       - name: Runner diagnostics before Supervision qualification
         uses: ./.github/actions/runner-diagnostics
@@ -528,15 +612,19 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kache-${{ github.job }}-${{ matrix.selection }}-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/kache-report
+          path: |
+            ${{ runner.temp }}/kache-report
+            ${{ runner.temp }}/kache-build-report
           if-no-files-found: warn
 
+  # The workspace's unit tests. The job restores the archive scenarios-build packed into a checkout
+  # of the same revision at the same path, and starts each test executable directly. It compiles
+  # nothing, so it needs neither the build's toolchain setup nor the cache.
   tests:
     name: tests
-    needs: [test-selection]
-    if: needs.test-selection.outputs.tests-required == 'true'
-    runs-on: ubicloud-standard-16-ubuntu-2404
-    timeout-minutes: 60
+    needs: [scenarios-build]
+    runs-on: boat-xlarge
+    timeout-minutes: 30
     permissions:
       contents: read
     env:
@@ -546,8 +634,141 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # The report reads the profiles with the toolchain's own LLVM tools; nothing is compiled. The
+      # toolchain file's components and target are installed here, so no command fetches them.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          targets: wasm32-unknown-unknown
+          components: clippy, llvm-tools
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,cargo-llvm-cov
+
+      - name: Install zstd
+        run: |
+          if ! command -v zstd > /dev/null; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends zstd
+          fi
+
+      # The tests sync their storage below /tmp and the checkout. A single-use runner needs no crash
+      # consistency, so those volumes drop their write barriers, as the build job's kache start step
+      # drops them for its store.
+      - name: Lighten the test volumes
+        run: |
+          python3 scripts/kache_remote.py lighten-volume /tmp
+          python3 scripts/kache_remote.py lighten-volume "${GITHUB_WORKSPACE}"
+
+      - name: Start runner load recorder
+        run: |
+          python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
+
+      - name: Runner diagnostics before Tests coverage
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: tests-coverage
+
+      - name: Download the unit tests
+        uses: ./.github/actions/ci-artifact-download
+        env:
+          R2_ARTIFACTS_BUCKET: ${{ vars.R2_ARTIFACTS_BUCKET }}
+          R2_ARTIFACTS_ENDPOINT: ${{ vars.R2_ARTIFACTS_ENDPOINT }}
+          R2_ARTIFACTS_ACCESS_KEY_ID: ${{ secrets.R2_ARTIFACTS_ACCESS_KEY_ID }}
+          R2_ARTIFACTS_SECRET_ACCESS_KEY: ${{ secrets.R2_ARTIFACTS_SECRET_ACCESS_KEY }}
+        with:
+          name: unit-tests
+          path: ${{ runner.temp }}/unit-tests
+
+      - name: Restore the unit tests
+        run: |
+          just test-coverage-unpack "${RUNNER_TEMP}/unit-tests/unit-tests.tar.zst"
+          rm "${RUNNER_TEMP}/unit-tests/unit-tests.tar.zst"
+
+      - name: Tests coverage
+        run: just test-coverage-run
+
+      - name: Upload tests coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-tests
+          overwrite: true
+          path: |
+            lcov-workspace.info
+            coverage-source-root.txt
+          if-no-files-found: warn
+
+      - name: Publish runner load
+        if: always()
+        run: |
+          if [[ -f "${RUNNER_TEMP}/runner-load.pid" ]]; then
+            kill -TERM "$(cat "${RUNNER_TEMP}/runner-load.pid")" || true
+            for _ in {1..10}; do
+              [[ -f "${RUNNER_TEMP}/runner-load.md" ]] && break
+              sleep 1
+            done
+          fi
+          if [[ -f "${RUNNER_TEMP}/runner-load.md" ]]; then
+            cat "${RUNNER_TEMP}/runner-load.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload runner load
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-load-${{ github.job }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/runner-load.csv
+            ${{ runner.temp }}/runner-load.md
+            ${{ runner.temp }}/runner-load.log
+          if-no-files-found: warn
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          overwrite: true
+          path: tests/logs
+          if-no-files-found: ignore
+
+  # One build of the scenario suite and the unit tests in one target directory, so what they share
+  # compiles once. The scenario executable, the binaries its scenarios start and the generated
+  # inputs they read go into the archive each shard restores, and the test executables into the
+  # archive the tests job restores. The build publishes its cache before anything runs, and then
+  # runs the failed backup cut cleanup check, whose deliberate failures keep a verdict of their own.
+  scenarios-build:
+    name: scenarios-build
+    needs: [test-selection]
+    if: needs.test-selection.outputs.tests-required == 'true'
+    runs-on: boat-xlarge
+    # Setup took up to 13 minutes on Boat, a warm scenario build 10 to 26 and a warm unit test build
+    # 16; the limit also funds a cold build, cache publication, packing and the uploads.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      shards: ${{ steps.shards.outputs.shards }}
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 2
+
+      - name: Plan the scenario shards
+        id: shards
+        run: echo "shards=$(python3 -m scripts.scenario_shards matrix "${SCENARIO_SHARDS}")" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
@@ -568,6 +789,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -594,16 +817,20 @@ jobs:
       - name: Install dockerfmt
         run: python3 scripts/install_go_ci_tool.py dockerfmt "${RUNNER_TEMP}/go-tool-bootstrap"
 
-      - name: Install playwright
-        run: |
-          npm install -g playwright
+      # Boat's own Node.js comes from nvm, which a job's shell may not load, so the build uses the
+      # Node.js this step pins instead.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
 
       - name: Install apt deps
         run: |
           sudo apt update
           sudo apt install -y \
             libcurl4-openssl-dev \
-            protobuf-compiler
+            protobuf-compiler \
+            zstd
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -618,14 +845,16 @@ jobs:
           cache-executables: "true"
           pr-comment: "false"
 
+      # The manifest keeps the name it had before the suite split into shards: a new name starts the
+      # job with nothing to prefetch, and a run cancelled before it publishes leaves the next one cold.
       - name: Start kache remote
         env:
-          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_MANIFEST_KEY: scenarios-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       - name: Start runner load recorder
@@ -633,24 +862,83 @@ jobs:
           python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
 
-      - name: Runner diagnostics before Tests coverage
+      - name: Runner diagnostics before the scenario build
         uses: ./.github/actions/runner-diagnostics
         with:
-          label: tests-coverage
+          label: scenario-build
 
-      - name: Tests coverage
+      - name: Build the scenario suite
         run: |
           just toolchains-install
-          just test-coverage
+          just test-scenarios-coverage-build
 
-      - name: Upload tests coverage
+      # The pack takes every object in the target directory, so it runs before the unit tests join
+      # the scenario suite there.
+      - name: Pack the scenario suite
+        run: just test-scenarios-coverage-pack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
+
+      - name: Build the unit tests
+        run: just test-coverage-binaries
+
+      # The cache the build filled is published before anything runs: no later step can lose it,
+      # the jobs building beside this one can use it, and its report shows what the build compiled
+      # and what the cache served.
+      - name: Publish kache cache after the build
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Publish kache report after the build
+        run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Pack the unit tests
+        run: just test-coverage-pack "${RUNNER_TEMP}/unit-tests/unit-tests.tar.zst"
+
+      # A test job has nothing to run without its archive, so the two archives alone pass through
+      # the R2 bucket, which fails independently of GitHub's artifact service. They are compressed
+      # already, and the jobs of this run are their only readers, so the bucket keeps them for a
+      # day. A rerun of this job replaces them, and a rerun of a test job within that day restores
+      # them; a later one needs this job to run again.
+      - name: Upload the scenario suite
+        uses: ./.github/actions/ci-artifact-upload
+        env:
+          R2_ARTIFACTS_BUCKET: ${{ vars.R2_ARTIFACTS_BUCKET }}
+          R2_ARTIFACTS_ENDPOINT: ${{ vars.R2_ARTIFACTS_ENDPOINT }}
+          R2_ARTIFACTS_ACCESS_KEY_ID: ${{ secrets.R2_ARTIFACTS_ACCESS_KEY_ID }}
+          R2_ARTIFACTS_SECRET_ACCESS_KEY: ${{ secrets.R2_ARTIFACTS_SECRET_ACCESS_KEY }}
+        with:
+          name: scenario-suite
+          path: ${{ runner.temp }}/scenario-suite/scenario-suite.tar.zst
+          compression-level: 0
+          retention: transfer
+          if-no-files-found: error
+
+      - name: Upload the unit tests
+        uses: ./.github/actions/ci-artifact-upload
+        env:
+          R2_ARTIFACTS_BUCKET: ${{ vars.R2_ARTIFACTS_BUCKET }}
+          R2_ARTIFACTS_ENDPOINT: ${{ vars.R2_ARTIFACTS_ENDPOINT }}
+          R2_ARTIFACTS_ACCESS_KEY_ID: ${{ secrets.R2_ARTIFACTS_ACCESS_KEY_ID }}
+          R2_ARTIFACTS_SECRET_ACCESS_KEY: ${{ secrets.R2_ARTIFACTS_SECRET_ACCESS_KEY }}
+        with:
+          name: unit-tests
+          path: ${{ runner.temp }}/unit-tests/unit-tests.tar.zst
+          compression-level: 0
+          retention: transfer
+          if-no-files-found: error
+
+      # These bodies must fail. The supervisor separately requires complete after-hook cleanup;
+      # their failure status is preserved and contributes no ordinary coverage verdict.
+      - name: Failed backup cut cleanup
+        run: just test-backup-cut-cleanup
+
+      - name: Upload failed backup cut cleanup evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-tests
-          path: |
-            lcov-workspace.info
-            coverage-source-root.txt
+          name: backup-cut-cleanup
+          path: target/backup-cut-cleanup.*
           if-no-files-found: warn
 
       - name: Publish runner load
@@ -672,6 +960,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: runner-load-${{ github.job }}
+          overwrite: true
           path: |
             ${{ runner.temp }}/runner-load.csv
             ${{ runner.temp }}/runner-load.md
@@ -704,7 +993,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/kache-report
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/kache-report
+            ${{ runner.temp }}/kache-build-report
           if-no-files-found: warn
 
       - name: Upload Go tool bootstrap logs
@@ -715,22 +1007,22 @@ jobs:
           path: ${{ runner.temp }}/go-tool-bootstrap
           if-no-files-found: ignore
 
-      - name: Upload test logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-logs
-          path: tests/logs
-          if-no-files-found: ignore
-
+  # One shard of the scenario suite. Each shard restores the archive scenarios-build packed into a
+  # checkout of the same revision at the same path, and runs its share of the scenario runs, which
+  # the scenario executable's --shard option deals out. SCENARIO_SHARDS sets how many shards run.
+  # A shard compiles nothing, so it needs neither the build's toolchain setup nor the cache.
   scenarios:
-    name: scenarios
-    needs: [test-selection]
-    if: needs.test-selection.outputs.tests-required == 'true'
-    runs-on: ubicloud-standard-16-ubuntu-2404
-    # The harness derives 105 minutes of scenarios from this limit, with 35 for setup/builds and
-    # 15 for cleanup/export/uploads. Keep tests/common/suite_watchdog.rs in step.
-    timeout-minutes: 155
+    name: scenarios (${{ matrix.shard }} of ${{ strategy.job-total }})
+    needs: [scenarios-build]
+    runs-on: boat-xlarge
+    # The harness derives each shard's 85-minute suite budget from this limit, with 15 minutes for
+    # setup and the archive's restore before it and 15 for cleanup, export and uploads after it.
+    # Keep tests/common/suite_watchdog.rs in step.
+    timeout-minutes: 115
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.scenarios-build.outputs.shards) }}
     permissions:
       contents: read
     env:
@@ -744,124 +1036,86 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
 
+      # The report reads the profiles with the toolchain's own LLVM tools; nothing is compiled. The
+      # toolchain file's components and target are installed here, so no command fetches them.
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
           targets: wasm32-unknown-unknown
+          components: clippy, llvm-tools
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov
 
-      - name: Install Latest LLVM
-        run: |
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 23
-
-      - name: Configure cargo
-        run: |
-          tee <<EOF > ~/.cargo/config.toml
-          [target.x86_64-unknown-linux-gnu]
-          ar = "llvm-ar-23"
-          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
-          EOF
-
-      - name: Setup Go environment
-        uses: actions/setup-go@v5
+      # Boat's own Node.js comes from nvm, which a job's shell may not load, so a global install
+      # goes into the Node.js this step pins instead.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          go-version: "1.26"
-
-      - name: Install TinyGo
-        run: |
-          set -euo pipefail
-          arch="$(dpkg --print-architecture)"
-          case "${arch}" in
-            amd64|arm64) ;;
-            *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
-          esac
-          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
-          sudo dpkg -i /tmp/tinygo.deb
-          tinygo version
-
-      - name: Install dockerfmt
-        run: python3 scripts/install_go_ci_tool.py dockerfmt "${RUNNER_TEMP}/go-tool-bootstrap"
+          node-version: "24"
 
       - name: Install playwright
         run: |
           npm install -g playwright
 
-      - name: Install apt deps
+      - name: Setup uv for Python driver coverage
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install zstd
         run: |
-          sudo apt update
-          sudo apt install -y \
-            libcurl4-openssl-dev \
-            protobuf-compiler
+          if ! command -v zstd > /dev/null; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends zstd
+          fi
 
-      - name: Setup flatc
-        uses: Nugine/setup-flatc@v1
-        with:
-          version: "25.12.19"
-
-      - name: Setup kache
-        uses: kunobi-ninja/kache-action@v1
-        with:
-          version: ${{ env.KACHE_VERSION }}
-          github-cache: "false"
-          cache-executables: "true"
-          pr-comment: "false"
-
-      - name: Start kache remote
-        env:
-          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: python3 scripts/kache_remote.py start
+      # The nodes a scenario starts sync their storage below /tmp. A single-use runner needs no crash
+      # consistency, so the volumes holding it and the checkout drop their write barriers, as the
+      # build job's kache start step drops them for its store.
+      - name: Lighten the scenario volume
+        run: |
+          python3 scripts/kache_remote.py lighten-volume /tmp
+          python3 scripts/kache_remote.py lighten-volume "${GITHUB_WORKSPACE}"
 
       - name: Start runner load recorder
         run: |
           python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
 
-      - name: Setup uv for Python driver coverage
-        uses: astral-sh/setup-uv@v6
-
-      - name: Runner diagnostics before Scenario coverage
+      - name: Runner diagnostics before the scenario shard
         uses: ./.github/actions/runner-diagnostics
         with:
-          label: scenario-coverage
+          label: scenario-shard
+
+      - name: Download the scenario suite
+        uses: ./.github/actions/ci-artifact-download
+        env:
+          R2_ARTIFACTS_BUCKET: ${{ vars.R2_ARTIFACTS_BUCKET }}
+          R2_ARTIFACTS_ENDPOINT: ${{ vars.R2_ARTIFACTS_ENDPOINT }}
+          R2_ARTIFACTS_ACCESS_KEY_ID: ${{ secrets.R2_ARTIFACTS_ACCESS_KEY_ID }}
+          R2_ARTIFACTS_SECRET_ACCESS_KEY: ${{ secrets.R2_ARTIFACTS_SECRET_ACCESS_KEY }}
+        with:
+          name: scenario-suite
+          path: ${{ runner.temp }}/scenario-suite
+
+      - name: Restore the scenario suite
+        run: |
+          just test-scenarios-coverage-unpack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
+          rm "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
 
       - name: Scenario coverage
-        run: |
-          just toolchains-install
-          just test-scenarios-coverage
-
-      # These bodies must fail. The supervisor separately requires complete after-hook cleanup;
-      # their failure status is preserved and contributes no ordinary coverage verdict.
-      - name: Failed backup cut cleanup
-        run: just test-backup-cut-cleanup
-
-      - name: Upload failed backup cut cleanup evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: backup-cut-cleanup
-          path: target/backup-cut-cleanup.*
-          if-no-files-found: warn
+        env:
+          SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
+        run: just test-scenarios-coverage-shard "${SHARD}"
 
       - name: Upload scenarios coverage
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-scenarios
+          name: coverage-scenarios-${{ matrix.shard }}
           overwrite: true
           path: |
             lcov-workspace.info
@@ -887,7 +1141,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: runner-load-${{ github.job }}
+          name: runner-load-${{ github.job }}-${{ matrix.shard }}
           overwrite: true
           path: |
             ${{ runner.temp }}/runner-load.csv
@@ -902,49 +1156,11 @@ jobs:
             cat tests/logs/suite-summary.md >> "${GITHUB_STEP_SUMMARY}"
           fi
 
-      - name: Publish kache cache
-        if: always()
-        timeout-minutes: 4
-        env:
-          JOB_STATUS: ${{ job.status }}
-        run: |
-          if [[ -f scripts/kache_remote.py ]]; then
-            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
-          else
-            echo "::notice::Kache publication did not run because checkout did not provide its script"
-          fi
-
-      - name: Publish kache report
-        if: always()
-        run: |
-          if [[ -f scripts/publish_kache_report.py ]]; then
-            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
-          else
-            echo "::notice::Kache report unavailable because checkout did not provide its script"
-          fi
-
-      - name: Upload kache report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          overwrite: true
-          path: ${{ runner.temp }}/kache-report
-          if-no-files-found: warn
-
-      - name: Upload Go tool bootstrap logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: go-tool-bootstrap-${{ github.job }}
-          path: ${{ runner.temp }}/go-tool-bootstrap
-          if-no-files-found: ignore
-
       - name: Upload scenario logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scenario-logs
+          name: scenario-logs-${{ matrix.shard }}
           overwrite: true
           path: tests/logs
           if-no-files-found: ignore
@@ -952,7 +1168,11 @@ jobs:
   coverage:
     name: coverage
     needs: [tests, scenarios, extra-tests]
-    runs-on: ubicloud-standard-4-ubuntu-2404
+    # extra-tests is skipped without an `extra-*` label, and its report is then not an input.
+    if: >-
+      !cancelled() && needs.tests.result == 'success' && needs.scenarios.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.extra-tests.result)
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -1001,28 +1221,40 @@ jobs:
         run: just install-cargo-crap
 
       - name: Download tests coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: coverage-tests
           path: coverage-inputs/tests
 
+      # Each shard's report lands in its own directory, named after its artifact.
       - name: Download scenarios coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
-          name: coverage-scenarios
-          path: coverage-inputs/scenarios
+          pattern: coverage-scenarios-*
+          path: coverage-inputs
 
       - name: Download native extra coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
-          name: coverage-native-extras
-          path: coverage-inputs/native-extras
+          pattern: coverage-native-extras
+          path: coverage-inputs
 
       # One repository-relative report of the ordinary producers, which every step below reads. The
       # merge leaves out the collections of other modes the native extras artifact holds, and fails
       # rather than publish an incomplete report.
       - name: Merge coverage
-        run: just coverage-merge coverage-inputs/tests coverage-inputs/scenarios coverage-inputs/native-extras
+        run: |
+          # Every shard's report is an input, so a shard whose report is missing fails the merge.
+          scenarios=()
+          for shard in $(seq 1 "${SCENARIO_SHARDS}"); do
+            scenarios+=("coverage-inputs/coverage-scenarios-${shard}")
+          done
+          # The native extras exist only when an `extra-*` label selected a step that collects them.
+          extras=()
+          if [[ -d coverage-inputs/coverage-native-extras ]]; then
+            extras+=(coverage-inputs/coverage-native-extras)
+          fi
+          just coverage-merge coverage-inputs/tests "${scenarios[@]}" "${extras[@]}"
 
       # The pinned cargo-crap scores the repository's Rust sources against the merged report. No score
       # fails the step: it fails only when the analysis cannot describe the report, and it writes its
@@ -1099,7 +1331,7 @@ jobs:
     name: coverage-full
     needs: [test-selection, bolero, coverage, extra-tests, diagnostic-evidence, shuttle, loom, turmoil, deloxide]
     if: ${{ !cancelled() && (needs.test-selection.result != 'success' || needs.test-selection.outputs.tests-required == 'true') }}
-    runs-on: ubicloud-standard-4-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -1125,19 +1357,19 @@ jobs:
             --tests-required "$TESTS_REQUIRED" --bolero-required "$BOLERO_REQUIRED" --jobs "$JOBS"
 
       - name: Download ordinary coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-merged
           path: coverage-full-inputs
 
       - name: Download native extra coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-native-extras
           path: coverage-full-inputs
 
       - name: Download diagnostic evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: diagnostic-evidence
           path: coverage-full-inputs
@@ -1145,37 +1377,37 @@ jobs:
       # The artifacts of label-enabled producers and of the Bolero call. A pattern that matches no
       # artifact downloads nothing; the union then names what the selection required and lacks.
       - name: Download Shuttle coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-shuttle
           path: coverage-full-inputs
 
       - name: Download Loom coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-loom
           path: coverage-full-inputs
 
       - name: Download Turmoil coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-turmoil
           path: coverage-full-inputs
 
       - name: Download Deloxide lane coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: deloxide-*
           path: coverage-full-inputs
 
       - name: Download combined fuzz coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-bolero-fuzz
           path: coverage-full-inputs
 
       - name: Download Bolero selection
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: bolero-selection
           path: coverage-full-inputs
@@ -1205,7 +1437,10 @@ jobs:
   client-conformance:
     name: client-conformance
     if: contains(github.event.pull_request.labels.*.name, 'client-conformance')
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    # Blacksmith's 16-CPU, 64 GB runner. On Boat, kache's downloads spent most of their time waiting
+    # for its store's lock, 4.6 seconds each against 0.4 on Blacksmith, and in Check run 40991534806
+    # the build hit 53% of the cache and took 49 of the job's 60 minutes.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     # The suite budget below is derived from this limit: builds before the scenarios, then at most
     # the budget, then the reserve the harness keeps for its own cleanup and the log upload.
     timeout-minutes: 60
@@ -1327,10 +1562,25 @@ jobs:
         with:
           label: client-conformance
 
-      - name: Client conformance
+      - name: Build the conformance probes and suite
         run: |
           just toolchains-install
-          just test-client-conformance
+          just build-client-conformance-tests
+
+      # The cache the build filled is published before the run starts: the run's outcome cannot lose
+      # it, the jobs building beside this one can use it, and its report shows what the build
+      # compiled and what the cache served.
+      - name: Publish kache cache after the build
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Publish kache report after the build
+        run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Client conformance
+        run: just test-client-conformance-run
 
       - name: Publish runner load
         if: always()
@@ -1360,7 +1610,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/kache-report
+          path: |
+            ${{ runner.temp }}/kache-report
+            ${{ runner.temp }}/kache-build-report
           if-no-files-found: warn
 
       - name: Upload test logs
@@ -1380,10 +1632,14 @@ jobs:
   extra-tests:
     name: extra-tests
     needs: [test-selection]
-    if: needs.test-selection.outputs.tests-required == 'true'
-    # Half the suite job's cores saves capacity. Budget cold ordinary instrumentation,
-    # compiler checks and modeled primitive builds.
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    # It runs for a pull request with an `extra-*` label, and each label selects its own steps, so
+    # a pull request pays only for the checks it asks for.
+    if: >-
+      needs.test-selection.outputs.tests-required == 'true' &&
+      contains(join(github.event.pull_request.labels.*.name, ' '), 'extra-')
+    # Its builds fill about 95 GiB of disk, which only Boat's largest machine holds with room to
+    # spare. Budget cold ordinary instrumentation, compiler checks and modeled primitive builds.
+    runs-on: boat-xlarge
     timeout-minutes: 120
     permissions:
       contents: read
@@ -1418,6 +1674,8 @@ jobs:
       # interchangeable in the shared cache rather than a second set of artifacts.
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -1440,6 +1698,13 @@ jobs:
           curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
+
+      # Boat's base image has Ubuntu's git 2.43, and the test selection passes `--no-lazy-fetch`,
+      # which git 2.44 added. GitHub's runner image takes the current git from this PPA too.
+      - name: Install the current git
+        run: |
+          sudo add-apt-repository --yes ppa:git-core/ppa
+          sudo apt-get install --yes --no-install-recommends git
 
       - name: Install apt deps
         run: |
@@ -1469,11 +1734,11 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       # Cheapest first, so a workspace that does not build at all is named in seconds rather than
@@ -1484,151 +1749,185 @@ jobs:
           phase: start
 
       - name: Runner diagnostics before Capability doctests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-doctests')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: capability-doctests
 
       - name: Capability doctests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-doctests')
         run: |
           just toolchains-install
           just test-capability-docs
 
       - name: Runner diagnostics before Expiry map Miri
+        if: contains(github.event.pull_request.labels.*.name, 'extra-miri')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: expiry-map-miri
 
       - name: Expiry map Miri
+        if: contains(github.event.pull_request.labels.*.name, 'extra-miri')
         run: just test-expiry-map-miri
 
       - name: Runner diagnostics before Expiry map mutation tests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-mutation')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: expiry-map-mutation-tests
 
       - name: Expiry map mutation tests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-mutation')
         run: just test-expiry-map-mutants
 
       - name: Setup uv for runner coverage
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         uses: astral-sh/setup-uv@v6
 
       - name: Patch coverage reporter
-        run: |
-          just coverage-patch-runner
-          pwd > target/coverage-source-root.txt
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
+        run: just coverage-patch-runner
 
       - name: Ordinary coverage merge
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-merge-runner
 
       - name: CRAP report
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-crap-report-runner
 
       - name: Full coverage union
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-full-runner
 
       - name: Paced simulation Python open policy
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-paced-simulation-python
 
       - name: Release evidence gate
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-release-evidence
 
       - name: Kubernetes deployment controller
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-operator-deployment
 
       - name: Kache remote contract
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-kache-ci
 
       - name: Plexus connector matrix renderer
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-connector-matrix
 
       # Every pull request whose diff requires the suites tests the source selection and the console
       # build's tooling here; the Bolero randomized job, which also runs them, needs `bolero-random`.
       - name: CI test selection
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-ci-selection
 
       - name: Web console wasm-bindgen CLI
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-wasm-bindgen
 
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-model-runner
 
       - name: Runner diagnostics before Source contracts, compiler diagnostics and paired API doctests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-compiler')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: source-contracts-compiler-diagnostics-and-paired-api-doctests
 
       - name: Source contracts, compiler diagnostics and paired API doctests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-compiler')
         run: just coverage-native-extras test-typed-ratchet
 
       - name: Runner diagnostics before Compiler cache changes, interruption and runner qualification
+        if: contains(github.event.pull_request.labels.*.name, 'extra-compiler')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: compiler-cache-changes-interruption-and-runner-qualification
 
       - name: Compiler cache changes, interruption and runner qualification
+        if: contains(github.event.pull_request.labels.*.name, 'extra-compiler')
         run: |
           just qualify-typed-ratchet-cache
           just coverage-typed-ratchet-python
 
       - name: Primitive source and thread owner validation coverage
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-primitive-boundary
 
       # The completed doctests no longer need their compiled outputs. Keep their evidence while
       # making room for the separately instrumented benchmark build.
       - name: Reclaim completed documentation builds
+        if: contains(github.event.pull_request.labels.*.name, 'extra-compiler')
         run: just clean-ci-docs
 
       # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
       # without treating noisy shared-runner timings as a performance regression signal. The run is
       # instrumented for source coverage, so its timings are not a measurement either.
       - name: Runner diagnostics before Benchmark smoke tests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-bench-smoke')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: benchmark-smoke-tests
 
       - name: Benchmark smoke tests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-bench-smoke')
         run: just coverage-native-extras bench-smoke
 
       # The collector has exported its report and recorded completion before this runs. Release
       # the benchmark's dev-profile build outputs while retaining every coverage record.
       - name: Reclaim completed benchmark builds
+        if: contains(github.event.pull_request.labels.*.name, 'extra-bench-smoke')
         run: just clean-ci-benchmarks
 
       # The primitive boundary's native conformance collected separately in every execution mode.
       - name: Runner diagnostics before Primitive boundary conformance
+        if: contains(github.event.pull_request.labels.*.name, 'extra-primitives')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: primitive-boundary-conformance
 
       - name: Primitive boundary conformance
+        if: contains(github.event.pull_request.labels.*.name, 'extra-primitives')
         run: just coverage-native-extras test-primitives
 
       - name: Runner diagnostics before Primitive boundary compile and browser checks
+        if: contains(github.event.pull_request.labels.*.name, 'extra-primitives')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: primitive-boundary-compile-and-browser-checks
 
       - name: Primitive boundary compile and browser checks
+        if: contains(github.event.pull_request.labels.*.name, 'extra-primitives')
         run: just test-primitives-compile
 
       # The walk saturates every core, and its failures are about completion reachability rather
       # than about any one test.
       - name: Runner diagnostics before Plexus completion walk
+        if: contains(github.event.pull_request.labels.*.name, 'extra-completion-walk')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: plexus-completion-walk
 
       - name: Plexus completion walk
+        if: contains(github.event.pull_request.labels.*.name, 'extra-completion-walk')
         run: just coverage-native-extras plexus-completion-walk
 
       - name: Runner diagnostics before Plexus connector declaration export
+        if: contains(github.event.pull_request.labels.*.name, 'extra-connector-matrix')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: plexus-connector-declaration-export
 
       - name: Plexus connector declaration export
+        if: contains(github.event.pull_request.labels.*.name, 'extra-connector-matrix')
         run: just coverage-native-extras validate-connector-matrix
 
       # Each collection's report, completion record, executions and export diagnostics, whatever
@@ -1640,6 +1939,13 @@ jobs:
         with:
           phase: finish
           artifact-name: runner-load-extra-tests
+
+      # Every step's report is rooted here, whichever labels selected them.
+      - name: Record the coverage source root
+        if: always()
+        run: |
+          mkdir -p target
+          pwd > target/coverage-source-root.txt
 
       - name: Upload native extra coverage
         if: always()
@@ -1667,7 +1973,7 @@ jobs:
             target/wasm-bindgen-coverage/python.lcov
             target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json
-          if-no-files-found: warn
+          if-no-files-found: ignore
 
       - name: Publish kache cache
         if: always()
@@ -1699,7 +2005,7 @@ jobs:
   shuttle:
     name: shuttle
     if: contains(github.event.pull_request.labels.*.name, 'shuttle')
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    runs-on: boat-xlarge
     timeout-minutes: 240
     permissions:
       contents: read
@@ -1727,6 +2033,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -1778,11 +2086,11 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       # Every registered Shuttle check under its exploration and under the nondeterminism detector,
@@ -1797,10 +2105,25 @@ jobs:
         with:
           label: shuttle-concurrency-checks
 
-      - name: Shuttle concurrency checks
+      - name: Build the Shuttle checks
         run: |
           just toolchains-install
-          just coverage-native-extras test-shuttle
+          just coverage-native-extras-build test-shuttle
+
+      # The cache the build filled is published before the run starts: the run's outcome cannot lose
+      # it, the jobs building beside this one can use it, and its report shows what the build
+      # compiled and what the cache served.
+      - name: Publish kache cache after the build
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Publish kache report after the build
+        run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Shuttle concurrency checks
+        run: just coverage-native-extras test-shuttle
 
       - name: Runner diagnostics before Shuttle schedule replay
         uses: ./.github/actions/runner-diagnostics
@@ -1851,7 +2174,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/kache-report
+          path: |
+            ${{ runner.temp }}/kache-report
+            ${{ runner.temp }}/kache-build-report
           if-no-files-found: warn
 
       # A modeled concurrency failure is only reproducible from the schedule that produced it,
@@ -1877,7 +2202,7 @@ jobs:
   loom:
     name: loom
     if: contains(github.event.pull_request.labels.*.name, 'loom')
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    runs-on: boat-xlarge
     # The models took 10 to 11 minutes on a warm cache. The limit leaves room for a cold
     # instrumented build and for the models the inventory adds.
     timeout-minutes: 60
@@ -1887,6 +2212,9 @@ jobs:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
+      # Sixteen compilers of the instrumented Loom build exceeded the 32 GB of Boat's 16-CPU
+      # machine, so the build keeps the eight it had on an 8-CPU, 32 GB runner.
+      CARGO_BUILD_JOBS: "8"
     steps:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
@@ -1907,6 +2235,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -1941,11 +2271,11 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       # Every registered Loom model of a production owner explored to exhaustion. The proof that
@@ -1961,10 +2291,25 @@ jobs:
         with:
           label: loom-memory-ordering-models
 
-      - name: Loom memory-ordering models
+      - name: Build the Loom models
         run: |
           just toolchains-install
-          just coverage-native-extras test-loom
+          just coverage-native-extras-build test-loom
+
+      # The cache the build filled is published before the run starts: the run's outcome cannot lose
+      # it, the jobs building beside this one can use it, and its report shows what the build
+      # compiled and what the cache served.
+      - name: Publish kache cache after the build
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Publish kache report after the build
+        run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Loom memory-ordering models
+        run: just coverage-native-extras test-loom
 
       - name: Publish runner load
         if: always()
@@ -2007,7 +2352,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/kache-report
+          path: |
+            ${{ runner.temp }}/kache-report
+            ${{ runner.temp }}/kache-build-report
           if-no-files-found: warn
 
       # A failed Loom model is only reproducible from the checkpoint of the execution that failed;
@@ -2032,7 +2379,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2]
-    runs-on: ubicloud-standard-8-ubuntu-2404
+    # Blacksmith's 16-CPU, 64 GB runner. On Boat, kache's downloads spent most of their time waiting
+    # for its store's lock, 1.8 and 2.8 seconds each against 0.4 on Blacksmith, and in Check run
+    # 40991534806 both shards reached the two-hour limit after about 107 minutes of compiling.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 120
     permissions:
       contents: read
@@ -2184,7 +2534,7 @@ jobs:
   turmoil:
     name: turmoil
     if: contains(github.event.pull_request.labels.*.name, 'turmoil')
-    runs-on: ubicloud-standard-4-ubuntu-2404
+    runs-on: boat-large
     # The emergency guard around the build, the tests and the upload. The tests end themselves
     # first: every run has its own real-time bound, and `just test-turmoil` gives all of them
     # together an 8-minute budget, which ends a wedged run with status 124 and leaves the record
@@ -2226,6 +2576,8 @@ jobs:
       # shares with them compile identically.
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -2248,11 +2600,11 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       - name: Start recording runner load
@@ -2265,10 +2617,25 @@ jobs:
         with:
           label: turmoil-simulations
 
-      - name: Turmoil simulations
+      - name: Build the Turmoil simulations
         run: |
           just toolchains-install
-          just coverage-native-extras test-turmoil --output target/turmoil.lcov
+          just coverage-native-extras-build test-turmoil
+
+      # The cache the build filled is published before the run starts: the run's outcome cannot lose
+      # it, the jobs building beside this one can use it, and its report shows what the build
+      # compiled and what the cache served.
+      - name: Publish kache cache after the build
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Publish kache report after the build
+        run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Turmoil simulations
+        run: just coverage-native-extras test-turmoil --output target/turmoil.lcov
 
       - name: Runner diagnostics before Turmoil failure replay
         uses: ./.github/actions/runner-diagnostics
@@ -2334,7 +2701,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/kache-report
+          path: |
+            ${{ runner.temp }}/kache-report
+            ${{ runner.temp }}/kache-build-report
           if-no-files-found: warn
 
       # A failed scenario is reproducible only from its record: the seed and every other input,

@@ -1856,6 +1856,9 @@ class Package:
     crate_types: frozenset[str]
     # The binaries the manifest declares, each with its crate root when the manifest names one.
     declared_binaries: tuple[tuple[str, str | None], ...]
+    # The dependencies a build of this package links, which a mode feature has to reach: the normal
+    # ones, and the dev-dependencies too when only tests build the package.
+    built_with: frozenset[str]
 
 
 def _dependency_tables(document: Mapping[str, object]) -> Iterator[tuple[str, Mapping[str, object]]]:
@@ -1917,6 +1920,15 @@ def tracked_files(root: Path) -> list[str]:
     return sorted(entry for entry in entries if not entry.startswith(excluded))
 
 
+def _has_test_targets_only(document: Mapping[str, object], directory: Path) -> bool:
+    """Whether a manifest declares test targets and its package has no library or binary, so that
+    nothing but its tests ever builds it."""
+
+    if "test" not in document or "lib" in document or "bin" in document:
+        return False
+    return not any((directory / "src" / root).is_file() for root in ("lib.rs", "main.rs"))
+
+
 def load_packages(root: Path, files: Sequence[str]) -> list[Package]:
     """Every package a tracked or new manifest declares: the workspace members, including new ones,
     and the standalone packages that have a workspace of their own."""
@@ -1948,6 +1960,13 @@ def load_packages(root: Path, files: Sequence[str]) -> list[Package]:
                 dependencies.append(Dependency(key=key, package=package, kind=kind, entry=entry))
                 if kind == "dependencies":
                     normal.add(package)
+        built_with = set(normal)
+        if _has_test_targets_only(document, root / manifest_path.parent):
+            built_with.update(
+                dependency.package
+                for dependency in dependencies
+                if dependency.kind == "dev-dependencies"
+            )
         library = document.get("lib", {})
         crate_types = library.get("crate-type", []) if isinstance(library, dict) else []
         declared_binaries: list[tuple[str, str | None]] = []
@@ -1969,6 +1988,7 @@ def load_packages(root: Path, files: Sequence[str]) -> list[Package]:
                 dependencies=tuple(dependencies),
                 crate_types=frozenset(crate_types),
                 declared_binaries=tuple(declared_binaries),
+                built_with=frozenset(built_with),
             )
         )
     return packages
@@ -2129,7 +2149,7 @@ def check_manifests(packages: Sequence[Package]) -> list[str]:
             if enabled is None:
                 continue
             forwarded = set(enabled)
-            if OWNER not in package.normal:
+            if OWNER not in package.built_with:
                 problems.append(
                     f"{package.manifest}: {RULE}: `{mode}` is a mode feature, so the package "
                     f"depends on {OWNER} directly to select it"
@@ -2139,7 +2159,7 @@ def check_manifests(packages: Sequence[Package]) -> list[str]:
                     f"{package.manifest}: {RULE}: feature `{mode}` does not forward "
                     f"`{OWNER}/{mode}`"
                 )
-            for dependency in sorted(package.normal):
+            for dependency in sorted(package.built_with):
                 owner = by_name.get(dependency)
                 if owner is None or dependency == OWNER or mode not in owner.features:
                     continue
