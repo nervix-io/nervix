@@ -974,6 +974,23 @@ consumers and producers it runs, which the client refuses. The Kafka-specific de
 generated grammar conformance and one-/three-node public declaration scenarios qualify these facts
 together.
 
+`PULSAR TOPIC` shares one topic rule between ingestion and emission: a local name, which the
+connector places in its client's namespace, or a fully qualified
+`persistent://tenant/namespace/topic` or `non-persistent://tenant/namespace/topic`, sent as
+written; at most 1,024 bytes without whitespace, control characters or an empty level. The
+ingestor names a subscription of 1 to 255 bytes with its declared owner, declares `NO ACK`,
+`ACK SEQUENTIAL` and `ACK PARALLEL` in Pulsar's own delivery-mode type, and quiesces only by
+`SUSPEND`, since the durable subscription keeps its backlog. The emitter declares `NO ACK` and
+`ACK` publishing and optional batching under the `maxMessageSize` the broker announces. Message
+properties are headers in both directions, `ordered_repeats` on ingestion and `last_wins` on
+emission. A Pulsar client declares only the keys both directions read. `namespace` holds exactly a
+tenant and a namespace, with the default `public/default` written once in the declaration, and topic
+qualification reads that effective value, so a namespace that cannot qualify a topic is refused at
+`CREATE`. `tls_ca_file`, `tls_allow_insecure_connection` and `tls_hostname_verification_enabled`
+require a `pulsar+ssl` address, since a plaintext connection uses none of them. The
+Pulsar-specific declaration tests, generated grammar conformance and one-/three-node public
+declaration scenarios qualify these facts together.
+
 Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
 endpoint ingestors reference endpoints, while a Syslog listener references a client; all three
 declare every-node execution. Scheduling and placement-reference completion read that capability,

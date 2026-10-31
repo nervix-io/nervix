@@ -415,6 +415,9 @@ current connection, retry and deadline limits.
   failures and which subscription `ALTER` retains or removes. Changing only consumer policy or
   handing the same subscription to `PROVISIONED` preserves its backlog; a changed broker, qualified
   topic or subscription name retires the preceding owned subscription best-effort.
+- A `PULSAR CLIENT`'s `namespace` is exactly `'tenant/namespace'` (default `public/default`), and
+  its TLS keys require a `pulsar+ssl://` `addr`; check both against `Ingestors` → `Pulsar` before
+  generating a client.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
   SUSPEND` and nothing else: no external connector client, codec, `DECODE USING`, headers, or `NO ACK`. The

@@ -607,7 +607,7 @@ Transport-specific schemes and keys:
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
+- `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`, which is primarily useful for SQS-compatible local/test endpoints. An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
@@ -1253,10 +1253,19 @@ in the declared `options:` row.
 Client config currently supports:
 
 - `'addr'`: broker address such as `'pulsar://127.0.0.1:6650'`
-- optional `'namespace'`: defaults short topic names to `persistent://public/default/<topic>`; fully qualified topic names are accepted as-is
+- optional `'namespace'`: the tenant and namespace, written `'tenant/namespace'`, that a short
+  topic name is placed in, so `TOPIC 'orders'` reads `persistent://<namespace>/orders`; defaults to
+  `public/default`, which `DESCRIBE CLIENT` shows as a default. Fully qualified topic names are sent
+  as written.
 - optional `'tls_ca_file'`: PEM-encoded CA bundle for `pulsar+ssl://...` connections
 - optional `'tls_allow_insecure_connection'`: `true` or `false`; defaults to `false`
 - optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
+
+The three TLS keys apply only to a `pulsar+ssl://...` address. A plaintext `pulsar://...`
+connection uses none of them, so `CREATE PULSAR CLIENT` refuses them there. It also refuses a
+`namespace` that is not exactly a tenant and a namespace, each nonempty and without whitespace or
+control characters, such as `'tenant-a'` or `'tenant-a/orders/eu'`, because no topic qualified
+with it is a valid Pulsar topic.
 
 Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
 
