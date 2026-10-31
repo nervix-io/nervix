@@ -337,6 +337,7 @@ impl Runtime {
             state: step.state,
             kind: branch_lru.kind,
             identifier: branch_lru.identifier.clone(),
+            unit: branch_lru.unit,
             branch_key: step.branch.clone(),
         };
         if !lifecycle.placement_is_current(&placement) {

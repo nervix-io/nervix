@@ -49,6 +49,7 @@ fn materialized_owner_cost() {
                 },
                 kind: ModelKind::Relay,
                 identifier: ModelName::parse("profiles").assured("valid relay"),
+                unit: nervix_models::Unit::Single,
                 branch_key: None,
             },
             record.arrow_schema(),

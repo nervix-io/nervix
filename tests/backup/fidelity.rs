@@ -135,11 +135,13 @@ impl ArchiveValues {
                         SectionPath::wasm_guest_blob(
                             &record.domain,
                             &record.entity,
+                            record.unit,
                             record.branch_fingerprint.as_ref(),
                         ),
                         SectionPath::wasm_guest_blob(
                             target,
                             &record.entity,
+                            record.unit,
                             record.branch_fingerprint.as_ref(),
                         ),
                     );
@@ -150,6 +152,7 @@ impl ArchiveValues {
                         SectionPath::wasm_state_descriptor(
                             target,
                             &record.entity,
+                            record.unit,
                             record.branch_fingerprint.as_ref(),
                         ),
                         record
@@ -162,7 +165,7 @@ impl ArchiveValues {
                         .assured("the original offsets validate");
                     record.domain = target.clone();
                     (
-                        SectionPath::kafka_offsets(target, &record.entity),
+                        SectionPath::kafka_offsets(target, &record.entity, record.unit),
                         record
                             .encode()
                             .assured("the restored-offset expectation encodes"),
@@ -173,7 +176,12 @@ impl ArchiveValues {
                         .assured("the original branch lifecycle validates");
                     record.domain = target.clone();
                     (
-                        SectionPath::branch_lifecycle(target, record.owner_kind, &record.entity),
+                        SectionPath::branch_lifecycle(
+                            target,
+                            record.owner_kind,
+                            &record.entity,
+                            record.unit,
+                        ),
                         record
                             .encode()
                             .assured("the restored-lifecycle expectation encodes"),
@@ -188,12 +196,19 @@ impl ArchiveValues {
                             SectionPath::materialized_columns(
                                 &record.domain,
                                 &record.entity,
+                                record.unit,
                                 group,
                             ),
-                            SectionPath::materialized_columns(target, &record.entity, group),
+                            SectionPath::materialized_columns(
+                                target,
+                                &record.entity,
+                                record.unit,
+                                group,
+                            ),
                         );
                     }
-                    let target_path = SectionPath::materialized_descriptor(target, &record.entity);
+                    let target_path =
+                        SectionPath::materialized_descriptor(target, &record.entity, record.unit);
                     // RESTORE clears source-process authority. A stopped domain re-exports
                     // the stored checkpoint, whose fence is explicitly reset to zero.
                     record.fence = 0;
@@ -211,7 +226,12 @@ impl ArchiveValues {
                             .assured("the original materialized identities validate");
                     record.domain = target.clone();
                     (
-                        SectionPath::materialized_identities(target, &record.entity, record.group),
+                        SectionPath::materialized_identities(
+                            target,
+                            &record.entity,
+                            record.unit,
+                            record.group,
+                        ),
                         record
                             .encode()
                             .assured("the restored identity expectation encodes"),
@@ -227,12 +247,14 @@ impl ArchiveValues {
                             SectionPath::deduplicator_keys(
                                 &record.domain,
                                 &record.entity,
+                                record.unit,
                                 branch.as_ref(),
                                 group,
                             ),
                             SectionPath::deduplicator_keys(
                                 target,
                                 &record.entity,
+                                record.unit,
                                 branch.as_ref(),
                                 group,
                             ),
@@ -243,6 +265,7 @@ impl ArchiveValues {
                         SectionPath::deduplicator_descriptor(
                             target,
                             &record.entity,
+                            record.unit,
                             branch.as_ref(),
                         ),
                         record
@@ -259,12 +282,14 @@ impl ArchiveValues {
                             SectionPath::window_input_rows(
                                 &record.domain,
                                 &record.entity,
+                                record.unit,
                                 branch.as_ref(),
                                 group,
                             ),
                             SectionPath::window_input_rows(
                                 target,
                                 &record.entity,
+                                record.unit,
                                 branch.as_ref(),
                                 group,
                             ),
@@ -273,12 +298,14 @@ impl ArchiveValues {
                             SectionPath::window_argument_columns(
                                 &record.domain,
                                 &record.entity,
+                                record.unit,
                                 branch.as_ref(),
                                 group,
                             ),
                             SectionPath::window_argument_columns(
                                 target,
                                 &record.entity,
+                                record.unit,
                                 branch.as_ref(),
                                 group,
                             ),
@@ -286,7 +313,12 @@ impl ArchiveValues {
                     }
                     record.domain = target.clone();
                     (
-                        SectionPath::window_descriptor(target, &record.entity, branch.as_ref()),
+                        SectionPath::window_descriptor(
+                            target,
+                            &record.entity,
+                            record.unit,
+                            branch.as_ref(),
+                        ),
                         record
                             .encode()
                             .assured("the restored window expectation encodes"),

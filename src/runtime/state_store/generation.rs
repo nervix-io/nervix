@@ -37,7 +37,7 @@ const MAX_STORAGE_KEY_BYTES: usize = (1_usize << u16::BITS) - 1;
 pub(super) const CHUNK_COORDINATE_BYTES: usize = 2 * std::mem::size_of::<u64>() + 2;
 const _: () = assert!(MAX_PLACEMENT_BYTES + CHUNK_COORDINATE_BYTES <= MAX_STORAGE_KEY_BYTES);
 const _: () = assert!(StoredCheckpoint::SEGMENTED_BYTES <= RESTORE_STATE_CHUNK_BYTES);
-pub(super) const STORAGE_FORMAT: &[u8] = b"namespaced-checkpoint-segments";
+pub(super) const STORAGE_FORMAT: &[u8] = b"unit-keyed-checkpoint-segments";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StateNamespace {

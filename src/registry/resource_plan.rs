@@ -17,7 +17,7 @@ use error_stack::{Report, ResultExt as _};
 use nervix_models::{
     ClusterNodeName, CodecName, CreateUdf, CreateWasmProcessor, DomainClockPeriod, DomainName,
     FieldName, FlushPolicy, GeneratorName, LookupName, MessageErrorPolicy, Model, ModelKind,
-    ModelName, RelayName, ResolvedBranching, ResourceId, ScheduledNode, ScheduledNodes,
+    ModelName, RelayName, ResolvedBranching, ResourceId, ScheduledNode, ScheduledNodes, Unit,
 };
 use nervix_primitives::sync::Arc;
 use nervix_roto::UdfProgram;
@@ -79,33 +79,52 @@ pub(crate) enum ResourcePlanError {
     MissingWasmGenerations { processor: ModelName },
 }
 
-/// Assignment from the same scheduled entry whose declaration produced a resource plan.
+/// Assignment of one execution unit from the same schedule as its resource plan.
 #[derive(Debug, Clone)]
-pub(crate) struct PlannedNodeAssignment {
+pub(crate) struct PlannedUnitAssignment {
     primary: Option<ClusterNodeName>,
     assigned: BTreeSet<ClusterNodeName>,
+}
+
+/// The unit-keyed assignments of the scheduled entry that produced a resource plan.
+#[derive(Debug, Clone)]
+pub(crate) struct PlannedNodeAssignment {
+    pub(crate) units: BTreeMap<Unit, PlannedUnitAssignment>,
 }
 
 impl PlannedNodeAssignment {
     fn from_scheduled(node: &ScheduledNode) -> Self {
         Self {
-            primary: node.primary_node.clone(),
-            assigned: node.assigned_nodes.iter().cloned().collect(),
+            units: node
+                .units
+                .iter()
+                .map(|(unit, assignment)| {
+                    (
+                        *unit,
+                        PlannedUnitAssignment {
+                            primary: assignment.primary_node.clone(),
+                            assigned: assignment.assigned_nodes.iter().cloned().collect(),
+                        },
+                    )
+                })
+                .collect(),
         }
     }
 
     pub(crate) fn executes_on(&self, local: Option<&ClusterNodeName>) -> bool {
-        match local {
-            Some(local) => match &self.primary {
+        self.units.values().any(|unit| match local {
+            Some(local) => match &unit.primary {
                 Some(primary) => primary == local,
-                None => self.assigned.contains(local),
+                None => unit.assigned.contains(local),
             },
-            None => self.primary.is_none() && self.assigned.is_empty(),
-        }
+            None => unit.primary.is_none() && unit.assigned.is_empty(),
+        })
     }
 
     pub(crate) fn is_assigned_to(&self, local: &ClusterNodeName) -> bool {
-        self.assigned.contains(local)
+        self.units
+            .values()
+            .any(|unit| unit.assigned.contains(local))
     }
 }
 

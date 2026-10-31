@@ -17,7 +17,7 @@
 use error_stack::Report;
 use nervix_models::{
     BranchKeyFingerprint, DomainName, ModelName, RemoteRuntimeRecordMetadata, SchemaFingerprint,
-    Timestamp, WindowModelDigest,
+    Timestamp, Unit, WindowModelDigest,
 };
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -48,6 +48,7 @@ pub fn deduplicator_key_column(index: usize) -> String {
 pub struct DeduplicatorStateDescriptor {
     pub domain: DomainName,
     pub entity: ModelName,
+    pub unit: Unit,
     pub schema: SchemaFingerprint,
     pub branch_fingerprint: Option<BranchKeyFingerprint>,
     pub branch: Option<Vec<StateField>>,
@@ -66,6 +67,7 @@ pub struct DeduplicatorStateDescriptor {
 pub struct WindowStateDescriptor {
     pub domain: DomainName,
     pub entity: ModelName,
+    pub unit: Unit,
     pub schema: SchemaFingerprint,
     /// The window processor model the state was built under.
     pub model: WindowModelDigest,
@@ -106,6 +108,7 @@ pub struct DelayedHistogramRemoval {
 struct DeduplicatorDescriptorWire {
     domain: String,
     entity: String,
+    unit: Unit,
     schema: [u8; 32],
     branch_fingerprint: Option<[u8; 32]>,
     branch: Option<Vec<StateField>>,
@@ -118,6 +121,7 @@ struct DeduplicatorDescriptorWire {
 struct WindowDescriptorWire {
     domain: String,
     entity: String,
+    unit: Unit,
     schema: [u8; 32],
     model: [u8; 32],
     branch_fingerprint: Option<[u8; 32]>,
@@ -153,7 +157,7 @@ struct DelayedRemovalWire {
 
 impl ArchiveRecord for DeduplicatorStateDescriptor {
     const KIND: RecordKind = RecordKind::DeduplicatorStateDescriptor;
-    const VERSION: u16 = 1;
+    const VERSION: u16 = 2;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         encode_record(
@@ -162,6 +166,7 @@ impl ArchiveRecord for DeduplicatorStateDescriptor {
             &DeduplicatorDescriptorWire {
                 domain: self.domain.as_str().to_string(),
                 entity: self.entity.as_str().to_string(),
+                unit: self.unit,
                 schema: *self.schema.as_digest(),
                 branch_fingerprint: self
                     .branch_fingerprint
@@ -186,6 +191,7 @@ impl ArchiveRecord for DeduplicatorStateDescriptor {
         Ok(Self {
             domain: parse_domain(path, &wire.domain)?,
             entity: parse_entity(path, &wire.entity)?,
+            unit: wire.unit,
             schema: SchemaFingerprint::from_digest(wire.schema),
             branch_fingerprint: wire.branch_fingerprint.map(BranchKeyFingerprint::new),
             branch: wire.branch,
@@ -198,7 +204,7 @@ impl ArchiveRecord for DeduplicatorStateDescriptor {
 
 impl ArchiveRecord for WindowStateDescriptor {
     const KIND: RecordKind = RecordKind::WindowStateDescriptor;
-    const VERSION: u16 = 1;
+    const VERSION: u16 = 2;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         let mut rows = Vec::with_capacity(self.rows.len());
@@ -218,6 +224,7 @@ impl ArchiveRecord for WindowStateDescriptor {
             &WindowDescriptorWire {
                 domain: self.domain.as_str().to_string(),
                 entity: self.entity.as_str().to_string(),
+                unit: self.unit,
                 schema: *self.schema.as_digest(),
                 model: *self.model.as_digest(),
                 branch_fingerprint: self
@@ -281,6 +288,7 @@ impl ArchiveRecord for WindowStateDescriptor {
         Ok(Self {
             domain: parse_domain(path, &wire.domain)?,
             entity: parse_entity(path, &wire.entity)?,
+            unit: wire.unit,
             schema: SchemaFingerprint::from_digest(wire.schema),
             model: WindowModelDigest::from_digest(wire.model),
             branch_fingerprint: wire.branch_fingerprint.map(BranchKeyFingerprint::new),
@@ -400,7 +408,7 @@ mod tests {
             DeduplicatorStateDescriptor::KIND,
             WindowStateDescriptor::KIND,
         ] {
-            for (tag, version) in [(kind.tag(), 2_u16), (u16::MAX, 1)] {
+            for (tag, version) in [(kind.tag(), u16::MAX), (u16::MAX, 1)] {
                 let mut bytes = crate::section::RECORD_MAGIC.to_vec();
                 bytes.extend_from_slice(&tag.to_le_bytes());
                 bytes.extend_from_slice(&version.to_le_bytes());
@@ -427,6 +435,7 @@ mod tests {
         let domain = DomainName::parse("prod").assured("the test domain is valid");
         let entity = ModelName::parse("latency_window").assured("the test entity is valid");
         let empty = WindowStateDescriptor {
+            unit: nervix_models::Unit::Single,
             domain,
             entity,
             schema: SchemaFingerprint::from_digest([1; 32]),

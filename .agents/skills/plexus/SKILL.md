@@ -61,7 +61,8 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   provisions a Pulsar subscription or its ingestor owns it, endpoints, delivery/ACK expectations,
   emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
   ordering, and offsets.
-- Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit.
+- Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit. A branch
+  currently has one direct execution partition; do not write a `PARTITIONS` clause.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.

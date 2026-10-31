@@ -26,7 +26,7 @@ use nervix_models::{
     ModelName, NodeEndpoint, NodePrerequisites, NodeRef, OwnershipStateRecoveryOutcome,
     OwnershipStateReset, PrerequisiteMismatch, RelayName, RemoteAckRegistration,
     RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName, Setting,
-    SubscriptionBinding, Timestamp, WasmStateResetScope,
+    SubscriptionBinding, Timestamp, Unit, WasmStateResetScope,
 };
 use nervix_primitives::{
     sync::{mpsc, watch},
@@ -446,6 +446,7 @@ pub struct CaptureOwnershipHandoffStateRequest {
     pub source_incarnation: ClusterNodeIncarnation,
     pub domain: DomainName,
     pub entity: NodeRef,
+    pub unit: Unit,
     pub base_schedule_fingerprint: [u8; 32],
 }
 
@@ -459,6 +460,7 @@ pub struct PrepareOwnershipHandoffStateRequest {
     pub destination_incarnation: ClusterNodeIncarnation,
     pub domain: DomainName,
     pub entity: NodeRef,
+    pub unit: Unit,
     pub base_schedule_fingerprint: [u8; 32],
     pub target_schedule_fingerprint: [u8; 32],
     pub checkpoints: Vec<OwnershipHandoffCheckpoint>,
@@ -474,6 +476,7 @@ pub struct ConfirmOwnershipHandoffStateRequest {
     pub destination_incarnation: ClusterNodeIncarnation,
     pub domain: DomainName,
     pub entity: NodeRef,
+    pub unit: Unit,
     pub base_schedule_fingerprint: [u8; 32],
     pub target_schedule_fingerprint: [u8; 32],
 }
@@ -486,6 +489,7 @@ pub struct PrepareForcedOwnershipRecoveryRequest {
     pub destination_incarnation: ClusterNodeIncarnation,
     pub domain: DomainName,
     pub entity: NodeRef,
+    pub unit: Unit,
     pub base_schedule_fingerprint: [u8; 32],
     pub target_schedule_fingerprint: [u8; 32],
 }
@@ -529,6 +533,7 @@ pub struct ActivateOwnershipHandoffStateRequest {
     pub destination_incarnation: ClusterNodeIncarnation,
     pub domain: DomainName,
     pub entity: NodeRef,
+    pub unit: Unit,
     pub base_schedule_fingerprint: [u8; 32],
     pub target_schedule_fingerprint: [u8; 32],
     pub activation_budget: Duration,
@@ -540,6 +545,7 @@ pub struct DiscardOwnershipHandoffStateRequest {
     pub operation_id: String,
     pub domain: DomainName,
     pub entity: NodeRef,
+    pub unit: Unit,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

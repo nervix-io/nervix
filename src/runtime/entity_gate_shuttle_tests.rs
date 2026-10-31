@@ -22,8 +22,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::EntityGatePurpose;
 use nervix_model_harness::shuttle::{check_pct, check_random};
 use nervix_models::{
-    ClusterNodeName, CoordinationIdentity, DomainName, DomainNodeRef, ModelKind, ModelName,
-    NodeRef, RelayName,
+    ClusterNodeName, CoordinationIdentity, DomainName, DomainNodeRef, DomainNodeUnitRef, ModelKind,
+    ModelName, NodeRef, RelayName,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -754,9 +754,13 @@ fn releasing_an_ownership_handoff_wakes_every_frozen_waiter(deadline: Instant) {
             kind: ModelKind::Relay,
             identifier: ModelName::from(&relay),
         };
-        let key = DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
+        let key = DomainNodeUnitRef::single(DomainNodeRef::node_in(
+            domain.clone(),
+            entity.kind,
+            entity.identifier.clone(),
+        ));
         let frozen_entities: Arc<
-            DashMap<DomainNodeRef, Arc<OwnershipHandoffFreezeState>, RandomState>,
+            DashMap<DomainNodeUnitRef, Arc<OwnershipHandoffFreezeState>, RandomState>,
         > = Arc::new(DashMap::with_hasher(RandomState::with_seeds(0, 0, 0, 0)));
         frozen_entities
             .entry(key.clone())
@@ -832,9 +836,13 @@ fn observing_an_ownership_handoff_freeze_never_misses_its_release() {
             kind: ModelKind::Relay,
             identifier: ModelName::from(&relay),
         };
-        let key = DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
+        let key = DomainNodeUnitRef::single(DomainNodeRef::node_in(
+            domain.clone(),
+            entity.kind,
+            entity.identifier.clone(),
+        ));
         let frozen_entities: Arc<
-            DashMap<DomainNodeRef, Arc<OwnershipHandoffFreezeState>, RandomState>,
+            DashMap<DomainNodeUnitRef, Arc<OwnershipHandoffFreezeState>, RandomState>,
         > = Arc::new(DashMap::with_hasher(RandomState::with_seeds(0, 0, 0, 0)));
         frozen_entities
             .entry(key.clone())
