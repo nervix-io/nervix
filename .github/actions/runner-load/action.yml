@@ -44,7 +44,7 @@ runs:
 
     - name: Upload runner load
       if: always() && inputs.phase == 'finish'
-      uses: ./.github/actions/ci-artifact-upload
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifact-name }}
         path: |

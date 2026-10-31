@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Tests of the CI artifact bucket: path selection, the transfer, and the workflows that use it."""
+"""Tests of the scenario archive's bucket: path selection, the transfer, and its two steps."""
 
 from __future__ import annotations
 
@@ -456,37 +456,35 @@ class WorkflowTests(unittest.TestCase):
                 checkout = text.find("uses: actions/checkout@")
                 self.assertNotEqual(checkout, -1, f"{path.name} {job} has no checkout")
                 self.assertLess(checkout, action.start(), f"{path.name} {job} checks out too late")
-        self.assertGreater(used, 60)
+        self.assertEqual(used, 2)
 
-    def test_a_sparse_checkout_keeps_the_actions(self) -> None:
+    def test_the_scenario_archive_alone_passes_through_the_bucket(self) -> None:
+        used = set()
         for path in WORKFLOWS:
             for job, text in jobs_of(path.read_text(encoding="utf-8")).items():
-                if "sparse-checkout:" in text and ACTIONS[1] in text:
-                    # Cone mode keeps the files directly in scripts/ beside scripts/chaos.
-                    self.assertIn(".github/actions\n", text, f"{path.name} {job}")
-                    self.assertIn("scripts/chaos\n", text, f"{path.name} {job}")
+                for step in steps_of(text):
+                    for action in ACTIONS:
+                        if f"uses: {action}" in step:
+                            used.add((path.name, job, action))
+                            self.assertIn("name: scenario-suite\n", step)
+        self.assertEqual(used, {
+            ("check.yaml", "scenarios-build", ACTIONS[0]),
+            ("check.yaml", "scenarios", ACTIONS[1]),
+        })
 
-    def test_every_workflow_gives_its_jobs_the_bucket(self) -> None:
+    def test_the_steps_that_use_the_bucket_receive_it_and_no_others_do(self) -> None:
+        receiving = 0
         for path in WORKFLOWS:
-            text = path.read_text(encoding="utf-8")
-            environment = re.search(r"^env:\n(?:(?:  .*)?\n)*", text, flags=re.M)
-            self.assertIsNotNone(environment, path.name)
-            for name in VARIABLES:
-                self.assertIn(f"  {name}: ${{{{ vars.{name} }}}}\n", environment.group(0), path.name)
-            for name in SECRETS:
-                self.assertIn(f"  {name}: ${{{{ secrets.{name} }}}}\n", environment.group(0), path.name)
-
-    def test_a_reusable_workflow_receives_the_bucket_from_every_caller(self) -> None:
-        callers = 0
-        for path in WORKFLOWS:
-            for job, text in jobs_of(path.read_text(encoding="utf-8")).items():
-                if "uses: ./.github/workflows/" not in text:
+            for step in steps_of(path.read_text(encoding="utf-8")):
+                if "R2_ARTIFACTS_" not in step:
                     continue
-                callers += 1
-                if "secrets: inherit" not in text:
-                    for name in SECRETS:
-                        self.assertIn(f"{name}: ${{{{ secrets.{name} }}}}", text, f"{path.name} {job}")
-        self.assertGreater(callers, 4)
+                receiving += 1
+                self.assertTrue(any(f"uses: {action}" in step for action in ACTIONS), step)
+                for name in VARIABLES:
+                    self.assertIn(f"{name}: ${{{{ vars.{name} }}}}\n", step)
+                for name in SECRETS:
+                    self.assertIn(f"{name}: ${{{{ secrets.{name} }}}}\n", step)
+        self.assertEqual(receiving, 2)
 
     def test_a_step_passes_only_inputs_the_action_declares(self) -> None:
         declared = {}

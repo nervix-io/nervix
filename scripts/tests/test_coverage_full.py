@@ -1159,10 +1159,10 @@ class WorkflowTests(unittest.TestCase):
     def test_missing_artifacts_reach_the_union_with_the_run_selection_preserved(self) -> None:
         job = job_section(self.workflow, "coverage-full")
         selection = job.index("      - name: Record the event, labels and producer results")
-        download = job.index("uses: ./.github/actions/ci-artifact-download")
+        download = job.index("uses: actions/download-artifact")
         self.assertLess(selection, download)
         for step in job.split("\n      - name: "):
-            if "uses: ./.github/actions/ci-artifact-download" in step:
+            if "uses: actions/download-artifact" in step:
                 self.assertRegex(step, r"\n          pattern: \S+")
         combine = step_section(job, "Combine coverage")
         self.assertIn("if: ${{ !cancelled() }}", combine)
@@ -1171,7 +1171,7 @@ class WorkflowTests(unittest.TestCase):
         job = job_section(self.workflow, "coverage-full")
         downloaded = set()
         for step in job.split("\n      - name: "):
-            if "uses: ./.github/actions/ci-artifact-download" not in step:
+            if "uses: actions/download-artifact" not in step:
                 continue
             match = re.search(r"(?:name|pattern): (\S+)", step.split("with:")[1])
             downloaded.add(match[1])

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
-"""Keep the artifacts of a CI run in a Cloudflare R2 bucket.
+"""Keep a CI run's scenario suite archive in a Cloudflare R2 bucket.
 
-Jobs hand files to later jobs of their run, and leave evidence for whoever reads the run afterwards,
-through artifacts. The bucket holds them, so a run depends on one store that its operators chose,
-reachable from every runner it uses. `.github/actions/ci-artifact-upload` and
-`.github/actions/ci-artifact-download` call this script, and take the inputs of the upload and
-download actions they replaced, so a job names its artifacts the way it always did.
+CI's jobs exchange files through GitHub's artifact service, with one exception: the archive
+`scenarios-build` hands to every scenario shard. A shard has nothing to run without it, so it passes
+through a bucket that fails independently of GitHub. `.github/actions/ci-artifact-upload` and
+`.github/actions/ci-artifact-download` call this script for those two steps, and take the inputs of
+GitHub's upload and download actions.
 
 `upload --name NAME --path PATHS` packs the files PATHS selects into a tar stream, gzipped unless
 `--compression-level 0` says the files are compressed already, cut into parts of 128 MiB. Each part

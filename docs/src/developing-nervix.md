@@ -412,14 +412,14 @@ machines, and the US bucket on GitHub's hosted runners and on Blacksmith's US ru
 
 ### CI artifacts
 
-A run's artifacts live in one R2 bucket, below `runs/<run id>/<name>/`, and not in GitHub's artifact
-service, so jobs exchange files through a store that fails independently of GitHub. Every job uses
-`.github/actions/ci-artifact-upload` and `.github/actions/ci-artifact-download`, which take the
-inputs of the GitHub actions they replaced, so a step reads the same. `scripts/ci_artifacts.py`
-states the format and how paths are rooted: an artifact is a tar stream cut into 128 MiB parts, each
-sent and retried on its own, and a manifest written last, so an unfinished upload cannot be read.
-An artifact belongs to the run, so a rerun of other jobs keeps it and a job that runs again replaces
-its own. A local action needs the repository, so a job checks out before it uses one.
+Jobs exchange files and leave their reports and logs through GitHub's artifact service, and
+`gh run download <run> --name <artifact>` reads them. The one exception is the scenario suite's
+archive, which `scenarios-build` hands to every `scenarios` shard. A shard has nothing to run
+without it, so it passes through one R2 bucket, which fails independently of GitHub. Only those two
+steps use `.github/actions/ci-artifact-upload` and `.github/actions/ci-artifact-download`.
+`scripts/ci_artifacts.py` states the format: a tar stream cut into 128 MiB parts, each sent and
+retried on its own, and a manifest written last, so an unfinished upload cannot be read. A rerun of
+a shard keeps the archive, and a rerun of `scenarios-build` replaces it.
 
 | Repository setting | Kind | Value |
 | --- | --- | --- |
@@ -428,22 +428,20 @@ its own. A local action needs the repository, so a job checks out before it uses
 | `R2_ARTIFACTS_ACCESS_KEY_ID` | Secret | The access key of an Object Read & Write token scoped to that bucket |
 | `R2_ARTIFACTS_SECRET_ACCESS_KEY` | Secret | That token's secret access key |
 
-Each workflow passes them to its jobs as environment variables of the same names, and a reusable
-workflow's caller passes the secrets on. The bucket is private, and its lifecycle rules are the only
-retention, matching key prefixes:
+Those two steps receive them as environment variables of the same names, and no other step does.
+The bucket is private, and its lifecycle rules are the only retention, matching key prefixes:
 
 | Prefix | Rule | Holds |
 | --- | --- | --- |
-| `transfer/` | Delete after 1 day | The parts of a large artifact only later jobs of its run read, which `retention: transfer` selects: the scenario suite's archive |
-| `runs/` | Delete after 30 days | Every manifest, and the parts of every other artifact: the reports, logs and evidence people read later |
+| `transfer/` | Delete after 1 day | The archive's parts |
+| `runs/` | Delete after 30 days | The archive's manifest, which outlives its parts so that a late reader is told they expired |
 
 A shard rerun more than a day after its build finds the archive's parts gone and says so, and
-`scenarios-build` has to run again. With the same variables set locally, read an artifact of any
-run the bucket still holds:
+`scenarios-build` has to run again. With the same settings in the environment, read a run's archive
+while the bucket holds it:
 
 ```bash
-just ci-artifact-download <run> --name coverage-full --path retained
-just ci-artifact-download <run> --pattern 'scenario-logs-*' --path logs
+just ci-artifact-download <run> --name scenario-suite --path archive
 ```
 
 ### CI labels

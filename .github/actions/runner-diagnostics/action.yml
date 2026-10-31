@@ -25,7 +25,7 @@ runs:
         --storage-path "${GITHUB_WORKSPACE}"
     - name: Retain runner diagnostics
       if: always()
-      uses: ./.github/actions/ci-artifact-upload
+      uses: actions/upload-artifact@v4
       with:
         name: runner-diagnostics-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ inputs.label }}
         path: ${{ runner.temp }}/runner-diagnostics/${{ inputs.label }}

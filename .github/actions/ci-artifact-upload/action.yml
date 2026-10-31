@@ -1,5 +1,5 @@
 name: Upload a CI artifact
-description: Store files of this job in the run's R2 artifact bucket, for later jobs and for readers.
+description: Store files of this job in the run's R2 bucket, for later jobs of the run.
 inputs:
   name:
     description: Artifact name, unique within the run. A rerun's upload replaces its earlier one.

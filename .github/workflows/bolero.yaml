@@ -47,11 +47,6 @@ env:
   BOLERO_TESTED_SHA: ${{ inputs.tested-sha || github.sha }}
   BOLERO_EVENT_NAME: ${{ inputs.event-name || github.event_name }}
   BOLERO_LABELS: ${{ inputs.labels-json || '[]' }}
-  # The bucket that holds this run's artifacts, which scripts/ci_artifacts.py reads.
-  R2_ARTIFACTS_BUCKET: ${{ vars.R2_ARTIFACTS_BUCKET }}
-  R2_ARTIFACTS_ENDPOINT: ${{ vars.R2_ARTIFACTS_ENDPOINT }}
-  R2_ARTIFACTS_ACCESS_KEY_ID: ${{ secrets.R2_ARTIFACTS_ACCESS_KEY_ID }}
-  R2_ARTIFACTS_SECRET_ACCESS_KEY: ${{ secrets.R2_ARTIFACTS_SECRET_ACCESS_KEY }}
 
 jobs:
   # Check excludes this whole call only for its verified prose-only selection without `bolero-random`
@@ -183,9 +178,10 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: ./.github/actions/ci-artifact-upload
+        uses: actions/upload-artifact@v4
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          overwrite: true
           path: |
             ${{ runner.temp }}/kache-report
             ${{ runner.temp }}/kache-build-report
@@ -351,7 +347,7 @@ jobs:
       # profiles and per-target reports stay in the shard's full coverage artifact.
       - name: Upload shard completion evidence
         if: always()
-        uses: ./.github/actions/ci-artifact-upload
+        uses: actions/upload-artifact@v4
         with:
           name: bolero-fuzz-evidence-${{ matrix.shard }}
           path: |
@@ -363,7 +359,7 @@ jobs:
 
       - name: Upload live campaign coverage and completion evidence
         if: always()
-        uses: ./.github/actions/ci-artifact-upload
+        uses: actions/upload-artifact@v4
         with:
           name: coverage-bolero-fuzz-${{ matrix.shard }}
           path: target/native-coverage/bolero-fuzz/
@@ -371,7 +367,7 @@ jobs:
 
       - name: Upload all fuzz and qualification artifacts
         if: always()
-        uses: ./.github/actions/ci-artifact-upload
+        uses: actions/upload-artifact@v4
         with:
           name: bolero-runs-${{ matrix.shard }}
           path: |
@@ -381,7 +377,7 @@ jobs:
 
       - name: Upload runner load
         if: always()
-        uses: ./.github/actions/ci-artifact-upload
+        uses: actions/upload-artifact@v4
         with:
           name: runner-load-bolero-fuzz-${{ matrix.shard }}
           path: |
@@ -413,9 +409,10 @@ jobs:
 
       - name: Upload kache report
         if: always()
-        uses: ./.github/actions/ci-artifact-upload
+        uses: actions/upload-artifact@v4
         with:
           name: kache-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
+          overwrite: true
           path: |
             ${{ runner.temp }}/kache-report
             ${{ runner.temp }}/kache-build-report
@@ -442,7 +439,7 @@ jobs:
           tool: just@latest
 
       - name: Download every shard's completion evidence
-        uses: ./.github/actions/ci-artifact-download
+        uses: actions/download-artifact@v8
         with:
           pattern: bolero-fuzz-evidence-*
           path: target/bolero-fuzz-shards
@@ -452,7 +449,7 @@ jobs:
 
       - name: Upload the combined campaign record and report
         if: always()
-        uses: ./.github/actions/ci-artifact-upload
+        uses: actions/upload-artifact@v4
         with:
           name: coverage-bolero-fuzz
           path: target/native-coverage/bolero-fuzz/combined/
@@ -470,13 +467,6 @@ jobs:
       sanitizer-result: ${{ steps.selection.outputs.sanitizer-result }}
       sanitizer-required: ${{ steps.selection.outputs.sanitizer-required }}
     steps:
-      # The artifact action and its script live in this repository.
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tested-sha || github.sha }}
-          persist-credentials: false
-
       - name: Require the requested ordinary properties and fuzzing
         id: selection
         env:
@@ -518,7 +508,7 @@ jobs:
           PYTHON
 
       - name: Publish eligible execution or deliberate skip
-        uses: ./.github/actions/ci-artifact-upload
+        uses: actions/upload-artifact@v4
         with:
           name: bolero-selection
           path: selection.json

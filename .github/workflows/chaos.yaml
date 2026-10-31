@@ -26,11 +26,6 @@ on:
         description: Suite of scripts/chaos/suites.json.
         type: string
         required: true
-    secrets:
-      R2_ARTIFACTS_ACCESS_KEY_ID:
-        required: true
-      R2_ARTIFACTS_SECRET_ACCESS_KEY:
-        required: true
   workflow_dispatch:
     inputs:
       image:
@@ -68,11 +63,6 @@ env:
   CHAOS_IMAGE_REVISION: ${{ inputs.revision }}
   CHAOS_SUITE: ${{ inputs.suite }}
   NO_COLOR: "1"
-  # The bucket that holds this run's artifacts, which scripts/ci_artifacts.py reads.
-  R2_ARTIFACTS_BUCKET: ${{ vars.R2_ARTIFACTS_BUCKET }}
-  R2_ARTIFACTS_ENDPOINT: ${{ vars.R2_ARTIFACTS_ENDPOINT }}
-  R2_ARTIFACTS_ACCESS_KEY_ID: ${{ secrets.R2_ARTIFACTS_ACCESS_KEY_ID }}
-  R2_ARTIFACTS_SECRET_ACCESS_KEY: ${{ secrets.R2_ARTIFACTS_SECRET_ACCESS_KEY }}
 
 jobs:
   plan:
@@ -273,25 +263,27 @@ jobs:
 
       - name: Upload the shard verdict
         if: always()
-        uses: ./.github/actions/ci-artifact-upload
+        uses: actions/upload-artifact@v4
         with:
           name: chaos-verdict-${{ inputs.suite }}-${{ matrix.shard.shard }}-${{ inputs.image-kind }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/chaos/${{ env.CHAOS_SUITE_ID }}/suite.json
             ${{ runner.temp }}/chaos/${{ env.CHAOS_SUITE_ID }}/summary.md
           if-no-files-found: warn
+          retention-days: 14
 
       # Every run directory, console log and cleanup capture: enough to reproduce each run, or to
       # replay a mixed-instability run with `just chaos replay`.
       - name: Upload the shard evidence
         if: always()
-        uses: ./.github/actions/ci-artifact-upload
+        uses: actions/upload-artifact@v4
         with:
           name: chaos-${{ inputs.suite }}-${{ matrix.shard.shard }}-${{ inputs.image-kind }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/chaos/${{ env.CHAOS_SUITE_ID }}
             ${{ runner.temp }}/chaos/${{ env.CHAOS_SUITE_ID }}-network-controls
           if-no-files-found: warn
+          retention-days: 14
 
   verdict:
     name: ${{ inputs.suite }} ${{ inputs.image-kind }} verdict
@@ -304,15 +296,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-          # Cone mode keeps the files directly in scripts/, which holds the artifact script.
-          sparse-checkout: |
-            .github/actions
-            scripts/chaos
+          sparse-checkout: scripts/chaos
 
       # Every attempt of this run keeps its own verdicts, so a rerun of failed shards never replaces
       # the verdicts of the attempt it repeats.
       - name: Download the shard verdicts
-        uses: ./.github/actions/ci-artifact-download
+        uses: actions/download-artifact@v8
         with:
           # The kind sits between the shard and the run, so no kind's pattern matches another's.
           pattern: chaos-verdict-${{ inputs.suite }}-*-${{ inputs.image-kind }}-${{ github.run_id }}-*

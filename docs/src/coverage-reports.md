@@ -601,10 +601,9 @@ The union reads reports and records only. Repeating it over a run's retained art
 tested revision the selection names, gives the same lines without binaries or a compiler:
 
 ```bash
-just ci-artifact-download <run> --name coverage-full --path retained
-for name in coverage-merged coverage-native-extras diagnostic-evidence bolero-selection; do
-  just ci-artifact-download <run> --name "${name}" --path "inputs/${name}"
-done
+gh run download <run> --name coverage-full --dir retained
+gh run download <run> --dir inputs --name coverage-merged --name coverage-native-extras \
+  --name diagnostic-evidence --name bolero-selection
 just coverage-full --selection retained/selection.json inputs/*
 ```
 

@@ -143,7 +143,7 @@ class WorkflowTests(unittest.TestCase):
                         following = steps[steps.index(step) + 1]
                         self.assertIsNotNone(following.field("run"))
         action = Path(".github/actions/runner-diagnostics/action.yml").read_text()
-        self.assertIn("./.github/actions/ci-artifact-upload", action)
+        self.assertIn("actions/upload-artifact@v4", action)
         self.assertIn('--storage-path "${GITHUB_WORKSPACE}"', action)
         builder = Path("Dockerfile.debian").read_text()
         self.assertIn("--output /tmp/runner-diagnostics --storage-path /app/target", builder)
