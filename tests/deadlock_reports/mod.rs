@@ -20,6 +20,7 @@ use nervix_primitives::deadlock::{
     LockSite, OrderEdge, OrderLock, OrderWitness, PotentialCycle, SourceSite, TrackedLockId,
     TrackedThreadId,
 };
+use nervix_test_environment::workspace_root;
 
 use super::ScenarioWorld;
 
@@ -38,8 +39,7 @@ impl ReportFixture {
     fn command(&self) -> Command {
         let binary = match std::env::var_os("NERVIX_DEADLOCK_REPORT_TOOL") {
             Some(binary) => PathBuf::from(binary),
-            None => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("target/debug/nervix-deadlock-report"),
+            None => workspace_root().join("target/debug/nervix-deadlock-report"),
         };
         Command::new(binary)
     }

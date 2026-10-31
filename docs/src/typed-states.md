@@ -26,6 +26,11 @@ refuses TLS file keys on HTTP. The case-preserving `ClickHouseTableName` is cons
 one or two nonempty locator parts; the connector receives that validated name and quotes its parts
 for SQL without reparsing a Plexus statement.
 
+A direct-value expression's inference refusal carries its declared section and destination key
+separately from the VM's typed compile cause. The registry associates that cause's operation span
+with the lowered mapping before reporting the refusal; a null-only mapping is refused at admission.
+[Errors And Diagnostics](errors-and-diagnostics.md#registry-validation-and-planning) owns the report.
+
 The MongoDB engine resolves a required nonempty database from its explicit key or the URL path
 into one private configuration value. It consumes the driver's optional default rather than
 carrying a second database identity. Collection names are validated vocabulary values that retain
@@ -219,8 +224,9 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX MODEL SEP` archive signature and consensus's `raft_platform_` keyspaces
-identify this current shape before decoding. An unrecognized signature or namespace fails with
+The registry's `NERVIX MODEL TAM` archive signature and consensus's `raft_timestamp_` keyspaces
+identify this current shape, which also holds an ingestor's `TIMESTAMP AT metadata.<field>` source,
+before decoding. An unrecognized signature or namespace fails with
 the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States

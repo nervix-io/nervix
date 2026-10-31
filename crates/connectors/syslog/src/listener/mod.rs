@@ -29,7 +29,8 @@ use bytes::{BufMut as _, buf::Limit};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    BrokerIngestorConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMetadataRow,
+    BrokerIngestorConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMessageMetadata,
+    IngestMetadataRow, IngestMetadataValues, IngestRowHeaders, IngestTransportPosition,
     IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
     IngestorReadCancellation, IngestorResult, IngestorResume, NoIngestHeaders,
 };
@@ -185,9 +186,21 @@ impl IngestorMessage for SyslogListenerIngestorMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::Syslog {
-            peer_addr: self.peer_addr,
+        IngestMetadataRow {
+            fields: self,
+            headers: IngestRowHeaders::NONE,
+            position: Some(IngestTransportPosition::Syslog {
+                peer: self.peer_addr,
+            }),
         }
+    }
+}
+
+/// The value of the metadata `SYSLOG LISTENER` declares: the peer the message arrived from, written
+/// in place rather than allocated per message.
+impl IngestMessageMetadata for SyslogListenerIngestorMessage {
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+        values.rendered(&self.peer_addr);
     }
 }
 

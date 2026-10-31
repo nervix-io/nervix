@@ -238,6 +238,7 @@ fn format_timestamp_source(source: Option<&IngestTimestampSource>) -> &'static s
     match source {
         Some(IngestTimestampSource::Now) => "NOW",
         Some(IngestTimestampSource::At(_)) => "AT",
+        Some(IngestTimestampSource::AtMetadata(_)) => "AT METADATA",
         None => "-",
     }
 }
