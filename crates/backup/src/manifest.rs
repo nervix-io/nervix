@@ -17,7 +17,7 @@ use crate::{
 
 /// The archive format major version this crate writes and reads. A reader refuses any other: a
 /// new major is a format this reader cannot interpret.
-pub const ARCHIVE_FORMAT_MAJOR: u16 = 1;
+pub const ARCHIVE_FORMAT_MAJOR: u16 = 2;
 
 /// The manifest record's format version.
 const MANIFEST_VERSION: u16 = 2;

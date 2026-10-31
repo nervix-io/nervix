@@ -478,6 +478,7 @@ mod tests {
             kind: ModelKind::Relay,
             identifier: ModelName::parse("unassigned_relay")
                 .assured("the test relay name is valid"),
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         };
         let error = Runtime::new()

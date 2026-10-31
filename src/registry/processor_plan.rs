@@ -587,6 +587,7 @@ mod tests {
                 name: branch_name.clone(),
                 schema: branch_schema.name.clone(),
                 ttl: branch_ttl.to_string(),
+                partitions: nervix_models::BranchPartitions::ONE,
                 eviction: Some(BranchEviction::Lru {
                     max_instances: NonZeroU64::new(8)
                         .assured("the fixture's branch capacity is a nonzero literal"),

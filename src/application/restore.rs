@@ -625,43 +625,57 @@ fn restore_state_warnings(
             )));
         }
         for archived in archive.states_for(&domain.source) {
-            let (kind, entity, schema) = match archived {
+            let (kind, entity, unit, schema) = match archived {
                 DescribedRuntimeState::Wasm { descriptor, .. } => (
                     ModelKind::WasmProcessor,
                     &descriptor.entity,
+                    descriptor.unit,
                     Some(descriptor.schema),
                 ),
                 DescribedRuntimeState::KafkaOffsets { offsets, .. } => {
                     if state == RestoreState::WithoutSourceOffsets {
                         continue;
                     }
-                    (ModelKind::Ingestor, &offsets.entity, Some(offsets.schema))
+                    (
+                        ModelKind::Ingestor,
+                        &offsets.entity,
+                        offsets.unit,
+                        Some(offsets.schema),
+                    )
                 }
                 DescribedRuntimeState::Materialized { descriptor, .. } => (
                     ModelKind::Relay,
                     &descriptor.entity,
+                    descriptor.unit,
                     Some(descriptor.schema),
                 ),
                 DescribedRuntimeState::BranchLifecycle { lifecycle, .. } => (
                     lifecycle.owner_kind,
                     &lifecycle.entity,
+                    lifecycle.unit,
                     Some(lifecycle.schema),
                 ),
                 DescribedRuntimeState::Deduplicator { descriptor, .. } => (
                     ModelKind::Deduplicator,
                     &descriptor.entity,
+                    descriptor.unit,
                     Some(descriptor.schema),
                 ),
                 DescribedRuntimeState::Window { descriptor, .. } => (
                     ModelKind::WindowProcessor,
                     &descriptor.entity,
+                    descriptor.unit,
                     Some(descriptor.schema),
                 ),
             };
             let node = schedule
                 .domain(&domain.target)
                 .and_then(|scheduled| scheduled.nodes.get(&NodeRef::new(kind, entity.clone())));
-            let mut reason = state_skip_reason(schema, node.map(|node| node.schema_fingerprint));
+            let published_schema = match node {
+                Some(node) if node.units.contains_key(&unit) => Some(node.schema_fingerprint),
+                _ => None,
+            };
+            let mut reason = state_skip_reason(schema, published_schema);
             if let DescribedRuntimeState::Window { descriptor, .. } = archived
                 && let Some(window) = domain.branch_state_schemas.window(&descriptor.entity)
                 && let Some(skip) = window.skip_of(descriptor, lifecycles.iter().copied())

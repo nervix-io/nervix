@@ -149,7 +149,7 @@ fn format_schedule_status_replicas(node: &ScheduledNode) -> String {
 }
 
 fn format_ownership_transition(node: &ScheduledNode) -> String {
-    let Some(transition) = node.ownership_transition.as_ref() else {
+    let Some(transition) = node.single_unit().ownership_transition.as_ref() else {
         return String::new();
     };
     let mut rendered = format!(
