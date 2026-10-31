@@ -1648,11 +1648,14 @@ jobs:
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
     steps:
+      # Each collection reads its profiles with the toolchain's own LLVM tools. The toolchain file's
+      # components and target are installed here, so no collection finds them missing.
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
           targets: wasm32-unknown-unknown
+          components: clippy, llvm-tools
 
       - name: Setup Rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -1706,12 +1709,17 @@ jobs:
           sudo add-apt-repository --yes ppa:git-core/ppa
           sudo apt-get install --yes --no-install-recommends git
 
+      # The runner diagnostics tests that `extra-runners` runs execute sysbench and fio, which Boat's
+      # base image lacks. The diagnostics action installs them too, but each of its steps runs only
+      # under its own label, so none may precede those tests.
       - name: Install apt deps
         run: |
           sudo apt update
           sudo apt install -y \
             libcurl4-openssl-dev \
-            protobuf-compiler
+            protobuf-compiler \
+            sysbench \
+            fio
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -1722,12 +1730,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
-
-      # Every label's step below builds with a toolchain the repository declares, and the native
-      # collector reads that toolchain's own llvm-profdata, so the declared toolchains and their
-      # components install first, whichever labels select the steps.
-      - name: Install the declared toolchains
-        run: just toolchains-install
 
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
@@ -1762,7 +1764,9 @@ jobs:
 
       - name: Capability doctests
         if: contains(github.event.pull_request.labels.*.name, 'extra-doctests')
-        run: just test-capability-docs
+        run: |
+          just toolchains-install
+          just test-capability-docs
 
       - name: Runner diagnostics before Expiry map Miri
         if: contains(github.event.pull_request.labels.*.name, 'extra-miri')
