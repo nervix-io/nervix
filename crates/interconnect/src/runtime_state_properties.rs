@@ -89,12 +89,33 @@ impl<'a> Messages<'a> {
         }
     }
 
+    fn unit(&mut self) -> nervix_models::Unit {
+        match self.arbitrary.entropy().byte() % 3 {
+            0 => nervix_models::Unit::Single,
+            variant => {
+                let ordinal = u32::try_from(
+                    self.arbitrary
+                        .entropy()
+                        .boundary_biased(0..=u64::from(u32::MAX)),
+                )
+                .assured("the generated unit ordinal is bounded by u32::MAX");
+                if variant == 1 {
+                    nervix_models::Unit::Partition(ordinal)
+                } else {
+                    nervix_models::Unit::Instance(ordinal)
+                }
+            }
+        }
+    }
+
     fn placement(&mut self) -> StatePlacementEnvelope {
+        let unit = self.unit();
         StatePlacementEnvelope {
             domain: self.arbitrary.rule_name(),
             state: self.state(),
             kind: self.arbitrary.model_kind(),
             identifier: self.arbitrary.rule_name::<ModelName>(),
+            unit,
             branch_key: self.arbitrary.remote_branch_key(),
         }
     }
@@ -283,6 +304,7 @@ impl<'a> Messages<'a> {
                     source_incarnation: ClusterNodeIncarnation::new(self.number()),
                     destination_incarnation: ClusterNodeIncarnation::new(self.number()),
                     domain: self.arbitrary.rule_name(),
+                    unit: self.unit(),
                     entity: NodeRef::new(
                         self.arbitrary.model_kind(),
                         self.arbitrary.rule_name::<ModelName>(),
@@ -304,6 +326,7 @@ impl<'a> Messages<'a> {
                     source: self.arbitrary.cluster_node(),
                     source_incarnation: ClusterNodeIncarnation::new(self.number()),
                     domain: self.arbitrary.rule_name(),
+                    unit: self.unit(),
                     entity: NodeRef::new(
                         self.arbitrary.model_kind(),
                         self.arbitrary.rule_name::<ModelName>(),
@@ -608,6 +631,7 @@ fn runtime_state_wire_variant_boundaries() {
                         kind,
                         identifier: ModelName::parse("checkpoint")
                             .assured("a fixed valid model name"),
+                        unit: nervix_models::Unit::Single,
                         branch_key,
                     };
                     Message::SyncRequest(StateSyncRequest {

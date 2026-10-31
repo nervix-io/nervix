@@ -186,6 +186,7 @@ pub(crate) struct NodeNameWire(pub(crate) String);
 pub(crate) struct WasmStateDescriptorWire {
     pub(crate) domain: String,
     pub(crate) entity: String,
+    pub(crate) unit: nervix_models::Unit,
     pub(crate) schema: [u8; 32],
     pub(crate) branch_fingerprint: Option<[u8; 32]>,
     pub(crate) branch: Option<Vec<StateField>>,
@@ -197,6 +198,7 @@ pub(crate) struct WasmStateDescriptorWire {
 pub(crate) struct KafkaOffsetsWire {
     pub(crate) domain: String,
     pub(crate) entity: String,
+    pub(crate) unit: nervix_models::Unit,
     pub(crate) schema: [u8; 32],
     pub(crate) revision: u64,
     pub(crate) applied_start_generation: Option<u64>,
@@ -215,6 +217,7 @@ pub(crate) struct BranchLifecycleWire {
     pub(crate) domain: String,
     pub(crate) owner_kind: String,
     pub(crate) entity: String,
+    pub(crate) unit: nervix_models::Unit,
     pub(crate) schema: [u8; 32],
     pub(crate) revision: u64,
     pub(crate) branches: Vec<BranchLifecycleEntryWire>,

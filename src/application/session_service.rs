@@ -1691,7 +1691,7 @@ impl SessionServiceImpl {
         if is_transaction_request {
             let leader = self.inner.consensus.current_leader().await;
             if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-                let result = self.not_leader_response(&req.query, leader).await;
+                let result = self.not_leader_response(&req.query, leader.into()).await;
                 let result = self
                     .command_with_transaction_status(result, subscriptions)
                     .await;
@@ -1845,7 +1845,7 @@ impl SessionServiceImpl {
         if let Some(request) = &persistent_request {
             let leader = self.inner.consensus.current_leader().await;
             if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-                let result = self.not_leader_response(&req.query, leader).await;
+                let result = self.not_leader_response(&req.query, leader.into()).await;
                 return Ok(CommandResponse::executed(result));
             }
             #[cfg(feature = "testing")]
@@ -1857,7 +1857,7 @@ impl SessionServiceImpl {
             }
             let leader = self.inner.consensus.current_leader().await;
             if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-                let result = self.not_leader_response(&req.query, leader).await;
+                let result = self.not_leader_response(&req.query, leader.into()).await;
                 return Ok(CommandResponse::executed(result));
             }
             if execution_guard.is_none() {

@@ -36,8 +36,8 @@ use error_stack::{Report, ResultExt as _};
 use nervix_execution::{Cancellation, MemoryClass};
 use nervix_interconnect::StatePlacementEnvelope;
 use nervix_models::{
-    BranchKeyFingerprint, DomainName, DomainStatus, ModelName, NodeRef, RemoteRuntimeField,
-    Timestamp,
+    BranchKeyFingerprint, DomainName, DomainStatus, ModelName, NodeRef, NodeUnitRef,
+    RemoteRuntimeField, Timestamp,
 };
 use thiserror::Error;
 
@@ -298,14 +298,17 @@ pub(crate) enum CapturedBranchStateKind {
 /// A branch-local state's entity and branch, which names it once in a cut.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BranchStateIdentity {
-    node: NodeRef,
+    node: NodeUnitRef,
     branch: Option<BranchKeyFingerprint>,
 }
 
 impl BranchStateIdentity {
     fn of_stored(stored: &StoredPlacement) -> Self {
         Self {
-            node: NodeRef::new(stored.kind, stored.identifier.clone()),
+            node: NodeUnitRef::new(
+                NodeRef::new(stored.kind, stored.identifier.clone()),
+                stored.unit,
+            ),
             branch: stored.branch,
         }
     }
@@ -642,7 +645,7 @@ impl Runtime {
         domain: &DomainName,
         quiesced: bool,
         status: DomainStatus,
-        primaries: &ahash::HashSet<NodeRef>,
+        primaries: &ahash::HashSet<NodeUnitRef>,
         cancellation: &Cancellation,
     ) -> error_stack::Result<CapturedDomainState, BackupStateCaptureError> {
         let Some(store) = self.inner.state_store.as_ref() else {
@@ -655,7 +658,10 @@ impl Runtime {
         for state in self.inner.replicated_kafka_offset_states.iter() {
             let placement = state.key();
             if &placement.domain != domain
-                || !primaries.contains(&NodeRef::new(placement.kind, placement.identifier.clone()))
+                || !primaries.contains(&NodeUnitRef::new(
+                    NodeRef::new(placement.kind, placement.identifier.clone()),
+                    placement.unit,
+                ))
                 || !self.runtime_state_placement_is_assigned_locally(placement)
             {
                 continue;
@@ -671,7 +677,10 @@ impl Runtime {
         for state in self.inner.replicated_branch_lifecycles.iter() {
             let placement = state.key();
             if &placement.domain != domain
-                || !primaries.contains(&NodeRef::new(placement.kind, placement.identifier.clone()))
+                || !primaries.contains(&NodeUnitRef::new(
+                    NodeRef::new(placement.kind, placement.identifier.clone()),
+                    placement.unit,
+                ))
                 || !self.runtime_state_placement_is_assigned_locally(placement)
             {
                 continue;
@@ -707,7 +716,10 @@ impl Runtime {
         let mut current = Vec::new();
         for checkpoint in listed.checkpoints {
             let stored = &checkpoint.placement;
-            let entity = NodeRef::new(stored.kind, stored.identifier.clone());
+            let entity = NodeUnitRef::new(
+                NodeRef::new(stored.kind, stored.identifier.clone()),
+                stored.unit,
+            );
             if primaries.contains(&entity) && self.names_stored_state(domain, stored) {
                 current.push(checkpoint);
             }
@@ -733,9 +745,12 @@ impl Runtime {
         let mut published = ahash::HashSet::default();
         for captured in &branch_states {
             published.insert(BranchStateIdentity {
-                node: NodeRef::new(
-                    captured.placement.kind,
-                    captured.placement.identifier.clone(),
+                node: NodeUnitRef::new(
+                    NodeRef::new(
+                        captured.placement.kind,
+                        captured.placement.identifier.clone(),
+                    ),
+                    captured.placement.unit,
                 ),
                 branch: captured.branch_fingerprint,
             });
@@ -828,7 +843,10 @@ impl Runtime {
                 let mut materialized = Vec::new();
                 for state in self.inner.replicated_materialized_stream_states.iter() {
                     let placement = state.key();
-                    let entity = NodeRef::new(placement.kind, placement.identifier.clone());
+                    let entity = NodeUnitRef::new(
+                        NodeRef::new(placement.kind, placement.identifier.clone()),
+                        placement.unit,
+                    );
                     if &placement.domain != domain
                         || !primaries.contains(&entity)
                         || !self.runtime_state_placement_is_assigned_locally(placement)
@@ -859,7 +877,11 @@ impl Runtime {
     /// Whether a stored checkpoint of `domain` is state its entity's current identity names.
     fn names_stored_state(&self, domain: &DomainName, stored: &StoredPlacement) -> bool {
         let node = NodeRef::new(stored.kind, stored.identifier.clone()).in_domain(domain);
-        let Some(slot) = self.inner.state_identities.get(&node) else {
+        let Some(slot) = self
+            .inner
+            .state_identities
+            .get(&nervix_models::DomainNodeUnitRef::new(node, stored.unit))
+        else {
             return false;
         };
         let Some(assignment) = slot.load_full() else {
@@ -890,7 +912,10 @@ impl Runtime {
         let mut keys = ahash::HashMap::default();
         for checkpoint in current {
             let stored = &checkpoint.placement;
-            let node = NodeRef::new(stored.kind, stored.identifier.clone());
+            let node = NodeUnitRef::new(
+                NodeRef::new(stored.kind, stored.identifier.clone()),
+                stored.unit,
+            );
             if stored.state.kind() != RuntimeStateKind::BranchLru || !nodes.contains(&node) {
                 continue;
             }
@@ -935,7 +960,7 @@ impl Runtime {
     fn published_branch_state_identities(
         &self,
         domain: &DomainName,
-        primaries: &ahash::HashSet<NodeRef>,
+        primaries: &ahash::HashSet<NodeUnitRef>,
     ) -> Vec<BranchStateIdentity> {
         let mut identities = Vec::new();
         for state in self.inner.replicated_deduplicator_states.iter() {
@@ -961,7 +986,7 @@ impl Runtime {
     fn capture_published_branch_states(
         &self,
         domain: &DomainName,
-        primaries: &ahash::HashSet<NodeRef>,
+        primaries: &ahash::HashSet<NodeUnitRef>,
         keys: &ahash::HashMap<BranchStateIdentity, Option<BranchKey>>,
     ) -> Vec<CapturedBranchState> {
         let mut deduplicators = Vec::new();
@@ -1014,7 +1039,7 @@ impl Runtime {
     fn captures_published_branch_state(
         &self,
         domain: &DomainName,
-        primaries: &ahash::HashSet<NodeRef>,
+        primaries: &ahash::HashSet<NodeUnitRef>,
         placement: &RuntimeStatePlacement,
         keys: &ahash::HashMap<BranchStateIdentity, Option<BranchKey>>,
     ) -> bool {
@@ -1029,10 +1054,13 @@ impl Runtime {
     fn names_published_branch_state(
         &self,
         domain: &DomainName,
-        primaries: &ahash::HashSet<NodeRef>,
+        primaries: &ahash::HashSet<NodeUnitRef>,
         placement: &RuntimeStatePlacement,
     ) -> Option<BranchStateIdentity> {
-        let node = NodeRef::new(placement.kind, placement.identifier.clone());
+        let node = NodeUnitRef::new(
+            NodeRef::new(placement.kind, placement.identifier.clone()),
+            placement.unit,
+        );
         if &placement.domain != domain
             || !primaries.contains(&node)
             || !self.runtime_state_placement_is_assigned_locally(placement)
@@ -1043,7 +1071,10 @@ impl Runtime {
         let slot = self
             .inner
             .state_identities
-            .get(&node.clone().in_domain(domain))?;
+            .get(&nervix_models::DomainNodeUnitRef::new(
+                node.node.clone().in_domain(domain),
+                placement.unit,
+            ))?;
         let assignment = slot.load_full()?;
         if !assignment.identity.names(placement.state, branch.as_ref()) {
             return None;
@@ -1146,6 +1177,7 @@ fn restored_placement(
         state: stored.state,
         kind: stored.kind,
         identifier: stored.identifier.clone(),
+        unit: stored.unit,
         branch_key,
     })
 }
@@ -1189,16 +1221,20 @@ mod tests {
     }
 
     /// The entities a cut names this node the primary of.
-    fn primaries(entities: impl IntoIterator<Item = NodeRef>) -> ahash::HashSet<NodeRef> {
+    fn primaries(entities: impl IntoIterator<Item = NodeRef>) -> ahash::HashSet<NodeUnitRef> {
         let mut primaries = ahash::HashSet::default();
-        primaries.extend(entities);
+        primaries.extend(
+            entities
+                .into_iter()
+                .map(|node| NodeUnitRef::new(node, nervix_models::Unit::Single)),
+        );
         primaries
     }
 
     async fn capture(
         runtime: &Runtime,
         domain: &DomainName,
-        primaries: ahash::HashSet<NodeRef>,
+        primaries: ahash::HashSet<NodeUnitRef>,
     ) -> error_stack::Result<CapturedDomainState, BackupStateCaptureError> {
         let capturing = runtime.clone();
         let domain = domain.clone();
@@ -1247,6 +1283,7 @@ mod tests {
             state: RuntimeState::BranchLru {
                 schema: SchemaFingerprint::from_digest([4; 32]),
             },
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         }
     }
@@ -1257,6 +1294,7 @@ mod tests {
                 schema: SchemaFingerprint::from_digest([4; 32]),
                 generation: WasmStateGeneration::FIRST,
             },
+            unit: nervix_models::Unit::Single,
             branch_key: super::super::string_branch_key("tenant", tenant),
             ..lifecycle.clone()
         }
@@ -1312,6 +1350,7 @@ mod tests {
                 .assured("lifecycle persists");
             let placement = RuntimeStatePlacement {
                 state: checkpoint.state,
+                unit: nervix_models::Unit::Single,
                 branch_key: super::super::string_branch_key("tenant", "alpha"),
                 ..lifecycle
             };
@@ -1410,6 +1449,7 @@ mod tests {
                 .assured("lifecycle persists");
             let placement = RuntimeStatePlacement {
                 state: RuntimeState::Deduplicator { schema },
+                unit: nervix_models::Unit::Single,
                 branch_key: super::super::string_branch_key("tenant", "alpha"),
                 ..lifecycle
             };
@@ -1491,6 +1531,7 @@ mod tests {
             state: RuntimeState::WindowProcessor {
                 schema: SchemaFingerprint::from_digest([4; 32]),
             },
+            unit: nervix_models::Unit::Single,
             branch_key: super::super::string_branch_key("tenant", "alpha"),
             ..lifecycle.clone()
         };
@@ -1873,6 +1914,7 @@ mod tests {
             state: RuntimeState::Deduplicator {
                 schema: SchemaFingerprint::from_digest([4; 32]),
             },
+            unit: nervix_models::Unit::Single,
             branch_key: super::super::string_branch_key("tenant", "alpha"),
         }
     }
@@ -1886,6 +1928,7 @@ mod tests {
             state: RuntimeState::WindowProcessor {
                 schema: SchemaFingerprint::from_digest([4; 32]),
             },
+            unit: nervix_models::Unit::Single,
             branch_key: super::super::string_branch_key("tenant", "alpha"),
         }
     }

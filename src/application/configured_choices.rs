@@ -912,6 +912,7 @@ mod tests {
             name: BranchName::parse(name).assured("the test branch names are valid"),
             schema: SchemaName::parse("tenant_key").assured("the test schema name is valid"),
             ttl: "5m".to_string(),
+            partitions: nervix_models::BranchPartitions::ONE,
             eviction,
         })
     }

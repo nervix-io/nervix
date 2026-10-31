@@ -350,6 +350,7 @@ pub(super) mod tests {
             state: RuntimeState::MaterializedRelay {
                 schema: nervix_models::SchemaFingerprint::from_digest([7; 32]).materialized_at(37),
             },
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         }
     }
@@ -737,9 +738,9 @@ pub(super) mod tests {
         // This node is the guest's primary, so the cut lists its save and only the scheduled
         // generation decides that the superseded value is never opened.
         let mut primaries = ahash::HashSet::default();
-        primaries.insert(nervix_models::NodeRef::new(
-            placement.kind,
-            placement.identifier.clone(),
+        primaries.insert(nervix_models::NodeUnitRef::new(
+            nervix_models::NodeRef::new(placement.kind, placement.identifier.clone()),
+            placement.unit,
         ));
         let captured = executor
             .run_storage(

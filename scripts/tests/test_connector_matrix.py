@@ -39,7 +39,7 @@ def declarations():
             "headers": {"layout": "ordered_repeats", "names": "exact",
                         "layout_meaning": "every header in the order it was written",
                         "names_meaning": "a name matches only itself"},
-            "batch": "optional", "batch_maximum": None,
+            "batch": "optional", "batch_maximum": None, "frame_limits": None,
             "body": "ENCODE USING <codec>", "batch_transformation": False,
             "envelope": [], "properties": [], "value_contract": None,
             "bounds": {
@@ -52,7 +52,8 @@ def declarations():
         }],
         "clients": [{"kind": "KAFKA", "pool": "unpooled", "config_owner": "driver", "options": [],
                      "keys": [{"name": "sasl.password", "presence": "optional", "type": "string",
-                               "owner": "driver; best effort", "confidential": True, "file": "none"}],
+                               "owner": "driver; best effort", "confidential": True, "file": "none",
+                               "readers": "every"}],
                      "namespaces": ["all driver property names"], "reserved": ["group.id"], "constraints": []}],
     }
 
@@ -83,6 +84,53 @@ class ConnectorMatrixTests(unittest.TestCase):
             self.assertIn(value, text)
         surface["emit"][0]["value_contract"]["fields"] = ["HISTOGRAM `count`: U64; optional"]
         self.assertNotEqual(text, matrix.render_matrix(surface, reasons()))
+
+    def test_keys_one_side_reads_name_the_entities_of_that_side(self):
+        surface = declarations()
+        key = surface["clients"][0]["keys"][0]
+        surface["clients"][0]["keys"] = [
+            {**key, "name": "framing", "readers": "emitters"},
+            {**key, "name": "max_message_size", "readers": "ingestors"},
+            {**key, "name": "protocol", "readers": "every"},
+            {**key, "name": "retries", "readers": "emitters"},
+            {**key, "name": "timeout_ms", "readers": "emitters"},
+        ]
+        text = matrix.render_matrix(surface, reasons())
+        self.assertIn("Only its `KAFKA TOPIC` ingestors read `max_message_size`. "
+                      "Only its `KAFKA TOPIC` emitters read `framing`, `retries` and `timeout_ms`. "
+                      "Every entity that references the client reads its other keys.", text)
+        self.assertNotIn("`protocol`.", text)
+
+        surface["clients"][0]["keys"] = [{**key, "readers": "every"}]
+        self.assertNotIn("Only its", matrix.render_matrix(surface, reasons()))
+
+    def test_a_key_for_a_side_without_entities_is_refused(self):
+        surface = declarations()
+        surface["emit"][0]["connector"] = "PULSAR"
+        surface["clients"][0]["keys"][0]["readers"] = "emitters"
+        with self.assertRaisesRegex(ValueError, "KAFKA client: `sasl.password` is read only by emitters, "
+                                                "but no KAFKA emitter references the client"):
+            matrix.render_matrix(surface, reasons())
+        surface = declarations()
+        surface["clients"][0]["keys"][0]["readers"] = "everyone"
+        with self.assertRaisesRegex(ValueError, "KAFKA client: `sasl.password` declares unknown readers 'everyone'"):
+            matrix.render_matrix(surface, reasons())
+
+    def test_declared_frame_limits_replace_the_absent_protocol_maximum(self):
+        surface = declarations()
+        text = matrix.render_matrix(surface, reasons())
+        self.assertIn("No additional protocol maximum is declared", text)
+        self.assertNotIn("Frame limits", text)
+
+        surface["emit"][0]["frame_limits"] = [
+            "udp: a payload of at most 65,507 bytes in one datagram",
+            "non-transparent framing: a payload without LF",
+        ]
+        text = matrix.render_matrix(surface, reasons())
+        self.assertIn("| Frame limits | udp: a payload of at most 65,507 bytes in one datagram"
+                      "<br>non-transparent framing: a payload without LF |", text)
+        self.assertIn("A batch is written as one frame within the frame limits", text)
+        self.assertNotIn("No additional protocol maximum is declared", text)
 
     def test_compiled_export_is_atomic_and_keeps_the_previous_complete_input_on_failure(self):
         with tempfile.TemporaryDirectory() as directory:

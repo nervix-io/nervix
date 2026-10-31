@@ -250,6 +250,7 @@ impl RuntimeStatePlacement {
             state: RuntimeState::BranchLru { schema },
             kind: self.kind,
             identifier: self.identifier.clone(),
+            unit: self.unit,
             branch_key: None,
         })
     }

@@ -67,6 +67,23 @@ const PULSAR: ConnectorKind = ConnectorKind::Pulsar;
 const PULSAR_OUTBOUND_CAPACITY: usize = 100;
 const _: () = assert!(PULSAR_OUTBOUND_CAPACITY > 0);
 
+/// The name the broker knows `topic` by: a fully qualified name as written, or a local name placed
+/// in its client's namespace, whose default the Pulsar client declaration writes.
+fn qualified_topic(config: &[ClientConfigEntry], topic: &PulsarTopicName) -> String {
+    let name = topic.as_str();
+    if name.contains("://") {
+        return name.to_owned();
+    }
+    let schema = PULSAR
+        .client()
+        .assured("the Pulsar connector declares a configured client")
+        .config;
+    let effective = schema.effective_entries(config);
+    let namespace = optional_client_config_value(&effective, "namespace")
+        .assured("the Pulsar client declaration defaults its namespace");
+    format!("persistent://{namespace}/{name}")
+}
+
 /// Why one message is refused for good: sending it again cannot succeed while the broker keeps its
 /// configuration.
 #[derive(Debug, PartialEq, Eq, Error)]
@@ -332,7 +349,7 @@ impl PulsarTopicEmitter {
                 .attach_printable(message));
         }
         let producer =
-            Self::producer_from_config(&config.config, config.topic.as_str(), config.mode).await?;
+            Self::producer_from_config(&config.config, &config.topic, config.mode).await?;
         Ok(Self {
             producer,
             publishing: config.mode.into(),
@@ -341,11 +358,11 @@ impl PulsarTopicEmitter {
 
     async fn producer_from_config(
         config: &[ClientConfigEntry],
-        topic: &str,
+        topic: &PulsarTopicName,
         mode: BrokerPublishingMode,
     ) -> EmitterStartResult<pulsar::Producer<TokioExecutor>> {
         let pulsar = Self::client_from_config(config, mode).await?;
-        let topic_name = Self::topic_from_config(config, topic);
+        let topic_name = qualified_topic(config, topic);
         pulsar
             .producer()
             .with_topic(topic_name)
@@ -443,16 +460,6 @@ impl PulsarTopicEmitter {
             tls_options.tls_hostname_verification_enabled = tls_hostname_verification_enabled;
         }
         Ok(Some(tls_options))
-    }
-
-    fn topic_from_config(config: &[ClientConfigEntry], topic: &str) -> String {
-        if topic.contains("://") {
-            return topic.to_string();
-        }
-
-        let namespace =
-            optional_client_config_value(config, "namespace").unwrap_or("public/default");
-        format!("persistent://{namespace}/{topic}")
     }
 
     /// Every way an ACK publish ends goes through the shared window, which settles answers
@@ -674,6 +681,33 @@ mod tests {
             PulsarSendFailure::from(error),
             PulsarSendFailure::Infrastructure(_)
         )
+    }
+
+    fn topic(name: &str) -> PulsarTopicName {
+        PulsarTopicName::parse(name).assured("each fixture is a valid Pulsar topic")
+    }
+
+    #[test]
+    fn a_local_topic_is_qualified_by_its_clients_namespace_or_the_declared_default() {
+        assert_eq!(
+            qualified_topic(&[], &topic("events")),
+            "persistent://public/default/events"
+        );
+        assert_eq!(
+            qualified_topic(&[entry("namespace", "tenant/ns")], &topic("events")),
+            "persistent://tenant/ns/events"
+        );
+        assert_eq!(
+            qualified_topic(
+                &[entry("namespace", "tenant/ns")],
+                &topic("non-persistent://other/ns/events")
+            ),
+            "non-persistent://other/ns/events"
+        );
+        assert_eq!(
+            qualified_topic(&[], &topic("persistent://tenant/ns/events")),
+            "persistent://tenant/ns/events"
+        );
     }
 
     #[test]

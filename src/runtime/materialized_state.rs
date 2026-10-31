@@ -841,6 +841,7 @@ mod tests {
             identifier: ModelName::from(
                 &RelayName::parse(relay).assured("the test relay name satisfies the relay grammar"),
             ),
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         }
     }

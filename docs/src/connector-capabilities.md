@@ -46,8 +46,8 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
 | Buffers | the response body: set by MAX BODY SIZE; when exceeded, fails the poll; the next poll reads again |  |
-| Network waits | a request: name resolution, connection, TLS and the response: `timeout_ms`; required |  |
-| Driver limits | Response heads above 100 headers or 417,792 bytes are refused.<br>Redirects and proxies require the client's explicit opt-in. |  |
+| Network waits | a request and the redirects it follows: name resolution, connection, TLS and each response: `timeout_ms`; required |  |
+| Driver limits | HTTP/1.1 response heads above 100 fields or 417,792 bytes, and HTTP/2 header lists of 16,384 bytes or more as HTTP/2 counts them, are refused.<br>Redirects and proxies require the client's explicit opt-in. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### HTTP ENDPOINT ingest
@@ -227,7 +227,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Acknowledgement confirmation | none |  |
 | Buffers | the query response: set by MAX BODY SIZE; when exceeded, fails the poll; the next poll reads again<br>samples the host takes in as one intake batch: at most 1024 samples; when full, holds back what fills it |  |
 | Network waits | a query: name resolution, connection, TLS and the response: `timeout_ms`; required |  |
-| Driver limits | Response heads above 100 headers or 417,792 bytes are refused. |  |
+| Driver limits | HTTP/1.1 response heads above 100 fields or 417,792 bytes, and HTTP/2 header lists of 16,384 bytes or more as HTTP/2 counts them, are refused. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### ZEROMQ PULL ingest
@@ -370,8 +370,8 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | The connector holds no buffer between its transport and the host. |  |
-| Network waits | a request: name resolution within half of it, each address's connection within an equal share of what is left, TLS, writing it and its final response headers: `timeout_ms`; required |  |
-| Driver limits | A response head above 74,240 bytes or 128 fields fails the attempt. |  |
+| Network waits | a request and the redirects it follows: for each, name resolution within half of what is left, each address's connection within an equal share of what is left after it, the proxy's TLS and tunnel, TLS, writing it and its final response headers: `timeout_ms`; required |  |
+| Driver limits | HTTP/1.1 response heads above 100 fields or 417,792 bytes, and HTTP/2 header lists of 16,384 bytes or more as HTTP/2 counts them, are refused.<br>Redirects and proxies require the client's explicit opt-in. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### KAFKA TOPIC emit
@@ -575,7 +575,8 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
-| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
+| Protocol batch maximum | A batch is written as one frame within the frame limits below; general BATCH limits still apply. |  |
+| Frame limits | udp: one datagram carries at most 65507 payload bytes<br>tcp and tls with octet-counting framing: an octet count has at most 10 digits, so a frame carries at most 9999999999 payload bytes<br>tcp with non-transparent framing: a payload cannot contain `\n`, which ends each frame |  |
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
@@ -823,7 +824,7 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
 | `auto.offset.reset` | optional | string | driver; best effort | no | none |
-| `bootstrap.servers` | optional | string | driver; best effort | no | none |
+| `bootstrap.servers` | required | string | driver; best effort | no | none |
 | `client.id` | optional | string | driver; best effort | no | none |
 | `fetch.wait.max.ms` | optional | unsigned integer | driver; best effort | no | none |
 | `heartbeat.interval.ms` | optional | positive integer | driver; best effort | no | none |
@@ -859,10 +860,10 @@ Delegated property namespaces: all driver property names. Reserved keys: `allow.
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
 | `addr` | required | URL (pulsar or pulsar+ssl) | Nervix; strict | no | none |
-| `namespace` | optional | string | Nervix; strict | no | none |
-| `tls_allow_insecure_connection` | optional | boolean | Nervix; strict | no | none |
-| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
-| `tls_hostname_verification_enabled` | optional | boolean | Nervix; strict | no | none |
+| `namespace` | optional; default `public/default` | tenant/namespace | Nervix; strict | no | none |
+| `tls_allow_insecure_connection` | optional; requires `addr` to use `pulsar+ssl` | boolean | Nervix; strict | no | none |
+| `tls_ca_file` | optional; requires `addr` to use `pulsar+ssl` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_hostname_verification_enabled` | optional; requires `addr` to use `pulsar+ssl` | boolean | Nervix; strict | no | none |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
@@ -1008,6 +1009,8 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
+
+Only its `SYSLOG LISTENER` ingestors read `idle_timeout_ms` and `max_message_size`. Only its `SYSLOG COLLECTOR` emitters read `framing` and `timeout_ms`. Every entity that references the client reads its other keys.
 
 ### PROMETHEUS client
 

@@ -650,6 +650,17 @@ envelope is encoded, before waiting for a connection lease or response headers. 
 for both allocations is a typed encoding admission failure, which releases both allocations
 rather than waiting while retaining the input. The request is not sent after such a refusal.
 
+Receive-side rkyv decoding follows the same admission rule. A charged body never waits for a
+second reservation while keeping its input, and a nested request never waits while its outer
+envelope remains charged. Both refuse immediately when the class has no free room, including
+room assigned to an earlier queued reservation. A nested decoder gives its input an independent
+charge that travels into the CPU job; cancellation of the enclosing request cannot release that
+charge before the job releases its bytes. The decoded value retains its own reservation.
+Memory-budget and execution-queue refusals carry typed remote outcomes with their traffic class
+and requested bytes or queue count. Temporary admission refusals while opening byte and duplex streams
+answer HTTP 503; an operation exceeding the whole memory budget answers 413. Neither means that
+the input was malformed. The relay quota probe retains its distinct `NoRoom` outcome.
+
 Stream slots are isolated per connection, and therefore per peer. Admission quotas, memory budgets,
 and CPU wait queues are isolated per class and shared by every peer of the node. A slow or stalled
 peer therefore holds at most the stream slots of its own connections. Once it holds the 32 shared
@@ -1485,7 +1496,8 @@ Staging and publication run on the admitted filesystem worker class. Authority i
 the storage job after admission, so waiting for a worker cannot preserve an expired installation
 right. Durable synchronization does not run on the async reactor.
 
-A runtime-state placement names exactly the state it addresses: the domain, entity, state kind, and
+A runtime-state placement names exactly the state it addresses: the domain, entity, execution unit,
+state kind, and
 concrete branch; for every kind of state except branch-aggregated metrics and Kafka domain offsets,
 the fingerprint of the schemas the state is laid out by; and for WASM processor guest state the
 generation the committed schedule names for that branch. Branch-aggregated metrics and Kafka domain
@@ -1502,6 +1514,10 @@ fingerprint to place its schema-bound state under, and refuses to place it rathe
 state under an assumed identity. A replication acknowledgement counts only toward the placement it
 names, so an acknowledgement for a replaced generation never satisfies the replica quorum of the
 current one.
+Checkpoint descriptions, replication requests and acknowledgements carry that unit in their typed
+placement envelope. Ownership-handoff and forced-recovery requests carry the unit separately as
+part of their transition identity; a destination may prepare and activate one unit without
+replacing a sibling unit's checkpoints.
 The schedule fingerprint an ownership handoff or forced recovery is bound to covers those schema
 fingerprints and generations, so a preparation staged against an earlier schema or generation cannot
 activate after a later one is committed. The control plane computes the exact fingerprint of the
@@ -1583,7 +1599,7 @@ restarts from the catalog's beginning when the replica has no cursor, when its c
 another catalog, such as one a replaced or restarted owner kept, and when it is older than the
 oldest removal the catalog kept. An owner that holds no branch state of the entity answers that it
 holds none. Both requests are answered only while the answering node is assigned the placement. Admission
-reads the retained entity assignment from the immutable routing publication; state and catalog
+reads the retained unit assignment from the immutable routing publication; state and catalog
 selection never reads the execution, identity or replicated-state registries. Route withdrawal
 ends the exact state handle before replacement, while an already admitted request may finish on
 the state it borrowed. A

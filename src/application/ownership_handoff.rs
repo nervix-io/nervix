@@ -38,8 +38,8 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     ClusterNodeIncarnation, ClusterNodeName, CoordinationIdentity, DomainName, NodeRef,
-    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
-    OwnershipTransition, ScheduledNode,
+    NodeUnitRef, OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
+    OwnershipTransition, ScheduledNode, Unit,
 };
 use nervix_primitives::time::sleep;
 use tracing::{debug, info, warn};
@@ -97,7 +97,7 @@ struct ClusterOwnershipHandoffPreparations {
     operation_id: String,
     domain: DomainName,
     target_schedule_fingerprint: [u8; 32],
-    attempts: BTreeMap<NodeRef, PlannedOwnershipMove>,
+    attempts: BTreeMap<NodeUnitRef, PlannedOwnershipMove>,
     publication_may_be_in_flight: bool,
     cleanup_owner: Option<SessionServiceImpl>,
 }
@@ -107,7 +107,7 @@ struct PendingOwnershipHandoffPreparationCleanup {
     operation_id: String,
     domain: DomainName,
     target_schedule_fingerprint: [u8; 32],
-    attempts: BTreeMap<NodeRef, PlannedOwnershipMove>,
+    attempts: BTreeMap<NodeUnitRef, PlannedOwnershipMove>,
     publication_may_be_in_flight: bool,
 }
 
@@ -242,6 +242,7 @@ impl AssignmentRelocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::application) struct PlannedOwnershipMove {
     pub(in crate::application) entity: NodeRef,
+    pub(in crate::application) unit: Unit,
     pub(in crate::application) former_owner: ClusterNodeName,
     pub(in crate::application) destination: ClusterNodeName,
     replicas: Vec<ClusterNodeName>,
@@ -261,10 +262,13 @@ impl PlannedOwnershipMove {
         let Some(node) = schedule.nodes.get(&self.entity) else {
             return Ok(false);
         };
-        if !node.is_primary_on(&self.destination) {
+        let Some(unit) = node.units.get(&self.unit) else {
+            return Ok(false);
+        };
+        if unit.primary_node.as_ref() != Some(&self.destination) {
             return Ok(false);
         }
-        let Some(transition) = node.ownership_transition.as_ref() else {
+        let Some(transition) = unit.ownership_transition.as_ref() else {
             return Ok(false);
         };
         Ok(transition.id == operation_id
@@ -297,11 +301,15 @@ impl ClusterOwnershipHandoffPreparations {
     /// Records the destination before its prepare RPC can persist anything. A missing response is
     /// therefore cleanup work, just like a successful response.
     fn record_attempt(&mut self, moved: &PlannedOwnershipMove) {
-        self.attempts.insert(moved.entity.clone(), moved.clone());
+        self.attempts.insert(
+            NodeUnitRef::new(moved.entity.clone(), moved.unit),
+            moved.clone(),
+        );
     }
 
-    fn mark_discarded(&mut self, entity: &NodeRef) {
-        self.attempts.remove(entity);
+    fn mark_discarded(&mut self, moved: &PlannedOwnershipMove) {
+        self.attempts
+            .remove(&NodeUnitRef::new(moved.entity.clone(), moved.unit));
     }
 
     fn mark_publication_may_be_in_flight(&mut self) {
@@ -387,11 +395,11 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
         let mut preparations = FuturesUnordered::new();
         for moved in moves {
             nervix_primitives::task::consume_budget().await;
-            let Some(transition) = target
-                .nodes
-                .get(&moved.entity)
-                .and_then(|node| node.ownership_transition.as_ref())
-            else {
+            let Some(transition) = target.nodes.get(&moved.entity).and_then(|node| {
+                node.units
+                    .get(&moved.unit)
+                    .and_then(|unit| unit.ownership_transition.as_ref())
+            }) else {
                 continue;
             };
             if transition.state_recovery == OwnershipStateRecoveryOutcome::Complete {
@@ -411,6 +419,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                                 destination: moved.destination.clone(),
                                 destination_incarnation,
                                 domain: current.domain.clone(),
+                                unit: moved.unit,
                                 entity: moved.entity.clone(),
                                 base_schedule_fingerprint,
                                 target_schedule_fingerprint,
@@ -460,7 +469,10 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                 .verified("the forced recovery move was derived from this target schedule");
             match preparation.result {
                 Ok(prepared) => {
-                    node.ownership_transition = Some(OwnershipTransition {
+                    node.units
+                        .get_mut(&moved.unit)
+                        .verified("the moved unit exists in the target schedule")
+                        .ownership_transition = Some(OwnershipTransition {
                         id: preparation.transition_id,
                         source: moved.former_owner.clone(),
                         destination: moved.destination.clone(),
@@ -480,6 +492,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                 Err(reason) => {
                     Self::mark_reset(
                         node,
+                        moved.unit,
                         preparation.transition_id,
                         moved.former_owner.clone(),
                         moved.destination.clone(),
@@ -512,6 +525,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                 .verified("the forced recovery move was derived from this target schedule");
             Self::mark_reset(
                 node,
+                moved.unit,
                 uuid::Uuid::now_v7().to_string(),
                 moved.former_owner,
                 moved.destination,
@@ -522,21 +536,26 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
 
     fn mark_reset(
         node: &mut ScheduledNode,
+        unit: Unit,
         id: String,
         source: ClusterNodeName,
         destination: ClusterNodeName,
         cause: OwnershipStateResetCause,
     ) {
-        node.ownership_transition = Some(OwnershipTransition {
+        let resets = node
+            .ownership_state_components()
+            .into_iter()
+            .map(|component| OwnershipStateReset { component, cause })
+            .collect();
+        node.units
+            .get_mut(&unit)
+            .verified("the moved unit exists in the target schedule")
+            .ownership_transition = Some(OwnershipTransition {
             id,
             source,
             destination,
             state_recovery: OwnershipStateRecoveryOutcome::Reset,
-            resets: node
-                .ownership_state_components()
-                .into_iter()
-                .map(|component| OwnershipStateReset { component, cause })
-                .collect(),
+            resets,
         });
     }
 }
@@ -554,24 +573,32 @@ pub(in crate::application) fn prefer_former_owners_as_replicas(
         let Some(current_node) = current.nodes.get(identity) else {
             continue;
         };
-        let (Some(former_owner), Some(destination)) = (
-            current_node.execution_node(),
-            planned_node.execution_node().cloned(),
-        ) else {
-            continue;
-        };
-        let replica_slots = planned_node.assigned_nodes.len();
-        if *former_owner == destination || replica_slots < 2 || !live_nodes.contains(former_owner) {
-            continue;
-        }
-        let mut assigned_nodes = vec![destination, former_owner.clone()];
-        for assigned in &planned_node.assigned_nodes {
-            if !assigned_nodes.contains(assigned) {
-                assigned_nodes.push(assigned.clone());
+        for (unit_id, planned_unit) in &mut planned_node.units {
+            let Some(current_unit) = current_node.units.get(unit_id) else {
+                continue;
+            };
+            let (Some(former_owner), Some(destination)) = (
+                current_unit.execution_node(),
+                planned_unit.execution_node().cloned(),
+            ) else {
+                continue;
+            };
+            let replica_slots = planned_unit.assigned_nodes.len();
+            if former_owner == &destination
+                || replica_slots < 2
+                || !live_nodes.contains(former_owner)
+            {
+                continue;
             }
+            let mut assigned_nodes = vec![destination, former_owner.clone()];
+            for assigned in &planned_unit.assigned_nodes {
+                if !assigned_nodes.contains(assigned) {
+                    assigned_nodes.push(assigned.clone());
+                }
+            }
+            assigned_nodes.truncate(replica_slots);
+            planned_unit.assigned_nodes = assigned_nodes;
         }
-        assigned_nodes.truncate(replica_slots);
-        planned_node.assigned_nodes = assigned_nodes;
     }
 }
 
@@ -587,27 +614,32 @@ pub(in crate::application) fn planned_ownership_moves(
         let Some(current_node) = current.nodes.get(identity) else {
             continue;
         };
-        let Some(former_owner) = current_node.primary_node() else {
-            continue;
-        };
-        let Some(destination) = planned_node.primary_node() else {
-            continue;
-        };
-        if former_owner == destination {
-            continue;
+        for (unit_id, planned_unit) in &planned_node.units {
+            let Some(current_unit) = current_node.units.get(unit_id) else {
+                continue;
+            };
+            let (Some(former_owner), Some(destination)) = (
+                current_unit.primary_node.as_ref(),
+                planned_unit.primary_node.as_ref(),
+            ) else {
+                continue;
+            };
+            if former_owner == destination {
+                continue;
+            }
+            moves.push(PlannedOwnershipMove {
+                entity: identity.clone(),
+                unit: *unit_id,
+                former_owner: former_owner.clone(),
+                destination: destination.clone(),
+                replicas: planned_unit.replica_nodes().into_iter().cloned().collect(),
+                promoted_replica: current_unit.assigned_nodes.contains(destination),
+            });
         }
-        moves.push(PlannedOwnershipMove {
-            entity: NodeRef {
-                kind: planned_node.kind(),
-                identifier: planned_node.identifier.clone(),
-            },
-            former_owner: former_owner.clone(),
-            destination: destination.clone(),
-            replicas: planned_node.replica_nodes().into_iter().cloned().collect(),
-            promoted_replica: current_node.is_assigned_to(destination),
-        });
     }
-    moves.sort_by(|left, right| left.entity.cmp(&right.entity));
+    moves.sort_by(|left, right| {
+        (left.entity.clone(), left.unit).cmp(&(right.entity.clone(), right.unit))
+    });
     moves
 }
 
@@ -621,7 +653,10 @@ pub(in crate::application) fn mark_complete_ownership_transitions(
             .nodes
             .get_mut(&moved.entity)
             .verified("every planned ownership move was derived from this target schedule");
-        node.ownership_transition = Some(OwnershipTransition {
+        node.units
+            .get_mut(&moved.unit)
+            .verified("the moved unit exists in the target schedule")
+            .ownership_transition = Some(OwnershipTransition {
             id: transition_id.clone(),
             source: moved.former_owner,
             destination: moved.destination,
@@ -639,10 +674,16 @@ pub(in crate::application) fn format_planned_ownership_move(
     } else {
         moved.replicas.join(",")
     };
+    let unit = match moved.unit {
+        Unit::Single => String::new(),
+        Unit::Partition(partition) => format!(" unit=partition:{partition}"),
+        Unit::Instance(instance) => format!(" unit=instance:{instance}"),
+    };
     format!(
-        "- kind={} name={} from={} to={} replicas={} promoted_replica={}",
+        "- kind={} name={}{} from={} to={} replicas={} promoted_replica={}",
         moved.entity.kind.as_ref(),
         moved.entity.identifier.as_str(),
+        unit,
         moved.former_owner,
         moved.destination,
         replicas,
@@ -871,7 +912,11 @@ impl SessionServiceImpl {
             .nodes
             .get(&first_move.entity)
             .verified("every ownership move was derived from the planned schedule");
-        let Some(first_transition) = first_node.ownership_transition.as_ref() else {
+        let Some(first_transition) = first_node
+            .units
+            .get(&first_move.unit)
+            .and_then(|unit| unit.ownership_transition.as_ref())
+        else {
             return Err(Report::new(DomainAlterError::EntityGate {
                 domain: domain.clone(),
                 operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
@@ -885,7 +930,11 @@ impl SessionServiceImpl {
                 .nodes
                 .get(&moved.entity)
                 .verified("every ownership move was derived from the planned schedule");
-            let Some(transition) = node.ownership_transition.as_ref() else {
+            let Some(transition) = node
+                .units
+                .get(&moved.unit)
+                .and_then(|unit| unit.ownership_transition.as_ref())
+            else {
                 return Err(Report::new(DomainAlterError::EntityGate {
                     domain: domain.clone(),
                     operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
@@ -1120,6 +1169,7 @@ impl SessionServiceImpl {
                         .get(&moved.destination)
                         .verified("every destination was found in live gossip above"),
                     domain: domain.clone(),
+                    unit: moved.unit,
                     entity: moved.entity.clone(),
                     base_schedule_fingerprint,
                     target_schedule_fingerprint,
@@ -1268,7 +1318,11 @@ impl SessionServiceImpl {
                 )
                 .await
                 .map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))?;
-            if !scheduled.is_primary_on(self.inner.consensus.local_node_id()) {
+            if !scheduled
+                .units
+                .get(&moved.unit)
+                .is_some_and(|unit| unit.is_primary_on(self.inner.consensus.local_node_id()))
+            {
                 return Err(OwnershipHandoffError::participant(format!(
                     "{} '{}' is not owned by source node '{}'",
                     moved.entity.kind.as_str(),
@@ -1283,6 +1337,7 @@ impl SessionServiceImpl {
                     coordination,
                     domain,
                     &moved.entity,
+                    moved.unit,
                     base_schedule_fingerprint,
                 )
                 .await;
@@ -1298,6 +1353,7 @@ impl SessionServiceImpl {
                     source: moved.former_owner.clone(),
                     source_incarnation,
                     domain: domain.clone(),
+                    unit: moved.unit,
                     entity: moved.entity.clone(),
                     base_schedule_fingerprint,
                 },
@@ -1406,6 +1462,7 @@ impl SessionServiceImpl {
                     .get(&moved.destination)
                     .verified("every planned destination has a bound incarnation"),
                 domain: handoff.gate.domain.clone(),
+                unit: moved.unit,
                 entity: moved.entity.clone(),
                 base_schedule_fingerprint: handoff.base_schedule_fingerprint,
                 target_schedule_fingerprint: handoff.target_schedule_fingerprint,
@@ -1496,7 +1553,11 @@ impl SessionServiceImpl {
                     request.entity.identifier.as_str()
                 ))
             })?;
-            if !scheduled.is_primary_on(&request.source) {
+            if !scheduled
+                .units
+                .get(&request.unit)
+                .is_some_and(|unit| unit.is_primary_on(&request.source))
+            {
                 return Err(OwnershipHandoffError::participant(format!(
                     "{} '{}' is no longer owned by source node '{}'",
                     request.entity.kind.as_str(),
@@ -1509,11 +1570,10 @@ impl SessionServiceImpl {
                 request.entity.kind,
                 request.entity.identifier,
             );
-            if !self
-                .inner
-                .runtime
-                .ownership_handoff_entity_is_frozen_by(&entity, &request.coordination)
-            {
+            if !self.inner.runtime.ownership_handoff_unit_is_frozen_by(
+                &nervix_models::DomainNodeUnitRef::new(entity, request.unit),
+                &request.coordination,
+            ) {
                 return Err(OwnershipHandoffError::participant(format!(
                     "source node '{}' no longer holds the ownership handoff freeze",
                     request.source
@@ -1555,6 +1615,7 @@ impl SessionServiceImpl {
                     operation_id,
                     domain,
                     &moved.entity,
+                    moved.unit,
                 )
                 .change_context(OwnershipHandoffError::Persistence);
         }
@@ -1566,6 +1627,7 @@ impl SessionServiceImpl {
                     coordination: coordination.clone(),
                     operation_id: operation_id.to_string(),
                     domain: domain.clone(),
+                    unit: moved.unit,
                     entity: moved.entity.clone(),
                 },
             )
@@ -1591,7 +1653,7 @@ impl SessionServiceImpl {
                 )
                 .await
             {
-                Ok(()) => preparations.mark_discarded(&moved.entity),
+                Ok(()) => preparations.mark_discarded(&moved),
                 Err(error) => {
                     warn!(
                         domain = preparations.domain.as_str(),
@@ -1668,7 +1730,9 @@ impl SessionServiceImpl {
                     );
                     match committed {
                         Ok(true) => {
-                            cleanup.attempts.remove(&moved.entity);
+                            cleanup
+                                .attempts
+                                .remove(&NodeUnitRef::new(moved.entity.clone(), moved.unit));
                         }
                         Ok(false) => {}
                         Err(error) => {
@@ -1704,7 +1768,9 @@ impl SessionServiceImpl {
                 };
                 match result {
                     Ok(()) => {
-                        cleanup.attempts.remove(&moved.entity);
+                        cleanup
+                            .attempts
+                            .remove(&NodeUnitRef::new(moved.entity.clone(), moved.unit));
                     }
                     Err(error) => {
                         debug!(
@@ -2071,7 +2137,11 @@ impl SessionServiceImpl {
                             request.entity.identifier.as_str()
                         ))
                     })?;
-                    if !node.is_primary_on(&request.destination) {
+                    if !node
+                        .units
+                        .get(&request.unit)
+                        .is_some_and(|unit| unit.is_primary_on(&request.destination))
+                    {
                         return Err(OwnershipHandoffError::participant(format!(
                             "{} '{}' is not owned by destination node '{}' in the committed \
                              target schedule",
@@ -2153,6 +2223,7 @@ impl SessionServiceImpl {
                 source_incarnation,
                 destination_incarnation,
                 domain: domain.clone(),
+                unit: moved.unit,
                 entity: moved.entity.clone(),
                 base_schedule_fingerprint: handoff.base_schedule_fingerprint,
                 target_schedule_fingerprint: handoff.target_schedule_fingerprint,

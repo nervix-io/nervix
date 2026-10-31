@@ -76,7 +76,9 @@ its Raft cause while classifying a known redirect as leadership loss, a fatal st
 storage, and other Raft write failures separately. A leader whose lease lapsed, because no quorum
 acknowledged a heartbeat or append it sent within the maximum election timeout, refuses a proposal
 before appending it with a redirect that names no leader. That refusal is leadership loss as well,
-although the node can still lead, and nothing of the refused proposal reached the log. A
+although the node can still lead, and nothing of the refused proposal reached the log. It is
+observed as an unconfirmed lease when the node led the same term when it proposed and after the
+refusal, and otherwise as no known leader. A
 state-machine refusal remains a typed conflict, distinct from a storage or leadership failure.
 These classifications determine whether the control plane redirects, retries, or reports an
 uncertain failure; it does not parse the error message to decide.
@@ -459,11 +461,16 @@ The dedicated database owns exactly four current keyspaces: `raft_jetstream_logs
 the complete keyspace namespace before reading any records. This namespace identifies the current
 Model shape, including the required serialized Sentry platform field, an ingestor's
 `TIMESTAMP AT metadata.<field>` source and the `NATS STREAM` ingestor entity. Its state metadata
-requires the current `RestoredLifecycle` encoding,
-including the durable restore installation gate. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
+requires the current `RestoredLifecycle` encoding, including the durable restore installation gate
+and the unit-keyed committed schedule. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
 and snapshot installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).
+
+The committed domain schedule stores the current unit map on every scheduled node. Each unit owns
+its placement, ownership transition and WASM generations. The state metadata's encoding check
+rejects a database written without this schedule shape before state-machine recovery reads its
+records; the node's state must then be recreated.
 
 This layout has one current shape. A consensus database containing an unknown keyspace, a malformed
 current archive, or incomplete or inconsistent current state fails with `invalid consensus record

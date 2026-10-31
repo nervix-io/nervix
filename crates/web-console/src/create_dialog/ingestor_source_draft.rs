@@ -25,12 +25,12 @@ use nervix_models::{
     MqttSession, MqttTopicFilter, MqttTopicIngestor, NatsConsumerName, NatsIngestMode,
     NatsIngestorEntity, NatsQueueGroupName, NatsStreamIngestMode, NatsStreamIngestor,
     NatsStreamName, NatsSubjectIngestor, NatsSubjectName, NodeRef, PayloadSizeLimit,
-    PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor, PulsarIngestorEntity,
-    PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership, PulsarTopicIngestor,
-    PulsarTopicName, RabbitMqIngestMode, RabbitMqIngestorEntity, RabbitMqQueueIngestor,
-    RabbitMqQueueName, RedisChannelName, RedisIngestorEntity, RedisPubSubIngestMode,
-    RedisPubSubIngestor, RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor,
-    SqsQueueName, SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor,
+    PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor, PulsarIngestMode,
+    PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
+    PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode, RabbitMqIngestorEntity,
+    RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName, RedisIngestorEntity,
+    RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SqsIngestMode, SqsIngestorEntity,
+    SqsQueueIngestor, SqsQueueName, SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor,
     WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
     WebsocketsIngestorEntity, WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, ZeroMqIngestMode,
     ZeroMqIngestorEntity, ZeroMqPullIngestor,
@@ -306,7 +306,7 @@ impl IngestorEntityDraft {
                     .change_context(IngestorEntityDraftError::Topic)?,
                 subscription: self.pulsar_subscription()?,
                 instances: self.instances()?,
-                mode: self.kafka_mode()?,
+                mode: self.pulsar_mode()?,
                 quiesce,
             }
             .into(),
@@ -523,6 +523,26 @@ impl IngestorEntityDraft {
                 retry_policy: self.retry_policy()?,
             }),
             Some(IngestDeliveryKind::NoAck) => Ok(KafkaIngestMode::NoAck),
+            Some(IngestDeliveryKind::AckRequest) | None => {
+                Err(Report::new(IngestorEntityDraftError::Mode))
+            }
+        }
+    }
+
+    fn pulsar_mode(&self) -> error_stack::Result<PulsarIngestMode, IngestorEntityDraftError> {
+        match self.delivery {
+            Some(IngestDeliveryKind::AckSequential) => Ok(PulsarIngestMode::AckSequential {
+                timeout: self.ack_timeout()?,
+                retry_policy: self.retry_policy()?,
+            }),
+            Some(IngestDeliveryKind::AckParallel) => Ok(PulsarIngestMode::AckParallel {
+                max: self.ack_max()?,
+                batch_timeout: self
+                    .required(&self.batch_timeout, IngestorEntityDraftError::BatchTimeout)?,
+                timeout: self.ack_timeout()?,
+                retry_policy: self.retry_policy()?,
+            }),
+            Some(IngestDeliveryKind::NoAck) => Ok(PulsarIngestMode::NoAck),
             Some(IngestDeliveryKind::AckRequest) | None => {
                 Err(Report::new(IngestorEntityDraftError::Mode))
             }

@@ -939,7 +939,10 @@ impl IngestorConnectorPlan {
                 })),
                 Model::ClientKafka(resolved),
             ) => {
-                let offsets = KafkaOffsetPlan::decide(offset_mode, scheduled.primary_node.as_ref());
+                let offsets = KafkaOffsetPlan::decide(
+                    offset_mode,
+                    scheduled.single_unit().primary_node.as_ref(),
+                );
                 Ok(Self::Kafka(KafkaIngestorStartPlan::Topic(
                     KafkaTopicIngestorStartPlan {
                         client: IngestorClientSpec::resolved(
@@ -1803,6 +1806,7 @@ mod tests {
                 named::<ModelName>("source"),
             ))
             .assured("the fixture schedules the ingestor")
+            .single_unit_mut()
             .primary_node = Some(named("node-a"));
         let activation =
             crate::registry::DomainActivationPlan::from_scheduled_nodes(&domain, &nodes)

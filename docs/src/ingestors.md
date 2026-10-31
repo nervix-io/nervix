@@ -611,7 +611,7 @@ Transport-specific schemes and keys:
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
+- `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`, which is primarily useful for SQS-compatible local/test endpoints. An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
@@ -981,8 +981,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | none |
 | Acknowledgement confirmation | none |
 | Buffers | the response body: set by MAX BODY SIZE; when exceeded, fails the poll; the next poll reads again |
-| Network waits | a request: name resolution, connection, TLS and the response: `timeout_ms`; required |
-| Driver limits | Response heads above 100 headers or 417,792 bytes are refused.<br>Redirects and proxies require the client's explicit opt-in. |
+| Network waits | a request and the redirects it follows: name resolution, connection, TLS and each response: `timeout_ms`; required |
+| Driver limits | HTTP/1.1 response heads above 100 fields or 417,792 bytes, and HTTP/2 header lists of 16,384 bytes or more as HTTP/2 counts them, are refused.<br>Redirects and proxies require the client's explicit opt-in. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-ingest).
@@ -993,8 +993,13 @@ See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md
   response body at its declared size, or 16 MiB where omitted. A response above that bound fails
   its poll.
 - The HTTP client requires `endpoint` and `timeout_ms`. It also declares optional
-  `follow_redirects` and `proxy` settings, plus TLS trust and client identity files. The polling
-  client ignores proxy environment variables and follows no redirect unless opted in.
+  `follow_redirects` and `proxy` settings, plus TLS trust and client identity files. Polling follows
+  a redirect only to the client's own origin and only with `follow_redirects = true`, sends its
+  requests through the declared `proxy` alone and never through one the environment names, and
+  shares one `timeout_ms` between a request and the redirects it follows, as
+  [HTTP client transport](emitters.md#http-client-transport) describes. A redirect the poll does not
+  follow fails it with its status, and a failed poll's `transient error:` names its status or its
+  transport failure but never the endpoint's path or query.
 - `metadata.status` is the successful response's `U16` status and `metadata.polled_at` is the
   scheduled `DATETIME` instant of that poll. `read_header` and `read_headers` read the response's
   headers; `204 No Content` emits no row.
@@ -1044,14 +1049,24 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).
 <!-- connector-matrix:ingest-kafka-topic:end -->
 
+`TOPIC` takes a string literal that Kafka accepts as a topic name: 1 to 249 ASCII letters, digits,
+`.`, `_` and `-`, other than `.` and `..`. Nervix preserves its case in both directions, so
+`TOPIC 'Orders.EU'` reads exactly that topic. `OFFSET BY CONSUMER GROUP` takes the group's name as
+a string literal of 1 to 255 bytes without control characters, passed to Kafka as written. The
+ingestor names `ON QUIESCE SUSPEND`, the only quiesce mode it declares: the topic keeps its records
+after they are read, so a suspended ingestor resumes from its position, within the topic's
+retention. It reads a record's headers through `read_header` and `read_headers`.
+
 Offset modes:
 
 - `CONSUMER GROUP '<group>'`: Kafka manages offsets
 - `DOMAIN`: Nervix stores the next offset in replicated runtime state and commits partition-to-instance assignment in the Raft-backed domain schedule
 
-`CREATE KAFKA CLIENT` refuses the Nervix-owned keys `group.id`, `enable.auto.commit`,
-`enable.partition.eof`, `allow.auto.create.topics` and `delivery.report.only.error`. Other property
-names and values are checked offline by librdkafka before commitment and passed through to it.
+`CREATE KAFKA CLIENT` requires `bootstrap.servers`, the brokers that each consumer and producer of
+the client contacts first, and refuses a client without it, which could reach no broker. It refuses
+the Nervix-owned keys `group.id`, `enable.auto.commit`, `enable.partition.eof`,
+`allow.auto.create.topics` and `delivery.report.only.error`. Other property names and values are
+checked offline by librdkafka before commitment and passed through to it.
 
 The statement's offset mode supplies the consumer's `group.id`. Only `OFFSET BY CONSUMER GROUP`
 with `MODE NO ACK` enables `enable.auto.commit`. Every consumer disables `enable.partition.eof`
@@ -1246,10 +1261,19 @@ in the declared `options:` row.
 Client config currently supports:
 
 - `'addr'`: broker address such as `'pulsar://127.0.0.1:6650'`
-- optional `'namespace'`: defaults short topic names to `persistent://public/default/<topic>`; fully qualified topic names are accepted as-is
+- optional `'namespace'`: the tenant and namespace, written `'tenant/namespace'`, that a short
+  topic name is placed in, so `TOPIC 'orders'` reads `persistent://<namespace>/orders`; defaults to
+  `public/default`, which `DESCRIBE CLIENT` shows as a default. Fully qualified topic names are sent
+  as written.
 - optional `'tls_ca_file'`: PEM-encoded CA bundle for `pulsar+ssl://...` connections
 - optional `'tls_allow_insecure_connection'`: `true` or `false`; defaults to `false`
 - optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
+
+The three TLS keys apply only to a `pulsar+ssl://...` address. A plaintext `pulsar://...`
+connection uses none of them, so `CREATE PULSAR CLIENT` refuses them there. It also refuses a
+`namespace` that is not exactly a tenant and a namespace, each nonempty and without whitespace or
+control characters, such as `'tenant-a'` or `'tenant-a/orders/eu'`, because no topic qualified
+with it is a valid Pulsar topic.
 
 Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
 
@@ -1581,7 +1605,13 @@ whose broker, identity, filter, session mode and QoS still match are retained, i
 an instance-count change. Changing a filter discards the retired filter's broker queue.
 Ordinary `STOP`, reconnect and ownership transfer retain persistent broker sessions.
 
-`SUSPEND` is valid only with `SESSION PERSISTENT QOS 1`. It disconnects while asking the broker to
+`SUSPEND` is valid only with `SESSION PERSISTENT QOS 1`. CREATE refuses any other pairing with
+`MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1`, underlining `SUSPEND`.
+An unsupported QoS number is refused with the supplied value and the accepted ingestor levels,
+such as `MQTT ingestor QOS must be 0 or 1, found 2`. Completion offers only the session's valid
+quiesce choices.
+
+`SUSPEND` disconnects while asking the broker to
 retain the session; broker offline-queue bounds and session expiry limit what can return. If the
 session expires, resume establishes a fresh session and the interim is lost. `BUFFER` and `DROP`
 remain connected under any valid session declaration. In ACK modes, Nervix acknowledges a payload
@@ -1981,7 +2011,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Acknowledgement confirmation | none |
 | Buffers | the query response: set by MAX BODY SIZE; when exceeded, fails the poll; the next poll reads again<br>samples the host takes in as one intake batch: at most 1024 samples; when full, holds back what fills it |
 | Network waits | a query: name resolution, connection, TLS and the response: `timeout_ms`; required |
-| Driver limits | Response heads above 100 headers or 417,792 bytes are refused. |
+| Driver limits | HTTP/1.1 response heads above 100 fields or 417,792 bytes, and HTTP/2 header lists of 16,384 bytes or more as HTTP/2 counts them, are refused. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [PROMETHEUS QUERY capability and mirror reference](connector-capabilities.md#prometheus-query-ingest).

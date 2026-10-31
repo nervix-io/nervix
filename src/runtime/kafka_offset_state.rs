@@ -1990,6 +1990,7 @@ mod tests {
             kind: ModelKind::Ingestor,
             identifier: ModelName::parse("source")
                 .assured("the test model name satisfies the model-name grammar"),
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         }
     }

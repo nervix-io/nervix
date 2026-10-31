@@ -51,7 +51,16 @@ pub(super) fn generated_placement(arbitrary: &mut Arbitrary<'_>) -> RuntimeState
         state: runtime_state(arbitrary),
         kind: arbitrary.model_kind(),
         identifier: arbitrary.rule_name(),
+        unit: generated_unit(arbitrary),
         branch_key: BranchKey::generated_scope(arbitrary),
+    }
+}
+
+pub(super) fn generated_unit(arbitrary: &mut Arbitrary<'_>) -> nervix_models::Unit {
+    match arbitrary.entropy().byte() % 3 {
+        0 => nervix_models::Unit::Single,
+        1 => nervix_models::Unit::Partition(u32::from(arbitrary.entropy().byte())),
+        _ => nervix_models::Unit::Instance(u32::from(arbitrary.entropy().byte())),
     }
 }
 
@@ -61,6 +70,26 @@ pub(super) fn generated_namespace(arbitrary: &mut Arbitrary<'_>) -> StateNamespa
         StateNamespace::Restored(arbitrary.entropy().any_u64())
     } else {
         StateNamespace::Initial
+    }
+}
+
+#[test]
+fn separate_units_of_one_entity_have_distinct_state_keys() {
+    let entropy = [7_u8; 256];
+    let mut arbitrary = Arbitrary::new(&entropy, Domain::Vocabulary);
+    let mut placement = generated_placement(&mut arbitrary);
+    let mut keys = std::collections::BTreeSet::new();
+    for unit in [
+        nervix_models::Unit::Single,
+        nervix_models::Unit::Partition(0),
+        nervix_models::Unit::Partition(1),
+        nervix_models::Unit::Instance(0),
+    ] {
+        placement.unit = unit;
+        let key = placement.as_storage_key();
+        let decoded = stored_placement(&key).assured("a current unit key decodes");
+        assert_eq!(decoded.unit, unit);
+        assert!(keys.insert(key));
     }
 }
 
@@ -92,6 +121,7 @@ fn bolero_runtime_state_keys_decode_their_placement_and_stay_apart() {
             assert_eq!(decoded.state, placement.state);
             assert_eq!(decoded.kind, placement.kind);
             assert_eq!(decoded.identifier, placement.identifier);
+            assert_eq!(decoded.unit, placement.unit);
             assert_eq!(
                 decoded.branch,
                 placement.branch_key.as_ref().map(BranchKey::fingerprint)
@@ -202,6 +232,7 @@ fn assert_canonical_placement_key(key: &[u8], namespace: StateNamespace, stored:
         state: stored.state,
         kind: stored.kind,
         identifier: stored.identifier.clone(),
+        unit: stored.unit,
         branch_key: None,
     };
     let unbranched = namespace
@@ -313,6 +344,7 @@ fn fixture_key() -> Vec<u8> {
         state: RuntimeState::BranchAggregated,
         kind: ModelKind::Relay,
         identifier: ModelName::parse("events").assured("the fixture name follows the name rule"),
+        unit: nervix_models::Unit::Single,
         branch_key: None,
     };
     StateNamespace::Initial

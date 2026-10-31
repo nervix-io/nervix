@@ -567,8 +567,8 @@ Feature: RabbitMQ ingestion
       | 3            |
 
 
-  # The downstream observer retries within 200ms, including after the intentional stall, so its
-  # one-slot MQTT queue can forward the whole window within the unchanged observation budget.
+  # Hold recovery until every original delivery fails, so the terminal fault cannot reject a
+  # replayed subset into another one-hour batch read. MQTT receipts confirm the downstream oracle.
   @rabbitmq_consumer_modes @deloxide_stress
   Scenario Outline: RabbitMQ ACK PARALLEL preserves all four deliveries when it must reject them after its connection was lost
     Given RabbitMQ is running
@@ -612,7 +612,7 @@ Feature: RabbitMQ ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_reject_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_reject_out_{{test_id}}' MODE QOS 1 ACK PARALLEL MAX 4 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -639,9 +639,28 @@ Feature: RabbitMQ ingestion
       mode: ACK PARALLEL MAX 4 BATCH TIMEOUT 1h ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 200ms
       """
     And RabbitMQ queue "notifications_lost_reject_{{test_id}}" eventually has 4 unacknowledged deliveries
-    When the stallable endpoint "rabbitmq" resets its connections
+    When the stallable endpoint "rabbitmq" is paused
+    And the stallable endpoint "rabbitmq" resets its connections
     Then RabbitMQ queue "notifications_lost_reject_{{test_id}}" eventually has 0 consumers
     When emitter "mqtt_forward" enters fault mode
+    Then within "30s" the active session observes a server error containing
+      """
+      source ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
+      """
+    And within "30s" the active session observes a server error containing
+      """
+      source ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
+      """
+    And within "30s" the active session observes a server error containing
+      """
+      source ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
+      """
+    And within "30s" the active session observes a server error containing
+      """
+      source ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
+      """
+    When emitter "mqtt_forward" leaves fault mode
+    And the stallable endpoint "rabbitmq" is resumed
     Then within "30s" DESCRIBE INGESTOR "rabbit_notifications" on the leader node contains
       """
       nervix_ingestor_transport_redeliveries_total: 4
@@ -653,7 +672,6 @@ Feature: RabbitMQ ingestion
       "user_id":103
       "user_id":104
       """
-    When emitter "mqtt_forward" leaves fault mode
     Then within "40s" the observed broker receives payloads
       """
       "user_id":101
@@ -661,6 +679,8 @@ Feature: RabbitMQ ingestion
       "user_id":103
       "user_id":104
       """
+    And within "40s" DESCRIBE EMITTER "mqtt_forward" on the leader node reports "messages_total" "sent" relay "notifications" totalling "4"
+    And RabbitMQ queue "notifications_lost_reject_{{test_id}}" eventually has 0 unacknowledged deliveries
     When RabbitMQ messages are published to queue "notifications_lost_reject_{{test_id}}"
       """
       [{"user_id":201},{"user_id":202},{"user_id":203},{"user_id":204}]

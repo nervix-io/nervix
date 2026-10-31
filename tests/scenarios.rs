@@ -132,7 +132,8 @@ use crate::common::{
         InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
         TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
         assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
-        command_connect_options, observe_kafka_through, publish_kafka_record_through,
+        command_connect_options, delete_rabbitmq_queue, ensure_rabbitmq_queue,
+        observe_kafka_through, publish_kafka_record_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
@@ -145,9 +146,10 @@ use crate::common::{
         SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
+    http_proxy::{HttpProxy, PROXY_STOP_BUDGET},
     http_receiver::{
         CapturedRequest, ClientCertificatePolicy, HttpReceiver, LengthPolicy, RECEIVER_STOP_BUDGET,
-        ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
+        ReceiverFault, ReceiverProtocols, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
     iceberg_catalog_gate::IcebergCatalogGate,
     kafka_group_member::ExternalKafkaGroupMember,
@@ -208,6 +210,7 @@ mod domain_resume;
 mod emitter_finish;
 mod endpoint_intake;
 mod generated_http_payloads;
+mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
 mod mqtt_fixtures;
@@ -220,6 +223,7 @@ mod paced_simulation;
 mod postgres_fixtures;
 mod process_cluster;
 mod pulsar_delivery;
+mod pulsar_readiness;
 mod pulsar_subscriptions;
 mod restarted_voter;
 mod session_protocol;
@@ -621,6 +625,8 @@ struct ScenarioWorld {
     unaccepted_addresses: Vec<UnacceptedAddress>,
     /// The HTTP receivers a scenario started, by the name its steps give them.
     http_receivers: BTreeMap<String, HttpReceiver>,
+    /// The forward HTTP proxies a scenario started, by the name its steps give them.
+    http_proxies: BTreeMap<String, HttpProxy>,
     /// The gRPC receivers a scenario started, by the name its steps give them.
     grpc_receivers: BTreeMap<String, GrpcReceiver>,
     /// The transport each OTLP receiver a scenario started serves, by the name its steps give it.
@@ -756,6 +762,7 @@ impl fmt::Debug for ScenarioWorld {
             .field("tcp_forwarders", &self.tcp_forwarders)
             .field("unaccepted_addresses", &self.unaccepted_addresses)
             .field("http_receivers", &self.http_receivers)
+            .field("http_proxies", &self.http_proxies)
             .field("grpc_receivers", &self.grpc_receivers)
             .field("otlp_receivers", &self.otlp_receivers)
             .field(
@@ -1578,14 +1585,52 @@ async fn then_the_stallable_endpoint_accepts_no_connection_beyond(
         };
         panic!(
             "the endpoint '{name}' accepted connection {beyond} {} after connection 1, expected \
-             no more than {count}",
-            humantime::format_duration(after)
+             no more than {count}: {}",
+            humantime::format_duration(after),
+            endpoint_connection_timeline(proxy)
         );
     }
     append_cucumber_log_line(&format!(
-        "endpoint '{name}' accepted no connection beyond {count} within {}",
-        humantime::format_duration(window)
+        "endpoint '{name}' accepted no connection beyond {count} within {}: {}",
+        humantime::format_duration(window),
+        endpoint_connection_timeline(proxy)
     ));
+}
+
+/// Every connection `proxy` accepted, measured from its first: from which local address, when the
+/// proxy accepted it and when it stopped forwarding it, if it has.
+fn endpoint_connection_timeline(proxy: &StallableTcpProxy) -> String {
+    let connections = proxy.accepted_connections();
+    let Some(first) = connections.first() else {
+        return "no connection".to_string();
+    };
+    let origin = first.accepted_at;
+    let mut described = Vec::with_capacity(connections.len());
+    for (index, connection) in connections.iter().enumerate() {
+        let accepted = elapsed_since_first_connection(origin, connection.accepted_at);
+        let ended = match connection.ended_at {
+            Some(ended_at) => format!(
+                "ended +{}",
+                elapsed_since_first_connection(origin, ended_at)
+            ),
+            None => "still open".to_string(),
+        };
+        described.push(format!(
+            "connection {} from {} accepted +{accepted}, {ended}",
+            index + 1,
+            connection.peer
+        ));
+    }
+    described.join("; ")
+}
+
+/// How long after an endpoint's first connection, accepted at `origin`, it recorded `instant`.
+fn elapsed_since_first_connection(origin: Instant, instant: Instant) -> String {
+    let elapsed = instant.checked_duration_since(origin).assured(
+        "an endpoint records its connections in the order it accepts them on the monotonic clock, \
+         and ends each after accepting it",
+    );
+    humantime::format_duration(elapsed).to_string()
 }
 
 #[given("ClickHouse is running")]
@@ -1797,9 +1842,12 @@ async fn given_strict_http_receiver_is_running(world: &mut ScenarioWorld, name: 
 
 #[given(expr = "HTTPS receiver {string} is running with a certificate for {string}")]
 async fn given_https_receiver_is_running(world: &mut ScenarioWorld, name: String, hosts: String) {
+    // The certificate's names may name the scenario, so its identity exists before they expand.
+    initialize_scenario_identity(world);
     let options = ReceiverTlsOptions {
         certificate_hosts: certificate_hosts(world, &hosts),
         client_certificate: ClientCertificatePolicy::NotRequested,
+        protocols: ReceiverProtocols::Http1,
     };
     start_http_receiver(
         world,
@@ -1819,9 +1867,12 @@ async fn given_https_receiver_requiring_client_certificates_is_running(
     name: String,
     hosts: String,
 ) {
+    // The certificate's names may name the scenario, so its identity exists before they expand.
+    initialize_scenario_identity(world);
     let options = ReceiverTlsOptions {
         certificate_hosts: certificate_hosts(world, &hosts),
         client_certificate: ClientCertificatePolicy::Required,
+        protocols: ReceiverProtocols::Http1,
     };
     start_http_receiver(
         world,
@@ -3789,6 +3840,20 @@ async fn given_nervix_server_process_is_started_with_state_snapshot_interval(
     .await;
 }
 
+/// The trace filter is the operator's `RUST_LOG`, which the fixture otherwise removes from the
+/// child's environment.
+#[given(expr = "a nervix-server process is started with trace filter {string}")]
+async fn given_nervix_server_process_is_started_with_trace_filter(
+    world: &mut ScenarioWorld,
+    filter: String,
+) {
+    let option = ServerProcessOption::Environment {
+        variable: "RUST_LOG".to_string(),
+        value: filter,
+    };
+    start_ready_server_process(world, &[option]).await;
+}
+
 #[given(
     expr = "a nervix-server process is started with transaction idle timeout {string} and \
             tombstone retention {string}"
@@ -3982,6 +4047,48 @@ async fn when_plexus_commands_are_executed_on_server_process(
                 process.log_tail()
             )
         }));
+    }
+}
+
+#[then(expr = "within {string} DESCRIBE EMITTER {string} on the server process contains")]
+async fn then_within_duration_describe_emitter_on_server_process_contains(
+    world: &mut ScenarioWorld,
+    duration: String,
+    emitter: String,
+    #[step] step: &Step,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let emitter = expand_placeholders(world, &emitter);
+    let expected = expand_placeholders(world, docstring(step));
+    let deadline = Instant::now() + duration;
+    let process = world
+        .server_process
+        .as_ref()
+        .verified("the preceding step started a nervix-server process");
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let output = process
+            .run_commands(&world.domain, &format!("DESCRIBE EMITTER {emitter};"))
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "DESCRIBE EMITTER {emitter} failed on the server process: {error}\n{}",
+                    process.log_tail()
+                )
+            });
+        if output.contains(expected.trim()) {
+            world.last_command_output = Some(output);
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE EMITTER {emitter} to contain {}. last output: \
+             {output}\n{}",
+            expected.trim(),
+            process.log_tail()
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -11839,6 +11946,26 @@ async fn when_runtime_installation_is_released(world: &mut ScenarioWorld, node_i
         .release_runtime_installation_pause(&crate::common::cluster::node_name(&node_id));
 }
 
+/// Holds the next runtime installation every node begins. A held installation keeps its node's
+/// installation sequence, so no later installation on that node proceeds until it is released.
+#[when("runtime installation on every node is paused")]
+async fn when_runtime_installation_is_paused_on_every_node(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .pause_runtime_installation_on(crate::common::cluster::node_name(&node_id));
+    }
+}
+
+#[when("runtime installation on every node is released")]
+async fn when_runtime_installation_is_released_on_every_node(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .release_runtime_installation_pause(&crate::common::cluster::node_name(&node_id));
+    }
+}
+
 #[when(expr = "runtime preparation on node {string} is paused")]
 async fn when_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -14639,10 +14766,11 @@ async fn then_rabbitmq_queue_has_unacknowledged_deliveries(
     expected: usize,
 ) {
     let queue = expand_placeholders(world, &queue);
-    let probe = world
-        .cluster()
-        .rabbitmq_queue_probe(&queue)
-        .expect("the management endpoint is provisioned");
+    let probe = crate::common::rabbitmq_queue::RabbitMqQueueProbe::new(
+        world.dependencies.endpoints(),
+        &queue,
+    )
+    .expect("the management endpoint is provisioned");
     probe
         .wait_for(crate::common::rabbitmq_queue::QueueExpectation::Unacknowledged(expected))
         .await
@@ -14656,10 +14784,11 @@ async fn then_rabbitmq_queue_has_outstanding_deliveries(
     expected: usize,
 ) {
     let queue = expand_placeholders(world, &queue);
-    let probe = world
-        .cluster()
-        .rabbitmq_queue_probe(&queue)
-        .expect("the management endpoint is provisioned");
+    let probe = crate::common::rabbitmq_queue::RabbitMqQueueProbe::new(
+        world.dependencies.endpoints(),
+        &queue,
+    )
+    .expect("the management endpoint is provisioned");
     probe
         .wait_for(crate::common::rabbitmq_queue::QueueExpectation::Outstanding(expected))
         .await
@@ -14679,10 +14808,11 @@ async fn then_rabbitmq_queue_has_consumer_contract(
         "automatic" => false,
         _ => panic!("the consumer's acknowledgement is manual or automatic"),
     };
-    let probe = world
-        .cluster()
-        .rabbitmq_queue_probe(&queue)
-        .expect("the management endpoint is provisioned");
+    let probe = crate::common::rabbitmq_queue::RabbitMqQueueProbe::new(
+        world.dependencies.endpoints(),
+        &queue,
+    )
+    .expect("the management endpoint is provisioned");
     probe
         .wait_for(crate::common::rabbitmq_queue::QueueExpectation::Consumer {
             ack_required,
@@ -15765,6 +15895,7 @@ async fn then_background_command_request_reports_leadership_lost(world: &mut Sce
         "background command request did not report that leadership moved: {}",
         result.message
     );
+    session_protocol::assert_reports_moved_leadership(&result.message);
 }
 
 #[then("the last command request reports an execution reference content conflict")]
@@ -16019,19 +16150,38 @@ async fn then_the_background_plexus_execution_fails_with(
     expected: String,
 ) {
     let expected = expand_placeholders(world, &expected);
-    let task = world
-        .background_plexus
-        .take()
-        .expect("a background Plexus execution must be active");
-    let error = task
-        .await
-        .expect("background Plexus task must not panic")
-        .expect_err("background Plexus execution must fail");
+    let error = take_background_plexus_failure(world).await;
     assert!(
         error.contains(&expected),
         "background Plexus error must contain '{expected}', got: {error}"
     );
     world.last_command_error = Some(error);
+}
+
+#[then(expr = "the background Plexus execution fails because either {string} or {string}")]
+async fn then_the_background_plexus_execution_fails_because_either(
+    world: &mut ScenarioWorld,
+    first: String,
+    second: String,
+) {
+    let first = expand_placeholders(world, &first);
+    let second = expand_placeholders(world, &second);
+    let error = take_background_plexus_failure(world).await;
+    assert!(
+        error.contains(&first) || error.contains(&second),
+        "background Plexus error must contain '{first}' or '{second}', got: {error}"
+    );
+    world.last_command_error = Some(error);
+}
+
+async fn take_background_plexus_failure(world: &mut ScenarioWorld) -> String {
+    let task = world
+        .background_plexus
+        .take()
+        .expect("a background Plexus execution must be active");
+    task.await
+        .expect("background Plexus task must not panic")
+        .expect_err("background Plexus execution must fail")
 }
 
 #[then("the background Plexus execution is discarded")]
@@ -24988,11 +25138,17 @@ async fn then_within_duration_node_eventually_reports_materialized_state_contain
 #[given(expr = "RabbitMQ queue {string} exists")]
 async fn given_rabbitmq_queue_exists(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
-    world
-        .cluster()
-        .ensure_rabbitmq_queue(&queue)
+    ensure_rabbitmq_queue(world.dependencies.endpoints(), &queue)
         .await
         .expect("failed to declare rabbitmq queue");
+}
+
+#[when(expr = "RabbitMQ queue {string} is deleted")]
+async fn when_rabbitmq_queue_is_deleted(world: &mut ScenarioWorld, queue: String) {
+    let queue = expand_placeholders(world, &queue);
+    delete_rabbitmq_queue(world.dependencies.endpoints(), &queue)
+        .await
+        .unwrap_or_else(|error| panic!("failed to delete RabbitMQ queue '{queue}': {error}"));
 }
 
 #[given(expr = "Kafka topic {string} exists with {int} partitions")]
@@ -33439,15 +33595,16 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
     std::future::pending::<SuiteOutcome>().await
 }
 
-/// Stops every HTTP and gRPC receiver the scenario started, together under one budget, and records
-/// how each stop went. A receiver's port goes back with the scenario's other fixture ports at the
-/// end of cleanup.
+/// Stops every HTTP and gRPC receiver and every HTTP proxy the scenario started, together under one
+/// budget, and records how each receiver's stop went. A receiver's or proxy's port goes back with
+/// the scenario's other fixture ports at the end of cleanup.
 async fn stop_receivers(world: &mut ScenarioWorld) {
     if let Some(peer) = world.websocket_peer.take() {
         peer.stop().await;
     }
     let http_receivers = std::mem::take(&mut world.http_receivers);
     let grpc_receivers = std::mem::take(&mut world.grpc_receivers);
+    let http_proxies = std::mem::take(&mut world.http_proxies);
     world.otlp_receivers.clear();
     let http_stops = join_all(
         http_receivers
@@ -33465,7 +33622,8 @@ async fn stop_receivers(world: &mut ScenarioWorld) {
                 (name, stop)
             }),
     );
-    let (http_stops, grpc_stops) = tokio::join!(http_stops, grpc_stops);
+    let proxy_stops = join_all(http_proxies.into_values().map(HttpProxy::stop));
+    let (http_stops, grpc_stops, _) = tokio::join!(http_stops, grpc_stops, proxy_stops);
     for (name, stop) in http_stops {
         append_cucumber_log_line(&format!("HTTP receiver cleanup: {name}: {stop}"));
         if stop.was_forced() {
@@ -33487,6 +33645,10 @@ async fn stop_receivers(world: &mut ScenarioWorld) {
 const _: () = assert!(
     RECEIVER_STOP_BUDGET.as_nanos() < CLUSTER_TEARDOWN_BUDGET.as_nanos(),
     "stopping the HTTP and gRPC receivers must cost less than stopping the cluster"
+);
+const _: () = assert!(
+    PROXY_STOP_BUDGET.as_nanos() < CLUSTER_TEARDOWN_BUDGET.as_nanos(),
+    "stopping the HTTP proxies must cost less than stopping the cluster"
 );
 
 /// Everything a scenario run may be configured with beyond cucumber's own options.

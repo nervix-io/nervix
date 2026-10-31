@@ -203,8 +203,10 @@ current connection, retry and deadline limits.
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
 - Every codec using the SYSLOG wire schema uses `FROM SYSLOG` and only the exact fixed fields
   documented in `Common` → `Syslog`; keep the format separate from the `SYSLOG CLIENT` transport,
-  use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter, and
-  configure TLS identity and framing for the client direction that consumes it.
+  use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter,
+  configure TLS identity for the client direction that consumes it, and set a key only one side
+  reads, such as `framing` or `idle_timeout_ms`, only on a client that side uses; the SYSLOG
+  client reference in `Connector Capabilities` names those keys.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
   owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
   nodes each have one additional fixed dispatch slot.
@@ -335,6 +337,10 @@ current connection, retry and deadline limits.
 - Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
   capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
   an ingestor's `NO ACK` or an emitter's `NO ACK`.
+- Every Kafka client sets `bootstrap.servers`; `CREATE KAFKA CLIENT` refuses a client without it.
+  Treat `TOPIC` as a literal, case-preserving Kafka topic name in both directions, and give every
+  `KAFKA TOPIC` ingestor `OFFSET BY DOMAIN` or `OFFSET BY CONSUMER GROUP '<group>'` and
+  `ON QUIESCE SUSPEND`.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default. Under `OFFSET BY DOMAIN` in an unpaced domain the same policy places a
@@ -410,6 +416,9 @@ current connection, retry and deadline limits.
   failures and which subscription `ALTER` retains or removes. Changing only consumer policy or
   handing the same subscription to `PROVISIONED` preserves its backlog; a changed broker, qualified
   topic or subscription name retires the preceding owned subscription best-effort.
+- A `PULSAR CLIENT`'s `namespace` is exactly `'tenant/namespace'` (default `public/default`), and
+  its TLS keys require a `pulsar+ssl://` `addr`; check both against `Ingestors` → `Pulsar` before
+  generating a client.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
   SUSPEND` and nothing else: no external connector client, codec, `DECODE USING`, headers, or `NO ACK`. The
@@ -635,7 +644,9 @@ Choose checks relevant to the configured graph:
   expiry outcomes.
 
 For a parse error, follow the reported expected token and compare clause order with the relevant
-public example. For a validation error, trace exact types, declaration order, domain ownership,
+public example. For an MQTT QoS or session-pairing refusal, use the underlined token and the
+connector's Ingestors or Emitters section to choose an accepted value or quiesce mode.
+For a validation error, trace exact types, declaration order, domain ownership,
 branch compatibility, construction completeness, and connector capabilities. For missing data,
 check domain lifecycle, source offsets, timestamps, filters, branch keys, route filters, flush
 boundaries, input collection boundaries, and external entity provisioning in that order.

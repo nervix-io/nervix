@@ -15,7 +15,10 @@
 
 use nervix_arbitrary::{Arbitrary, Domain};
 
-use super::{key_properties::generated_placement, *};
+use super::{
+    key_properties::{generated_placement, generated_unit},
+    *,
+};
 
 /// A placement's remote form as archived bytes. Typed branch values compare by these bytes, which
 /// tell apart what value equality does not: NaN payloads, signed zeros and datetime offsets.
@@ -65,6 +68,7 @@ struct Transition {
     source_incarnation: ClusterNodeIncarnation,
     destination_incarnation: ClusterNodeIncarnation,
     entity: DomainNodeRef,
+    unit: nervix_models::Unit,
     base_schedule_fingerprint: [u8; 32],
     target_schedule_fingerprint: [u8; 32],
     checkpoints: Vec<(RuntimeStatePlacement, PersistedRuntimeStateEntry)>,
@@ -90,6 +94,7 @@ impl Transition {
             source_incarnation: arbitrary.incarnation(),
             destination_incarnation: arbitrary.incarnation(),
             entity,
+            unit: generated_unit(arbitrary),
             base_schedule_fingerprint: arbitrary.digest(),
             target_schedule_fingerprint: arbitrary.digest(),
             checkpoints: arbitrary.records(checkpoint),
@@ -105,6 +110,7 @@ impl Transition {
             source_incarnation: self.source_incarnation,
             destination_incarnation: self.destination_incarnation,
             entity: &self.entity,
+            unit: self.unit,
             base_schedule_fingerprint: self.base_schedule_fingerprint,
             target_schedule_fingerprint: self.target_schedule_fingerprint,
         }
@@ -117,6 +123,7 @@ impl Transition {
             destination: &self.destination,
             destination_incarnation: self.destination_incarnation,
             entity: &self.entity,
+            unit: self.unit,
             target_schedule_fingerprint: self.target_schedule_fingerprint,
         }
     }
@@ -128,6 +135,7 @@ impl Transition {
             &self.entity.domain,
             self.entity.kind(),
             self.entity.identifier(),
+            self.unit,
         )
     }
 
@@ -136,6 +144,7 @@ impl Transition {
             &self.entity.domain,
             self.entity.kind(),
             self.entity.identifier(),
+            self.unit,
         )
     }
 }
@@ -171,6 +180,7 @@ fn bolero_runtime_state_identity_records_round_trip() {
             assert_eq!(stored.domain, transition.entity.domain);
             assert_eq!(stored.kind, transition.entity.kind());
             assert_eq!(&stored.identifier, transition.entity.identifier());
+            assert_eq!(stored.unit, transition.unit);
             assert_eq!(
                 stored.base_schedule_fingerprint,
                 transition.base_schedule_fingerprint
@@ -220,14 +230,15 @@ fn bolero_runtime_state_identity_records_round_trip() {
             let other = Transition::generated(&mut arbitrary);
             let same_handoff = other.coordination == transition.coordination
                 && other.operation_id == transition.operation_id
-                && other.entity == transition.entity;
+                && other.entity == transition.entity
+                && other.unit == transition.unit;
             assert_eq!(
                 other.handoff_key() == transition.handoff_key(),
                 same_handoff
             );
             assert_eq!(
                 other.forced_recovery_key() == transition.forced_recovery_key(),
-                other.entity == transition.entity
+                other.entity == transition.entity && other.unit == transition.unit
             );
         });
 }
@@ -271,6 +282,7 @@ fn bolero_malformed_runtime_state_identity_records_fail_typed() {
                         source_incarnation: stored.source_incarnation,
                         destination_incarnation: stored.destination_incarnation,
                         entity: &entity,
+                        unit: stored.unit,
                         base_schedule_fingerprint: stored.base_schedule_fingerprint,
                         target_schedule_fingerprint: stored.target_schedule_fingerprint,
                     };

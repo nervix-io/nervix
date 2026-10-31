@@ -9,8 +9,9 @@
 //!   the endpoints each node advertises.
 //! - **Must not know.** How a redirect travels to a client.
 //!
-//! A redirect never guesses. While no leader is known it names none, and while discovery has not
-//! established one of the leader's endpoints that endpoint stays absent.
+//! A redirect never guesses. While no leader is known it names none, a leader that could not
+//! confirm its lease names none either, since it may or may not still lead, and while discovery has
+//! not established one of the leader's endpoints that endpoint stays absent.
 
 #![cfg_attr(
     nervix_lint,
@@ -21,7 +22,7 @@
 )]
 
 use error_stack::Report;
-use nervix_consensus::ConsensusError;
+use nervix_consensus::{ConsensusError, LeadershipObservation};
 use nervix_models::ClusterNodeName;
 
 use super::{
@@ -53,16 +54,21 @@ impl SessionServiceImpl {
         }
     }
 
-    /// Where a request that needs the leader goes instead, while `leader` leads.
+    /// Where a request that needs the leader goes instead, given what this node observes about
+    /// leadership.
     pub(in crate::application) async fn redirect_to_leader(
         &self,
-        leader: Option<ClusterNodeName>,
+        observed: LeadershipObservation,
     ) -> LeaderRedirect {
-        let leader = match leader {
-            Some(leader) => Some(self.node_location(leader).await),
-            None => None,
-        };
-        LeaderRedirect { leader }
+        match observed {
+            LeadershipObservation::Leader(leader) => {
+                LeaderRedirect::Leader(self.node_location(leader).await)
+            }
+            LeadershipObservation::NoLeader => LeaderRedirect::NoLeader,
+            LeadershipObservation::UnconfirmedLease { term } => {
+                LeaderRedirect::UnconfirmedLease { term }
+            }
+        }
     }
 
     /// Refuses a command that needs the leader. Nothing of it was admitted. The diagnostic spans
@@ -70,18 +76,26 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn not_leader_response(
         &self,
         query: &str,
-        leader: Option<ClusterNodeName>,
+        observed: LeadershipObservation,
     ) -> CommandResult {
-        let message = match leader.as_ref() {
-            Some(leader) => format!("retry this command on leader '{leader}'"),
-            None => "retry this command on the current leader".to_string(),
+        let message = match &observed {
+            LeadershipObservation::Leader(leader) => {
+                format!("retry this command on leader '{leader}'")
+            }
+            LeadershipObservation::NoLeader => {
+                "retry this command on the current leader".to_string()
+            }
+            LeadershipObservation::UnconfirmedLease { term } => format!(
+                "the leader could not confirm its lease in term {term} and may still lead; retry \
+                 this command on the current leader"
+            ),
         };
         let span = if query.is_empty() {
             None
         } else {
             Some(0..query.len())
         };
-        let redirect = self.redirect_to_leader(leader).await;
+        let redirect = self.redirect_to_leader(observed).await;
         CommandResult {
             diagnostics: vec![CommandDiagnostic { message, span }],
             ..CommandResult::new(
@@ -91,16 +105,16 @@ impl SessionServiceImpl {
         }
     }
 
-    /// The result of a command whose proposal failed: a not-leader redirect when this node lost
-    /// leadership, and a failure carrying `message` otherwise.
+    /// The result of a command whose proposal failed: a not-leader redirect when this node could
+    /// not propose as the leader, and a failure carrying `message` otherwise.
     pub(in crate::application) async fn consensus_error_response(
         &self,
         error: &ConsensusError,
         message: String,
     ) -> CommandResult {
         match error {
-            ConsensusError::LeadershipLost { leader_id } => {
-                self.not_leader_response("", leader_id.clone()).await
+            ConsensusError::LeadershipLost { observed } => {
+                self.not_leader_response("", observed.clone()).await
             }
             _ => command_error(message),
         }

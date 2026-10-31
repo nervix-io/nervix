@@ -226,11 +226,12 @@ either that string or an explicit null. Planning resolves the declared default i
 platform string; connector preparation uses it only when the codec's event omits the field.
 
 A NATS ingestor Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`, so a stored ingestor
-holds the archived union of both. The registry's `NERVIX MODEL NJS` archive signature and
-consensus's `raft_jetstream_` keyspaces identify this current shape, which also holds the Sentry
-platform field and an ingestor's `TIMESTAMP AT metadata.<field>` source, before decoding. An
-unrecognized signature or namespace fails with the owning storage error and requires the stored
-data to be recreated.
+holds the archived union of both. The registry's `NERVIX MODEL NJS` archive signature identifies
+the current Model layout, including that union, the required branch partition count, Sentry
+platform, and an ingestor's `TIMESTAMP AT metadata.<field>` source. Consensus's `raft_jetstream_`
+keyspaces and current state metadata encoding identify its stored shapes. An unrecognized
+signature, namespace or encoding fails with the owning storage error and requires the stored data
+to be recreated.
 
 ## Absence And Distinct States
 
@@ -386,6 +387,15 @@ one compare-and-exchange chooses an irreversible verdict. Borrowed admitted work
 transport permits have separate lifetimes. [Cluster Interconnect](./interconnect.md#bounded-correlation-and-peer-owners)
 owns their delivery guarantees and bounds.
 
+**Receive decoding admission.** `RemoteRequestFailure` distinguishes a full memory budget,
+an input above that budget, a closed budget, a full execution queue and a closed execution pool.
+The wire projection retains the traffic class and applicable byte or queue dimensions; callers
+recognize capacity by the variant. These refusals judge admission before inspecting the input,
+while `InvalidPayload` represents validation or deserialization failure. A nested decoding job
+owns its encoded bytes together with their independent reservation until the job exits, even if
+the enclosing request ends. [Cluster Interconnect](./interconnect.md#traffic-and-resource-isolation)
+owns receive admission and its stream responses.
+
 **Client ingestors.** An ingestor's input is either a transport, which carries its source and the
 codec that decodes it, or a client source, which carries the schema its batches hold and its
 producer policy. There is no optional codec beside an optional schema, so an ingestor cannot claim
@@ -520,6 +530,9 @@ reports through a retained token.
 The runtime checks a stored state's schema identity against the current scheduled identity before
 accepting it. WASM guest state additionally uses its generation for the concrete branch. A state
 from another schema or generation cannot become current merely because it has a later revision.
+Its required unit is a typed `Single`, `Partition(p)` or `Instance(i)` identity in the schedule,
+state placement, storage key, remote envelope and archive section. A checkpoint for one unit cannot
+be read as the state of another unit of the same entity.
 This identity check is separate from the snapshot and handoff durability rules in
 [WASM State And Recovery](./wasm-state.md), [Consensus Storage And Replication](./consensus-storage-and-replication.md),
 and [Shutdown And Recovery](./shutdown.md). Those chapters define when state is saved, transferred,

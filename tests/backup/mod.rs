@@ -40,6 +40,7 @@ mod materialized;
 pub(crate) mod memory;
 mod native_metadata;
 pub(crate) mod restore;
+mod snapshot_receive;
 mod staging;
 mod wait;
 
@@ -309,6 +310,59 @@ fn when_backup_lease_pause_released(world: &mut ScenarioWorld, raw_domain: Strin
     world
         .fault_injection
         .release_backup_cut_pause(&domain, BackupCutBoundary::Lease);
+}
+
+/// Every cut of the domain whose pause every live node applied waits `seconds` from its own
+/// arrival before its drain begins, as a slow application of the pause across the cluster would.
+#[given(
+    expr = "the backup cut for domain {string} will be held for {int} seconds once its pause is \
+            applied"
+)]
+fn given_backup_cut_held_once_paused(world: &mut ScenarioWorld, raw_domain: String, seconds: u64) {
+    let domain = scenario_domain(world, &raw_domain);
+    world
+        .fault_injection
+        .pause_backup_cut_on(domain.clone(), BackupCutBoundary::Drain);
+    world.fault_injection.hold_backup_cuts_for(
+        &domain,
+        BackupCutBoundary::Drain,
+        Duration::from_secs(seconds),
+    );
+}
+
+/// Every cut of the domain waits once every live node applied its pause, before the drain's first
+/// poll, a cut of a backup that runs again under its execution reference included, until the
+/// scenario releases the gate.
+#[given(expr = "the backup cut for domain {string} will pause before its drain")]
+fn given_backup_drain_pauses(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    world
+        .fault_injection
+        .pause_backup_cut_on(domain, BackupCutBoundary::Drain);
+}
+
+#[then(expr = "the backup cut for domain {string} has reached its drain pause")]
+async fn then_backup_drain_paused(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    // The cut reaches this pause after its lease and its pause, each of which a loaded runner
+    // delays; the wait ends as soon as the pause is reached.
+    nervix_primitives::time::timeout(
+        Duration::from_secs(120),
+        world
+            .fault_injection
+            .wait_for_backup_cut_pause(&domain, BackupCutBoundary::Drain),
+    )
+    .await
+    .expect("the backup pauses its domain and reaches the pause before its drain");
+}
+
+/// Every cut waiting before the domain's drain continues, and every later one passes.
+#[when(expr = "the backup drain pause for domain {string} is released")]
+fn when_backup_drain_pause_released(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    world
+        .fault_injection
+        .release_backup_cut_pause(&domain, BackupCutBoundary::Drain);
 }
 
 #[then("the background CLI backup finishes")]

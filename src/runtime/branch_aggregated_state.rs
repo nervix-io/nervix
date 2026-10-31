@@ -37,6 +37,7 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: named("source"),
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         };
         let state = ReplicatedBranchAggregatedState::new(

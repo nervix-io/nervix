@@ -16,8 +16,9 @@ use rstest::rstest;
 use super::*;
 use crate::{
     ClientConfigEntry, ClientConfigKey, ClientConfigOwner, ClientConfigPresence,
-    ClientConfigSchemaError, ClientConfigValue, ClientPooling, CreateClientRedis,
-    EmitterEntityKind, IngestDeliveryKind, IngestQuiesceKind, IngestorEntityKind,
+    ClientConfigReaders, ClientConfigSchemaError, ClientConfigValue, ClientPooling,
+    CreateClientRedis, EmitterEntityKind, IngestDeliveryKind, IngestQuiesceKind,
+    IngestorEntityKind,
 };
 
 #[test]
@@ -198,6 +199,7 @@ fn client_schema_declares_the_command_pool_lifetimes_with_defaults() {
             value: ClientConfigValue::Milliseconds,
             owner: ClientConfigOwner::Nervix,
             confidential: false,
+            readers: ClientConfigReaders::Every,
         };
         assert_eq!(schema.key(name), Some(&declared));
     }

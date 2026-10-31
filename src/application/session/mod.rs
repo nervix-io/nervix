@@ -882,7 +882,7 @@ async fn inspect_transaction(
             InspectionOutcome::Rejected { rejection, message }
         }
         TransactionInspectionOutcome::NotLeader { leader } => {
-            let redirect = shared.service.redirect_to_leader(leader).await;
+            let redirect = shared.service.redirect_to_leader(leader.into()).await;
             InspectionOutcome::NotLeader(leader_redirect(redirect))
         }
     }

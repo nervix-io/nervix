@@ -3,13 +3,22 @@
 //!
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
-//! - **Owns.** One loopback listener, when it accepted each connection, the connections it forwards
-//!   to its dependency or holds unanswered, the gate that pauses both directions of every forwarded
-//!   one, resetting them, and rewriting the broker address a Pulsar topic lookup answers with.
+//! - **Owns.** One loopback listener on a port drawn from the harness pool, each connection it
+//!   accepted with its client's address, when it accepted it and when it stopped serving it, the
+//!   connections it forwards to its dependency or holds unanswered, the gate that pauses both
+//!   directions of every forwarded one, resetting them, and rewriting the broker address a Pulsar
+//!   topic lookup answers with, and when a ready producer-creation reply reached its client.
 //! - **Depends on.** Tokio's TCP sockets and codecs, the primitives boundary's watch channel and
-//!   cancellation, and the Pulsar frame codec.
+//!   cancellation, the harness port pool, and the Pulsar frame codec.
 //! - **Must not know.** DNS, Nervix, or the protocol a forwarded connection carries beyond Pulsar's
-//!   lookup answer.
+//!   lookup and producer-creation answers.
+//!
+//! # Why the port comes from the pool
+//!
+//! A scenario counts the connections its client opens through this proxy. A port zero bind can be
+//! handed a port the pool still reserves for another scenario, a stopped node's among them, whose
+//! peers keep dialing it, and every one of those dials would count as the scenario's own. The pool
+//! hands out no port anything may still dial, so the proxy listens on one drawn from it.
 
 use std::{
     future::Future,
@@ -31,6 +40,8 @@ use pulsar::message::Codec as PulsarCodec;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
+use super::port_pool::{next_port, release_test_ports};
+
 const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
 /// A loopback TCP proxy in front of one dependency that a scenario can pause, and whose forwarded
@@ -39,14 +50,61 @@ const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 #[derive(Debug)]
 pub(crate) struct StallableTcpProxy {
     local_addr: std::net::SocketAddr,
-    /// When the proxy accepted each connection, in the order it accepted them. Each follows the
-    /// pause and reset controls from the moment it is recorded.
-    accepted: watch::Sender<Vec<Instant>>,
+    /// Each connection the proxy accepted, in the order it accepted them. Each follows the pause
+    /// and reset controls from the moment it is recorded.
+    accepted: watch::Sender<Vec<AcceptedConnection>>,
     paused: watch::Sender<bool>,
     /// Signalled to reset every connection the proxy forwards at that moment.
     resets: watch::Sender<()>,
     cancellation: CancellationToken,
     task: JoinHandle<()>,
+}
+
+/// One connection the proxy accepted: from which client address, when, and when it ended.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AcceptedConnection {
+    pub(crate) accepted_at: Instant,
+    pub(crate) peer: SocketAddr,
+    /// When the proxy stopped forwarding or holding it, or nothing while it still does.
+    pub(crate) ended_at: Option<Instant>,
+    /// The ready producer-creation reply was flushed to this client at this instant.
+    pub(crate) pulsar_producer_ready_at: Option<Instant>,
+}
+
+/// Records when the proxy stops forwarding or holding one accepted connection, however its task
+/// ends.
+struct ConnectionEnd {
+    accepted: watch::Sender<Vec<AcceptedConnection>>,
+    ordinal: usize,
+}
+
+impl ConnectionEnd {
+    fn record_pulsar_producer_ready(&self) {
+        let ready_at = Instant::now();
+        self.accepted.send_modify(|accepted| {
+            if let Some(connection) = accepted.get_mut(self.ordinal) {
+                connection.pulsar_producer_ready_at.get_or_insert(ready_at);
+            }
+        });
+    }
+}
+
+/// The protocol and observations of the exact connection this task forwards.
+struct ForwardingContext<'a> {
+    protocol: ForwardingProtocol,
+    local_addr: SocketAddr,
+    connection: &'a ConnectionEnd,
+}
+
+impl Drop for ConnectionEnd {
+    fn drop(&mut self) {
+        let ended_at = Instant::now();
+        self.accepted.send_modify(|accepted| {
+            if let Some(connection) = accepted.get_mut(self.ordinal) {
+                connection.ended_at = Some(ended_at);
+            }
+        });
+    }
 }
 
 /// What ended one connection the proxy forwarded.
@@ -103,8 +161,15 @@ impl StallableTcpProxy {
     }
 
     async fn listen(target: ProxyTarget) -> io::Result<Self> {
-        let listener = TokioTcpListener::bind((HOST, 0)).await?;
-        let local_addr = listener.local_addr()?;
+        let listening_port = next_port()?;
+        let listener = match TokioTcpListener::bind((HOST, listening_port)).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                release_test_ports(&[listening_port]);
+                return Err(error);
+            }
+        };
+        let local_addr = SocketAddr::new(HOST, listening_port);
         let (accepted, _) = watch::channel(Vec::new());
         let (paused, paused_rx) = watch::channel(false);
         let (resets, resets_rx) = watch::channel(());
@@ -118,7 +183,7 @@ impl StallableTcpProxy {
                     _ = task_cancellation.cancelled() => return,
                     incoming = listener.accept() => incoming,
                 };
-                let Ok((downstream, _)) = incoming else {
+                let Ok((downstream, peer)) = incoming else {
                     return;
                 };
                 let paused = paused_rx.clone();
@@ -126,7 +191,20 @@ impl StallableTcpProxy {
                 let mut resets = resets_rx.clone();
                 resets.mark_unchanged();
                 let connection_cancellation = task_cancellation.child_token();
-                task_accepted.send_modify(|accepted| accepted.push(Instant::now()));
+                let mut ordinal = 0;
+                task_accepted.send_modify(|accepted| {
+                    ordinal = accepted.len();
+                    accepted.push(AcceptedConnection {
+                        accepted_at: Instant::now(),
+                        peer,
+                        ended_at: None,
+                        pulsar_producer_ready_at: None,
+                    });
+                });
+                let ended = ConnectionEnd {
+                    accepted: task_accepted.clone(),
+                    ordinal,
+                };
                 match target.clone() {
                     ProxyTarget::Dependency {
                         host,
@@ -145,8 +223,11 @@ impl StallableTcpProxy {
                                 paused,
                                 resets,
                                 connection_cancellation,
-                                protocol,
-                                local_addr,
+                                ForwardingContext {
+                                    protocol,
+                                    local_addr,
+                                    connection: &ended,
+                                },
                             )
                             .await;
                             if let ForwardingEnd::ResetRequested = end {
@@ -163,11 +244,10 @@ impl StallableTcpProxy {
                         });
                     }
                     ProxyTarget::Silent => {
-                        nervix_primitives::task::spawn(hold_unanswered(
-                            downstream,
-                            resets,
-                            connection_cancellation,
-                        ));
+                        nervix_primitives::task::spawn(async move {
+                            let _ended = ended;
+                            hold_unanswered(downstream, resets, connection_cancellation).await;
+                        });
                     }
                 }
             }
@@ -199,7 +279,14 @@ impl StallableTcpProxy {
     /// When the proxy accepted the connection at `index` in the order it accepted them, counting
     /// from zero, or nothing while it has accepted fewer.
     pub(crate) fn accepted_at(&self, index: usize) -> Option<Instant> {
-        self.accepted.borrow().get(index).copied()
+        let accepted = self.accepted.borrow();
+        let connection = accepted.get(index)?;
+        Some(connection.accepted_at)
+    }
+
+    /// Every connection the proxy accepted, in the order it accepted them.
+    pub(crate) fn accepted_connections(&self) -> Vec<AcceptedConnection> {
+        self.accepted.borrow().clone()
     }
 
     pub(crate) fn local_port(&self) -> u16 {
@@ -208,6 +295,34 @@ impl StallableTcpProxy {
 
     pub(crate) fn set_paused(&self, paused: bool) {
         self.paused.send_replace(paused);
+    }
+
+    /// Pause an established Pulsar producer without interrupting its creation.
+    pub(crate) async fn pause_pulsar_after_producer_ready(
+        &self,
+        within: Duration,
+    ) -> io::Result<()> {
+        let mut accepted = self.accepted.subscribe();
+        nervix_primitives::time::timeout(
+            within,
+            accepted.wait_for(|connections| {
+                connections.iter().any(|connection| {
+                    connection.ended_at.is_none() && connection.pulsar_producer_ready_at.is_some()
+                })
+            }),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "no live Pulsar producer creation reply reached its client within {within:?}"
+                ),
+            )
+        })?
+        .map_err(io::Error::other)?;
+        self.set_paused(true);
+        Ok(())
     }
 
     /// End a scenario's timed dependency fault while another action runs. The returned future
@@ -246,8 +361,7 @@ async fn forward_through_stall_gate(
     paused: watch::Receiver<bool>,
     mut resets: watch::Receiver<()>,
     cancellation: CancellationToken,
-    protocol: ForwardingProtocol,
-    local_addr: SocketAddr,
+    context: ForwardingContext<'_>,
 ) -> ForwardingEnd {
     let (downstream_read, downstream_write) = downstream.split();
     let (upstream_read, upstream_write) = upstream.split();
@@ -258,7 +372,7 @@ async fn forward_through_stall_gate(
         cancellation.clone(),
     );
     let downstream_copy = async {
-        match protocol {
+        match context.protocol {
             ForwardingProtocol::Tcp => {
                 copy_through_stall_gate(upstream_read, downstream_write, paused, cancellation).await
             }
@@ -268,7 +382,8 @@ async fn forward_through_stall_gate(
                     downstream_write,
                     paused,
                     cancellation,
-                    local_addr,
+                    context.local_addr,
+                    context.connection,
                 )
                 .await
             }
@@ -313,6 +428,10 @@ impl Drop for StallableTcpProxy {
     fn drop(&mut self) {
         self.cancellation.cancel();
         self.task.abort();
+        // A scenario drops its endpoints once the clients they served have stopped, so nothing
+        // dials the port any more. A port zero draw never lands on a port a listener still holds,
+        // so the pool may hand it on before the aborted listener has closed.
+        release_test_ports(&[self.local_addr.port()]);
     }
 }
 
@@ -356,6 +475,7 @@ async fn forward_pulsar_responses<Reader, Writer>(
     mut paused: watch::Receiver<bool>,
     cancellation: CancellationToken,
     local_addr: SocketAddr,
+    connection: &ConnectionEnd,
 ) -> io::Result<()>
 where
     Reader: AsyncRead + Unpin,
@@ -382,8 +502,16 @@ where
         if let Some(lookup) = &mut message.command.lookup_topic_response {
             lookup.broker_service_url = Some(format!("pulsar://{local_addr}"));
         }
+        let producer_ready = message
+            .command
+            .producer_success
+            .as_ref()
+            .is_some_and(|reply| reply.producer_ready.unwrap_or(true));
         wait_for_proxy_resume(&mut paused, &cancellation).await?;
         writer.send(message).await.map_err(io::Error::other)?;
+        if producer_ready {
+            connection.record_pulsar_producer_ready();
+        }
     }
 }
 

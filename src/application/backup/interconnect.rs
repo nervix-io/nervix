@@ -27,7 +27,7 @@ use nervix_interconnect::{
     HandlerRegistrationError, RemoteOperationFailure, RemoteOperationSubject,
     StatePlacementEnvelope, StreamHandlerError, StreamingResponse, Transport,
 };
-use nervix_models::{DomainName, DomainStatus, NodeRef, RestoreStateAuthority};
+use nervix_models::{DomainName, DomainStatus, NodeUnitRef, RestoreStateAuthority};
 use nervix_primitives::{
     sync::{Arc, Mutex as AsyncMutex, watch},
     time::Instant,
@@ -218,6 +218,13 @@ impl SessionServiceImpl {
         )
     }
 
+    /// Answers one drain poll of a quiesced cut with the admitted work this node holds.
+    ///
+    /// The poll installs no runtime state. The cut's pause had every live node apply the paused
+    /// state before the first poll, and a node that had not yet stopped its intake reports its
+    /// ingestors as admitting, so the drain cannot miss its work. Installing the current state
+    /// here would wait for this node's installation sequence and for every live node to prepare
+    /// and ready the revision, on every poll of every node.
     pub(crate) async fn handle_backup_drain_status_request(
         &self,
         peer: &nervix_models::ClusterNodeName,
@@ -230,11 +237,6 @@ impl SessionServiceImpl {
                     "backup drain coordinator is not the current leader",
                 ));
             }
-            self.apply_current_cluster_state()
-                .await
-                .change_context_lazy(|| {
-                    failure_context(&request.domain, "backup state section operation failed")
-                })?;
             let status = match request.action {
                 BackupDrainAction::FlushHeldWork => {
                     self.inner.runtime.flush_held_domain_work(&request.domain)
@@ -274,7 +276,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         quiesced: bool,
         status: DomainStatus,
-        primaries: ahash::HashSet<NodeRef>,
+        primaries: ahash::HashSet<NodeUnitRef>,
         progress: &mut CutProgress,
     ) -> Result<CapturedDomainState, Report<RemoteOperationFailure>> {
         let runtime = self.inner.runtime.clone();
@@ -368,8 +370,7 @@ impl SessionServiceImpl {
             // admission or storage refusal could only fail the cut.
             let mut primaries = ahash::HashSet::default();
             if let Some(schedule) = capture.schedule.domain(&request.domain) {
-                primaries
-                    .extend(schedule.primary_entities_on(self.inner.consensus.local_node_id()));
+                primaries.extend(schedule.primary_units_on(self.inner.consensus.local_node_id()));
             }
             let state = self
                 .capture_local_state(
@@ -904,6 +905,62 @@ mod tests {
             .err()
             .assured("an owner that does not catch up reaches its deadline");
         assert!(failure.to_string().contains("within its deadline"));
+    }
+
+    /// A cut's pause has every live node apply the paused state before the drain's first poll, so
+    /// a poll reads, or flushes, the admitted work its node already holds. Were a poll to install
+    /// the current runtime state, every poll of every node would wait for that node's installation
+    /// and for every live node to prepare and ready its revision.
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn a_drain_poll_answers_without_installing_runtime_state() {
+        use nervix_recovery::Discarded as _;
+
+        use crate::application::test_fixtures::{
+            TestService, build_test_service_with_fault_injection,
+        };
+
+        let faults = crate::FaultInjection::default();
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service_with_fault_injection(true, faults.clone()).await;
+        let coordinator = service.inner.consensus.local_node_id().clone();
+        let domain = DomainName::parse("default").assured("the fixture domain name is valid");
+        let coordination = service
+            .inner
+            .interconnect
+            .next_coordination_identity()
+            .assured("the fixture transport issues a coordination identity");
+        faults.pause_runtime_installation_on(coordinator.clone());
+        for action in [
+            BackupDrainAction::FlushHeldWork,
+            BackupDrainAction::Confirm,
+            BackupDrainAction::Observe,
+        ] {
+            let request = BackupDrainStatusRequest {
+                coordination: coordination.clone(),
+                domain: domain.clone(),
+                action,
+            };
+            let poll = service.handle_backup_drain_status_request(&coordinator, request);
+            let installation = faults.wait_for_runtime_installation_pause(&coordinator);
+            nervix_primitives::select! {
+                biased;
+                status = poll => {
+                    let status = status.assured("the leader's poll of its own node is answered");
+                    assert!(!status.holds_admitted_work(), "{action:?}: {status:?}");
+                }
+                () = installation => {
+                    panic!("a {action:?} drain poll began a runtime installation");
+                }
+            }
+        }
+        faults.release_runtime_installation_pause(&coordinator);
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
     }
 
     #[test]

@@ -1886,7 +1886,7 @@ mod tests {
             ))
             .expect("fixture schedule must include its materialized relay");
         assert_eq!(
-            scheduled_relay.assigned_nodes,
+            scheduled_relay.single_unit().assigned_nodes,
             [named::<ClusterNodeName>("node-1")]
         );
 

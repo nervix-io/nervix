@@ -7,18 +7,18 @@
 //! domains/<domain>/models.plexus
 //! domains/<domain>/resources/<resource>/<version>/version.rkyv
 //! domains/<domain>/resources/<resource>/<version>/archive.tar   (unless WITHOUT RESOURCES)
-//! domains/<domain>/state/wasm_processor/<processor>/<branch>/descriptor.rkyv
-//! domains/<domain>/state/wasm_processor/<processor>/<branch>/guest.bin
-//! domains/<domain>/state/kafka_offset/<ingestor>/offsets.rkyv
-//! domains/<domain>/state/branch_lifecycle/<kind>/<processor>/branches.rkyv
-//! domains/<domain>/state/materialized_relay/<relay>/descriptor.rkyv
-//! domains/<domain>/state/materialized_relay/<relay>/groups/<group>/identities.rkyv
-//! domains/<domain>/state/materialized_relay/<relay>/groups/<group>/columns.arrow
-//! domains/<domain>/state/deduplicator/<deduplicator>/<branch>/descriptor.rkyv
-//! domains/<domain>/state/deduplicator/<deduplicator>/<branch>/groups/<group>/keys.arrow
-//! domains/<domain>/state/window_processor/<processor>/<branch>/descriptor.rkyv
-//! domains/<domain>/state/window_processor/<processor>/<branch>/groups/<group>/input.arrow
-//! domains/<domain>/state/window_processor/<processor>/<branch>/groups/<group>/arguments.arrow
+//! domains/<domain>/state/wasm_processor/<processor>/<unit>/<branch>/descriptor.rkyv
+//! domains/<domain>/state/wasm_processor/<processor>/<unit>/<branch>/guest.bin
+//! domains/<domain>/state/kafka_offset/<ingestor>/<unit>/offsets.rkyv
+//! domains/<domain>/state/branch_lifecycle/<kind>/<processor>/<unit>/branches.rkyv
+//! domains/<domain>/state/materialized_relay/<relay>/<unit>/descriptor.rkyv
+//! domains/<domain>/state/materialized_relay/<relay>/<unit>/groups/<group>/identities.rkyv
+//! domains/<domain>/state/materialized_relay/<relay>/<unit>/groups/<group>/columns.arrow
+//! domains/<domain>/state/deduplicator/<deduplicator>/<unit>/<branch>/descriptor.rkyv
+//! domains/<domain>/state/deduplicator/<deduplicator>/<unit>/<branch>/groups/<group>/keys.arrow
+//! domains/<domain>/state/window_processor/<processor>/<unit>/<branch>/descriptor.rkyv
+//! domains/<domain>/state/window_processor/<processor>/<unit>/<branch>/groups/<group>/input.arrow
+//! domains/<domain>/state/window_processor/<processor>/<unit>/<branch>/groups/<group>/arguments.arrow
 //! ```
 //!
 //! A path is for people and for tar tools; a reader identifies each section by the manifest entry
@@ -29,7 +29,7 @@
 use std::{borrow::Cow, fmt, num::NonZeroU64};
 
 use error_stack::Report;
-use nervix_models::{BranchKeyFingerprint, DomainName, ModelKind, ModelName, ResourceName};
+use nervix_models::{BranchKeyFingerprint, DomainName, ModelKind, ModelName, ResourceName, Unit};
 
 use crate::error::ArchiveReadError;
 
@@ -87,40 +87,55 @@ impl SectionPath {
     pub fn wasm_state_descriptor(
         domain: &DomainName,
         entity: &ModelName,
+        unit: Unit,
         branch: Option<&BranchKeyFingerprint>,
     ) -> Self {
         Self(format!(
-            "{}/state/wasm_processor/{}/{}/descriptor.rkyv",
+            "{}/state/wasm_processor/{}/{}/{}/descriptor.rkyv",
             domain_directory(domain),
             segment(entity.as_str()),
+            unit_segment(unit),
             branch_segment(branch)
         ))
     }
 
     /// The generation descriptor of one materialized relay.
-    pub fn materialized_descriptor(domain: &DomainName, entity: &ModelName) -> Self {
+    pub fn materialized_descriptor(domain: &DomainName, entity: &ModelName, unit: Unit) -> Self {
         Self(format!(
-            "{}/state/materialized_relay/{}/descriptor.rkyv",
+            "{}/state/materialized_relay/{}/{}/descriptor.rkyv",
             domain_directory(domain),
-            segment(entity.as_str())
+            segment(entity.as_str()),
+            unit_segment(unit)
         ))
     }
 
     /// One bounded group's typed record identities.
-    pub fn materialized_identities(domain: &DomainName, entity: &ModelName, group: u32) -> Self {
+    pub fn materialized_identities(
+        domain: &DomainName,
+        entity: &ModelName,
+        unit: Unit,
+        group: u32,
+    ) -> Self {
         Self(format!(
-            "{}/state/materialized_relay/{}/groups/{group:010}/identities.rkyv",
+            "{}/state/materialized_relay/{}/{}/groups/{group:010}/identities.rkyv",
             domain_directory(domain),
-            segment(entity.as_str())
+            segment(entity.as_str()),
+            unit_segment(unit)
         ))
     }
 
     /// One bounded group's Arrow IPC columns.
-    pub fn materialized_columns(domain: &DomainName, entity: &ModelName, group: u32) -> Self {
+    pub fn materialized_columns(
+        domain: &DomainName,
+        entity: &ModelName,
+        unit: Unit,
+        group: u32,
+    ) -> Self {
         Self(format!(
-            "{}/state/materialized_relay/{}/groups/{group:010}/columns.arrow",
+            "{}/state/materialized_relay/{}/{}/groups/{group:010}/columns.arrow",
             domain_directory(domain),
-            segment(entity.as_str())
+            segment(entity.as_str()),
+            unit_segment(unit)
         ))
     }
 
@@ -128,11 +143,12 @@ impl SectionPath {
     pub fn deduplicator_descriptor(
         domain: &DomainName,
         entity: &ModelName,
+        unit: Unit,
         branch: Option<&BranchKeyFingerprint>,
     ) -> Self {
         Self(format!(
             "{}/descriptor.rkyv",
-            branch_state_directory(domain, "deduplicator", entity, branch)
+            branch_state_directory(domain, "deduplicator", entity, unit, branch)
         ))
     }
 
@@ -140,12 +156,13 @@ impl SectionPath {
     pub fn deduplicator_keys(
         domain: &DomainName,
         entity: &ModelName,
+        unit: Unit,
         branch: Option<&BranchKeyFingerprint>,
         group: u32,
     ) -> Self {
         Self(format!(
             "{}/groups/{group:010}/keys.arrow",
-            branch_state_directory(domain, "deduplicator", entity, branch)
+            branch_state_directory(domain, "deduplicator", entity, unit, branch)
         ))
     }
 
@@ -153,11 +170,12 @@ impl SectionPath {
     pub fn window_descriptor(
         domain: &DomainName,
         entity: &ModelName,
+        unit: Unit,
         branch: Option<&BranchKeyFingerprint>,
     ) -> Self {
         Self(format!(
             "{}/descriptor.rkyv",
-            branch_state_directory(domain, "window_processor", entity, branch)
+            branch_state_directory(domain, "window_processor", entity, unit, branch)
         ))
     }
 
@@ -165,12 +183,13 @@ impl SectionPath {
     pub fn window_input_rows(
         domain: &DomainName,
         entity: &ModelName,
+        unit: Unit,
         branch: Option<&BranchKeyFingerprint>,
         group: u32,
     ) -> Self {
         Self(format!(
             "{}/groups/{group:010}/input.arrow",
-            branch_state_directory(domain, "window_processor", entity, branch)
+            branch_state_directory(domain, "window_processor", entity, unit, branch)
         ))
     }
 
@@ -178,12 +197,13 @@ impl SectionPath {
     pub fn window_argument_columns(
         domain: &DomainName,
         entity: &ModelName,
+        unit: Unit,
         branch: Option<&BranchKeyFingerprint>,
         group: u32,
     ) -> Self {
         Self(format!(
             "{}/groups/{group:010}/arguments.arrow",
-            branch_state_directory(domain, "window_processor", entity, branch)
+            branch_state_directory(domain, "window_processor", entity, unit, branch)
         ))
     }
 
@@ -191,30 +211,39 @@ impl SectionPath {
     pub fn wasm_guest_blob(
         domain: &DomainName,
         entity: &ModelName,
+        unit: Unit,
         branch: Option<&BranchKeyFingerprint>,
     ) -> Self {
         Self(format!(
-            "{}/state/wasm_processor/{}/{}/guest.bin",
+            "{}/state/wasm_processor/{}/{}/{}/guest.bin",
             domain_directory(domain),
             segment(entity.as_str()),
+            unit_segment(unit),
             branch_segment(branch)
         ))
     }
 
-    pub fn kafka_offsets(domain: &DomainName, entity: &ModelName) -> Self {
+    pub fn kafka_offsets(domain: &DomainName, entity: &ModelName, unit: Unit) -> Self {
         Self(format!(
-            "{}/state/kafka_offset/{}/offsets.rkyv",
+            "{}/state/kafka_offset/{}/{}/offsets.rkyv",
             domain_directory(domain),
-            segment(entity.as_str())
+            segment(entity.as_str()),
+            unit_segment(unit)
         ))
     }
 
-    pub fn branch_lifecycle(domain: &DomainName, kind: ModelKind, entity: &ModelName) -> Self {
+    pub fn branch_lifecycle(
+        domain: &DomainName,
+        kind: ModelKind,
+        entity: &ModelName,
+        unit: Unit,
+    ) -> Self {
         Self(format!(
-            "{}/state/branch_lifecycle/{}/{}/branches.rkyv",
+            "{}/state/branch_lifecycle/{}/{}/{}/branches.rkyv",
             domain_directory(domain),
             kind.as_str(),
-            segment(entity.as_str())
+            segment(entity.as_str()),
+            unit_segment(unit)
         ))
     }
 
@@ -254,14 +283,24 @@ fn branch_state_directory(
     domain: &DomainName,
     kind: &str,
     entity: &ModelName,
+    unit: Unit,
     branch: Option<&BranchKeyFingerprint>,
 ) -> String {
     format!(
-        "{}/state/{kind}/{}/{}",
+        "{}/state/{kind}/{}/{}/{}",
         domain_directory(domain),
         segment(entity.as_str()),
+        unit_segment(unit),
         branch_segment(branch)
     )
+}
+
+fn unit_segment(unit: Unit) -> String {
+    match unit {
+        Unit::Single => "single".to_string(),
+        Unit::Partition(partition) => format!("partition/{partition}"),
+        Unit::Instance(instance) => format!("instance/{instance}"),
+    }
 }
 
 fn branch_segment(branch: Option<&BranchKeyFingerprint>) -> String {
@@ -327,6 +366,23 @@ mod tests {
             SectionPath::resource_archive(&domain("prod"), &resource("model.v2"), version).as_str(),
             "domains/prod/resources/model.v2/3/archive.tar"
         );
+    }
+
+    #[test]
+    fn state_sections_of_one_entity_are_separate_per_unit() {
+        let domain = domain("prod");
+        let entity = ModelName::parse("orders").assured("the test entity is valid");
+        let mut paths = std::collections::BTreeSet::new();
+        for unit in [
+            Unit::Single,
+            Unit::Partition(0),
+            Unit::Partition(1),
+            Unit::Instance(0),
+        ] {
+            let path = SectionPath::kafka_offsets(&domain, &entity, unit);
+            SectionPath::parse(path.as_str()).assured("a current section path is valid");
+            assert!(paths.insert(path));
+        }
     }
 
     #[test]
