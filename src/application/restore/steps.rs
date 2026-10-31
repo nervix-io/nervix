@@ -693,8 +693,8 @@ impl SessionServiceImpl {
 
     /// The failure a consensus refusal of a restore step stands for.
     async fn consensus_step_failure(&self, error: &Report<ConsensusError>) -> StepFailure {
-        if let ConsensusError::LeadershipLost { leader_id } = error.current_context() {
-            let redirect = self.not_leader_response("", leader_id.clone()).await;
+        if let ConsensusError::LeadershipLost { observed } = error.current_context() {
+            let redirect = self.not_leader_response("", observed.clone()).await;
             return StepFailure::LeadershipLost(Box::new(redirect));
         }
         StepFailure::Failed(format!("{error:#}"))
@@ -739,10 +739,10 @@ impl SessionServiceImpl {
                 offset: version.archive.offset,
             };
             if let Err(error) = self.install_imported_resource_version(import).await {
-                if let Some(ConsensusError::LeadershipLost { leader_id }) =
+                if let Some(ConsensusError::LeadershipLost { observed }) =
                     error.downcast_ref::<ConsensusError>()
                 {
-                    let redirect = self.not_leader_response("", leader_id.clone()).await;
+                    let redirect = self.not_leader_response("", observed.clone()).await;
                     return Err(StepFailure::LeadershipLost(Box::new(redirect)));
                 }
                 return Err(StepFailure::Failed(format!(

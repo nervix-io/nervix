@@ -203,8 +203,10 @@ current connection, retry and deadline limits.
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
 - Every codec using the SYSLOG wire schema uses `FROM SYSLOG` and only the exact fixed fields
   documented in `Common` → `Syslog`; keep the format separate from the `SYSLOG CLIENT` transport,
-  use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter, and
-  configure TLS identity and framing for the client direction that consumes it.
+  use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter,
+  configure TLS identity for the client direction that consumes it, and set a key only one side
+  reads, such as `framing` or `idle_timeout_ms`, only on a client that side uses; the SYSLOG
+  client reference in `Connector Capabilities` names those keys.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
   owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
   nodes each have one additional fixed dispatch slot.
@@ -414,6 +416,9 @@ current connection, retry and deadline limits.
   failures and which subscription `ALTER` retains or removes. Changing only consumer policy or
   handing the same subscription to `PROVISIONED` preserves its backlog; a changed broker, qualified
   topic or subscription name retires the preceding owned subscription best-effort.
+- A `PULSAR CLIENT`'s `namespace` is exactly `'tenant/namespace'` (default `public/default`), and
+  its TLS keys require a `pulsar+ssl://` `addr`; check both against `Ingestors` → `Pulsar` before
+  generating a client.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
   SUSPEND` and nothing else: no external connector client, codec, `DECODE USING`, headers, or `NO ACK`. The

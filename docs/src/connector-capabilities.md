@@ -555,7 +555,8 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
-| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
+| Protocol batch maximum | A batch is written as one frame within the frame limits below; general BATCH limits still apply. |  |
+| Frame limits | udp: one datagram carries at most 65507 payload bytes<br>tcp and tls with octet-counting framing: an octet count has at most 10 digits, so a frame carries at most 9999999999 payload bytes<br>tcp with non-transparent framing: a payload cannot contain `\n`, which ends each frame |  |
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
@@ -839,10 +840,10 @@ Delegated property namespaces: all driver property names. Reserved keys: `allow.
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
 | `addr` | required | URL (pulsar or pulsar+ssl) | Nervix; strict | no | none |
-| `namespace` | optional | string | Nervix; strict | no | none |
-| `tls_allow_insecure_connection` | optional | boolean | Nervix; strict | no | none |
-| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
-| `tls_hostname_verification_enabled` | optional | boolean | Nervix; strict | no | none |
+| `namespace` | optional; default `public/default` | tenant/namespace | Nervix; strict | no | none |
+| `tls_allow_insecure_connection` | optional; requires `addr` to use `pulsar+ssl` | boolean | Nervix; strict | no | none |
+| `tls_ca_file` | optional; requires `addr` to use `pulsar+ssl` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_hostname_verification_enabled` | optional; requires `addr` to use `pulsar+ssl` | boolean | Nervix; strict | no | none |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
@@ -988,6 +989,8 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
+
+Only its `SYSLOG LISTENER` ingestors read `idle_timeout_ms` and `max_message_size`. Only its `SYSLOG COLLECTOR` emitters read `framing` and `timeout_ms`. Every entity that references the client reads its other keys.
 
 ### PROMETHEUS client
 

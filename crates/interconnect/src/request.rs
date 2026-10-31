@@ -97,8 +97,78 @@ pub enum RemoteRequestFailure {
     PayloadTooLarge { actual: u64, limit: u64 },
     #[error("the {subquota:?} request subquota is full")]
     AdmissionFull { subquota: RequestSubquota },
+    #[error("the {class:?} memory budget has no room for another {requested} bytes")]
+    MemoryBudgetFull { class: PoolClass, requested: u64 },
+    #[error("a {requested}-byte decode exceeds the {capacity}-byte {class:?} memory budget")]
+    MemoryBudgetExceeded {
+        class: PoolClass,
+        requested: u64,
+        capacity: u64,
+    },
+    #[error("the {class:?} memory budget is closed")]
+    MemoryBudgetClosed { class: PoolClass },
+    #[error("the {class:?} execution queue already holds {pending} waiting jobs")]
+    ExecutionQueueFull { class: PoolClass, pending: u64 },
+    #[error("the {class:?} execution pool is closed")]
+    ExecutionPoolClosed { class: PoolClass },
     #[error("the coordination identity does not belong to the authenticated request sender")]
     CoordinationIdentityMismatch,
+}
+
+impl RemoteRequestFailure {
+    /// Project a decoder report at the fixed remote boundary. Admission judged no input, so it
+    /// retains its class and dimensions instead of claiming malformed bytes.
+    pub(crate) fn decode(error: Report<TransportError>, class: PoolClass) -> Self {
+        use nervix_execution::{AdmissionError, ExecutionError};
+
+        match error.downcast_ref::<AdmissionError>() {
+            Some(AdmissionError::BudgetExhausted { requested, .. }) => {
+                return Self::MemoryBudgetFull {
+                    class,
+                    requested: *requested,
+                };
+            }
+            Some(AdmissionError::ExceedsBudget {
+                requested,
+                capacity,
+                ..
+            }) => {
+                return Self::MemoryBudgetExceeded {
+                    class,
+                    requested: *requested,
+                    capacity: *capacity,
+                };
+            }
+            Some(AdmissionError::BudgetClosed { .. }) => {
+                return Self::MemoryBudgetClosed { class };
+            }
+            Some(AdmissionError::DifferentBudget { .. }) | None => {}
+        }
+        match error.downcast_ref::<ExecutionError>() {
+            Some(ExecutionError::QueueFull { pending, .. }) => {
+                return Self::ExecutionQueueFull {
+                    class,
+                    pending: u64::try_from(*pending)
+                        .assured("a bounded worker queue fits in the wire count"),
+                };
+            }
+            Some(ExecutionError::PoolClosed { .. }) => return Self::ExecutionPoolClosed { class },
+            Some(ExecutionError::JobPanicked { .. }) | None => {}
+        }
+        Self::InvalidPayload(format!("{error:#}"))
+    }
+
+    pub(crate) fn status(&self) -> http::StatusCode {
+        match self {
+            Self::AdmissionFull { .. }
+            | Self::MemoryBudgetFull { .. }
+            | Self::MemoryBudgetClosed { .. }
+            | Self::ExecutionQueueFull { .. }
+            | Self::ExecutionPoolClosed { .. } => http::StatusCode::SERVICE_UNAVAILABLE,
+            Self::MemoryBudgetExceeded { .. } => http::StatusCode::PAYLOAD_TOO_LARGE,
+            _ => http::StatusCode::BAD_REQUEST,
+        }
+    }
 }
 
 /// The authenticated peer that submitted a request to a registered handler.
@@ -525,7 +595,10 @@ impl RequestError {
             Self::AdmissionFull { .. }
             | Self::ConnectionCapacityExhausted { .. }
             | Self::RemoteRejected {
-                failure: RemoteRequestFailure::AdmissionFull { .. },
+                failure:
+                    RemoteRequestFailure::AdmissionFull { .. }
+                    | RemoteRequestFailure::MemoryBudgetFull { .. }
+                    | RemoteRequestFailure::ExecutionQueueFull { .. },
                 ..
             } => true,
             Self::Encode { .. }
@@ -927,7 +1000,7 @@ where
             } = codec
                 .decode::<M>(payload)
                 .await
-                .map_err(|error| RemoteRequestFailure::InvalidPayload(error.to_string()))?;
+                .map_err(|error| RemoteRequestFailure::decode(error, M::CLASS))?;
             let items = DuplexItems::new(frames, codec.clone(), M::NAME);
             let responses = (handler)(context, request, items)
                 .await
@@ -970,7 +1043,7 @@ where
         Box::pin(async move {
             let (request, _request_reservation) = M::decode_rkyv(executor, M::CLASS, payload)
                 .await
-                .map_err(|error| RemoteRequestFailure::InvalidPayload(error.to_string()))?;
+                .map_err(|error| RemoteRequestFailure::decode(error, M::CLASS))?;
             if let Some(identity) = request.coordination_identity()
                 && !context.authenticates(identity)
             {
@@ -1031,7 +1104,7 @@ where
             let (request, _request_reservation) =
                 M::decode_rkyv(executor.clone(), M::CLASS, payload)
                     .await
-                    .map_err(|error| RemoteRequestFailure::InvalidPayload(error.to_string()))?;
+                    .map_err(|error| RemoteRequestFailure::decode(error, M::CLASS))?;
             if let Some(identity) = request.coordination_identity()
                 && !context.authenticates(identity)
             {
@@ -1781,6 +1854,76 @@ mod shuttle_checks;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct BulkDecodeRequest {
+        payload: Vec<u8>,
+    }
+
+    impl InterconnectStreamRequest for BulkDecodeRequest {
+        const NAME: &'static str = "test_bulk_decode";
+        const CLASS: PoolClass = PoolClass::Bulk;
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
+        const TIMEOUT: Duration = Duration::from_secs(5);
+    }
+
+    #[nervix_primitives::test]
+    async fn receive_decode_reports_memory_pressure_as_capacity_exhaustion() {
+        let executor = Executor::default();
+        let payload = rkyv::to_bytes::<RkyvError>(&BulkDecodeRequest {
+            payload: vec![7; 1024],
+        })
+        .assured("the current request serializes")
+        .to_vec();
+        let held = executor
+            .try_reserve(
+                nervix_execution::MemoryClass::Bulk,
+                executor
+                    .memory(nervix_execution::MemoryClass::Bulk)
+                    .capacity_bytes,
+            )
+            .assured("the fixture occupies the untouched bulk class");
+        let node = ClusterNodeName::parse("node-b").assured("the fixture node name is valid");
+        let handler = TypedStreamHandler::<BulkDecodeRequest, _> {
+            handler: Arc::new(|_context, _request| async {
+                Err(Report::new(StreamHandlerError::new(
+                    "a refused request reached its handler",
+                )))
+            }),
+            request: PhantomData,
+        };
+        let failure = match handler
+            .handle(
+                executor.clone(),
+                RequestContext {
+                    peer_node_id: node.clone(),
+                    peer_advertised_host: "node-b".to_owned(),
+                    peer_process_epoch: 1,
+                },
+                payload,
+            )
+            .await
+        {
+            Err(failure) => failure,
+            Ok(_) => panic!("the occupied class must refuse decoding"),
+        };
+        let error = RequestError::RemoteRejected {
+            node,
+            request: BulkDecodeRequest::NAME,
+            failure,
+        };
+        assert!(
+            error.is_capacity_exhaustion(),
+            "a decode that judged no bytes must report a retryable capacity refusal: {error}"
+        );
+        drop(held);
+        assert_eq!(
+            executor
+                .memory(nervix_execution::MemoryClass::Bulk)
+                .reserved_bytes,
+            0
+        );
+    }
 
     #[test]
     fn application_health_probe_uses_reserved_management_capacity_and_returns_identity() {

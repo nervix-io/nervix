@@ -2,8 +2,9 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Syslog transport, framing, size and TLS configuration interpretation, and which
-//!   clients may set each deadline key.
+//! - **Owns.** Syslog transport, framing, size and TLS configuration interpretation, and the
+//!   transports over which each deadline key bounds a wait; the client declaration states which
+//!   side reads each key.
 //! - **Depends on.** Connector TLS primitives, Syslog client entries, and rustls.
 //! - **Must not know.** Runtime tasks, relays, branches, schedules, Models beyond typed client
 //!   entries, or registry state.
@@ -24,10 +25,11 @@ use std::num::NonZeroUsize;
 
 use ahash::HashSet;
 use error_stack::Report;
+use meticulous::OptionExt as _;
 use nervix_connector::{
     RustlsClientConfigProvider, client_tls_paths, install_rustls_crypto_provider, read_tls_file,
 };
-use nervix_models::DeadlineKey;
+use nervix_models::{ClientConfigKey, CreateClientSyslog, DeadlineKey};
 use nervix_primitives::sync::StdArc;
 use nonzero_ext::nonzero;
 use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
@@ -37,12 +39,21 @@ use thiserror::Error;
 use url::{Host, Url};
 
 pub const DEFAULT_MAX_MESSAGE_SIZE: NonZeroUsize = nonzero!(131_072usize);
-pub const MAX_UDP_PAYLOAD_SIZE: usize = 65_507;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyslogDirection {
     Ingest,
     Emit,
+}
+
+impl SyslogDirection {
+    /// Whether a client used on this side reads `key`, as the client declaration states.
+    fn reads(self, key: &ClientConfigKey) -> bool {
+        match self {
+            Self::Ingest => key.readers.include_ingestors(),
+            Self::Emit => key.readers.include_emitters(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,15 +94,17 @@ impl SyslogDeadlineScope {
         }
     }
 
-    /// Whether a client of `direction` over `protocol` performs a wait this scope names.
-    fn includes(self, direction: SyslogDirection, protocol: SyslogProtocol) -> bool {
-        match self {
-            Self::ConnectionOrTlsHandshake => {
-                direction == SyslogDirection::Emit || protocol == SyslogProtocol::Tls
+    /// Whether a client of `direction` that reads this scope's key performs its wait over
+    /// `protocol`: a listener completes TLS handshakes only over TLS, and reads connections only
+    /// over TCP or TLS.
+    fn waits_over(self, direction: SyslogDirection, protocol: SyslogProtocol) -> bool {
+        match (self, direction) {
+            (Self::ConnectionOrTlsHandshake, SyslogDirection::Ingest) => {
+                protocol == SyslogProtocol::Tls
             }
-            Self::EmitterWrites => direction == SyslogDirection::Emit,
-            Self::ListenerConnections => {
-                direction == SyslogDirection::Ingest && protocol != SyslogProtocol::Udp
+            (Self::ListenerConnections, _) => protocol != SyslogProtocol::Udp,
+            (Self::ConnectionOrTlsHandshake, SyslogDirection::Emit) | (Self::EmitterWrites, _) => {
+                true
             }
         }
     }
@@ -321,18 +334,23 @@ impl SyslogClientConfig {
     }
 
     /// Refuses a deadline key on a client of `direction` over `protocol` that never performs the
-    /// wait the key bounds, so every key a client sets bounds something.
+    /// wait the key bounds, so every key a client sets bounds something. The declaration states
+    /// which side reads the key; the transport decides whether that side waits over `protocol`.
     fn validate_deadline_keys(
         entries: &[nervix_models::ClientConfigEntry],
         direction: SyslogDirection,
         protocol: SyslogProtocol,
     ) -> error_stack::Result<(), SyslogConfigError> {
+        let schema = CreateClientSyslog::<u64>::DECLARATION.config;
         for key in DeadlineKey::iter() {
             if Self::optional_value(entries, key.key()).is_none() {
                 continue;
             }
+            let declared = schema
+                .key(key.key())
+                .verified("validate_keys refused every entry the client does not declare");
             let scope = SyslogDeadlineScope::of(key);
-            if !scope.includes(direction, protocol) {
+            if !direction.reads(declared) || !scope.waits_over(direction, protocol) {
                 return Err(Report::new(SyslogConfigError::InapplicableDeadlineKey {
                     key: key.key(),
                     scope,

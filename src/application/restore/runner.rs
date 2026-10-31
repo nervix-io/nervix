@@ -29,8 +29,9 @@ use crate::application::command_result::CommandResult;
 
 /// Why a step of a restore did not apply.
 pub(in crate::application) enum StepFailure {
-    /// Leadership moved. The restore stays applying for the next leader, and this is the redirect
-    /// to answer with.
+    /// This node cannot write as the leader: leadership moved, or the leader could not confirm its
+    /// lease. The restore stays applying for whichever node leads next, and this is the redirect to
+    /// answer with.
     LeadershipLost(Box<CommandResult>),
     /// The step failed definitively, for this reason. The steps before it stay applied.
     Failed(String),
@@ -46,7 +47,7 @@ pub(in crate::application) trait RestoreSteps {
 pub(in crate::application) enum RestoreRunEnd {
     /// Every step is applied.
     Completed,
-    /// Leadership moved; the restore stays applying.
+    /// This node cannot write as the leader; the restore stays applying.
     LeadershipLost(Box<CommandResult>),
     /// A step failed definitively, for this reason.
     Failed { step: RestoreStep, reason: String },

@@ -1166,7 +1166,7 @@ Transport-specific expectations:
 - `REDIS`: use `rediss://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
+- `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
 - `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
   An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses
   `tls_cert_file` and `tls_key_file`.
@@ -1381,10 +1381,16 @@ every message in flight on it. With `ACK`, a message the broker receives and ref
 Pulsar emitters use the same client config surface as Pulsar ingestors:
 
 - `'addr'`: broker address such as `'pulsar://127.0.0.1:6650'`
-- optional `'namespace'`: defaults short topic names to `persistent://public/default/<topic>`; fully qualified topic names are accepted as-is
+- optional `'namespace'`: the tenant and namespace, written `'tenant/namespace'`, that a short
+  topic name is placed in, so `TOPIC 'orders'` writes `persistent://<namespace>/orders`; defaults
+  to `public/default`. Fully qualified topic names are sent as written.
 - optional `'tls_ca_file'`: PEM-encoded CA bundle for `pulsar+ssl://...` connections
 - optional `'tls_allow_insecure_connection'`: `true` or `false`; defaults to `false`
 - optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
+
+As the [ingestor manual](ingestors.md#pulsar) states, `CREATE PULSAR CLIENT` refuses the three TLS
+keys with a plaintext `pulsar://...` address and a `namespace` that is not exactly a tenant and a
+namespace.
 
 Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
 
@@ -1796,7 +1802,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
-| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Protocol batch maximum | A batch is written as one frame within the frame limits below; general BATCH limits still apply. |
+| Frame limits | udp: one datagram carries at most 65507 payload bytes<br>tcp and tls with octet-counting framing: an octet count has at most 10 digits, so a frame carries at most 9999999999 payload bytes<br>tcp with non-transparent framing: a payload cannot contain `\n`, which ends each frame |
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |

@@ -1,7 +1,8 @@
 //! Declared connector client configuration and its validation and inspection boundaries.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** Key names, presence, types, confidentiality, file roles and delegated namespaces.
+//! - **Owns.** Key names, presence, types, confidentiality, file roles, the entities that read each
+//!   key and delegated namespaces.
 //! - **Depends on.** Configuration entries, the shared deadline contract and URL values.
 //! - **Must not know.** Driver implementations, resource installation or network operations.
 
@@ -157,6 +158,38 @@ impl DriverUrl {
     }
 }
 
+/// The entities of a client's connector that read a declared key.
+///
+/// A connector whose ingestors and emitters read different keys from one client declares which
+/// side reads each; a key every entity reads means the same thing wherever the client is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientConfigReaders {
+    /// Every ingestor and emitter that references the client.
+    Every,
+    /// Only the ingestors that read through the client.
+    Ingestors,
+    /// Only the emitters that write through the client.
+    Emitters,
+}
+
+impl ClientConfigReaders {
+    /// Whether an ingestor that reads through the client reads the key.
+    pub const fn include_ingestors(self) -> bool {
+        match self {
+            Self::Every | Self::Ingestors => true,
+            Self::Emitters => false,
+        }
+    }
+
+    /// Whether an emitter that writes through the client reads the key.
+    pub const fn include_emitters(self) -> bool {
+        match self {
+            Self::Every | Self::Emitters => true,
+            Self::Ingestors => false,
+        }
+    }
+}
+
 /// A file's role, including the two halves of a TLS client identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientConfigFile {
@@ -184,6 +217,9 @@ pub enum ClientConfigValue {
     DriverUrl(DriverUrl),
     Choice(&'static [&'static str]),
     File(ClientConfigFile),
+    /// Exactly the levels its template names, such as `tenant/namespace`: each nonempty, without
+    /// whitespace or control characters, and separated by `/`. The template is also its label.
+    Levels(&'static str),
 }
 
 impl ClientConfigValue {
@@ -206,7 +242,39 @@ impl ClientConfigValue {
             }
             Self::Choice(_) => "declared choice",
             Self::File(_) => "file path, with resource mount templates resolved before use",
+            Self::Levels(template) => template,
         }
+    }
+
+    /// Whether `value` names exactly the levels `template` names, each nonempty and without
+    /// whitespace or control characters.
+    fn holds_levels(template: &str, value: &str) -> bool {
+        let levels: Vec<&str> = value.split('/').collect();
+        if levels.len() != template.split('/').count() {
+            return false;
+        }
+        for level in levels {
+            if level.is_empty() {
+                return false;
+            }
+            if level
+                .chars()
+                .any(|ch| ch.is_whitespace() || ch.is_control())
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether `value`, which parses as `count`, is the count an integer kind admits: written as
+    /// plain decimal digits, without the sign the integer parser also accepts, and not zero for a
+    /// positive integer.
+    fn admits_count(self, value: &str, count: u64) -> bool {
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+        self != Self::PositiveInteger || count != 0
     }
 
     fn validate(self, key: &str, value: &str) -> Result<(), Report<ClientConfigSchemaError>> {
@@ -226,10 +294,7 @@ impl ClientConfigValue {
             }
             Self::UnsignedInteger | Self::PositiveInteger => {
                 let count = value.parse::<u64>().change_context(invalid())?;
-                if value.is_empty()
-                    || !value.bytes().all(|byte| byte.is_ascii_digit())
-                    || (self == Self::PositiveInteger && count == 0)
-                {
+                if !self.admits_count(value, count) {
                     return Err(Report::new(invalid()));
                 }
             }
@@ -264,6 +329,11 @@ impl ClientConfigValue {
                     return Err(Report::new(invalid()));
                 }
             }
+            Self::Levels(template) => {
+                if !Self::holds_levels(template, value) {
+                    return Err(Report::new(invalid()));
+                }
+            }
         }
         Ok(())
     }
@@ -289,7 +359,8 @@ impl ClientConfigValue {
             | Self::DriverUrl(_)
             | Self::DriverAddress
             | Self::Choice(_)
-            | Self::File(_) => false,
+            | Self::File(_)
+            | Self::Levels(_) => false,
         }
     }
 
@@ -343,6 +414,7 @@ pub struct ClientConfigKey {
     pub value: ClientConfigValue,
     pub owner: ClientConfigOwner,
     pub confidential: bool,
+    pub readers: ClientConfigReaders,
 }
 
 impl ClientConfigKey {
@@ -371,6 +443,7 @@ impl ClientConfigKey {
             value,
             owner: ClientConfigOwner::Nervix,
             confidential: false,
+            readers: ClientConfigReaders::Every,
         }
     }
 
@@ -449,6 +522,22 @@ impl ClientConfigKey {
     pub const fn driver(self) -> Self {
         Self {
             owner: ClientConfigOwner::Driver,
+            ..self
+        }
+    }
+
+    /// Declare that only the client's ingestors read this key.
+    pub const fn read_by_ingestors(self) -> Self {
+        Self {
+            readers: ClientConfigReaders::Ingestors,
+            ..self
+        }
+    }
+
+    /// Declare that only the client's emitters read this key.
+    pub const fn read_by_emitters(self) -> Self {
+        Self {
+            readers: ClientConfigReaders::Emitters,
             ..self
         }
     }
