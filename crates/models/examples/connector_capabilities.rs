@@ -48,11 +48,29 @@ fn main() -> std::io::Result<()> {
 
 fn locator(declaration: Option<LocatorDeclaration>) -> Option<String> {
     let declaration = declaration?;
+    Some(locator_with_label(declaration))
+}
+
+/// Every locator a body may write, the declared one first and each alternative after it, or none.
+fn locators(declarations: &[LocatorDeclaration]) -> Option<String> {
+    if declarations.is_empty() {
+        return None;
+    }
+    let described: Vec<String> = declarations
+        .iter()
+        .copied()
+        .map(locator_with_label)
+        .collect();
+    Some(described.join(" | "))
+}
+
+/// The locator written in full, with the label completion offers for its name.
+fn locator_with_label(declaration: LocatorDeclaration) -> String {
     let label = match declaration.name {
         LocatorName::External(name) => name.label,
         LocatorName::Unquoted { label } => label,
     };
-    Some(format!("{} ({label})", declaration.example()))
+    format!("{} ({label})", declaration.example())
 }
 
 fn option_value(value: OptionValue) -> String {
@@ -165,7 +183,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
     );
     json!({
         "entity": kind.phrase(), "connector": kind.connector().keyword(),
-        "reference": reference, "locator": locator(declared_locator), "options": options,
+        "reference": reference, "locator": locators(&kind.locators()), "options": options,
         "modes": modes, "quiesce": quiesce, "metadata": metadata,
         "headers": header_model(headers), "every_node": executes_on_every_cluster_node,
         "position": position_class.as_ref(),

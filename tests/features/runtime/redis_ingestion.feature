@@ -195,6 +195,110 @@ Feature: Redis ingestion
       | 1            | 0             | Orders:EU/*   |
       | 3            | 0             | Orders:EU/*   |
 
+  @redis_pattern_subscription
+  Scenario Outline: A Redis pattern subscription delivers every channel it matches with the delivering channel and pattern as metadata
+    Given Redis is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE SCHEMA delivered_notification (
+        user_id I64,
+        channel STRING OPTIONAL,
+        pattern STRING OPTIONAL
+      );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA delivered_notification UNBRANCHED;
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 CONFIG {
+        'addr' = '{{redis_addr}}',
+        'subscription_buffer_messages' = '16',
+        'idle_timeout_ms' = '30000'
+      };
+      CREATE REDIS PUBSUB INGESTOR redis_notifications
+        FROM redis_main PATTERN 'orders_{{test_id}}.*' MODE NO ACK
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL
+        SET channel = metadata.channel, pattern = metadata.pattern
+        WHERE channel != 'orders_{{test_id}}.skip'
+        UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    # Redis counts no subscribers per pattern, so the first delivery shows the subscription is live.
+    Then within "20s" repeatedly publishing Redis message to channel "orders_{{test_id}}.ready" yields a relay subscription payload
+      """
+      {"user_id":0}
+      """
+    When Redis message is published to channel "orders_{{test_id}}.eu"
+      """
+      {"user_id":1}
+      """
+    And Redis message is published to channel "orders_{{test_id}}.us"
+      """
+      {"user_id":2}
+      """
+    Then within "20s" the relay subscription receives payloads containing all fragments
+      """
+      "user_id":1 | "channel":"orders_{{test_id}}.eu" | "pattern":"orders_{{test_id}}.*"
+      "user_id":2 | "channel":"orders_{{test_id}}.us" | "pattern":"orders_{{test_id}}.*"
+      """
+    # One subscription delivers in publication order, so a message from a channel the pattern does
+    # not match, or one the route drops by its channel, would arrive before the fence after it.
+    When Redis message is published to channel "returns_{{test_id}}.eu"
+      """
+      {"user_id":3}
+      """
+    And Redis message is published to channel "orders_{{test_id}}.skip"
+      """
+      {"user_id":4}
+      """
+    And Redis message is published to channel "orders_{{test_id}}.apac"
+      """
+      {"user_id":5}
+      """
+    Then within "20s" the relay subscription receives payloads in order
+      """
+      "user_id":5
+      """
+    When these Plexus statements are executed
+      """
+      ALTER REDIS PUBSUB INGESTOR redis_notifications SET FROM redis_main
+        CHANNEL 'audit_{{test_id}}' MODE NO ACK ON QUIESCE DROP;
+      """
+    Then Redis channel "audit_{{test_id}}" eventually has 1 subscribers
+    When Redis message is published to channel "audit_{{test_id}}"
+      """
+      {"user_id":6}
+      """
+    Then within "20s" the relay subscription receives payloads containing all fragments
+      """
+      "user_id":6 | "channel":"audit_{{test_id}}" | "pattern":null
+      """
+    When Redis message is published to channel "orders_{{test_id}}.eu"
+      """
+      {"user_id":7}
+      """
+    And Redis message is published to channel "audit_{{test_id}}"
+      """
+      {"user_id":8}
+      """
+    Then within "20s" the relay subscription receives payloads in order
+      """
+      "user_id":8
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @retained_task_handles
   Scenario Outline: Redis ingestor reports transient source failures and recovers
     Given Redis is running

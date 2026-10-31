@@ -11,7 +11,8 @@ use nervix_models::{
     ClickHouseTableName, ExternalNameError, IcebergNamespace, IcebergTableName,
     KafkaConsumerGroupName, KafkaTopicName, MongoDbCollectionName, MqttTopicFilter, MqttTopicName,
     MySqlTableName, NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName, PostgresTableName,
-    PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName, SqsQueueName,
+    PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName,
+    RedisChannelPattern, SqsQueueName,
 };
 
 /// Pieces arbitrary text is assembled from: what the rules admit, the separators and wildcards
@@ -137,6 +138,7 @@ macro_rules! for_every_external_name_type {
         $assertion!(RabbitMqQueueName, $text);
         $assertion!(SqsQueueName, $text);
         $assertion!(RedisChannelName, $text);
+        $assertion!(RedisChannelPattern, $text);
         $assertion!(NatsSubjectName, $text);
         $assertion!(NatsQueueGroupName, $text);
         $assertion!(MqttTopicFilter, $text);
@@ -191,6 +193,10 @@ fn bolero_external_names_round_trip_through_every_representation() {
             assert_external_name_round_trips!(RabbitMqQueueName, arbitrary.rabbitmq_queue_name());
             assert_external_name_round_trips!(SqsQueueName, arbitrary.sqs_queue_name());
             assert_external_name_round_trips!(RedisChannelName, arbitrary.redis_channel_name());
+            assert_external_name_round_trips!(
+                RedisChannelPattern,
+                arbitrary.redis_channel_pattern()
+            );
             assert_external_name_round_trips!(NatsSubjectName, arbitrary.nats_subject_name());
             assert_external_name_round_trips!(
                 NatsQueueGroupName,
@@ -375,6 +381,14 @@ fn a_queue_or_channel_admits_any_text_within_its_bound() {
     assert!(RedisChannelName::parse("orders:*").is_ok());
     assert_eq!(
         refusal!(RedisChannelName, &"c".repeat(1025)),
+        ExternalNameError::TooLong {
+            max: 1024,
+            actual: 1025
+        }
+    );
+    assert!(RedisChannelPattern::parse("orders:[eu]?/*").is_ok());
+    assert_eq!(
+        refusal!(RedisChannelPattern, &"p".repeat(1025)),
         ExternalNameError::TooLong {
             max: 1024,
             actual: 1025

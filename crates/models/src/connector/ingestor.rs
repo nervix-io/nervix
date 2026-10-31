@@ -448,7 +448,9 @@ pub struct IngestorEntityCapabilities {
     pub delivery: &'static [DeclaredDelivery],
     /// The quiesce modes its transport can honor, each kind at most once.
     pub quiesce: &'static [DeclaredQuiesce],
-    /// The name that locates what it reads, for an entity whose body names one.
+    /// The name that locates what it reads, for an entity whose body names one. A body may write
+    /// one of the entity's [alternative locators](IngestorDeclaration::ALTERNATIVE_LOCATORS)
+    /// instead, and [`IngestorEntityKind::locators`] reads them together.
     pub locator: Option<LocatorDeclaration>,
     /// The options its body writes after the locator, in the order a statement writes them.
     pub options: &'static [OptionDeclaration],
@@ -527,6 +529,12 @@ impl IngestorEntityCapabilities {
 pub trait IngestorDeclaration {
     const CAPABILITIES: IngestorEntityCapabilities;
 
+    /// The other names a body may locate what it reads by instead of the capabilities' locator,
+    /// each opened by its own keywords, such as a Redis Pub/Sub ingestor's `PATTERN` beside its
+    /// `CHANNEL`. A body writes exactly one locator. Empty for an entity whose body locates what
+    /// it reads one way, or by none.
+    const ALTERNATIVE_LOCATORS: &'static [LocatorDeclaration] = &[];
+
     /// Whether this source can honor `quiesce`, as its entity declares.
     fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool
     where
@@ -604,6 +612,12 @@ pub trait IngestorEntityMetadata {
     fn form_label(&self) -> &'static str;
 
     fn capabilities(&self) -> IngestorEntityCapabilities;
+
+    /// The names a body may locate what it reads by instead of the declared locator, none for an
+    /// entity that declares no alternative.
+    fn alternative_locators(&self) -> &'static [LocatorDeclaration] {
+        &[]
+    }
 }
 
 entity_union! {
@@ -680,6 +694,18 @@ impl IngestorEntityKind {
     /// What every source of this pair declares.
     pub fn capabilities(self) -> IngestorEntityCapabilities {
         self.entity().capabilities()
+    }
+
+    /// Every name a body of this pair may locate what it reads by: the declared locator, then its
+    /// alternatives. A body writes exactly one of them, and a pair whose body names none has none.
+    pub fn locators(self) -> Vec<LocatorDeclaration> {
+        let entity = self.entity();
+        let mut locators = Vec::new();
+        if let Some(locator) = entity.capabilities().locator {
+            locators.push(locator);
+        }
+        locators.extend_from_slice(entity.alternative_locators());
+        locators
     }
 
     /// The key a form identifies this pair by: its phrase in lower case, joined by a hyphen.

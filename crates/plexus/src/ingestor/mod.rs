@@ -1201,8 +1201,10 @@ mod tests {
             IngestorEntity::Redis(RedisIngestor::PubSub(RedisPubSubIngestor {
                 client: nervix_models::ClientName::try_from("redis_main")
                     .expect("valid client identifier"),
-                channel: nervix_models::RedisChannelName::try_from("notifications")
-                    .expect("valid channel identifier"),
+                subscription: nervix_models::RedisSubscriptionTarget::Channel(
+                    nervix_models::RedisChannelName::try_from("notifications")
+                        .expect("valid channel identifier")
+                ),
                 mode: RedisPubSubIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Drop,
             }))

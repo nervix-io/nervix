@@ -385,6 +385,9 @@ fn every_external_name_declares_its_label_and_an_example_its_rule_admits() {
     assert_declares_an_admitted_example::<RabbitMqQueueName>("rabbitmq_queue");
     assert_declares_an_admitted_example::<SqsQueueName>("sqs_queue");
     assert_declares_an_admitted_example::<RedisChannelName>("redis_channel");
+    assert_declares_an_admitted_example::<nervix_models::RedisChannelPattern>(
+        "redis_channel_pattern",
+    );
     assert_declares_an_admitted_example::<NatsSubjectName>("nats_subject");
     assert_declares_an_admitted_example::<NatsQueueGroupName>("nats_queue_group");
     assert_declares_an_admitted_example::<MqttTopicFilter>("mqtt_topic_filter");

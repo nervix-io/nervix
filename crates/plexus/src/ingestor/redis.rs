@@ -2,8 +2,8 @@
 //!
 //! Layer: language.
 //!
-//! - **Owns.** The body of a `REDIS PUBSUB` ingestor: its client, channel, delivery mode and
-//!   quiesce mode.
+//! - **Owns.** The body of a `REDIS PUBSUB` ingestor: its client, the channel or channel pattern
+//!   it subscribes to, its delivery mode and its quiesce mode.
 //! - **Depends on.** The shared ingestor clauses and the Redis vocabulary.
 //! - **Must not know.** The Redis driver or how a subscription is held at run time.
 
@@ -13,7 +13,10 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{RedisChannelName, RedisPubSubIngestMode, RedisPubSubIngestor};
+use nervix_models::{
+    RedisChannelName, RedisChannelPattern, RedisPubSubIngestMode, RedisPubSubIngestor,
+    RedisSubscriptionTarget,
+};
 
 use super::delivery::{no_ack, push_quiesce_clause};
 use crate::{
@@ -21,78 +24,153 @@ use crate::{
     parser_support::{ParseError, client_ref, external_name, kw},
 };
 
-/// `FROM <client> CHANNEL '<channel>' MODE NO ACK ON QUIESCE BUFFER …|DROP`.
+/// `FROM <client> CHANNEL '<channel>' | PATTERN '<pattern>' MODE NO ACK ON QUIESCE BUFFER …|DROP`.
 pub(super) fn pubsub_body<'src>()
 -> impl Parser<'src, &'src [Token], RedisPubSubIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
-        .then_ignore(kw(Identifier::Channel))
-        .then(external_name::<RedisChannelName>())
+        .then(subscription())
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(RedisPubSubIngestMode::NoAck))
         .then(push_quiesce_clause())
-        .map(|(((client, channel), mode), quiesce)| RedisPubSubIngestor {
-            client,
-            channel,
-            mode,
-            quiesce,
-        })
+        .map(
+            |(((client, subscription), mode), quiesce)| RedisPubSubIngestor {
+                client,
+                subscription,
+                mode,
+                quiesce,
+            },
+        )
         .boxed()
+}
+
+/// `CHANNEL '<channel>'` or `PATTERN '<pattern>'`: the one locator a body subscribes by.
+fn subscription<'src>()
+-> impl Parser<'src, &'src [Token], RedisSubscriptionTarget, extra::Err<ParseError<'src>>> + Clone {
+    let channel = kw(Identifier::Channel)
+        .ignore_then(external_name::<RedisChannelName>())
+        .map(RedisSubscriptionTarget::Channel);
+    let pattern = kw(Identifier::Pattern)
+        .ignore_then(external_name::<RedisChannelPattern>())
+        .map(RedisSubscriptionTarget::Pattern);
+    choice((channel, pattern)).boxed()
 }
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{IngestorEntity, IngestorInput, Model, RedisIngestor};
+    use nervix_models::{
+        IngestorEntity, IngestorInput, Model, RedisIngestor, RedisPubSubIngestor,
+        RedisSubscriptionTarget,
+    };
     use rstest::rstest;
 
     use crate::conformance_support::{assert_offers_exactly, created_model, refused};
 
-    #[rstest]
-    #[case("Orders:EU/*")]
-    #[case("通道:Événements")]
-    fn channel_literals_reach_the_ingestor_model_unchanged(#[case] channel: &str) {
+    /// The source a statement whose body subscribes by `locator` constructs.
+    fn created_source(locator: &str) -> RedisPubSubIngestor {
         let statement = format!(
-            "CREATE REDIS PUBSUB INGESTOR intake FROM redis_main CHANNEL '{channel}' MODE NO ACK \
-             ON QUIESCE DROP DECODE USING event_codec TO events INHERIT ALL UNBRANCHED FLUSH \
-             IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+            "CREATE REDIS PUBSUB INGESTOR intake FROM redis_main {locator} MODE NO ACK ON QUIESCE \
+             DROP DECODE USING event_codec TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
         );
         let Some(Model::Ingestor(ingestor)) = created_model(&statement) else {
-            panic!("a literal channel is accepted by the composed grammar: {statement}");
+            panic!("the composed grammar accepts the locator: {statement}");
         };
         let IngestorInput::Transport(input) = ingestor.input else {
             panic!("the REDIS PUBSUB head names a transport");
         };
         let IngestorEntity::Redis(RedisIngestor::PubSub(source)) = input.source else {
-            panic!("the REDIS PUBSUB head constructs the Redis channel Model");
+            panic!("the REDIS PUBSUB head constructs the Redis Pub/Sub Model");
         };
-        assert_eq!(source.channel.as_str(), channel);
+        source
+    }
+
+    #[rstest]
+    #[case("Orders:EU/*")]
+    #[case("通道:Événements")]
+    fn channel_literals_reach_the_ingestor_model_unchanged(#[case] channel: &str) {
+        let source = created_source(&format!("CHANNEL '{channel}'"));
+        let RedisSubscriptionTarget::Channel(subscribed) = source.subscription else {
+            panic!("CHANNEL subscribes to one channel");
+        };
+        assert_eq!(subscribed.as_str(), channel);
+    }
+
+    #[rstest]
+    #[case("orders.*")]
+    #[case("Orders:[EU]?/[^x]*")]
+    #[case("literal\\*star")]
+    #[case("通道:*")]
+    fn pattern_literals_reach_the_ingestor_model_unchanged(#[case] pattern: &str) {
+        let source = created_source(&format!("PATTERN '{pattern}'"));
+        let RedisSubscriptionTarget::Pattern(subscribed) = source.subscription else {
+            panic!("PATTERN subscribes to the channels a pattern matches");
+        };
+        assert_eq!(subscribed.as_str(), pattern);
     }
 
     #[test]
-    fn channel_completion_and_modes_follow_the_pubsub_declaration() {
+    fn completion_offers_both_locators_then_the_pubsub_declaration() {
+        assert_offers_exactly(
+            "CREATE REDIS PUBSUB INGESTOR intake FROM redis_main ",
+            &["CHANNEL", "PATTERN"],
+        );
         assert_offers_exactly(
             "CREATE REDIS PUBSUB INGESTOR intake FROM redis_main CHANNEL ",
             &["redis_channel"],
         );
         assert_offers_exactly(
-            "CREATE REDIS PUBSUB INGESTOR intake FROM redis_main CHANNEL 'Orders:EU/*' MODE ",
-            &["NO ACK"],
+            "CREATE REDIS PUBSUB INGESTOR intake FROM redis_main PATTERN ",
+            &["redis_channel_pattern"],
         );
-        assert_offers_exactly(
-            "CREATE REDIS PUBSUB INGESTOR intake FROM redis_main CHANNEL 'Orders:EU/*' MODE NO \
-             ACK ON QUIESCE ",
-            &["BUFFER", "DROP"],
-        );
+        for locator in ["CHANNEL 'Orders:EU/*'", "PATTERN 'orders.*'"] {
+            assert_offers_exactly(
+                &format!("CREATE REDIS PUBSUB INGESTOR intake FROM redis_main {locator} "),
+                &["MODE"],
+            );
+            assert_offers_exactly(
+                &format!("CREATE REDIS PUBSUB INGESTOR intake FROM redis_main {locator} MODE "),
+                &["NO ACK"],
+            );
+            assert_offers_exactly(
+                &format!(
+                    "CREATE REDIS PUBSUB INGESTOR intake FROM redis_main {locator} MODE NO ACK ON \
+                     QUIESCE "
+                ),
+                &["BUFFER", "DROP"],
+            );
+        }
     }
 
-    #[test]
-    fn the_composed_grammar_applies_the_channel_byte_bound() {
-        for channel in [String::new(), "é".repeat(513)] {
+    #[rstest]
+    #[case("CHANNEL")]
+    #[case("PATTERN")]
+    fn the_composed_grammar_applies_the_byte_bound_to_either_locator(#[case] keywords: &str) {
+        for name in [String::new(), "é".repeat(513)] {
             let statement = format!(
-                "CREATE REDIS PUBSUB INGESTOR intake FROM redis_main CHANNEL '{channel}' MODE NO \
+                "CREATE REDIS PUBSUB INGESTOR intake FROM redis_main {keywords} '{name}' MODE NO \
                  ACK ON QUIESCE DROP DECODE USING event_codec TO events INHERIT ALL UNBRANCHED \
                  FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
             );
-            assert!(refused(&statement), "channel is outside its declared bound");
+            assert!(
+                refused(&statement),
+                "{keywords} is outside its declared bound"
+            );
         }
+    }
+
+    #[rstest]
+    #[case("CHANNEL 'orders' PATTERN 'orders.*'")]
+    #[case("PATTERN 'orders.*' CHANNEL 'orders'")]
+    #[case("")]
+    fn a_body_subscribes_by_exactly_one_locator(#[case] locators: &str) {
+        let statement = format!(
+            "CREATE REDIS PUBSUB INGESTOR intake FROM redis_main {locators} MODE NO ACK ON \
+             QUIESCE DROP DECODE USING event_codec TO events INHERIT ALL UNBRANCHED FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+        );
+        assert!(
+            refused(&statement),
+            "a body writes one locator: {statement}"
+        );
     }
 }

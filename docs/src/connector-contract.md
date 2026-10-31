@@ -455,9 +455,10 @@ initial subscribe and resume, and opens a dedicated TCP or TLS stream. It tries 
 addresses in order inside the client's `connect_timeout_ms`, 30 seconds by default, shared by DNS,
 TCP, TLS, Redis setup, and subscribe.
 The source uses Redis's command encoder and asynchronous RESP parser for authentication,
-database selection, protocol negotiation and `SUBSCRIBE` on that stream. A Unix socket remains
-a direct Unix connection with no DNS query. The dedicated subscription never occupies a pooled
-command connection.
+database selection, protocol negotiation and the subscription on that stream: `SUBSCRIBE` for a
+`CHANNEL` and `PSUBSCRIBE` for a `PATTERN`, each confirmed by Redis before the reader starts. A
+Unix socket remains a direct Unix connection with no DNS query. The dedicated subscription never
+occupies a pooled command connection.
 
 For `rediss://`, the configured hostname remains the TLS server name after an address is chosen.
 The source's TLS configuration keeps the same optional client certificate and key as the command
@@ -486,10 +487,13 @@ retention and drop counters. Redis Pub/Sub supplies no replay after a disconnect
 The source client's required `idle_timeout_ms` bounds a silent active read. After half the
 interval the reader sends `PING` on the subscription connection; activity must arrive within the
 remaining half. Activity means a complete Redis message or probe reply. Both RESP2 and RESP3 are
-supported. Waiting for handoff room precedes the read and
-does not spend its idle interval. A failed probe closes the connection and reaches the host's
-existing reconnect policy. Source suspend and close abort and join the exact reader before a
-replacement can open; queued messages are otherwise delivered before a terminal read failure.
+supported: a delivery is a `message` for a `CHANNEL` and a `pmessage` for a `PATTERN`, as a RESP2
+array or a RESP3 push, and the reader moves its channel, pattern and payload bytes out of the
+parsed reply without copying them. Any other reply ends the read as an unexpected response.
+Waiting for handoff room precedes the read and does not spend its idle interval. A failed probe
+closes the connection and reaches the host's existing reconnect policy. Source suspend and close
+abort and join the exact reader before a replacement can open; queued messages are otherwise
+delivered before a terminal read failure.
 
 ### DNS for MQTT
 
@@ -841,7 +845,7 @@ remain in their owning work records until that delivery.
 
 | Side | What the entity declares |
 | --- | --- |
-| Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
+| Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits, and any alternative locators a body may write instead of it, each with its own keywords and name; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
 | Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
@@ -932,11 +936,17 @@ that owns those layers reads the declaration instead.
 
 `REDIS PUBSUB` shares one channel-name rule between ingestion and emission: a nonempty literal
 of at most 1,024 UTF-8 bytes, passed through without normalization or wildcard interpretation.
-Its declaration permits `NO ACK` in both directions and `BUFFER`/`DROP` for intake, since Redis
-retains no Pub/Sub backlog. Pub/Sub carries no transport headers or emitter envelope. Redis's
-own bulk-length refusal stays a record outcome; the emitter declares optional batching without
-a learned size ceiling. The Redis-specific declaration tests, generated grammar conformance and
-one-/three-node public declaration scenarios qualify these facts together.
+An ingestor's body locates what it reads by that `CHANNEL` or, as the entity's one alternative
+locator, by a `PATTERN`: a nonempty literal of at most 1,024 UTF-8 bytes that Redis matches as a
+glob, also passed through exactly as written. Every message exposes `metadata.channel`, the
+channel it was published to, and `metadata.pattern`, the pattern that matched it, null for a
+`CHANNEL` subscription; a delivered channel that is not UTF-8 text reads as a null
+`metadata.channel`. Its declaration permits `NO ACK` in both directions and `BUFFER`/`DROP` for
+intake, since Redis retains no Pub/Sub backlog. Pub/Sub carries no transport headers or emitter
+envelope. Redis's own bulk-length refusal stays a record outcome; the emitter declares optional
+batching without a learned size ceiling. The Redis-specific declaration tests, generated grammar
+conformance and one-/three-node public declaration scenarios qualify these facts together, and
+the pattern subscription's runtime scenario observes both metadata fields.
 
 `SQS QUEUE` shares one queue-name rule between ingestion and emission: 1 to 80 ASCII letters,
 digits, `-` and `_`, where a FIFO queue's name ends in `.fifo` within those 80 characters, passed
@@ -1155,7 +1165,7 @@ error policies name their output relays; its general error policy belongs to the
 health and counters follow configuration, including Kafka's observed partition assignments.
 
 `SHOW INGESTORS`, `SHOW EMITTERS` and graph transport labels use the same declared entity phrase.
-The console's ingestor choices read the declared entities, locator, options, option choices,
+The console's ingestor choices read the declared entities, locators, options, option choices,
 delivery modes and quiesce modes. Required option choices govern whether delivery and quiesce
 buttons are enabled, and the draft enforces those same requirements before constructing a Model.
 Typed field adapters bind declarations to draft storage; they do not define another allowed list.

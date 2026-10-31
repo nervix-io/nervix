@@ -10,6 +10,12 @@ complete field; entity presentation distinguishes omission from an explicitly wr
 The registry's current archive signature and consensus keyspace namespace fence this shape before
 decoding; existing current-header corruption and namespace validation tests qualify those owners.
 
+`REDIS PUBSUB` ingestor generators draw both subscriptions, a `CHANNEL` and a `PATTERN`, each from
+any text within its byte bound and the pattern from glob characters too. The Model/archive,
+registry, consensus and canonical Plexus properties preserve which subscription an ingestor holds
+and its exact text, and the archive signature and consensus keyspace namespace fence that shape
+before decoding.
+
 Ingestor generators draw every timestamp source, `TIMESTAMP AT metadata.<field>` included, in
 `CREATE` and in `ALTER ... SET TIMESTAMP`. The Model/archive, registry, consensus and canonical
 Plexus properties preserve the metadata source distinctly from a payload field of the same name,

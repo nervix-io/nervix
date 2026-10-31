@@ -86,6 +86,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("pulsar_topic", "'nx-topic'"),
     ("rabbitmq_queue", "'nx.queue'"),
     ("redis_channel", "'nx.channel'"),
+    ("redis_channel_pattern", "'nx.*'"),
     ("relay_capacity", "1024"),
     ("sqs_queue", "'nx-queue'"),
     ("string", "'nx_value'"),

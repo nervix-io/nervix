@@ -14,8 +14,8 @@ use nervix_models::{
     PrometheusQueryIngestor, PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription,
     PulsarSubscriptionOwnership, PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestorEntity,
     RabbitMqQueueIngestor, RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor,
-    RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SyslogIngestMode,
-    SyslogIngestorEntity, SyslogListenerIngestor, TransportIngestorInput,
+    RedisSubscriptionTarget, RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor,
+    SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor, TransportIngestorInput,
     WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
     WebsocketsIngestorEntity, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
 };
@@ -262,15 +262,24 @@ impl Arbitrary<'_> {
         self.quiescing_as_supported(source)
     }
 
-    /// A Redis Pub/Sub channel.
+    /// A Redis Pub/Sub subscription to a channel or to the channels a pattern matches.
     pub fn redis_pubsub_source(&mut self) -> RedisPubSubIngestor {
         let source = RedisPubSubIngestor {
             client: self.name(),
-            channel: self.redis_channel_name(),
+            subscription: self.redis_subscription_target(),
             mode: RedisPubSubIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
+    }
+
+    /// What a Redis Pub/Sub source subscribes to: a channel, or the channels a pattern matches.
+    pub fn redis_subscription_target(&mut self) -> RedisSubscriptionTarget {
+        if self.entropy.flag() {
+            RedisSubscriptionTarget::Pattern(self.redis_channel_pattern())
+        } else {
+            RedisSubscriptionTarget::Channel(self.redis_channel_name())
+        }
     }
 
     /// A PromQL query evaluated on a cadence of domain time, with or without its response bound.

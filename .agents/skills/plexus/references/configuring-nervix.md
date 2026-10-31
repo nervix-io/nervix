@@ -395,7 +395,10 @@ current connection, retry and deadline limits.
   required capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the source's explicit
   `BUFFER` or `DROP` policy in generated Plexus.
 - Redis Pub/Sub uses `NO ACK` in both directions. Treat `CHANNEL` as a literal, case-preserving
-  name and consult the Redis manual sections for its byte bound and unavailable header operations.
+  name. An ingestor writes exactly one of `CHANNEL` and `PATTERN`; use `PATTERN` only for a Redis
+  glob over channel names, and read `metadata.channel` and `metadata.pattern` to tell deliveries
+  apart. Consult the Redis manual sections for the byte bounds, how a pattern matches, the
+  metadata's nulls and unavailable header operations.
 - An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`, and an emitter
   `MODE SINGLE` or `MODE BATCH`. Treat `QUEUE` as a literal, case-preserving SQS name, and check
   `SQS CLIENT` keys against `Ingestors` → `SQS`: `endpoint`, `region`, `access_key_id` and

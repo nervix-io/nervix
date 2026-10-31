@@ -456,11 +456,12 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_unit_timestamp_logs`,
-`raft_unit_timestamp_meta`, `raft_unit_timestamp_state`, and `raft_unit_timestamp_snapshots`.
+The dedicated database owns exactly four current keyspaces: `raft_pattern_logs`,
+`raft_pattern_meta`, `raft_pattern_state`, and `raft_pattern_snapshots`.
 Opening it validates the complete keyspace namespace before reading any records. This namespace
-identifies the current Model shape, including the required serialized Sentry platform field and
-an ingestor's `TIMESTAMP AT metadata.<field>` source. Its state metadata requires the current
+identifies the current Model shape, including the required serialized Sentry platform field, an
+ingestor's `TIMESTAMP AT metadata.<field>` source and a `REDIS PUBSUB` ingestor's `CHANNEL` or
+`PATTERN` subscription. Its state metadata requires the current
 `RestoredLifecycle` encoding, including the durable restore installation gate and the unit-keyed
 committed schedule. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
