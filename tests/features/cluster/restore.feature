@@ -1,5 +1,33 @@
 Feature: Restore configuration, users and resources from a backup archive
 
+  Scenario: A restore keeps its raw applying loss while reaching a later finalization hold
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "first_route"
+    And a node other than placeholder "first_route" is saved as placeholder "successor"
+    When the CLI backs up "domain {{domain}}" from node "{{first_route}}" into "applying.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given restore step "import resources" of domain "{{domain}}_copy" on node "{{first_route}}" pauses before it applies
+    And command finalization on node "{{successor}}" pauses before its outcome is recorded
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "applying.nvxb" is streamed to node "{{first_route}}" under execution reference "applying-restore" in the background
+    Then the restore pauses at step "import resources" of domain "{{domain}}_copy" on node "{{first_route}}"
+    When leadership is transferred from node "{{first_route}}" to node "{{successor}}"
+    Then node "{{successor}}" eventually reports a leader other than "{{first_route}}"
+    And node "{{first_route}}" eventually reports a leader other than "{{first_route}}"
+    When the restore step pause on node "{{first_route}}" is released
+    Then the background restore's outcome is held on node "{{successor}}" before it is recorded
+    When leadership is transferred from node "{{successor}}" to node "{{first_route}}"
+    Then node "{{first_route}}" eventually reports a leader other than "{{successor}}"
+    And node "{{successor}}" eventually reports a leader other than "{{successor}}"
+    When the command finalization pause on node "{{successor}}" is released
+    Then the background restore stream's outcome is "leadership lost" as "executed"
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "applying.nvxb" is streamed to node "{{first_route}}" under execution reference "applying-restore" with outcome recovery
+    Then the restore stream's outcome is "completed" as "recovered"
+
   Scenario: A restore reaches its finalization hold after admission loses its first leader
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
