@@ -34,7 +34,7 @@ use crate::{
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
     IngestorReferenceKind, KafkaIngestMode, LocatorDeclaration, LocatorName, OptionChoice,
     OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass,
 };
@@ -267,7 +267,7 @@ impl IngestorDeclaration for PulsarTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // A Pulsar message carries its properties as a list, in the order the producer wrote them.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
-        metadata: IngestorMetadataScope::Headers,
+        metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Pulsar),
         position_class: PositionClass::Replayable,

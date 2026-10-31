@@ -690,7 +690,15 @@ A MySQL pool is kept at its `POOL SIZE MIN` by a task no caller waits on, so tha
 witness of a pass that ends below the minimum. It reports `PoolMinimumError::NotRestored`, naming
 the minimum, above the failed checkout's `PoolMinimumError::CheckOut` and the driver's error, at
 `debug`, returns the connections the pass held, and passes again a second later. An emitter that
-needs a connection meanwhile reports its own failed checkout.
+needs a connection meanwhile reports its own failed checkout. The shared MySQL pool retains
+`ConfiguredDeadline` for `timeout_ms`, when present, and every checkout, validation and insert
+keeps a typed `DeadlineElapsed` on expiry. Driver checkout and validation errors retain their
+typed causes through the open/write contexts. The emitter's pool-borrow context adds no rendered
+copy of the report. Its deadline report also attaches the safe operation, key and duration for
+the host's public emitter diagnostic. MySQL initialization changes context on the shared-client
+report rather than reducing it to Display text, so that projection and the typed cause survive.
+Deadline failures are infrastructure outcomes and leave pending rows on the host's retry policy;
+they do not become definite record rejections.
 
 An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP emitter: a timeout, a
 DNS, connection, TLS, send or response-header failure, an invalid destination, a declared proxy that
@@ -1143,7 +1151,12 @@ typed node identity, and a `ConnectorDeclarationIssue` naming the refused clause
 Duration failures retain the duration reader's typed cause; an unschedulable duration and an
 inverted retry range are distinct issues. A mapped-value type failure reports the declared type
 and the expression's inferred Arrow type, such as `VALUES key 'severity_number' requires I32,
-found Int64`. An envelope clause or `PROPERTIES` key the entity does not declare is
+found Int64`. If expression inference fails before a type exists, `MappedExpressionInference`
+names the declared section and destination key while retaining the VM's typed `CompileError`
+beneath it. The registry associates the compile error's operation span with the lowered mapping;
+it does not recover a key from diagnostic text or expose a generated assignment name. A null-only
+mapping is refused at this boundary during both `CREATE` and `ALTER`.
+An envelope clause or `PROPERTIES` key the entity does not declare is
 `ConnectorDeclarationIssue::Envelope`, carrying the vocabulary's typed
 `EnvelopeDeclarationError` that names the entity and the clause or key; an envelope duration
 reuses the duration issues under `DELIVER AFTER` or `DELAY`, and an envelope expression that is
@@ -1191,6 +1204,16 @@ projects the offending driver property key through `OfflineClientConfigError`, r
 Iceberg storage reader's typed error beneath it. The public refusal does not print the property's
 value. Properties requiring a table or an initialized OpenDAL operator remain initialization
 checks.
+An Iceberg emitter whose catalog client sets a file I/O property that its storage client supplies
+is refused with `RegistryError::EmitterClientPairing`. That context names the domain, the emitter,
+its entity kind and both clients. Beneath it, the vocabulary's `IcebergPropertyCollision` names the
+property and the storage key that supplies it, as in `ICEBERG TABLE emitter 'output' in domain
+'shop' cannot pair storage client 'storage' with catalog client 'catalog': Iceberg property
+'s3.endpoint' is set by the storage client as 'endpoint' and by the catalog client`. Neither
+client's value is printed. A TLS file that either Iceberg client cannot use stops the emitter at
+open with `EmitterOpenError::InvalidConfiguration`. Beneath it, `IcebergClientTlsError` names the
+catalog or the object-store client, and the shared `TlsClientConfigError` beneath that names the
+file and the step that failed.
 An emitter whose connector keeps one value per header name and whose `INVOKE` clause writes one literal
 header name twice is refused with `RegistryError::ReplacedHeaderWrite`, which names the domain, the
 emitter, the emitter's connector and entity, the header as the emitter's
@@ -1198,6 +1221,14 @@ emitter, the emitter's connector and entity, the header as the emitter's
 `emitter 'out' in domain 'shop' writes header 'route' at INVOKE #1 and again at #3, but PULSAR TOPIC
 emitters keep one value per header name, so the later write would replace the earlier one on every
 record`. The header is a name the statement writes, never a value a record carries.
+An ingestor route that reads a `metadata.<field>` its entity does not declare is refused with
+`RegistryError::UndeclaredIngestorMetadata`, which names the domain, the ingestor, the route's relay,
+the field and the entity with the fields it declares, such as `ingestor 'orders' in domain 'shop'
+reads metadata.key in its route to 'events', but KAFKA TOPIC ingestors declare only metadata.topic,
+metadata.partition and metadata.offset`. A `TIMESTAMP AT metadata.<field>` that names an undeclared
+field is refused with `RegistryError::UndeclaredIngestorTimestampMetadata`, and one that names a
+field declared as another type than `DATETIME` with `RegistryError::IngestorTimestampMetadataType`,
+which names the declared type.
 Planning failures
 likewise retain the selected entity or placement so an operator can correct the request. A
 relocation the graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`:
@@ -1230,6 +1261,13 @@ revision before runtime installation. A planning failure leaves the previously a
 the predecessor for a retry; runtime installation adds domain context and never selects a fallback
 configuration.
 
+The background runtime-installation supervisor logs a failed application's complete typed report and
+retries on the admission loop's half-second cadence, or sooner when the committed schedule or domain
+state changes. It reads current admitted state on each attempt and retains the last successful
+schedule as its predecessor. A repeated failure remains visible; retry does not turn it into a
+successful command outcome, change its classification, or require a new configuration command.
+Successful installation ends the retry cadence, and shutdown ends a pending retry wait.
+
 Resource planning checks the committed lookup key and codec, generator materialized source,
 output branch and route construction, and WASM guest-state generation before runtime binding.
 These failures name the owning node and relevant relay, codec, or field. A missing
@@ -1249,6 +1287,14 @@ memory capacity and reserved bytes beside configured workers, running jobs and p
 operator can distinguish memory waiting, worker waiting and dependency work. These are
 observations of the run; a successful later inspection does not identify the cause of an earlier
 timeout.
+
+### Client Inspection Admission
+
+Client inspection during incoming preflight may refuse full command-memory or filesystem queue
+capacity. An accepted transaction or restore model step waits for that capacity instead: temporary
+pressure is not an invalid configuration or a failed restore step. Oversized charges and closed
+executors retain their typed admission causes beneath the inspection context. Existing service-task
+cancellation ends a waiting inspection without converting it into an invalid-key diagnosis.
 
 ### Runtime Installation
 
@@ -1543,8 +1589,8 @@ The source host, or the endpoint that received the payload, turns each codec ref
 `DecodeRejection`: a UUIDv7 reference, the code `validation`, the operation `decode`, the codec,
 the fields its `MissingField`, `UnexpectedField` and `ParseField` contexts name at fault, including
 those of a failed message an unfolding kept as a report of its own, the instant the source took the
-payload in, the transport position the payload's typed metadata names, and the codec report's whole
-chain rendered once as its message. The code and the operation are the same for every decode
+payload in, the transport position the payload's ingest metadata row names, and the codec report's
+whole chain rendered once as its message. The code and the operation are the same for every decode
 rejection, so the record does not store them. The record never holds the payload, and the codec's
 contexts name the codec and the field, never a value. The ingestor's `ON GENERAL ERROR` policy then
 reports the rejection: `LOG` publishes `ingestor '<name>' general error in domain '<domain>': decode
@@ -1584,10 +1630,11 @@ row whose own request exceeds `MAX SIZE`, that row receives a `validation` messa
 `Postgres insert of one row measures 1219 bytes, above MAX SIZE 600B`, and the other rows are sent
 in bounded requests. A row within `MAX SIZE` that its destination could never
 accept is the destination's `external` rejection of the `publish` operation, named with the
-destination's limit: a Postgres insert above the largest protocol message the server reads, or a
-MongoDB document above its 16 MiB document limit, which is rejected before the write that would
-carry it. A SQL write that fails for a reason specific to its rows is written again one row at a
-time, and each row the destination still refuses receives an `external` `publish` error with the
+destination's limit: a MongoDB document above its 16 MiB document limit, which is rejected before
+the write that would carry it. A Postgres emitter cannot declare a `MAX SIZE` above the largest
+protocol message the server reads, which `CREATE` refuses, so its rows never reach that limit. A
+SQL write that fails for a reason specific to its rows is written again one row at a time, and
+each row the destination still refuses receives an `external` `publish` error with the
 destination's reason. That includes a violated MySQL `CHECK` constraint, which the server reports
 under the generic SQLSTATE `HY000`, and a Postgres cardinality violation, which is how
 `ON CONFLICT DO UPDATE` refuses one insert that carries a key twice. A MongoDB write answers for
@@ -1681,10 +1728,14 @@ guest-requested state reset reports on its own, and an ingest group's failure to
 branch entrypoint, which the group's flush also returns to its caller. A branch whose domain
 routing can no longer be read fails the acknowledgements it was handed with that routing failure
 directly, without a policy or a runtime event.
-A WebSockets ingest metadata builder checks its frame-label capacity before allocation. A row bound
-whose byte estimate exceeds the address space returns `IngestMetadataError::WebsocketsCapacityOverflow`;
-the ingest group retains it below its `open ingest metadata` operation and the source's general-error
-policy reports that chain.
+An ingest group's metadata builders refuse a message that hands over another number of metadata
+values than its entity declares, or a value of another type than its field's, with
+`IngestMetadataError::ExcessValues`, `MissingValues` or `ValueType`, which name the declared count
+or the field with its declared and handed type. Such a message is a connector defect: the ingest
+group retains the refusal below its `append ingest metadata` operation and the source's
+general-error policy reports that chain. An ingestor whose programs and the declaration they were
+validated against disagree fails to bind with `EntrypointBindingError::ProjectMetadata` above
+`IngestMetadataError::UndeclaredField`, which names the field.
 
 Each failure reports its owner's typed context above the cause it kept:
 

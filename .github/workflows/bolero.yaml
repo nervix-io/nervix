@@ -21,8 +21,6 @@ on:
         value: ${{ jobs.bolero-gate.outputs.sanitizer-result }}
       sanitizer-required:
         value: ${{ jobs.bolero-gate.outputs.sanitizer-required }}
-  schedule:
-    - cron: "0 3 * * 0"
   workflow_dispatch:
 
 permissions:
@@ -33,10 +31,13 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Boat machines set en_US.UTF-8, whose collation orders `sort` output differently. Keep the
+  # C.UTF-8 locale of GitHub's runner image, which the scripts and their tests expect.
+  LC_ALL: C.UTF-8
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-  # Kache sizes its local store from the cache volume (5%, rounded and bounded).
-  # Keep the default so a runner disk change also changes its cache budget.
-  KACHE_VERSION: "1.2.1"
+  # scripts/kache_remote.py lets each job's local store hold a quarter of its cache volume, so a
+  # runner's disk still sets the store's budget.
+  KACHE_VERSION: "1.2.2"
   KACHE_REMOTE_KEY_LISTING: "false"
   # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
   KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "68719476736"
@@ -56,7 +57,7 @@ jobs:
   bolero-random:
     name: bolero-random
     if: (inputs.event-name || github.event_name) != 'pull_request' || contains(fromJSON(inputs.labels-json || '[]'), 'bolero-random')
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: boat-xlarge
     # Run 39649567371 took 47m10s; 90 minutes covers 1.5 times that duration plus publication.
     timeout-minutes: 90
     steps:
@@ -81,6 +82,13 @@ jobs:
         with:
           version: "25.12.19"
 
+      # Boat's base image has Ubuntu's git 2.43, and the test selection passes `--no-lazy-fetch`,
+      # which git 2.44 added. GitHub's runner image takes the current git from this PPA too.
+      - name: Install the current git
+        run: |
+          sudo add-apt-repository --yes ppa:git-core/ppa
+          sudo apt-get install --yes --no-install-recommends git
+
       - name: Install native build tools
         run: |
           wget https://apt.llvm.org/llvm.sh
@@ -94,6 +102,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -111,11 +121,11 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: bolero-random-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       - name: Runner diagnostics before Run runner tests and every ordinary Bolero property
@@ -123,9 +133,25 @@ jobs:
         with:
           label: run-runner-tests-and-every-ordinary-bolero-property
 
-      - name: Run runner tests and every ordinary Bolero property
+      - name: Build every ordinary Bolero property
         run: |
           just toolchains-install
+          just build-bolero
+
+      # The cache the build filled is published before the run starts: the run's outcome cannot lose
+      # it, the jobs building beside this one can use it, and its report shows what the build
+      # compiled and what the cache served.
+      - name: Publish kache cache after the build
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Publish kache report after the build
+        run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Run runner tests and every ordinary Bolero property
+        run: |
           just test-bolero-runner
           just test-bolero
 
@@ -141,6 +167,26 @@ jobs:
             echo "::notice::Kache publication did not run because checkout did not provide its script"
           fi
 
+      - name: Publish kache report
+        if: always()
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/kache-report
+            ${{ runner.temp }}/kache-build-report
+          if-no-files-found: warn
+
   bolero-fuzz:
     name: bolero-fuzz (${{ matrix.shard }} of ${{ strategy.job-total }})
     if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
@@ -149,6 +195,8 @@ jobs:
       matrix:
         # Each shard runs whole harnesses of the inventory; `just fuzz-plan 3` shows the division.
         shard: [1, 2, 3]
+    # The address-sanitized server build needs more than the 32 GB of Boat's largest machine, even
+    # with eight compilers, so the shards run on Blacksmith's 64 GB machine in the US.
     runs-on: blacksmith-16vcpu-ubuntu-2404
     # The 205-target plan estimates up to 114 minutes per shard before discovery, qualification
     # and uploads. Fund 1.5 times that estimate plus their overhead on a slow runner.
@@ -201,6 +249,8 @@ jobs:
 
       - name: Configure cargo
         run: |
+          # A machine whose rustup is installed system-wide, as on Boat, has no Cargo home yet.
+          mkdir -p ~/.cargo
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
@@ -258,6 +308,18 @@ jobs:
           # One Cargo build job bounds the instrumented server build's compiler memory.
           CARGO_BUILD_JOBS: "1"
         run: just prepare-bolero-shard ${{ matrix.shard }}/${{ strategy.job-total }}
+
+      # The cache the build filled is published before the run starts: the run's outcome cannot lose
+      # it, the jobs building beside this one can use it, and its report shows what the build
+      # compiled and what the cache served.
+      - name: Publish kache cache after the build
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"
+
+      - name: Publish kache report after the build
+        run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
 
       - name: Runner diagnostics before Run this shard's sanitizer libFuzzer targets and qualify failures
         uses: ./.github/actions/runner-diagnostics
@@ -336,11 +398,31 @@ jobs:
             echo "::notice::Kache publication did not run because checkout did not provide its script"
           fi
 
+      - name: Publish kache report
+        if: always()
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/kache-report
+            ${{ runner.temp }}/kache-build-report
+          if-no-files-found: warn
+
   bolero-fuzz-combined:
     name: bolero-fuzz-combined
     if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
     needs: [bolero-fuzz]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -357,7 +439,7 @@ jobs:
           tool: just@latest
 
       - name: Download every shard's completion evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: bolero-fuzz-evidence-*
           path: target/bolero-fuzz-shards
@@ -377,7 +459,7 @@ jobs:
     name: bolero-gate
     if: always()
     needs: [bolero-random, bolero-fuzz, bolero-fuzz-combined]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       randomized-result: ${{ steps.selection.outputs.randomized-result }}

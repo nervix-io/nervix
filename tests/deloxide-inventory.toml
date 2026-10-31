@@ -23,9 +23,13 @@
 # minutes also leaves room for the selection's other builds and variation without borrowing time
 # from its workloads. Expiry ends the lane with status 124 and identifies the build stage.
 build_budget_seconds = 4800
-# The unchanged real-time budget of one selection's workloads, started after every build completes.
-# CI bounds prerequisites, both stages and the coverage export together at 175 minutes.
-budget_seconds = 4800
+# The real-time budget of one selection's workloads, started after every build completes. On CI's
+# Boat runner the order selection's workloads run about three times as long as on its previous
+# runner: Check run 40926015015 reached its 24th scenario chunk after 4403s, which run 40825862815
+# reached after 1226s of the 3289s all its workloads took, so they take about 10800s. Four hours
+# cover that about 1.3 times. CI bounds prerequisites, both stages and the coverage export
+# together at 335 minutes, within the six hours a Boat CI job may run.
+budget_seconds = 14400
 # How long a process gets to end on SIGTERM before the lane kills it.
 stop_grace_seconds = 30
 # How long the scenario binary's own teardown may take after its suite budget expires. The lane
@@ -99,13 +103,14 @@ target = "lib"
 bound_seconds = 2400
 concurrency = 4
 evidence = true
-features = ["testing"]
 id = "scenarios"
 inputs = ["tests/features/**/*.feature"]
 kind = "cucumber"
-package = "nervix-server"
+package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@restore_client_inspection",
+  "@runtime_installation_retry",
   "@execution_class_drain",
   "@kafka_start_generation",
   "@kafka_start_generation_restore",
@@ -177,11 +182,10 @@ bound_seconds = 1200
 concurrency = 4
 driver = "nervix-paced-simulation"
 evidence = true
-features = ["testing"]
 id = "paced-simulation"
 inputs = ["tests/features/runtime/paced_simulation.feature"]
 kind = "cucumber"
-package = "nervix-server"
+package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = ["@paced_simulation_reopen"]
 target = "test:scenarios"
@@ -193,11 +197,10 @@ target = "test:scenarios"
 bound_seconds = 900
 concurrency = 1
 evidence = true
-features = ["testing"]
 id = "stress-transaction-retention"
 inputs = ["tests/features/runtime/client_wire_tombstone_retention.feature"]
 kind = "cucumber"
-package = "nervix-server"
+package = "nervix-scenarios"
 selections = ["deloxide-stress"]
 tags = ["@deloxide_stress_transaction_retention"]
 target = "test:scenarios"
@@ -209,17 +212,18 @@ target = "test:scenarios"
 # Together with the paced-driver scenarios below and `stress-restore-scenarios`, the stressed
 # scenarios are every scenario of the active-only selection but the report tool's triage, which
 # drives no lifecycle path.
-# Run 39569675589 spent 19m49s here. A 45-minute invocation leaves 39 minutes of execution after
-# its six-minute teardown reserve, covering 1.5 times that measurement with nine minutes left.
+# On CI's Boat runner, Check run 40909456410 ran 153 of the 154 runs in 2342s before its suite
+# budget expired, so all of them take about 2357s; Ubicloud's run 40825862815 had run 153 in 1909s.
+# A 66-minute invocation leaves 60 minutes of execution after its six-minute teardown reserve, about
+# 1.5 times that measurement.
 [[invocation]]
-bound_seconds = 2700
+bound_seconds = 3960
 concurrency = 1
 evidence = true
-features = ["testing"]
 id = "stress-scenarios"
 inputs = ["tests/features/**/*.feature"]
 kind = "cucumber"
-package = "nervix-server"
+package = "nervix-scenarios"
 selections = ["deloxide-stress"]
 tags = ["@deloxide_stress"]
 target = "test:scenarios"
@@ -231,11 +235,10 @@ target = "test:scenarios"
 bound_seconds = 900
 concurrency = 1
 evidence = true
-features = ["testing"]
 id = "stress-endpoint-acknowledgement"
 inputs = ["tests/features/runtime/endpoint_acknowledgement.feature"]
 kind = "cucumber"
-package = "nervix-server"
+package = "nervix-scenarios"
 selections = ["deloxide-stress"]
 tags = ["@deloxide_stress_endpoint_ack"]
 target = "test:scenarios"
@@ -247,11 +250,10 @@ bound_seconds = 2400
 concurrency = 1
 driver = "nervix-paced-simulation"
 evidence = true
-features = ["testing"]
 id = "stress-paced-simulation"
 inputs = ["tests/features/runtime/paced_simulation.feature"]
 kind = "cucumber"
-package = "nervix-server"
+package = "nervix-scenarios"
 selections = ["deloxide-stress"]
 tags = ["@paced_simulation_reopen"]
 target = "test:scenarios"
@@ -262,11 +264,10 @@ target = "test:scenarios"
 bound_seconds = 4200
 concurrency = 1
 evidence = true
-features = ["testing"]
 id = "stress-restore-scenarios"
 inputs = ["tests/features/**/*.feature"]
 kind = "cucumber"
-package = "nervix-server"
+package = "nervix-scenarios"
 selections = ["deloxide-stress-restore"]
 tags = ["@deloxide_stress_restore"]
 target = "test:scenarios"
@@ -2716,6 +2717,46 @@ scenario = "A model command whose publication met a lapsed leader lease releases
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "A persisted running domain is installed after bounded construction refusals, with no new configuration or lifecycle command."
+examples = 1
+feature = "tests/features/runtime/runtime_installation_retry.feature"
+id = "scenario.runtime-installation-retry"
+invariant = "A restarted node retries refused installations of its committed runtime, forwards new Syslog traffic through the recovered graph, and retains its original relay owner."
+invocation = "scenarios"
+scenario = "A restarted node retries refused installations of its committed runtime"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: installation of a persisted running domain after bounded construction refusals without another committed change."
+examples = 1
+feature = "tests/features/runtime/runtime_installation_retry.feature"
+id = "stress.runtime-installation-retry"
+invariant = "A restarted node retries refused installations of its committed runtime, forwards new Syslog traffic through the recovered graph, and retains its original relay owner."
+invocation = "stress-scenarios"
+scenario = "A restarted node retries refused installations of its committed runtime"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Accepted restore model application reaches a full real filesystem queue before its first-poll observation; after capacity is released every step and the configured client are preserved. Queue submission and draining reach the executor class-local tracked FIFO fence; async capacity waits and test worker parking are untracked."
+examples = 2
+feature = "tests/features/cluster/restore_client_inspection.feature"
+id = "scenario.restore-client-inspection"
+invariant = "An accepted restore waits for client-inspection capacity, then applies every step and preserves the configured client on one and three nodes."
+invocation = "scenarios"
+scenario = "An accepted restore waits for client inspection capacity on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Accepted restore model application reaches a full real filesystem queue before its first-poll observation; after capacity is released every step and the configured client are preserved. Queue submission and draining reach the executor class-local tracked FIFO fence; async capacity waits and test worker parking are untracked."
+examples = 2
+feature = "tests/features/cluster/restore_client_inspection.feature"
+id = "stress.restore-client-inspection"
+invariant = "An accepted restore waits for client-inspection capacity, then applies every step and preserves the configured client on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "An accepted restore waits for client inspection capacity on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Class-local executor FIFO admission and drain fences while every node's bulk workers are held and a prepared production client completes six sequential management mutations on one and three nodes. Cleanup releases the tracked holds before diagnostics and node stop. Callbacks execute outside the fence; async admission and network waits remain untracked."
 examples = 2
 feature = "tests/features/cluster/bounded_execution.feature"
@@ -2760,6 +2801,8 @@ selections = ["deloxide-stress"]
 gap = "CPU-worker interruption between simulated callbacks belongs to the mutually exclusive Turmoil mode. Native blocking-task teardown before its first callback is not deterministically reached by these public scenarios. Native workloads reach normal FIFO admission, cancellation and draining; the ordinary interrupted-worker regression covers selected and queued destructor cleanup without claiming tracked-lock interleavings."
 path = "crates/execution/src/workers.rs"
 workloads = [
+  "scenario.restore-client-inspection",
+  "stress.restore-client-inspection",
   "scenario.execution-class-drain",
   "stress.execution-class-drain",
   "scenario.materialized-bulk-generations",
@@ -3160,6 +3203,8 @@ workloads = [
 gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. Ordinary branch-state-room scenarios retain their broader capture and restore coverage outside these workloads."
 path = "src/fault_injection.rs"
 workloads = [
+  "scenario.runtime-installation-retry",
+  "stress.runtime-installation-retry",
   "scenario.inferencer-inspection-admission",
   "stress.inferencer-inspection-admission",
   "scenario.shutdown-flush-before-freeze",

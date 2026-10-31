@@ -84,9 +84,17 @@ pub(crate) fn head_kind<'src>()
     choice(heads).boxed()
 }
 
+/// `TIMESTAMP NOW`, `TIMESTAMP AT <field>` for a payload field, or `TIMESTAMP AT metadata.<field>`
+/// for a metadata field. A payload field may itself be named `metadata`: only the dot makes the
+/// metadata form.
 fn timestamp_source<'src>()
 -> impl Parser<'src, &'src [Token], IngestTimestampSource, extra::Err<ParseError<'src>>> + Clone {
-    let at_field = kw(Identifier::At).ignore_then(field_ref().map(IngestTimestampSource::At));
+    let metadata_field = kw(Identifier::Metadata)
+        .ignore_then(tok(Token::Dot))
+        .ignore_then(field_ref())
+        .map(IngestTimestampSource::AtMetadata);
+    let payload_field = field_ref().map(IngestTimestampSource::At);
+    let at_field = kw(Identifier::At).ignore_then(choice((metadata_field, payload_field)));
 
     kw(Identifier::Timestamp).ignore_then(choice((
         kw(Identifier::Now).to(IngestTimestampSource::Now),
@@ -1983,6 +1991,104 @@ mod tests {
             Some(IngestTimestampSource::At(
                 nervix_models::FieldName::try_from("occurred_at").expect("valid field name")
             ))
+        );
+    }
+
+    fn timestamp_source_of(clause: &str) -> Option<IngestTimestampSource> {
+        let input = format!(
+            "CREATE HTTP REQUEST INGESTOR polled FROM http_main METHOD 'GET' EVERY 1s MODE NO ACK \
+             ON QUIESCE SUSPEND DECODE USING event_codec {clause} TO events UNBRANCHED FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+        );
+        let tokens = to_tokens(&input);
+        let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
+        parsed.timestamp_source.clone()
+    }
+
+    #[test]
+    fn parses_create_ingestor_with_timestamp_at_a_metadata_field() {
+        let polled_at = nervix_models::FieldName::try_from("polled_at").expect("valid field name");
+        assert_eq!(
+            timestamp_source_of("TIMESTAMP AT metadata.polled_at"),
+            Some(IngestTimestampSource::AtMetadata(polled_at.clone()))
+        );
+        assert_eq!(
+            timestamp_source_of("timestamp at METADATA.polled_at"),
+            Some(IngestTimestampSource::AtMetadata(polled_at))
+        );
+    }
+
+    #[test]
+    fn a_payload_field_named_metadata_stays_a_payload_timestamp() {
+        assert_eq!(
+            timestamp_source_of("TIMESTAMP AT metadata"),
+            Some(IngestTimestampSource::At(
+                nervix_models::FieldName::try_from("metadata").expect("valid field name")
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_a_metadata_timestamp_without_exactly_one_field() {
+        for clause in [
+            "TIMESTAMP AT metadata.",
+            "TIMESTAMP AT metadata.polled_at.instant",
+            "TIMESTAMP AT metadata polled_at",
+        ] {
+            let input = format!(
+                "CREATE HTTP REQUEST INGESTOR polled FROM http_main METHOD 'GET' EVERY 1s MODE NO \
+                 ACK ON QUIESCE SUSPEND DECODE USING event_codec {clause} TO events UNBRANCHED \
+                 FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+            );
+            let tokens = to_tokens(&input);
+            assert!(
+                parse_create_ingestor_tokens(&tokens).is_err(),
+                "{clause} names no single metadata field"
+            );
+        }
+    }
+
+    #[test]
+    fn suggests_the_metadata_namespace_and_a_field_after_timestamp_at() {
+        let head = "CREATE HTTP REQUEST INGESTOR polled FROM http_main METHOD 'GET' EVERY 1s MODE \
+                    NO ACK ON QUIESCE SUSPEND DECODE USING event_codec TIMESTAMP AT ";
+        let suggestions = suggest_create_ingestor(head, head.len());
+        assert!(
+            suggestions.contains(&"METADATA".to_string()),
+            "{suggestions:?}"
+        );
+        assert!(
+            suggestions.contains(&"field_name".to_string()),
+            "{suggestions:?}"
+        );
+        assert!(!suggestions.contains(&"NOW".to_string()), "{suggestions:?}");
+        assert!(!suggestions.contains(&"TO".to_string()), "{suggestions:?}");
+
+        let metadata = format!("{head}metadata.");
+        let suggestions = suggest_create_ingestor(&metadata, metadata.len());
+        assert!(
+            suggestions.contains(&"field_name".to_string()),
+            "{suggestions:?}"
+        );
+        assert!(
+            !suggestions.contains(&"METADATA".to_string()),
+            "{suggestions:?}"
+        );
+        assert!(!suggestions.contains(&"TO".to_string()), "{suggestions:?}");
+    }
+
+    #[test]
+    fn parses_set_timestamp_at_a_metadata_field_in_alter_ingestor() {
+        let parsed = parse_alter_ingestor(
+            "ALTER HTTP REQUEST INGESTOR polled SET TIMESTAMP AT metadata.polled_at;",
+        )
+        .expect("parse should succeed");
+        let rendered = parsed
+            .to_canonical_plexus()
+            .expect("the alteration renders");
+        assert!(
+            rendered.contains("SET TIMESTAMP AT metadata.polled_at"),
+            "{rendered}"
         );
     }
 

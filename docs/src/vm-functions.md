@@ -798,7 +798,7 @@ about vector instructions it supports.
 | Class | Examples | Claim |
 | --- | --- | --- |
 | Arrow compute kernel | Boolean logic, `STRING`/`BYTES`/`DATETIME` comparisons, `LIKE`/`ILIKE`, `contains`/`starts_with`/`ends_with`, casts, `CASE`/`coalesce`/`nullif` selection, filter/take/zip/interleave, UTC `date_part`, `bitwise_and`/`or`/`xor`, list `sum` per row | Whatever Arrow 58.4's kernels do; Nervix adds none of its own |
-| Explicit SIMD lanes | Checked `+` and `-` over `I8`, `U8`, `I16`, `U16`, `I32`, `U32`, `I64`, and `U64`, checked `*` below 64 bits, integer column-by-scalar `/` and `%` below 64 bits, and `I64` column-by-scalar `/` | `nervix-simd-kernels` selects the vector instructions once per process, with a scalar fallback, and every level computes the same lanes; the [SIMD kernels 07 report](https://github.com/nervix-io/nervix/blob/main/benches/reports/simd-kernels-07.md) and [08 report](https://github.com/nervix-io/nervix/blob/main/benches/reports/simd-kernels-08.md) inspect the generated code |
+| Explicit SIMD lanes | Checked `+` and `-` over `I8`, `U8`, `I16`, `U16`, `I32`, `U32`, `I64`, and `U64`, checked `*` below 64 bits, integer column-by-scalar `/` and `%` below 64 bits, and `I64` column-by-scalar `/` | `nervix-simd-kernels` selects the vector instructions once per process, with a scalar fallback, and every level computes the same lanes; the [SIMD kernels 07 report](https://app.clickup.com/t/86bc85vc3) and [08 report](https://app.clickup.com/t/86bc85vcf) inspect the generated code |
 | One pass over value buffers | Integer division by a column, `U64` column-by-scalar `/` and `%` and `I64` column-by-scalar `%` with a prepared reciprocal, checked `*` over `I64` and `U64`, checked float arithmetic, numeric comparisons, fixed-width `IN`, `abs`/`sign`/negation, `ceil`/`floor`/`round`/`trunc`, `sqrt`, shifts, classification, fixed-unit `date_trunc`/`date_bin`/`date_add`/`date_diff`, `to_unix`/`from_unix`, `length`/`octet_length`/`bit_length`, ASCII `lower`/`upper`, list `count` | Written so LLVM may auto-vectorize the loop for the target CPU; no claim that it does |
 | Library with runtime SIMD dispatch | JSON structure (simd-json), base64 (base64-simd), hexadecimal (faster-hex), `sha256` (sha2 with SHA-NI detection) | The library selects instructions at run time; `xxh3_64` selects them when the binary is built |
 | Irregular, per row | Transcendental math, `round(value, digits)`, zoned and calendar datetimes, datetime formatting and parsing, Unicode case mapping and NFC, regular expressions, Aho-Corasick, substring and padding functions, `md5`, IP and URL parsing, JSON path walk and conversion, most list functions, UUIDs | Batch API with optimized substeps; scalar work per row |
@@ -880,7 +880,7 @@ compares each width's selected kernel, scalar reciprocal and checked lane loop o
 `U64` and `I64` remainder retain scalar reciprocal loops because their vector forms measured slower
 on `x86-64-v3`. The
 retained paths and generated instructions are recorded in the
-[SIMD kernels 08 report](https://github.com/nervix-io/nervix/blob/main/benches/reports/simd-kernels-08.md).
+[SIMD kernels 08 report](https://app.clickup.com/t/86bc85vcf).
 
 Floating-point operations fail a lane that produces NaN or infinity. The transcendental functions
 come from the platform math library as opaque calls per lane that no loop vectorizes, so those
@@ -920,7 +920,7 @@ These are three different claims, and the implementation makes them separately:
   lane and failure bit is exact. The VM names no instruction set and uses no `std::arch` or
   `target_feature` of its own.
 
-The [VM functions measurement report](https://github.com/nervix-io/nervix/blob/main/benches/reports/vm-functions-18.md)
+The [VM functions measurement report](https://app.clickup.com/t/86bc202hj)
 records what the measurements establish, and
 [Measured Performance](./filter-map-functions.md#measured-performance) turns them into user
 guidance:
@@ -939,7 +939,7 @@ guidance:
 
 The timings were taken on one development machine with other builds running, so they are
 diagnostic. Without hardware counters or generated-instruction inspection, they do not establish a
-SIMD speedup. The [SIMD kernels 07 report](https://github.com/nervix-io/nervix/blob/main/benches/reports/simd-kernels-07.md)
+SIMD speedup. The [SIMD kernels 07 report](https://app.clickup.com/t/86bc85vc3)
 records the generated instructions and interleaved Criterion rounds of the explicit integer lanes.
 
 ### Nulls, NaN, Overflow, And Unicode
@@ -1074,8 +1074,8 @@ The injectors:
 
 - **Header reads.** `IngestHeaderFunctionInjector` answers header reads from the ingest metadata of
   one execution. Outbound WebSockets supply their connection's captured response headers, including
-  after quiesce replay; the metadata builder writes the retained frame kind into a typed STRING
-  column before VM execution.
+  after quiesce replay; where a route reads `metadata.frame_type`, the metadata builder writes the
+  retained frame kind into a typed STRING column before VM execution.
 - **Window aggregates.** `WindowAggregateResults` answers window aggregates from the accumulators at
   emission.
 - **UDFs.** `nervix-roto`'s `UdfExecutor` answers UDF calls:

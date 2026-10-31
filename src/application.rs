@@ -183,6 +183,7 @@ mod relocation;
 mod resource;
 mod restore;
 mod runtime_admission;
+mod runtime_reconciliation;
 mod schedule_planning;
 mod scheduling;
 mod service_tasks;
@@ -272,6 +273,43 @@ pub struct Application {
     pub shutdown: ShutdownCoordinator,
     #[builder(default = true)]
     pub graceful_shutdown_drain: bool,
+}
+
+/// Runs this process as the server, from its own command line to its exit. The `nervix-server`
+/// executable is this call, and a test process that re-executes itself under the server's name
+/// makes the same call, so a real process in a test starts the way a deployed one does. No Shuttle
+/// model runs a whole process and Shuttle's runtime has no stack size to set, so a Shuttle build has
+/// no such entry point.
+#[cfg(not(feature = "shuttle"))]
+pub fn run_server_process() -> Result<(), Report<AppError>> {
+    let args = Args::parse();
+    // Registered before any other thread exists, so neither SIGINT nor SIGTERM can end the process
+    // by its default action at any later point in its life.
+    let termination_signals = TerminationSignals::register()?;
+    // A diagnostic node installs its deadlock detector before any tracked lock or runtime worker
+    // exists, and after the signals, so the detector's threads never see one by its default action.
+    #[cfg(feature = "deloxide")]
+    nervix_deadlock::DiagnosticRun::start_selected(
+        args.diagnostics
+            .deadlock_evidence
+            .clone()
+            .map(nervix_deadlock::EvidenceDirectory::new),
+        nervix_primitives::deadlock::DiagnosticSelection::for_build(
+            args.diagnostics.deadlock_active_only,
+        ),
+    )
+    .change_context(AppError::StartDeadlockDiagnostics)?;
+    let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
+        .thread_stack_size(8 * 1024 * 1024) // Set custom stack size here
+        .enable_all()
+        .build()
+        .change_context(AppError::BuildRuntime)?;
+
+    let tracing_guard = {
+        let _entered = runtime.enter();
+        init_tracing(&args.tracing)?
+    };
+    runtime.block_on(run_cli(args, termination_signals, &tracing_guard))
 }
 
 /// Runs the server command line with termination signals the caller has already registered, so
@@ -1520,7 +1558,8 @@ impl Application {
         let certificates_for_schedule = certificates.clone();
         let runtime_for_schedule = runtime.clone();
         let registry_for_schedule = registry.clone();
-        let mut schedule_rx = consensus.observer().subscribe_schedule();
+        let schedule_rx = consensus.observer().subscribe_schedule();
+        let domains_rx = consensus.observer().subscribe_domains();
         let consensus_for_schedule = consensus.observer();
         let cluster_for_schedule = cluster.clone();
         let interconnect_for_schedule = interconnect.clone();
@@ -1537,23 +1576,13 @@ impl Application {
                 admission: &schedule_runtime_admission,
                 shutdown: &schedule_shutdown,
             };
-            if let Err(error) = apply_current_cluster_runtime_state(application).await {
-                warn!(error = format!("{error:#}"), "failed to apply initial cluster schedule");
-            }
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                nervix_primitives::select! {
-                    _ = schedule_shutdown.cancelled() => break,
-                    changed = schedule_rx.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        if let Err(error) = apply_current_cluster_runtime_state(application).await {
-                            warn!(error = format!("{error:#}"), "failed to apply updated cluster schedule");
-                        }
-                    }
-                }
-            }
+            runtime_reconciliation::RuntimeReconciliation::new(
+                schedule_rx,
+                domains_rx,
+                schedule_shutdown.clone(),
+            )
+            .run(|| apply_current_cluster_runtime_state(application))
+            .await;
         }));
         let events = SessionEvents::new(SESSION_EVENT_CAPACITY);
         let service = SessionServiceImpl {
@@ -2264,33 +2293,6 @@ impl Application {
                 nervix_primitives::select! {
                     _ = resource_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_secs(1)) => {}
-                }
-            }
-        }));
-
-        let domain_apply_service = service.clone();
-        let domain_apply_shutdown = shutdown.clone();
-        background_tasks.push(nervix_primitives::task::spawn(async move {
-            let mut domains_rx = domain_apply_service.inner.consensus.subscribe_domains();
-            if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
-                warn!(
-                    error = format!("{error:#}"),
-                    "failed to apply cluster schedule after initial domain sync"
-                );
-            }
-
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                nervix_primitives::select! {
-                    _ = domain_apply_shutdown.cancelled() => break,
-                    changed = domains_rx.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
-                            warn!(error = format!("{error:#}"), "failed to apply cluster schedule after domain sync");
-                        }
-                    }
                 }
             }
         }));

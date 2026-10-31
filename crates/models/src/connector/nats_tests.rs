@@ -124,8 +124,7 @@ fn both_subject_directions_carry_headers_by_name_and_no_typed_metadata() {
     assert_eq!(ingest.headers, headers);
     assert_eq!(emit.headers, headers);
     assert!(ingest.reads_headers());
-    assert_eq!(ingest.metadata, IngestorMetadataScope::Headers);
-    assert!(ingest.metadata.fields().is_empty());
+    assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
 }
 
 #[test]

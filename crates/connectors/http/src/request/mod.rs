@@ -34,9 +34,9 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     ClientConfigResult, HttpClientConfig, IngestMessageHeaders, IngestorConnector, IngestorError,
-    IngestorPoll, IngestorPollMessage, IngestorPollMetadata, IngestorResult,
-    PacedIngestorConnector, RetainedIngestHeaders, client_config_value,
-    physical_time::actual_utc_now,
+    IngestorPoll, IngestorPollMessage, IngestorResult, PacedIngestorConnector,
+    RetainedIngestHeaders, RetainedIngestMetadata, RetainedIngestMetadataValue,
+    client_config_value, physical_time::actual_utc_now,
 };
 use nervix_dns::{DnsResolver, LookupShare, OperationBudget};
 use nervix_models::{ClientConfigEntry, HttpRequestHeader, PayloadSizeLimit, Timestamp};
@@ -181,10 +181,7 @@ impl PacedIngestorConnector for HttpRequestIngestor {
             messages: vec![IngestorPollMessage {
                 payload,
                 headers,
-                metadata: IngestorPollMetadata::Http {
-                    status,
-                    polled_at: scheduled_at,
-                },
+                metadata: Self::poll_metadata(status, scheduled_at),
             }],
             failures: Vec::new(),
             observed_at: actual_utc_now(),
@@ -193,6 +190,15 @@ impl PacedIngestorConnector for HttpRequestIngestor {
 }
 
 impl HttpRequestIngestor {
+    /// The metadata HTTP REQUEST declares for one answered poll, in its order: the response status,
+    /// then the poll's scheduled instant.
+    fn poll_metadata(status: u16, scheduled_at: Timestamp) -> RetainedIngestMetadata {
+        RetainedIngestMetadata::from_values(vec![
+            RetainedIngestMetadataValue::U16(status),
+            RetainedIngestMetadataValue::Datetime(scheduled_at),
+        ])
+    }
+
     fn endpoint_from_config(config: &[ClientConfigEntry]) -> ClientConfigResult<String> {
         client_config_value(config, "endpoint", "HTTP")
     }
@@ -346,6 +352,38 @@ mod tests {
             ("x-trace", vec!["a", "b"]),
         ]);
         assert_eq!(values, expected);
+    }
+
+    /// An answered poll hands over the values of the metadata HTTP REQUEST declares, of the
+    /// declared types and in the declared order.
+    #[test]
+    fn an_answered_poll_carries_its_declared_status_and_scheduled_instant() {
+        use nervix_models::{HttpIngestorEntity, IngestorEntityKind};
+
+        let scheduled_at = Timestamp::from_unix_nanos(1_234_567_890);
+        let metadata = HttpRequestIngestor::poll_metadata(206, scheduled_at);
+
+        assert_eq!(
+            metadata.values(),
+            [
+                RetainedIngestMetadataValue::U16(206),
+                RetainedIngestMetadataValue::Datetime(scheduled_at),
+            ]
+        );
+        let declared = IngestorEntityKind::Http(HttpIngestorEntity::Request)
+            .capabilities()
+            .metadata;
+        let declared_types = declared
+            .fields()
+            .iter()
+            .map(|field| Some(field.ty()))
+            .collect::<Vec<_>>();
+        let handed_types = metadata
+            .values()
+            .iter()
+            .map(RetainedIngestMetadataValue::ty)
+            .collect::<Vec<_>>();
+        assert_eq!(handed_types, declared_types);
     }
 
     #[test]

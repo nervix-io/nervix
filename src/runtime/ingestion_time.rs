@@ -17,7 +17,7 @@ use nervix_models::{DomainName, FieldName, IngestTimestampSource, IngestorName, 
 use thiserror::Error;
 
 use super::{
-    RecordMetadataColumns, Runtime, RuntimeRecordBatch,
+    IngestFilterMapMetadata, RecordMetadataColumns, Runtime, RuntimeRecordBatch,
     domain_clock::{DomainClockLifecycle, DomainIngestionSnapshot},
 };
 
@@ -49,6 +49,13 @@ pub(super) enum IngestionTimeError {
         field: FieldName,
     },
     #[error(
+        "TIMESTAMP AT metadata.{field} for ingestor '{ingestor}' must contain a supported DATETIME"
+    )]
+    TimestampMetadataField {
+        ingestor: IngestorName,
+        field: FieldName,
+    },
+    #[error(
         "paced domain '{domain}' rejected ingestor '{ingestor}' event outside any reached logical \
          tick window"
     )]
@@ -69,13 +76,15 @@ impl IngestionTime<'_> {
         self.clock.snapshot.now()
     }
 
-    /// Resolves one timestamp column for the decoded group. A declared field reuses its Arrow
-    /// values buffer; connector-owned ingest instants reuse the metadata's low watermark buffer.
+    /// Resolves one timestamp column for the decoded group. A declared payload or metadata field
+    /// reuses its Arrow values buffer; connector-owned ingest instants reuse the metadata's low
+    /// watermark buffer.
     pub(super) fn select_column(
         &self,
         source: Option<&IngestTimestampSource>,
         batch: &RuntimeRecordBatch,
         metadata: &RecordMetadataColumns,
+        ingest_metadata: &IngestFilterMapMetadata,
     ) -> Result<TimestampNanosecondArray, Report<IngestionTimeError>> {
         match source {
             Some(IngestTimestampSource::Now) => {
@@ -95,6 +104,21 @@ impl IngestionTime<'_> {
                     .index_of(field.as_str())
                     .map_err(|_| Report::new(context()))?;
                 let column = batch.batch().column(index);
+                let timestamps = column
+                    .as_any()
+                    .downcast_ref::<TimestampNanosecondArray>()
+                    .ok_or_else(|| Report::new(context()))?;
+                Ok(timestamps.clone())
+            }
+            Some(IngestTimestampSource::AtMetadata(field)) => {
+                let context = || IngestionTimeError::TimestampMetadataField {
+                    ingestor: self.ingestor.clone(),
+                    field: field.clone(),
+                };
+                let column = ingest_metadata
+                    .field_column(field.as_str())
+                    .change_context_lazy(context)?
+                    .ok_or_else(|| Report::new(context()))?;
                 let timestamps = column
                     .as_any()
                     .downcast_ref::<TimestampNanosecondArray>()
@@ -132,6 +156,12 @@ impl IngestionTime<'_> {
     ) -> IngestionTimeError {
         if missing && let Some(IngestTimestampSource::At(field)) = source {
             return IngestionTimeError::TimestampField {
+                ingestor: self.ingestor.clone(),
+                field: field.clone(),
+            };
+        }
+        if missing && let Some(IngestTimestampSource::AtMetadata(field)) = source {
+            return IngestionTimeError::TimestampMetadataField {
                 ingestor: self.ingestor.clone(),
                 field: field.clone(),
             };
@@ -225,13 +255,20 @@ mod tests {
         let record = test_runtime_row([]).with_ingested_at_watermarks(Timestamp::now());
         let batch = record.one_row_batch();
         let metadata = RecordMetadataColumns::from_rows([record.metadata().clone()]);
+        let no_metadata =
+            IngestFilterMapMetadata::headerless(1).assured("one headerless row builds");
         let column = time
-            .select_column(Some(&IngestTimestampSource::Now), &batch, &metadata)
+            .select_column(
+                Some(&IngestTimestampSource::Now),
+                &batch,
+                &metadata,
+                &no_metadata,
+            )
             .assured("TIMESTAMP NOW has a logical execution snapshot");
         assert_eq!(column.value(0), 0);
         assert!(time.admit_column(&column).value(0));
         assert!(matches!(
-            time.select_column(None, &batch, &metadata)
+            time.select_column(None, &batch, &metadata, &no_metadata)
                 .err()
                 .assured("paced intake requires a source")
                 .current_context(),
@@ -259,8 +296,15 @@ mod tests {
         assert!(time.now() >= before && time.now() <= Timestamp::now());
         let batch = record.one_row_batch();
         let metadata = RecordMetadataColumns::from_rows([record.metadata().clone()]);
+        let no_metadata =
+            IngestFilterMapMetadata::headerless(1).assured("one headerless row builds");
         let logical = time
-            .select_column(Some(&IngestTimestampSource::Now), &batch, &metadata)
+            .select_column(
+                Some(&IngestTimestampSource::Now),
+                &batch,
+                &metadata,
+                &no_metadata,
+            )
             .assured("unpaced logical time is available");
         assert_eq!(logical.value(0), time.now().unix_nanos());
         let declared = time
@@ -268,11 +312,12 @@ mod tests {
                 Some(&IngestTimestampSource::At(named("occurred_at"))),
                 &batch,
                 &metadata,
+                &no_metadata,
             )
             .assured("the declared DATETIME column exists");
         assert_eq!(declared.value(0), -123);
         let connector = time
-            .select_column(None, &batch, &metadata)
+            .select_column(None, &batch, &metadata, &no_metadata)
             .assured("the unpaced connector timestamp exists");
         assert_eq!(connector.value(0), 42);
         let nullable = TimestampNanosecondArray::from(vec![Some(-123), None, Some(42)]);
@@ -281,6 +326,90 @@ mod tests {
             (0..3).map(|row| accepted.value(row)).collect::<Vec<_>>(),
             vec![true, false, true]
         );
+    }
+
+    #[test]
+    fn timestamp_at_a_metadata_field_reads_its_declared_column_with_payload_admission() {
+        use nervix_connector::{
+            IngestMetadataRow, IngestRowHeaders, RetainedIngestMetadata,
+            RetainedIngestMetadataValue,
+        };
+        use nervix_models::{HttpIngestorEntity, IngestorEntityKind};
+
+        use crate::runtime::{IngestMetadataProjection, test_fixtures::ingest_metadata_for_test};
+
+        let runtime = Runtime::new();
+        let domain = domain("unpaced");
+        let ingestor = named("source");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
+        let time = runtime
+            .ingestion_time(&domain, &ingestor)
+            .assured("fixture clock is installed");
+        let declared = IngestorEntityKind::Http(HttpIngestorEntity::Request)
+            .capabilities()
+            .metadata;
+        let polled = Timestamp::from_unix_nanos(1_234);
+        let answered = RetainedIngestMetadata::from_values(vec![
+            RetainedIngestMetadataValue::U16(200),
+            RetainedIngestMetadataValue::Datetime(polled),
+        ]);
+        let unanswered = RetainedIngestMetadata::from_values(vec![
+            RetainedIngestMetadataValue::U16(200),
+            RetainedIngestMetadataValue::Absent,
+        ]);
+        let rows = [
+            IngestMetadataRow {
+                fields: &answered,
+                headers: IngestRowHeaders::NONE,
+                position: None,
+            },
+            IngestMetadataRow {
+                fields: &unanswered,
+                headers: IngestRowHeaders::NONE,
+                position: None,
+            },
+        ];
+        let reading = IngestMetadataProjection::reading(declared, ["polled_at"])
+            .assured("HTTP REQUEST declares polled_at");
+        let ingest_metadata = ingest_metadata_for_test(reading, &rows);
+        let record =
+            test_runtime_row([]).with_ingested_at_watermarks(Timestamp::from_unix_nanos(9));
+        let batch = RuntimeRecordBatch::concat(&[&record.one_row_batch(), &record.one_row_batch()])
+            .assured("two rows of one schema concatenate");
+        let metadata = RecordMetadataColumns::from_rows([
+            record.metadata().clone(),
+            record.metadata().clone(),
+        ]);
+        let source = IngestTimestampSource::AtMetadata(named("polled_at"));
+
+        let selected = time
+            .select_column(Some(&source), &batch, &metadata, &ingest_metadata)
+            .assured("the read DATETIME metadata column exists");
+        assert_eq!(selected.value(0), 1_234);
+        let admitted = time.admit_column(&selected);
+        assert_eq!(
+            (0..2).map(|row| admitted.value(row)).collect::<Vec<_>>(),
+            vec![true, false],
+            "a message that carried no value is rejected as a null payload timestamp is"
+        );
+        assert!(matches!(
+            time.rejection(Some(&source), true),
+            IngestionTimeError::TimestampMetadataField { .. }
+        ));
+
+        let unread = IngestMetadataProjection::reading(declared, ["status"])
+            .assured("HTTP REQUEST declares status");
+        let without_column = ingest_metadata_for_test(unread, &rows);
+        assert!(matches!(
+            time.select_column(Some(&source), &batch, &metadata, &without_column)
+                .err()
+                .assured("a column no program reads is not built")
+                .current_context(),
+            IngestionTimeError::TimestampMetadataField { .. }
+        ));
     }
 
     #[test]

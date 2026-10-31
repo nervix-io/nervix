@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from typing import Callable
@@ -580,6 +581,63 @@ class MainTests(unittest.TestCase):
             result = json.loads((self.runner.work / "inventory.json").read_text())
             self.assertTrue(result["diagnostics_checked"])
             self.assertFalse(result["matrix_complete"])
+
+    def test_configurations_analyze_beside_each_other_and_keep_their_declared_order(self) -> None:
+        names = ["ordinary", "browser", "testing", "shuttle", "loom"]
+        self.configurations[:] = [Configuration(name, "Cargo.toml", ()) for name in names]
+        # The first three wait for each other, so the analysis passes only when they run at once.
+        together = threading.Barrier(3, timeout=30)
+        running = []
+        most = []
+        lock = threading.Lock()
+
+        def analyze(configuration, **kwargs):
+            with lock:
+                running.append(configuration.name)
+                most.append(len(running))
+            if configuration.name in names[:3]:
+                together.wait()
+            # Later configurations end first, so the evidence's order is the declared one, not the
+            # order the analyses end in.
+            time.sleep(0.01 * (len(names) - names.index(configuration.name)))
+            with lock:
+                running.remove(configuration.name)
+            return {"configuration": {"name": configuration.name}, "reports": {}, "complete": True}
+
+        self.runner.analyze.side_effect = analyze
+        status, output = self.run_main("--jobs", "3")
+        self.assertEqual(status, 0, output)
+        inventory = json.loads((self.runner.work / "inventory.json").read_text())
+        self.assertEqual([entry["configuration"]["name"] for entry in inventory["evidence"]], names)
+        self.assertEqual(max(most), 3)
+
+    def test_a_failed_configuration_starts_no_other_and_fails_the_gate(self) -> None:
+        names = ["ordinary", "browser", "testing"]
+        self.configurations[:] = [Configuration(name, "Cargo.toml", ()) for name in names]
+        started = []
+
+        def analyze(configuration, **kwargs):
+            started.append(configuration.name)
+            if configuration.name == "ordinary":
+                raise AnalysisError("ordinary: the server analysis was killed")
+            return {"configuration": {"name": configuration.name}, "reports": {}, "complete": True}
+
+        self.runner.analyze.side_effect = analyze
+        status, output = self.run_main("--jobs", "1")
+        self.assertEqual(status, 1)
+        self.assertIn("ordinary: the server analysis was killed", output)
+        self.assertEqual(started, ["ordinary"])
+
+    def test_the_number_of_configurations_at_once_comes_from_the_environment_or_the_default(self) -> None:
+        self.assertEqual(typed_ratchet.analysis_jobs({}), typed_ratchet.DEFAULT_ANALYSIS_JOBS)
+        self.assertEqual(typed_ratchet.analysis_jobs({typed_ratchet.JOBS_VARIABLE: "6"}), 6)
+        for value in ("0", "many"):
+            with self.subTest(value=value), self.assertRaises(AnalysisError):
+                typed_ratchet.analysis_jobs({typed_ratchet.JOBS_VARIABLE: value})
+        with mock.patch.dict(os.environ, {typed_ratchet.JOBS_VARIABLE: "0"}):
+            status, output = self.run_main()
+        self.assertEqual(status, 1)
+        self.assertIn(typed_ratchet.JOBS_VARIABLE, output)
 
     def test_source_changes_during_matrix_are_rejected(self) -> None:
         with mock.patch("scripts.typed_ratchet.source_inputs", return_value={"src/lib.rs": "changed source"}):

@@ -31,6 +31,9 @@ when the qualification ends; its target directory stays, so a later run reuses i
 The copy compiles incrementally, and `--shard NUMBER/COUNT` qualifies one part of the distinct
 weakenings, so separate jobs can split the rebuilds.
 Discovery, execution, replay and qualification use the same build profile.
+
+`build` compiles the Loom build of every inventory package exactly as `run` lists it, and runs
+nothing, so a later `run` compiles nothing.
 """
 
 from __future__ import annotations
@@ -382,6 +385,14 @@ def discover(commands: Commands, package: str) -> Discovery:
     models = tuple(test for test in listed_tests(listing.output) if is_model(test))
     ignored = tuple(test for test in listed_tests(ignored_listing.output) if is_model(test))
     return Discovery(package=package, models=models, ignored=ignored)
+
+
+def build_models(commands: Commands, inventory: Inventory) -> int:
+    for package in inventory.packages():
+        built = commands.run(cargo_test(package, "--no-run"))
+        if built.status != 0:
+            raise RunnerError(f"cannot build the Loom build of {package}")
+    return 0
 
 
 def loom_version(root: Path) -> str | None:
@@ -769,6 +780,7 @@ def main(
     replay_parser.add_argument("failure", type=Path)
     qualify_parser = subcommands.add_parser("qualify")
     qualify_parser.add_argument("--shard", default="1/1")
+    subcommands.add_parser("build")
     arguments = parser.parse_args(argv)
 
     root = arguments.root or repository_root()
@@ -776,6 +788,8 @@ def main(
     commands = commands_for(root)
     try:
         inventory = parse_inventory((root / INVENTORY).read_text(encoding="utf-8"))
+        if arguments.command == "build":
+            return build_models(commands, inventory)
         if arguments.command == "run":
             return run_models(commands, inventory, target, arguments.filter, arguments.report)
         if arguments.command == "replay":

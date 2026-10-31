@@ -26,6 +26,11 @@ refuses TLS file keys on HTTP. The case-preserving `ClickHouseTableName` is cons
 one or two nonempty locator parts; the connector receives that validated name and quotes its parts
 for SQL without reparsing a Plexus statement.
 
+A direct-value expression's inference refusal carries its declared section and destination key
+separately from the VM's typed compile cause. The registry associates that cause's operation span
+with the lowered mapping before reporting the refusal; a null-only mapping is refused at admission.
+[Errors And Diagnostics](errors-and-diagnostics.md#registry-validation-and-planning) owns the report.
+
 The MongoDB engine resolves a required nonempty database from its explicit key or the URL path
 into one private configuration value. It consumes the driver's optional default rather than
 carrying a second database identity. Collection names are validated vocabulary values that retain
@@ -219,8 +224,9 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX MODEL SEP` archive signature and consensus's `raft_platform_` keyspaces
-identify this current shape before decoding. An unrecognized signature or namespace fails with
+The registry's `NERVIX MODEL TAM` archive signature and consensus's `raft_timestamp_` keyspaces
+identify this current shape, which also holds an ingestor's `TIMESTAMP AT metadata.<field>` source,
+before decoding. An unrecognized signature or namespace fails with
 the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
@@ -423,6 +429,22 @@ SQL destination; it does not reinterpret the whole path as one identifier. Poole
 configuration has one reserved-key declaration, shared by offline MySQL URL inspection and the
 host's resolved-configuration refusal. Pool capacity remains the client's typed `POOL SIZE`
 bounds, with no competing URL setting.
+
+The MySQL shared pool and each borrowed connection retain an `Option<ConfiguredDeadline>`:
+absence means the client omitted an operation bound, while a present value has already passed
+the shared schedulable-deadline validation. Checkout, validation and insert failures keep typed
+reports, including `DeadlineElapsed`, beneath their host contexts; a rendered reason is never
+the pool-borrow error's state. Paired identity-file presence is established by the client schema,
+then checked again when the driver options are constructed. The connector extends the parsed
+URL's TLS options rather than reconstructing their policy from the presence of a CA file.
+
+Postgres table names validate the same one- or two-part path at construction and decoding, and the
+connector quotes the parts it borrows from the validated name in both its insert and its catalog
+lookup. A Postgres address's TLS policy is the typed `PostgresSslMode`, read through the declared
+`sslmode` option that schema validation applies too; a spelling the option does not declare, or the
+option written twice, is refused rather than defaulted to a policy. A Postgres conflict clause's
+rules belong to `PostgresConflictAction`, whose typed refusal names a missing `DO UPDATE` target, an
+empty target column or an update without a mapped column outside its target.
 
 RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
 and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch

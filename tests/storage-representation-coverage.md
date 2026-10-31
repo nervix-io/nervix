@@ -10,6 +10,11 @@ complete field; entity presentation distinguishes omission from an explicitly wr
 The registry's current archive signature and consensus keyspace namespace fence this shape before
 decoding; existing current-header corruption and namespace validation tests qualify those owners.
 
+Ingestor generators draw every timestamp source, `TIMESTAMP AT metadata.<field>` included, in
+`CREATE` and in `ALTER ... SET TIMESTAMP`. The Model/archive, registry, consensus and canonical
+Plexus properties preserve the metadata source distinctly from a payload field of the same name,
+and the same signature and namespace fence that shape.
+
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions
 run in both modes. A target writes through the storage engine its boundary owns when it has one:
@@ -135,6 +140,10 @@ preserve the authored entries; the effective-default projection preserves those 
 idempotent, and public inspection remains idempotent.
 Scheme-restricted driver addresses include RabbitMQ's `amqps` TLS-file configurations; the
 property retains their complete ordered trust and identity entries through both encodings.
+Driver URLs with Nervix-owned query options include Postgres addresses, which set `sslmode` once
+to a declared choice; a TLS file conditioned on `verify-full` fixes that choice in the generated
+address, and the property retains the address, its file entries and their acceptance through
+both encodings.
 `models-archived-models` includes the typed `DESCRIBE CLIENT` statement and its client identity;
 the Plexus statement targets check its canonical text through both composed statement readers.
 

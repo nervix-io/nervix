@@ -96,7 +96,10 @@ guarantee. An impossible mapped type is not a retryable connector initialization
 
 The registry checks these declarations against the candidate graph before accepting `CREATE` or
 `ALTER`. It rejects duplicate `VALUES` keys, unsupported or wrongly typed mappings, and invalid
-transport-ingestor delivery durations before any ingestor or emitter opens. ACK timeouts and retry
+transport-ingestor delivery durations before any ingestor or emitter opens. Expression inference
+precedes the mapped-type check. An expression that cannot infer a type, including a null-only
+mapping, is refused with its declared section and destination key and retains the typed VM cause.
+ACK timeouts and retry
 durations must be positive; a zero batch timeout gathers without waiting. Every duration must fit
 the shared schedulable deadline bound, and retry maximum must be at least its initial backoff.
 OTEL `RESOURCE` mappings remain literal-only. Required batching is established by validation, so
@@ -283,9 +286,16 @@ OpenDAL's credential providers through its accessor info. The object-store clien
 `timeout_ms`, read through `ConfiguredDeadline`, sets both the operation and I/O timeout of the
 OpenDAL operator, including credential HTTP calls, name resolution, connection and TLS. Without
 the key, metadata and delete operations allow 60 seconds and reads and writes allow 10 seconds.
-That HTTP client takes no CA file or client identity from the client's configuration. The
-Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled
-trust roots, including in an isolated Iceberg connector build. The three Iceberg backends keep their
+Each of the two Iceberg HTTP clients receives the rustls configuration that the shared
+`RustlsClientConfigProvider` builds from its own client's entries. It holds the bundled WebPKI roots and the
+platform's native roots with the client's `tls_ca_file` added, and the identity of its
+`tls_cert_file` and `tls_key_file`. The Reqwest 0.13 object-store client takes its configuration
+from the S3, GCS or Azure Blob client, and it serves both OpenDAL's object requests and its
+credential providers' HTTP calls. The Reqwest 0.12 catalog client takes its configuration from the
+ICEBERG_REST client. The emitter builds both configurations when it opens, under the rustls
+provider the host installed or AWS-LC when the host installed none. An unreadable or invalid file is
+therefore an open-time configuration failure, with the client it belongs to and the provider's
+typed TLS cause beneath it. The three Iceberg backends keep their
 S3, GCS, and Azure property mappings and commit boundary. One operator is initialized from the
 emitter's location and the initial table's effective storage properties. Table metadata refreshes
 retain that table's `FileIO` and its initialized storage, so later object calls reuse the operator;
@@ -707,6 +717,13 @@ retirement and nothing cancels it, since a destruction cannot stop part way. It 
 client alone, never the ingestor's or emitter's host or its intake, and Nervix never hands a client to
 another ingestor or emitter, so a replacement opens a client of its own.
 
+An ingestor-open failure during graph construction propagates through the runtime installation
+report, before an ingestor host loop exists. The control-plane installation supervisor retries that
+failed application on the admission loop's half-second cadence, or on a committed schedule or domain
+update, using the current admitted state. An emitter initialization failure inside an already
+running host remains owned by that host's declared retry policy. Neither path requires a fresh
+configuration command.
+
 A joined consumer whose coordinator does not answer holds a connector worker for those five
 seconds, and a producer holds one for its polling thread's last poll and up to half a second of
 flushing. A broker that stops answering while its clients retire therefore delays the node's other
@@ -816,7 +833,7 @@ remain in their owning work records until that delivery.
 
 | Side | What the entity declares |
 | --- | --- |
-| Ingestor | Header reads, the typed metadata scope, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
+| Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
 | Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership. The declaration explicitly names delegated property namespaces and reserved keys. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
@@ -839,6 +856,11 @@ not disable verification or silently fall back when unavailable.
 The server composition root extends the existing changed-model binding boundary before standalone
 mutation or transaction commit. It renders mount templates using the resource resolver and checks
 the rendered schema and Nervix-owned file paths on an admitted filesystem worker, charged to command memory.
+Request preflight refuses inspection when command memory or the filesystem wait queue is full.
+Applying a model step under an accepted transaction or restore instead waits for those existing
+capacities with `QueueAdmission::WaitForPlace`; lack of room has not judged the configuration.
+The service task's existing shutdown cancellation ends the wait. A charge larger than the whole
+class or a closed executor still fails inspection, and no uncharged config copy is made while waiting.
 Rendered values also pass the existing WebSockets configuration and Prometheus API-root owners;
 an optional Redis subscription capacity passes the same range parser its ingestor plan uses.
 Ingestor-only presence requirements stay with that plan.
@@ -862,6 +884,17 @@ table declaration admits one or two nonempty, case-preserving identifier parts, 
 quotes each part separately. Its declared placeholder bound is shared with the statement divider;
 the bound narrows rows by mapped column count. The [MySQL manual](emitters.md#mysql) gives its
 exact binary binding and conflict semantics.
+
+The Postgres client schema declares its address as a driver URL whose scheme and `sslmode` Nervix
+owns: validation and the connector read the one TLS policy through the same declared option, and
+a missing, repeated or undeclared choice is a value-free refusal before storage. The TLS files are
+conditioned on `sslmode=verify-full` in that schema, and sqlx's offline parser checks every other
+query option before commit. Its table declaration admits one or two nonempty, case-preserving
+identifier parts, which the connector quotes separately in the insert and its catalog lookup. Its
+declared batch maximum is the largest protocol message the server reads, the same bound the
+statement divider keeps every insert within, and its conflict rule is the vocabulary's, which the
+grammar applies at `CREATE`. The [Postgres manual](emitters.md#postgres) gives its text binding
+and conflict semantics.
 
 Offline refusals keep their driver cause beneath `OfflineClientConfigError`; lapin's URI parser
 exposes only a string, which remains an attached diagnostic. Public command outcomes select reviewed
@@ -971,19 +1004,26 @@ namespace. Location validation compares the URL scheme with the resolved storage
 before activation. Commit size and batch size share the vocabulary's positive whole-byte value,
 so planning consumes the decided count instead of parsing a second size string.
 
-The storage clients declare their Nervix-owned addresses, credentials, booleans and deadlines
-separately from `s3.*`/`client.*`, `gcs.*` and `adls.*` driver properties. The REST client owns its
+The storage clients declare their Nervix-owned addresses, credentials, booleans, deadlines and TLS
+files separately from `s3.*`/`client.*`, `gcs.*` and `adls.*` driver properties. The REST client owns its
 catalog locator and warehouse and delegates its catalog headers and storage-property namespaces.
 Registry validation, completion, inspection and the generated key reference consume these shared
 schemas; they do not keep another Iceberg key table. The network-free composition hook checks
 the storage properties the connector can interpret before a table location exists. Building an
 OpenDAL operator, credentials and connectivity remain initialization checks.
 
-The REST catalog's file I/O property map starts with the normalized storage properties and then
-applies catalog properties. A catalog entry for the same Iceberg property key takes precedence
-in that map, which the table's file I/O supplies to the configured storage factory for object
-operations. The factory retains the selected backend, resolver, location and storage deadline; it
-does not replace the effective catalog properties with a second client map.
+The REST catalog's property map holds two sets of entries. The first is the storage client's file
+I/O properties: each Nervix-owned key under the Iceberg property the vocabulary declares for it,
+and each delegated property as written. The second is the catalog client's configuration without
+its TLS files. The vocabulary's `IcebergCatalogProperties` pairs the two clients under one rule.
+Registry validation refuses an emitter whose catalog client sets a property that its storage client
+supplies, and the connector builds the catalog's map through the same pairing, so neither client
+silently replaces the other's value. Deadline and TLS-file keys configure the clients' own
+transports and stay out of the map. The table's file I/O supplies that map to the configured
+storage factory for object operations. The factory retains the selected backend, resolver,
+location, storage deadline and object-store TLS configuration; it does not replace the effective
+catalog properties with a second client map. The storage reader holds each Boolean property to the
+value it states, so `gcs.no-auth` set to `false` keeps the GCS credential loader and signing.
 
 ### Capability inventory
 
@@ -1093,9 +1133,9 @@ surfaces and parses its declared acknowledgement before any connector instance o
 that fails leaves nothing running.
 
 A source plan combines connector-specific settings, validated capabilities, and the host's ACK
-policy. Capabilities state whether header reads are available, which typed metadata scope exists,
-whether quiesce is supported, the nonzero instance count, the supported acknowledgement mode, and
-the position class the source's entity declares.
+policy. Capabilities state whether header reads are available, whether quiesce is supported, the
+nonzero instance count, the supported acknowledgement mode, and the position class the source's
+entity declares.
 The source owns `open`, `suspend`, `resume`, `close`, the next broker batch or scheduled poll, and
 the meaning of acknowledging or rejecting its own position. A broker message lends its payload,
 headers, typed metadata, and transport position to the host. Positions remain connector-owned;
@@ -1105,21 +1145,44 @@ returns; see [Confirmed acknowledgements](#confirmed-acknowledgements).
 
 A client source's plan is not a connector plan: it carries the input schema, its compiled form, the
 producer policy of window, ACK timeout, and retry backoff, and the endpoint contract digest producers
-attach to. It declares no header or metadata scope and supports only `SUSPEND`.
+attach to. It declares no header model or metadata field and supports only `SUSPEND`.
 
-The metadata boundary has distinct header, WebSockets, Kafka, and Syslog scopes. WebSockets carries
-the text or binary frame kind and upgrade-response headers; Kafka carries topic, partition, offset,
-and headers; Syslog carries the peer address. The scopes, and the fields of
-each with their exact types, are declared once in the vocabulary, and each source entity names the
-scope its messages expose. Registry validation reads that declaration for the fields an ingestor's
-programs may name, the host builds its metadata columns from the same fields, and a connector's
-metadata row names the scope it carries, so the three cannot disagree. Transport headers are visited
-from the borrowed message in the order the entity's [header model](#header-models) declares. The
-host copies them only when the quiesce control decides on a payload, which may retain it, or a
-WebSocket session must retain them after the source message ends. HTTP endpoint and polling headers,
-WebSocket upgrade headers, Kafka record headers, NATS headers, Pulsar properties, RabbitMQ AMQP
-headers, and SQS attributes keep their transport's own semantics; other connector and entity pairs
-carry no transport headers.
+Each source entity declares its typed metadata fields beside its other capabilities in the
+vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the response status and
+the poll's scheduled instant, `WEBSOCKETS CONNECTION` the frame kind, `KAFKA TOPIC` the topic,
+partition and offset, `SYSLOG LISTENER` the peer address, and every other entity none. Registry
+validation reads that declaration for the fields an ingestor's route programs and its
+`TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
+connector's message hands the host the value of every declared field in declared order, one typed
+call per field into the host's value sink, so the three cannot disagree. A value is a `STRING`,
+`BYTES`, `BOOL`, `U16`, `I32`, `I64` or `DATETIME`, or absent where the message carries none; a
+`STRING` such as a socket address may be written into the column in place instead of being
+allocated per message. A message that hands over another number of values than its entity declares,
+or a value of another type than its field's, is a connector defect the host refuses as a typed
+metadata error. A connector adds a field by declaring it and handing its value over: neither the
+contract nor the host names any connector's fields.
+
+The host projects metadata lazily. When an ingestor binds its programs, the host records which
+declared fields its route programs and its `TIMESTAMP AT metadata.<field>` read, and every ingest
+group of the ingestor builds Arrow columns for those fields and no others. A group of an ingestor
+that reads none visits no metadata value at all. Transport headers keep their projection whatever
+the programs read, because an ingestor's error-route programs may call `read_header` and are
+compiled with the domain's routing, outside the source host.
+
+Beside its fields and headers, a message names the position its transport gives it, where the
+transport has one: a Kafka record's topic, partition and offset, or a syslog frame's peer. It is the
+transport's own coordinate, never a header value its sender wrote, and a decode rejection names it.
+A paced source returns each polled message owned, its declared values already copied.
+
+Transport headers are visited from the borrowed message in the order the entity's
+[header model](#header-models) declares. The host copies them only when the quiesce control decides
+on a payload, which may retain it, or a WebSocket session must retain them after the source message
+ends. A retained payload keeps the value of every field its entity declares, whichever the programs
+read, and its position, so a replayed message builds the same columns a delivered one would; a
+WebSocket frame keeps its connection's exact header snapshot by reference rather than a copy. HTTP
+endpoint and polling headers, WebSocket upgrade headers, Kafka record headers, NATS headers, Pulsar
+properties, RabbitMQ AMQP headers, and SQS attributes keep their transport's own semantics; other
+connector and entity pairs carry no transport headers.
 `read_header` and `read_headers` are validated against that declaration, and header values do not
 travel through relays unless an ingestor writes them into schema-backed fields. See
 [Header Context](./ingestors.md#header-context) for the exact expression behavior. The session
@@ -1127,10 +1190,6 @@ completion resolver uses the same vocabulary source capability before the full i
 so it offers those functions only for sources that can read headers. Its emitter `INVOKE`
 completion similarly uses the vocabulary emitter capability to offer `write_header` only for emitters that
 can write headers. Runtime validation remains authoritative.
-
-The host checks the WebSockets frame-label byte capacity before opening its Arrow metadata builder.
-An unaddressable row-bound estimate returns a typed metadata error through the group's opening
-operation and its general-error policy.
 
 The source host decodes consecutive payloads into one ingest group's Arrow builders. For a
 schemaful JSON codec, that group also owns mutable payload scratch and simd-json parser buffers;
@@ -2058,8 +2117,9 @@ the same requests again.
 The database emitters divide the whole run. ClickHouse measures the `JSONEachRow` body of an insert,
 each row's line encoded once and sent as a slice of one buffer. Postgres measures the one `unnest`
 statement every insert of the write executes and the text arrays it binds, exactly as the driver
-encodes them, and never lets that size exceed the largest protocol message the server reads, which
-bounds the Bind message that carries the arrays. MySQL measures each multi-row statement and every
+encodes them; its declared batch maximum, which `CREATE` holds `MAX SIZE` to, is the largest
+protocol message the server reads, so the measure also bounds the Bind message that carries the
+arrays. MySQL measures each multi-row statement and every
 value's binary-protocol encoding, and narrows the row limit to the rows whose placeholders fit the
 65,535 one statement binds. MongoDB measures each inserted document with the `_id` the driver
 prepends, or each upsert's filter and update documents, and rejects a row whose document exceeds
@@ -2069,8 +2129,9 @@ time; a Postgres cardinality violation, which is how `ON CONFLICT DO UPDATE` ref
 carries a key twice, is isolated the same way. Postgres and MySQL write the isolated rows on the
 connection the refused insert borrowed, so an insert borrows once and its per-record outcome never
 waits for the shared pool again during isolation. Postgres also runs a write's metadata lookup on
-its first insert's connection. Both release the connection before the next bounded insert or retry
-backoff. MongoDB answers per document, so it needs no isolation pass.
+its first insert's connection, and the lookup and the insert quote each declared table part as one
+identifier, so they name the same relation. Both release the connection before the next bounded
+insert or retry backoff. MongoDB answers per document, so it needs no isolation pass.
 
 Registered Bolero properties hold these rules against their owners, with measures that grow and
 shrink with a candidate: `connector-row-request-division` the division rule and both limits,
@@ -2642,7 +2703,18 @@ and Arrow type retained beneath the publish context. It is not a per-record reje
 that keeps a MySQL pool at `POOL SIZE MIN` reports a pass that ends below it as
 `PoolMinimumError::NotRestored`, naming the minimum, above the failed checkout's `CheckOut` and the
 driver's error, before its next pass retries; a later writer's failure remains a separate
-diagnostic.
+diagnostic. MySQL's configured `timeout_ms` is read once through `ConfiguredDeadline` and retained
+with the node's shared driver pool. It bounds every checkout, including the minimum keeper's,
+initial connection validation, and each insert as separate operations. An elapsed operation keeps
+the typed `DeadlineElapsed` beneath its MySQL and host contexts and attaches its safe operation,
+key and duration for public emitter diagnostics. MySQL composition preserves the shared-client
+report through initialization. An elapsed operation is infrastructure failure, never a row
+rejection. Cancelling a driver command marks its connection disconnected, and the
+recycler discards it before handing out capacity again. Omitting the key retains the declared
+unbounded waits. TLS files extend the URL's existing `SslOpts`, retaining verification and trust
+choices, and paired identity files install the driver's RSA PKCS#1 identity. The silent-handshake,
+locked-insert/retry and shared-pool-contention scenarios own the public deadline observations;
+the mounted-certificate scenario uses an account that requires a client certificate.
 
 The host's source start keeps every connector report it composes an ingestor from. A client
 configuration that does not resolve, a connector plan that fails, such as a Syslog, Redis,

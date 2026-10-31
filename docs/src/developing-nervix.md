@@ -276,7 +276,7 @@ For repository-wide validation:
 just validate
 ```
 
-The `checks`, `tests`, and `scenarios` CI jobs install the Go formatters through
+The `checks` and `scenarios-build` CI jobs install the Go formatters through
 `scripts/install_go_ci_tool.py`: dockerfmt is pinned to v0.5.4 and ghokin to v3.9.0. The installer
 uses Go 1.26 in each job, keeps the public Go checksum database enabled, and disallows an implicit
 toolchain download. It retries only a transport failure while reading that database, at most three
@@ -285,29 +285,38 @@ fails on the first attempt. Each attempt is retained in the job's
 `go-tool-bootstrap-<job>` artifact. Run `just test-go-ci-tool` to exercise the classifier and
 workflow wiring without network access.
 
-CI installs the latest `just` release. `just validate`, `just validate-ci`, `just lint` and
-`just cargo-clippy` default to four concurrent recipe bodies across the `[parallel]` groups.
-Pass a job count, such as `just validate 2`, or use `just --jobs 2 validate` to select another
-limit. `JUST_JOBS` also supplies the default. Validation runs the product and compiler tooling
-Clippy recipes in one invocation, so they share the same limit.
+CI installs the latest `just` release. `just validate`, `just validate-ci`, `just lint` and `just
+cargo-clippy` default to four concurrent recipe bodies across the `[parallel]` groups. Pass a job
+count, such as `just validate 2`, or use `just --jobs 2 validate` to select another limit.
+`JUST_JOBS` also supplies the default. Validation runs the product and compiler tooling Clippy
+recipes in one invocation, so they share the same limit. In `just validate-ci` the lints and the
+other validations run beside each other, each building in directories of its own, so none waits for
+another's directory lock, and the typed ratchet runs once they have finished. CI's `checks` job
+passes four as well, because memory limits it rather than CPUs: each recipe's Cargo already uses
+every CPU, and in Check 41126961308, which compiled the server cold, one recipe per CPU overlapped
+enough Clippy compilations to pass the runner's 32 GB and one was killed. The typed ratchet's
+admission queue admits its server analyses as if nothing else ran: beside the lints, the kernel's
+out-of-memory killer ended the ratchet's Shuttle analysis of the server in Check 41066649586.
 
 Each package and configuration is a separate parallel dependency of one shared Clippy recipe.
 The `[parallel]` groups map package lists onto that recipe, including the packages checked with
 `--all-features` and the compiler tooling packages. Feature, target, profile and compiler selections
 stay separate, so mutually exclusive execution modes never share a Cargo invocation.
 
-Clippy builds in four directories, `clippy/0` to `clippy/3` beneath `CARGO_TARGET_DIR`, or the
-repository's `target` directory when that variable is unset. The SHA-256 of a configuration's
-package, Cargo arguments and toolchain, modulo four, selects its directory, so each run of a
-configuration returns to the directory that holds its artifacts. The configurations in a directory
-share the dependencies they build, build scripts included, and Cargo keeps the artifacts of
-different features, profiles, targets and flags, and of the stable and nightly compilers, apart
+Clippy builds in sixteen directories, `clippy/0` to `clippy/f` beneath `CARGO_TARGET_DIR`, or the
+repository's `target` directory when that variable is unset. The last hexadecimal digit of the
+SHA-256 of a configuration's package, Cargo arguments and toolchain selects its directory, so each
+run of a configuration returns to the directory that holds its artifacts. The configurations in a
+directory share the dependencies they build, build scripts included, and Cargo keeps the artifacts
+of different features, profiles, targets and flags, and of the stable and nightly compilers, apart
 there. Configurations in the same directory take turns on its build directory lock, so two of them
-selected at once run one after the other. Nothing deletes these directories, locally or on CI: the
-four of them bound what a lint leaves on disk. `just cargo-clippy-package <package> [arguments ...]`
-runs a focused check of all targets through the same recipe. The compiler driver builds keep their
-separate `typed-ratchet/driver` directory. All builds retain the configured kache wrapper. Cargo's
-compiler job limit applies separately within each invocation.
+selected at once run one after the other; sixteen directories let up to sixteen build at once, where
+four left a 16-CPU runner mostly idle behind the server's long compilations. Nothing deletes these
+directories, locally or on CI: the sixteen of them bound what a lint leaves on disk. `just
+cargo-clippy-package <package> [arguments ...]` runs a focused check of all targets through the same
+recipe. The compiler driver builds keep their separate `typed-ratchet/driver` directory. All builds
+retain the configured kache wrapper. Cargo's compiler job limit applies separately within each
+invocation.
 
 `just validate-plexus-docs` scans `docs/src` and parses every exact `plexus` code fence directly with
 the parser crate. Use `plexus,ignore` only for loose grammar synopses and statement fragments that
@@ -342,6 +351,162 @@ passed to the test binaries, so a test name filter narrows the run:
 ```bash
 just test-connectors <filter>
 ```
+
+### CI runners
+
+Each CI job's `runs-on` label picks one of three kinds of machine.
+
+GitHub's own hosted runners, which are free for a public repository, run the jobs that coordinate a
+run or need little of a machine: the test selection, the PR title check, the image metadata and
+manifest, the chaos plans and verdicts, the Bolero gate and the combination of its shards, the
+benchmark comment, the coverage merges, the book and the deployment checks. They also run the chaos
+shards, on the workers the suites were qualified on. `ubuntu-24.04` has 4 CPUs, 16 GB of memory and
+a 14 GB SSD, and `ubuntu-24.04-arm` is the same machine on arm64, so each deployment check runs on
+its image's own architecture. The organization's GitHub plan runs at most 20 hosted jobs at once
+across its repositories; in a week of October 2026 the other jobs had at most 10 running at once, so
+a soak suite's shards, which need more, wait for one another. On Boat's workers a container's run,
+inspection or stop took 8 to 29 seconds against the chaos suite's 30-second bound of a fault
+operation, and three of fourteen soak shards failed their network qualification.
+
+[Boat](https://boat.dev) machines, which the boat CI GitHub App starts for every job whose `runs-on`
+names a Boat size, run every other job but the three that run on Blacksmith. Each gets a fresh
+x86_64 Ubuntu 24.04 virtual machine with Docker, deleted when the job ends.
+`.github/actionlint.yaml` declares the Boat labels to `just validate-workflows`. Boat runs a public
+repository's jobs only for the GitHub users its account setting lists, and only when both a run's
+author and the user who started it are on that list, so it refuses any other run, such as one for a
+pull request from a fork. Each job starts one machine, and Boat's plan limits how many start each
+minute, hour and day. A job's size follows the memory and disk its builds use rather than its CPUs,
+since a Boat machine has only 2 GB of memory per CPU, with 4 GB of swap beside it:
+
+- `boat-xlarge`, with 16 CPUs, 32 GB and 251 GB of disk, runs validation, the diagnostic evidence,
+  the unit tests, the scenario build and each of its shards, the extra checks, Shuttle, Loom, the
+  Deloxide lane, the Bolero randomized properties, the image builds and the benchmarks. In runs of
+  October 2026 the extra checks used about 95 GiB of disk and the amd64 image build lost its runner
+  on a 16 GB machine.
+  Sixteen compilers of the instrumented Loom build exceed the machine's 32 GB, so the `loom` job
+  sets `CARGO_BUILD_JOBS` to eight; its build then peaked at 21 GiB.
+- `boat-large`, with 8 CPUs, 16 GB and 111 GB, runs Turmoil.
+
+A Boat machine sets the `en_US.UTF-8` locale, whose collation orders `sort` output differently from
+the `C.UTF-8` of GitHub's runner image, so every workflow sets `LC_ALL=C.UTF-8`. Its Docker daemon
+can start a few seconds after a job begins, so a Boat job whose first steps use Docker waits for it.
+Its own Node.js comes from nvm, which a job's shell may not load, so a Boat job that runs Node.js or
+npm pins it with `actions/setup-node`. Its Rust toolchain is installed system-wide under
+`/usr/local/cargo`, so a job creates `~/.cargo` before it writes its Cargo configuration there. Its
+git is Ubuntu's 2.43, older than the 2.44 whose `--no-lazy-fetch` the test selection passes, so the
+Boat jobs that run the selection's tests install the current git from the git-core PPA, as GitHub's
+runner image does.
+
+[Blacksmith](https://www.blacksmith.sh)'s `blacksmith-16vcpu-ubuntu-2404`, with 16 CPUs, 64 GB and
+GitHub's runner image, runs the Bolero sanitizer shards, the Loom qualification shards and client
+conformance. The sanitizer shards' address-sanitized server build needs more than Boat's 32 GB, even
+with eight compilers. The other two are compile-bound builds that kache serves slowly on Boat: in
+Check run 40991534806 kache's downloads spent most of their time waiting for the lock of its local
+store, 1.8 to 4.6 seconds each against 0.4 seconds on Blacksmith, the Loom qualification shards
+reached their two-hour limit after about 107 minutes of compiling, and the client conformance build
+took 49 of its job's 60 minutes. `.github/actionlint.yaml` declares the Blacksmith labels as well.
+
+A kache-backed job uses the cache bucket in its runner's region: the EU bucket on Boat's European
+machines, and the US bucket on GitHub's hosted runners and on Blacksmith's US runners.
+[What Runs Where](integration-test-lifecycle.md#what-runs-where) names their settings.
+
+### CI artifacts
+
+Jobs exchange files and leave their reports and logs through GitHub's artifact service, and
+`gh run download <run> --name <artifact>` reads them. The exceptions are the two archives
+`scenarios-build` packs: `scenario-suite`, which every `scenarios` shard restores, and `unit-tests`,
+which the `tests` job restores. A test job has nothing to run without its archive, so they pass
+through one R2 bucket, which fails independently of GitHub. Only the steps that upload and download
+them use `.github/actions/ci-artifact-upload` and `.github/actions/ci-artifact-download`.
+`scripts/ci_artifacts.py` states the format: a tar stream cut into 128 MiB parts, each sent and
+retried on its own, and a manifest written last, so an unfinished upload cannot be read. A rerun of
+a test job keeps its archive, and a rerun of `scenarios-build` replaces both.
+
+| Repository setting | Kind | Value |
+| --- | --- | --- |
+| `R2_ARTIFACTS_BUCKET` | Variable | The bucket's name |
+| `R2_ARTIFACTS_ENDPOINT` | Variable | The account's S3 URL, `https://<account id>.r2.cloudflarestorage.com` |
+| `R2_ARTIFACTS_ACCESS_KEY_ID` | Secret | The access key of an Object Read & Write token scoped to that bucket |
+| `R2_ARTIFACTS_SECRET_ACCESS_KEY` | Secret | That token's secret access key |
+
+Those steps receive them as environment variables of the same names, and no other step does.
+The bucket is private, and its lifecycle rules are the only retention, matching key prefixes:
+
+| Prefix | Rule | Holds |
+| --- | --- | --- |
+| `transfer/` | Delete after 1 day | The archives' parts |
+| `runs/` | Delete after 30 days | The archives' manifests, which outlive their parts so that a late reader is told they expired |
+
+A rerun of a test job more than a day after its build finds the archive's parts gone and says so,
+and `scenarios-build` has to run again. With the same settings in the environment, read a run's
+archive while the bucket holds it:
+
+```bash
+just ci-artifact-download <run> --name scenario-suite --path archive
+```
+
+### CI labels
+
+A pull request opts into every method beyond its ordinary jobs through labels, so it pays only for
+what its change affects. This table lists every label that changes what CI runs. A change that adds,
+removes or renames one updates it in the same change, and `scripts/tests/test_labeled_check_jobs.py`
+compares it with the workflows.
+
+| Label | Workflow | What it runs |
+| --- | --- | --- |
+| `shuttle` | Check | The Shuttle checks and their replay check |
+| `loom` | Check | The Loom models and their weakening qualification |
+| `turmoil` | Check | The Turmoil simulation suite and its replay check |
+| `deloxide` | Check | The four Deloxide lanes |
+| `client-conformance` | Check | The cross-language client probes against one- and three-node clusters |
+| `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
+| `fuzz` | Check, through Bolero | The Bolero sanitizer campaigns and the combined record of their shards |
+| `extra-doctests` | Check | Capability doctests |
+| `extra-miri` | Check | Miri over the expiry map |
+| `extra-mutation` | Check | Mutation tests of the expiry map |
+| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector and the primitive source validator |
+| `extra-compiler` | Check | Source contracts, compiler diagnostics, paired API doctests and compiler cache qualification |
+| `extra-bench-smoke` | Check | Benchmark smoke tests |
+| `extra-primitives` | Check | Primitive boundary conformance in every mode, and its compile and browser checks. `coverage-full` then requires those collections |
+| `extra-completion-walk` | Check | The Plexus completion walk |
+| `extra-connector-matrix` | Check | The Plexus connector declaration export |
+| `chaos` | Docker Build | The chaos smoke suite against the release image and the diagnostic image |
+| `chaos-soak` | Docker Build | The chaos soak suite against both images |
+| `benchmark` | Docker Build | The product comparison against the pull request's image and the ordinary primitive probe, with the comparison commented on the pull request |
+| `book` | Docker Build | A published preview of the book, its PDF and the Plexus agent index, with its links commented on the pull request |
+| `no-docker` | Docker Build | Nothing: it stops the image builds and every job that needs an image, which are `benchmark`, `chaos`, `chaos-soak` and the deployment checks. `book` and every Check job still run |
+
+`chaos`, `chaos-soak`, `benchmark` and `book` act only on a pull request from a branch of this
+repository. `just release-evidence` requires the label of every method in its inventory, which is
+all of these except `benchmark`, `book` and `no-docker`, so a qualifying revision has run every
+step. It also refuses a revision built with `no-docker`, whose images and deployment checks never
+ran.
+
+A pull request labels what its change affects, and the chapter that owns a method says when it
+applies. Among the `extra-*` labels, a grammar change carries `extra-completion-walk`, a connector
+declaration `extra-connector-matrix`, a change to a compiler rule `extra-compiler`, and a change to
+a primitive `extra-primitives`. A pull request carries `benchmark` only when its task requires a
+measured comparison, such as a change that claims a performance effect, and `no-docker` only when
+nothing in it needs an image. `no-docker` never authorizes a test exclusion.
+
+The `extra-tests` job stays one job: each `extra-*` label selects its own steps, and the job runs
+only when at least one is present. Without any of them it is skipped, and `coverage` and
+`coverage-full` treat that as a deliberate selection.
+
+A label change acts through the events each workflow runs on, and the two differ:
+
+- **Check** runs on `labeled` and `unlabeled` for every label, whatever its name, and cancels the
+  run in progress on its branch. Adding or removing any label, even one that selects nothing such
+  as `bug`, therefore throws away a Check in progress and starts another from its first job. GitHub
+  sends one event per label, so a request that adds three labels starts three runs and only the
+  last continues. Set a pull request's labels before the run you mean to keep.
+- **Docker Build** runs on `labeled` but not `unlabeled`. Adding `benchmark`, `chaos` or
+  `chaos-soak` builds the images at once, which cancels a build in progress on the branch, and
+  adding `book` builds the book at once. Any other label, `no-docker` included, runs in a
+  concurrency group of its own and cancels nothing, so it does not stop a build already running.
+  Removing a label starts nothing, so a pull request that drops `no-docker` builds its images on
+  its next push.
+- Every push runs both workflows with the labels the pull request carries at that moment.
 
 ### Compiler architecture gate
 
@@ -596,9 +761,8 @@ The external smoke and soak suites use a fresh ordinary image built from that re
 resolves the image once and gives every scenario the same image identity; its `suite.json` and each
 run's manifest prove which image, fault action, accepted events and recovery outcome were observed.
 For pull-request CI, select both `chaos` and `chaos-soak` when qualifying the complete matrix; the
-labels run the suites against that pull request's own image. A nightly run of a different commit
-does not qualify the candidate. A recorded replay reproduces the external action plan, not the
-operating system's thread schedule.
+labels run the suites against that pull request's own image. A recorded replay reproduces the
+external action plan, not the operating system's thread schedule.
 
 Measure the ordinary, uninstrumented build on the same host and profile as its baseline:
 
@@ -752,8 +916,8 @@ just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest>
 The smoke suite runs a baseline, a leader crash with its restart and a partition with its recovery;
 the soak suite runs every delivered scenario with fixed and rotating mixed-instability seeds. CI
 runs the smoke suite against a pull request's own images only for a pull request labeled `chaos`,
-and the soak suite for one labeled `chaos-soak`. The nightly build of `main` runs the soak suite,
-and a manual run of the `Chaos` workflow takes a suite, an immutable image digest and its kind.
+and the soak suite for one labeled `chaos-soak`. A manual run of the `Chaos` workflow takes a
+suite, an immutable image digest and its kind.
 Label a pull request that changes the chaos runner, or the membership, failover, recovery or
 delivery behavior its scenarios verify, with `chaos`.
 

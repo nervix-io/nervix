@@ -139,8 +139,15 @@ impl TestParallelism {
     }
 }
 
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+/// The root of the workspace this crate was built in, which holds the fixtures, tools and scripts
+/// a test reads.
+pub fn workspace_root() -> PathBuf {
+    let crate_directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = crate_directory
+        .ancestors()
+        .nth(2)
+        .assured("this crate lies in `crates/` of the workspace");
+    root.to_path_buf()
 }
 
 pub const KAFKA_ADDR: &str = "kafka_addr";
@@ -186,7 +193,13 @@ pub const MOCK_HTTPS_ADDR: &str = "mock_https_addr";
 pub const MOCK_WS_ADDR: &str = "mock_ws_addr";
 pub const MOCK_WSS_ADDR: &str = "mock_wss_addr";
 pub const RUSTFS_ADDR: &str = "rustfs_addr";
+/// RustFS behind a TLS front that presents the dev CA's node certificate and requires a client
+/// certificate the same CA issued.
+pub const RUSTFS_TLS_ADDR: &str = "rustfs_tls_addr";
 pub const ICEBERG_REST_ADDR: &str = "iceberg_rest_addr";
+/// The Iceberg REST catalog behind the TLS front of [`RUSTFS_TLS_ADDR`], with the same server and
+/// client certificate rules.
+pub const ICEBERG_REST_TLS_ADDR: &str = "iceberg_rest_tls_addr";
 pub const GCS_ADDR: &str = "gcs_addr";
 pub const AZURITE_ADDR: &str = "azurite_addr";
 pub const QUICKWIT_ADDR: &str = "quickwit_addr";
@@ -1205,6 +1218,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         if !self.mark_starting("iceberg").await? {
             return Ok(());
         }
+        let tls = self.ensure_tls()?.clone();
         let network = self.network_name("iceberg-stack");
         let rustfs_name = self.container_name("rustfs");
         let rustfs = self
@@ -1269,14 +1283,63 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             })
             .await?;
         let iceberg_port = mapped_port(&iceberg, 8181, "Iceberg REST").await?;
+
+        // One front terminates TLS for the catalog and the object store. It presents the dev CA's
+        // node certificate and accepts only a client certificate that CA issued, so a commit that
+        // passes through it shows that each Iceberg client trusted the mounted CA and presented its
+        // mounted identity. The original Host header reaches RustFS unchanged because S3 signs it.
+        let tls_front_config = format!(
+            "server {{\n  listen 8443 ssl;\n  server_name localhost;\n  ssl_certificate \
+             /etc/nginx/certs/node.pem;\n  ssl_certificate_key /etc/nginx/certs/node-key.pem;\n  \
+             ssl_client_certificate /etc/nginx/certs/ca.pem;\n  ssl_verify_client on;\n  \
+             location / {{\n    proxy_pass http://{iceberg_name}:8181;\n    proxy_set_header Host \
+             $http_host;\n    proxy_set_header X-Forwarded-Proto https;\n  }}\n}}\nserver {{\n  \
+             listen 9443 ssl;\n  server_name localhost;\n  ssl_certificate \
+             /etc/nginx/certs/node.pem;\n  ssl_certificate_key /etc/nginx/certs/node-key.pem;\n  \
+             ssl_client_certificate /etc/nginx/certs/ca.pem;\n  ssl_verify_client on;\n  \
+             client_max_body_size 0;\n  location / {{\n    proxy_pass \
+             http://{rustfs_name}:9000;\n    proxy_http_version 1.1;\n    \
+             proxy_request_buffering off;\n    proxy_set_header Host $http_host;\n  }}\n}}\n"
+        );
+        let tls_front = self
+            .start_container("iceberg-tls", 8443.tcp(), "Iceberg TLS front", || {
+                GenericImage::new("nginx", "1.27-alpine")
+                    .with_exposed_port(8443.tcp())
+                    .with_exposed_port(9443.tcp())
+                    .with_wait_for(WaitFor::message_on_either_std("start worker processes"))
+                    .with_network(&network)
+                    .with_copy_to(
+                        "/etc/nginx/conf.d/default.conf",
+                        tls_front_config.clone().into_bytes(),
+                    )
+                    .with_copy_to("/etc/nginx/certs/ca.pem", tls.ca_pem.clone())
+                    .with_copy_to("/etc/nginx/certs/node.pem", tls.node_pem.clone())
+                    .with_copy_to(
+                        CopyTargetOptions::new("/etc/nginx/certs/node-key.pem").with_mode(0o600),
+                        tls.node_key_pem.clone(),
+                    )
+                    .with_startup_timeout(STARTUP_TIMEOUT)
+            })
+            .await?;
+        let iceberg_tls_port = mapped_port(&tls_front, 8443, "Iceberg REST TLS").await?;
+        let rustfs_tls_port = mapped_port(&tls_front, 9443, "RustFS TLS").await?;
         self.endpoints
             .insert(RUSTFS_ADDR, format!("http://127.0.0.1:{rustfs_port}"));
+        self.endpoints.insert(
+            RUSTFS_TLS_ADDR,
+            format!("https://127.0.0.1:{rustfs_tls_port}"),
+        );
         self.endpoints.insert(
             ICEBERG_REST_ADDR,
             format!("http://127.0.0.1:{iceberg_port}"),
         );
+        self.endpoints.insert(
+            ICEBERG_REST_TLS_ADDR,
+            format!("https://127.0.0.1:{iceberg_tls_port}"),
+        );
         self.containers.push(RunningContainer::Generic(rustfs));
         self.containers.push(RunningContainer::Generic(iceberg));
+        self.containers.push(RunningContainer::Generic(tls_front));
         Ok(())
     }
 
