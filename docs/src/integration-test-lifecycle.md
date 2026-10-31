@@ -966,6 +966,26 @@ failed on loaded runners, both before a backup's first cut arrived and before th
 backup that had started again arrived. The wait ends as soon as a cut arrives, and the bound
 neither measures nor shortens any hold or cut budget.
 
+A step waits up to 120 seconds, too, for a commit to reach the transaction commit pause a scenario
+armed on a node after its admission or after a statement. A commit reaches such a pause only after
+its admission and, for a later statement, the step's domain pause, drain, entity gates and
+publication, which a loaded runner delays. On three nodes the leader's raft lease lapses under that
+load: the leader refuses the step's publication, and the release of its pause, while it still
+leads, the COMMIT answers as a node that does not lead, its client sends it again under the same
+execution reference, and the next attempt adopts the step's pause and runs the step again. In the
+loaded CI run that first showed this, one commit step was applied three times within eleven and a
+half seconds and a ten-second bound expired before the commit reached its pause. Twenty-four
+concurrent copies of the three-node outline on four runtime workers reproduced it: four failed the
+ten-second bound, each commit needing three or four attempts and reaching its pause 10.0 to 12.3
+seconds after the step began. With the 120-second bound all 24 passed, the slowest commit needing
+seven attempts and 15.7 seconds from its first one to its pause. The wait watches
+the background COMMIT, so a COMMIT that ends before its pause fails the step at once with its own
+outcome, and the wait ends as soon as the pause is reached. Either failure releases the pause
+before the step fails, so a commit that reaches it later passes it instead of holding its node's
+shutdown until the drain deadline. `A backup waits for the domain lease of a commit whose first
+publication met a lapsed leader lease` forces that second attempt on one and three nodes, and its
+backup still waits for the domain lease the commit holds.
+
 The bounded native backup recovery outline instead expects the client's ten-second wait to end
 with typed uncertainty while the admitted backup continues. It uses both a two-second and a
 twelve-second first hold inside the unchanged thirty-second cut budget, on one and three nodes.
