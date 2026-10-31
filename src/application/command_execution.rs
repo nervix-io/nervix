@@ -14,9 +14,11 @@
     )
 )]
 
-use std::{collections::BTreeSet, convert::Infallible, time::Duration};
+// Cluster policy definitions have one vocabulary owner. These facades hold bootstrap inputs.
+use std::{collections::BTreeSet, time::Duration};
 
 use ahash::RandomState;
+use arch_into::ArchInto as _;
 use blake3::Hasher;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -30,11 +32,12 @@ use nervix_consensus::{
     ConsensusError, RecordedBackupArchive, RestoreExecution,
 };
 use nervix_models::{
-    Backup, BackupCapture, BackupResources, BackupScope, ClusterNodeIdentity, ClusterParameters,
+    Backup, BackupCapture, BackupResources, BackupScope, ClusterNodeIdentity,
     CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus, Restore,
-    RestoreArchive, Setting, SettingDefinition, Statement, Timestamp, TransactionPosition,
-    TransactionStatus, UserName,
+    RestoreArchive, Setting, Statement, Timestamp, TransactionPosition, TransactionStatus,
+    UserName,
 };
+pub use nervix_models::{CommandExecutionCapacity, CommandRetryValidity};
 use nervix_plexus::client_statement::ClientStatement;
 use nervix_primitives::{
     collections::DashMap,
@@ -72,49 +75,6 @@ impl From<&Backup> for BackupExecutionParameters {
     }
 }
 
-/// How long the cluster recognizes a command reference, so a client's retry of the same command
-/// finds its first outcome instead of running it again.
-pub struct CommandRetryValidity;
-
-impl SettingDefinition for CommandRetryValidity {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = Infallible;
-
-    const NAME: &'static str = "command-retry-validity";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> Duration {
-        Duration::from_secs(15 * 60)
-    }
-
-    fn validate(_: &Duration, _: &()) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
-}
-
-/// The most command executions the cluster retains outcomes for at once.
-pub struct CommandExecutionCapacity;
-
-impl SettingDefinition for CommandExecutionCapacity {
-    type Class = ClusterParameters;
-    type Value = usize;
-    type Context = ();
-    type Error = Infallible;
-
-    const NAME: &'static str = "command-execution-capacity";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> usize {
-        65_536
-    }
-
-    fn validate(_: &usize, _: &()) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
-}
-
 /// How the cluster admits persistent session commands and how long it retains their outcomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandExecutionPolicy {
@@ -127,16 +87,16 @@ impl CommandExecutionPolicy {
     pub fn resolve(
         retry_validity: Option<Duration>,
         capacity: Option<usize>,
-    ) -> Result<Self, Report<Infallible>> {
+    ) -> Result<Self, Report<nervix_models::ClusterParameterError>> {
         Ok(Self {
             retry_validity: Setting::resolve(retry_validity, &())?,
-            capacity: Setting::resolve(capacity, &())?,
+            capacity: Setting::resolve(capacity.map(|value| value.arch_into()), &())?,
         })
     }
 
     pub fn new(retry_validity: Duration, capacity: usize) -> Self {
         Self::resolve(Some(retry_validity), Some(capacity))
-            .assured("the command execution settings declare no validation")
+            .assured("the command execution settings have valid bounds")
     }
 
     pub fn retry_validity(self) -> Duration {
@@ -144,7 +104,8 @@ impl CommandExecutionPolicy {
     }
 
     pub fn capacity(self) -> usize {
-        *self.capacity.value()
+        usize::try_from(*self.capacity.value())
+            .assured("the validated count fits a supported native target")
     }
 
     pub(in crate::application) fn admission_at(
@@ -157,7 +118,7 @@ impl CommandExecutionPolicy {
 
 impl Default for CommandExecutionPolicy {
     fn default() -> Self {
-        Self::resolve(None, None).assured("the command execution defaults declare no validation")
+        Self::resolve(None, None).assured("the command execution defaults have valid bounds")
     }
 }
 
@@ -652,6 +613,13 @@ impl SessionServiceImpl {
             .await;
 
         let effect = match &request.body {
+            PersistentCommandRequestBody::Statement {
+                statement: Statement::AlterCluster(alter),
+                ..
+            } => CommandExecutionEffect::AlterCluster {
+                changes: alter.parameters.clone(),
+                applied: None,
+            },
             PersistentCommandRequestBody::Transaction(transaction) => {
                 CommandExecutionEffect::TransactionRequest(Box::new(transaction.clone()))
             }
@@ -738,10 +706,7 @@ impl SessionServiceImpl {
             ))),
         };
         let admitted_at = current_timestamp();
-        let policy = self
-            .inner
-            .command_execution_policy
-            .admission_at(admitted_at);
+        let policy = self.command_execution_policy().admission_at(admitted_at);
         let execution = CommandExecution::applying_at_position(
             reference.clone(),
             owner,
@@ -801,6 +766,14 @@ impl SessionServiceImpl {
             ));
         };
         match effect {
+            CommandExecutionEffect::AlterCluster { changes, applied } => {
+                Box::pin(self.alter_cluster_parameters(
+                    execution,
+                    &changes,
+                    applied.map(|record| *record),
+                ))
+                .await
+            }
             CommandExecutionEffect::CreateDomain {
                 if_not_exists,
                 existed_at_admission,

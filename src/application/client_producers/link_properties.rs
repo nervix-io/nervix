@@ -32,11 +32,11 @@ use nervix_client_wire::SessionLimits;
 use nervix_execution::Executor;
 use nervix_interconnect::{DuplexCodec, TransportError};
 use nervix_models::{
-    AckWindow, CLIENT_PRODUCER_SESSION_BYTES, ClientAttachmentId, ClientBatchDefect,
-    ClientEndpointContract, ClientOutcomeUncertainty, ClientProcessingFailure,
-    ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
-    ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy, ClientProducerRefusal,
-    ClientSubmissionOutcome, ClientSubmissionRefusal, ClusterNodeName, DomainName, IngestorName,
+    AckWindow, ClientAttachmentId, ClientBatchDefect, ClientEndpointContract,
+    ClientOutcomeUncertainty, ClientProcessingFailure, ClientProducerAdmission,
+    ClientProducerDescription, ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits,
+    ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
+    ClusterNodeName, DEFAULT_CLIENT_PRODUCER_SESSION_BYTES, DomainName, IngestorName,
     MAX_CLIENT_PRODUCER_BATCHES,
 };
 use strum::{EnumIter, IntoEnumIterator as _};
@@ -458,7 +458,7 @@ fn boundary_frames() -> Vec<LinkFrame> {
     let declared_most = ClientProducerLimits {
         batches: NonZeroU32::new(MAX_CLIENT_PRODUCER_BATCHES)
             .assured("a producer may hold a batch outstanding"),
-        bytes: NonZeroU64::new(CLIENT_PRODUCER_SESSION_BYTES)
+        bytes: NonZeroU64::new(DEFAULT_CLIENT_PRODUCER_SESSION_BYTES)
             .assured("a producer may hold bytes outstanding"),
     };
     let least = ClientProducerLimits {

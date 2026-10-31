@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use error_stack::Report;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use thiserror::Error;
 use url::{Position, Url};
 
@@ -33,7 +33,7 @@ pub enum HttpRequestFieldError {
     HeaderName,
     #[error("header value is invalid")]
     HeaderValue,
-    #[error("application headers exceed the 128-header or 32 KiB bound")]
+    #[error("application headers exceed the configured field-count or byte bound")]
     HeaderLimit,
 }
 
@@ -224,15 +224,51 @@ impl HttpHeaderValue {
     }
 }
 
+/// The class-typed header bounds captured for one request publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpHeaderLimits {
+    maximum_bytes: crate::Setting<crate::HttpHeaderBytes>,
+    maximum_fields: crate::Setting<crate::HttpHeaderFields>,
+}
+
+impl HttpHeaderLimits {
+    pub fn new(
+        maximum_bytes: crate::Setting<crate::HttpHeaderBytes>,
+        maximum_fields: crate::Setting<crate::HttpHeaderFields>,
+    ) -> Self {
+        Self {
+            maximum_bytes,
+            maximum_fields,
+        }
+    }
+}
+
+impl Default for HttpHeaderLimits {
+    fn default() -> Self {
+        Self::new(
+            crate::Setting::resolve(None, &()).assured("the default header byte bound is valid"),
+            crate::Setting::resolve(None, &()).assured("the default header count bound is valid"),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HttpApplicationHeaders {
+    limits: HttpHeaderLimits,
     values: BTreeMap<HttpHeaderName, HttpHeaderValue>,
 }
 
 impl HttpApplicationHeaders {
+    pub fn with_limits(limits: HttpHeaderLimits) -> Self {
+        Self {
+            limits,
+            values: BTreeMap::new(),
+        }
+    }
+
     /// Writes `value` under `name`, replacing the value an earlier write gave the same name. A
-    /// write that would take the headers past 128 names, or whose name and value together exceed
-    /// 32 KiB, is refused and changes nothing.
+    /// write that would take the headers past the configured field count, or whose name and value together exceed
+    /// the configured byte bound, is refused and changes nothing.
     pub fn insert(
         &mut self,
         name: HttpHeaderName,
@@ -243,20 +279,28 @@ impl HttpApplicationHeaders {
             .len()
             .checked_add(value.0.len())
             .ok_or_else(|| Report::new(HttpRequestFieldError::HeaderLimit))?;
-        if size > 32 * 1024 {
+        if u64::try_from(size).assured("header sizes fit the process address space")
+            > *self.limits.maximum_bytes.value()
+        {
             return Err(Report::new(HttpRequestFieldError::HeaderLimit));
         }
-        if !self.values.contains_key(&name) && self.values.len() >= 128 {
+        if !self.values.contains_key(&name)
+            && u64::try_from(self.values.len())
+                .assured("header counts fit the process address space")
+                >= *self.limits.maximum_fields.value()
+        {
             return Err(Report::new(HttpRequestFieldError::HeaderLimit));
         }
         self.values.insert(name, value);
         Ok(())
     }
 
-    /// Checks the 32 KiB bound on every retained name and value together, once every invocation
+    /// Checks the configured byte bound on every retained name and value together, once every invocation
     /// has replaced any earlier value written under the same name.
     pub fn validate_total(&self) -> Result<(), Report<HttpRequestFieldError>> {
-        if self.field_bytes() > 32 * 1024 {
+        if u64::try_from(self.field_bytes()).assured("header sizes fit the process address space")
+            > *self.limits.maximum_bytes.value()
+        {
             return Err(Report::new(HttpRequestFieldError::HeaderLimit));
         }
         Ok(())
@@ -264,17 +308,17 @@ impl HttpApplicationHeaders {
 
     /// The UTF-8 bytes of every retained name and value.
     pub fn field_bytes(&self) -> usize {
-        // `insert` admits at most 128 fields of at most 32 KiB each, so no sum below overflows.
+        // Retained strings together fit the process address space.
         let mut bytes = 0usize;
         for (name, value) in &self.values {
             let field = name
                 .0
                 .len()
                 .checked_add(value.0.len())
-                .assured("insert admits a field of at most 32 KiB");
+                .assured("the retained header strings fit the process address space");
             bytes = bytes
                 .checked_add(field)
-                .assured("insert admits at most 128 fields of at most 32 KiB each");
+                .assured("the retained header strings fit the process address space");
         }
         bytes
     }
@@ -307,7 +351,6 @@ fn http_token_byte(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
 
     use super::*;
 
@@ -517,6 +560,61 @@ mod tests {
         assert_eq!(
             sized.field_bytes(),
             "x-one".len() + "short".len() + "x-two".len() + 20 * 1024
+        );
+    }
+}
+
+#[cfg(test)]
+mod parameter_tests {
+    use super::*;
+    use crate::{ClusterParameterChange, ClusterParameterUpdates, ClusterParameterValues};
+
+    #[test]
+    fn a_request_captures_both_header_bounds_and_allows_replacing_a_name_at_capacity() {
+        let changes = ClusterParameterUpdates::try_from(vec![
+            ClusterParameterChange::HttpHeaderFields(2),
+            ClusterParameterChange::HttpHeaderBytes(64),
+        ])
+        .assured("the candidate assigns two different bounds");
+        let policy = ClusterParameterValues::default()
+            .changed(&changes)
+            .assured("the candidate has valid header bounds");
+        let mut headers = HttpApplicationHeaders::with_limits(policy.http_header_limits());
+        let name = |value| HttpHeaderName::parse(value).assured("the fixture has a valid name");
+        let value = || HttpHeaderValue::parse("v").assured("the fixture value has no whitespace");
+        headers
+            .insert(name("a"), value())
+            .assured("one header fits");
+        headers
+            .insert(name("b"), value())
+            .assured("two distinct headers fit");
+        assert!(headers.insert(name("c"), value()).is_err());
+        headers
+            .insert(name("A"), value())
+            .assured("case-folded replacement uses the same field");
+        assert_eq!(headers.iter().count(), 2);
+        let changes =
+            ClusterParameterUpdates::try_from(vec![ClusterParameterChange::HttpHeaderFields(3)])
+                .assured("the raised bound has one assignment");
+        let raised = policy
+            .changed(&changes)
+            .assured("three fields are representable");
+        let mut next = HttpApplicationHeaders::with_limits(raised.http_header_limits());
+        for field in ["a", "b", "c"] {
+            next.insert(name(field), value())
+                .assured("the next publication admits three fields");
+        }
+        assert!(headers.insert(name("c"), value()).is_err());
+        let changes =
+            ClusterParameterUpdates::try_from(vec![ClusterParameterChange::HttpHeaderBytes(1)])
+                .assured("the lower byte bound has one assignment");
+        let lowered = raised
+            .changed(&changes)
+            .assured("one byte is a valid bound");
+        assert!(
+            HttpApplicationHeaders::with_limits(lowered.http_header_limits())
+                .insert(name("a"), value())
+                .is_err()
         );
     }
 }

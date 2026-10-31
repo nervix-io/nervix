@@ -446,6 +446,7 @@ enum CommandPausePoint {
     Admission(ClusterNodeName),
     ClientInspectionAdmission(DomainName),
     RuntimeInstallation(ClusterNodeName),
+    InitialClusterParameters(ClusterNodeName),
     ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
     ApplicationRevisionResponse(ClusterNodeName),
@@ -1414,6 +1415,23 @@ impl FaultInjection {
         self.arm_command_pause(CommandPausePoint::Admission(node_id));
     }
 
+    /// Holds initial live-policy discovery after the public observation listeners start.
+    pub fn pause_initial_cluster_parameters_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::InitialClusterParameters(node_id));
+    }
+
+    pub async fn wait_for_initial_cluster_parameters_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::InitialClusterParameters(
+            node_id.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_initial_cluster_parameters_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::InitialClusterParameters(
+            node_id.clone(),
+        ));
+    }
     pub async fn wait_for_command_admission_pause(&self, node_id: &ClusterNodeName) {
         self.wait_for_command_pause(&CommandPausePoint::Admission(node_id.clone()))
             .await;
@@ -2282,6 +2300,14 @@ impl FaultInjection {
 
     pub(crate) async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::Admission(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_initial_cluster_parameters_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+    ) {
+        self.pause_command_if_armed(CommandPausePoint::InitialClusterParameters(node_id.clone()))
             .await;
     }
 

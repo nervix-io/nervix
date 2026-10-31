@@ -25,8 +25,8 @@ use ahash::HashMap;
 use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AckWindow, CLIENT_CONSUMER_NODE_BYTES, CLIENT_CONSUMER_SESSION_BYTES, DomainName, EmitterName,
-    ModelKind, RelayName, SchemaField, Timestamp,
+    AckWindow, CLIENT_CONSUMER_NODE_BYTES, DomainName, EmitterName, ModelKind, RelayName,
+    SchemaField, Timestamp,
 };
 use nervix_primitives::{
     sync::{
@@ -380,10 +380,7 @@ impl ClientEmitterEndpoint {
         if expected_fields != self.description.fields {
             return Err(ClientEmitterRefusal::SchemaMismatch);
         }
-        if max_batches == 0
-            || max_bytes.get() < self.description.maximum_payload_bytes
-            || max_bytes.get() > CLIENT_CONSUMER_SESSION_BYTES
-        {
+        if max_batches == 0 || max_bytes.get() < self.description.maximum_payload_bytes {
             return Err(ClientEmitterRefusal::InvalidWindow);
         }
         let (reply, result) = oneshot::channel();
@@ -481,6 +478,10 @@ impl Runtime {
         max_bytes: NonZeroU64,
         forwarded: bool,
     ) -> Result<(ClientEmitterDescription, ClientEmitterConsumer), ClientEmitterRefusal> {
+        if max_bytes.get() > self.cluster_parameters().client_consumer_session_bytes() {
+            return Err(ClientEmitterRefusal::InvalidWindow);
+        }
+
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
         let Some(endpoint) = self.inner.client_emitters.get(&key) else {
             return Err(ClientEmitterRefusal::Closed);

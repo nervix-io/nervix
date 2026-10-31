@@ -115,6 +115,7 @@ pub(in crate::application) struct PreflightOutcome {
     pub(in crate::application) memory: NodeMemory,
     /// The restore staging the node's state store may hold, resolved against the database volume.
     pub(in crate::application) restore_staging_max_bytes: ByteUnit,
+    pub(in crate::application) database_volume: ByteUnit,
 }
 
 /// What the preflight checks: the node's paths and settings.
@@ -165,22 +166,11 @@ impl Preflight<'_> {
             prepare_directory(&executor, StagingDirectory::Database, self.db_path).await?;
         let temporary =
             prepare_directory(&executor, StagingDirectory::Temporary, self.temp_dir).await?;
-        let resources = self.settings.resources.limits();
         let restore_staging_max_bytes = self
             .settings
             .runtime
             .restore_staging_quota(database.capacity);
-        let database_quotas = [
-            (RestoreStagingMaxBytes::NAME, restore_staging_max_bytes),
-            (
-                ResourceMaxArchiveBytes::NAME,
-                ByteUnit::Byte(resources.max_archive_bytes),
-            ),
-            (
-                ResourceMaxExtractedBytes::NAME,
-                ByteUnit::Byte(resources.max_extracted_bytes),
-            ),
-        ];
+        let database_quotas = [(RestoreStagingMaxBytes::NAME, restore_staging_max_bytes)];
         for (setting, quota) in database_quotas {
             if quota > database.capacity {
                 return Err(Report::new(PreflightError::QuotaExceedsVolume {
@@ -211,6 +201,7 @@ impl Preflight<'_> {
             dns,
             memory,
             restore_staging_max_bytes,
+            database_volume: database.capacity,
         })
     }
 }
@@ -278,3 +269,33 @@ fn prepare_directory_now(
 #[cfg(test)]
 #[path = "preflight_tests.rs"]
 mod tests;
+
+/// Validate resource promises only after choosing the actual bootstrap or live committed policy.
+/// Local defaults on a returning node are never a substitute for that policy.
+pub(in crate::application) fn validate_resource_volume(
+    parameters: &nervix_models::ClusterParameterValues,
+    capacity: ByteUnit,
+    path: &Path,
+) -> Result<(), Report<PreflightError>> {
+    for (setting, quota) in [
+        (
+            ResourceMaxArchiveBytes::NAME,
+            ByteUnit::Byte(parameters.resource_max_archive_bytes()),
+        ),
+        (
+            ResourceMaxExtractedBytes::NAME,
+            ByteUnit::Byte(parameters.resource_max_extracted_bytes()),
+        ),
+    ] {
+        if quota > capacity {
+            return Err(Report::new(PreflightError::QuotaExceedsVolume {
+                setting,
+                quota,
+                capacity,
+                directory: StagingDirectory::Database,
+                path: path.to_path_buf(),
+            }));
+        }
+    }
+    Ok(())
+}

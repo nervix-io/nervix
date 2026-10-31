@@ -66,6 +66,10 @@ the downloaded artifact:
 | `coverage-typed-ratchet-python` | Architecture source/compiler rule runners and their qualification |
 | `coverage-primitive-boundary` | Primitive provenance and thread-owner validation |
 
+The collector's real toolchain fixtures and Deloxide's real process supervision tests run in
+separate Python interpreters, so each supervisor retains ownership of its own children.
+`coverage-model-runner` appends both executions into one branch coverage file before exporting it.
+
 Only reports the artifact actually exports are inputs; running a focused coverage recipe does not
 register it in CI by itself. Focused Backup, Visual Create, client and runtime recipes export local
 ordinary reports for `coverage-patch`, using the same normalization as the workspace merge.

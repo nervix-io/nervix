@@ -33,74 +33,67 @@ pub struct TransactionArgs {
     #[arg(
         long = TransactionIdleTimeout::NAME,
         env = "NERVIX_TRANSACTION_IDLE_TIMEOUT",
-        default_value_t = HumanDuration(TransactionIdleTimeout::default_value(&())),
-        help = "How long an open transaction may wait for its next statement before the cluster \
-                abandons it"
+        help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::TransactionIdleTimeout, "How long an open transaction may wait for its next statement before the cluster \
+                abandons it")
     )]
-    pub transaction_idle_timeout: HumanDuration,
+    pub transaction_idle_timeout: Option<HumanDuration>,
     #[arg(
         long = TransactionTombstoneRetention::NAME,
         env = "NERVIX_TRANSACTION_TOMBSTONE_RETENTION",
-        default_value_t = HumanDuration(TransactionTombstoneRetention::default_value(&())),
-        help = "How long the cluster remembers how a finished transaction ended"
+        help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::TransactionTombstoneRetention, "How long the cluster remembers how a finished transaction ended")
     )]
-    pub transaction_tombstone_retention: HumanDuration,
+    pub transaction_tombstone_retention: Option<HumanDuration>,
     #[arg(
         long = CommandRetryValidity::NAME,
         env = "NERVIX_COMMAND_RETRY_VALIDITY",
-        default_value_t = HumanDuration(CommandRetryValidity::default_value(&())),
-        help = "How long the cluster recognizes a command reference, so a retried command finds \
-                its first outcome"
+        help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::CommandRetryValidity, "How long the cluster recognizes a command reference, so a retried command finds \
+                its first outcome")
     )]
-    pub command_retry_validity: HumanDuration,
+    pub command_retry_validity: Option<HumanDuration>,
     #[arg(
         long = CommandExecutionCapacity::NAME,
         env = "NERVIX_COMMAND_EXECUTION_CAPACITY",
-        default_value_t = CommandExecutionCapacity::default_value(&()),
-        help = "The most command executions the cluster retains outcomes for at once"
+        help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::CommandExecutionCapacity, "The most command executions the cluster retains outcomes for at once")
     )]
-    pub command_execution_capacity: usize,
+    pub command_execution_capacity: Option<usize>,
     #[arg(
         long = TransactionMaxStatements::NAME,
         env = "NERVIX_TRANSACTION_MAX_STATEMENTS",
-        default_value_t = TransactionMaxStatements::default_value(&()),
-        help = "The most statements one transaction may queue"
+        help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::TransactionMaxStatements, "The most statements one transaction may queue")
     )]
-    pub transaction_max_statements: usize,
+    pub transaction_max_statements: Option<usize>,
     #[arg(
         long = TransactionMaxSourceBytes::NAME,
         env = "NERVIX_TRANSACTION_MAX_SOURCE_BYTES",
-        default_value_t = TransactionMaxSourceBytes::default_value(&()),
-        help = "The most statement source bytes one transaction may queue"
+        help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::TransactionMaxSourceBytes, "The most statement source bytes one transaction may queue")
     )]
-    pub transaction_max_source_bytes: u64,
+    pub transaction_max_source_bytes: Option<u64>,
     #[arg(
         long = TransactionMaxOpen::NAME,
         env = "NERVIX_TRANSACTION_MAX_OPEN",
-        default_value_t = TransactionMaxOpen::default_value(&()),
-        help = "The most transactions the cluster keeps open at once"
+        help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::TransactionMaxOpen, "The most transactions the cluster keeps open at once")
     )]
-    pub transaction_max_open: usize,
+    pub transaction_max_open: Option<usize>,
 }
 
 impl TransactionArgs {
     pub(super) fn limits(&self) -> TransactionLimits {
         TransactionLimits::resolve(TransactionBounds {
-            idle_timeout: Some(self.transaction_idle_timeout.0),
-            tombstone_retention: Some(self.transaction_tombstone_retention.0),
-            max_statements: Some(self.transaction_max_statements),
-            max_source_bytes: Some(self.transaction_max_source_bytes),
-            max_open: Some(self.transaction_max_open),
+            idle_timeout: self.transaction_idle_timeout.map(|value| value.0),
+            tombstone_retention: self.transaction_tombstone_retention.map(|value| value.0),
+            max_statements: self.transaction_max_statements,
+            max_source_bytes: self.transaction_max_source_bytes,
+            max_open: self.transaction_max_open,
         })
-        .assured("the transaction limits declare no validation")
+        .assured("the transaction limits have valid bounds")
     }
 
     pub(super) fn commands(&self) -> CommandExecutionPolicy {
         CommandExecutionPolicy::resolve(
-            Some(self.command_retry_validity.0),
-            Some(self.command_execution_capacity),
+            self.command_retry_validity.map(|value| value.0),
+            self.command_execution_capacity,
         )
-        .assured("the command execution settings declare no validation")
+        .assured("the command execution settings have valid bounds")
     }
 
     pub(super) fn from_settings(
@@ -108,35 +101,35 @@ impl TransactionArgs {
         commands: &CommandExecutionPolicy,
     ) -> Self {
         Self {
-            transaction_idle_timeout: HumanDuration(limits.idle_timeout()),
-            transaction_tombstone_retention: HumanDuration(limits.tombstone_retention()),
-            command_retry_validity: HumanDuration(commands.retry_validity()),
-            command_execution_capacity: commands.capacity(),
-            transaction_max_statements: limits.max_statements(),
-            transaction_max_source_bytes: limits.max_source_bytes(),
-            transaction_max_open: limits.max_open(),
+            transaction_idle_timeout: Some(HumanDuration(limits.idle_timeout())),
+            transaction_tombstone_retention: Some(HumanDuration(limits.tombstone_retention())),
+            command_retry_validity: Some(HumanDuration(commands.retry_validity())),
+            command_execution_capacity: Some(commands.capacity()),
+            transaction_max_statements: Some(limits.max_statements()),
+            transaction_max_source_bytes: Some(limits.max_source_bytes()),
+            transaction_max_open: Some(limits.max_open()),
         }
     }
 
     pub(super) fn render(&self, command_line: &mut CommandLine) {
-        command_line.option(TransactionIdleTimeout::NAME, self.transaction_idle_timeout);
-        command_line.option(
+        command_line.optional(TransactionIdleTimeout::NAME, self.transaction_idle_timeout);
+        command_line.optional(
             TransactionTombstoneRetention::NAME,
             self.transaction_tombstone_retention,
         );
-        command_line.option(CommandRetryValidity::NAME, self.command_retry_validity);
-        command_line.option(
+        command_line.optional(CommandRetryValidity::NAME, self.command_retry_validity);
+        command_line.optional(
             CommandExecutionCapacity::NAME,
             self.command_execution_capacity,
         );
-        command_line.option(
+        command_line.optional(
             TransactionMaxStatements::NAME,
             self.transaction_max_statements,
         );
-        command_line.option(
+        command_line.optional(
             TransactionMaxSourceBytes::NAME,
             self.transaction_max_source_bytes,
         );
-        command_line.option(TransactionMaxOpen::NAME, self.transaction_max_open);
+        command_line.optional(TransactionMaxOpen::NAME, self.transaction_max_open);
     }
 }

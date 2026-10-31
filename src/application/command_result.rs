@@ -49,8 +49,8 @@ pub(in crate::application) enum CommandDisposition {
     TransactionDetached { transaction_id: String },
     /// Another session attached the transaction this session was bound to.
     TransactionTakenOver { transaction_id: String },
-    /// The command was durably admitted, and its outcome is not known yet. A retry with the same
-    /// execution reference recovers it.
+    /// The command may have been durably admitted, and its authoritative outcome is not known
+    /// yet. A retry with the same execution reference recovers it.
     OutcomeUnknown(OutcomeUnknownCause),
     /// The execution reference already identifies a different command.
     ExecutionReferenceConflict(CommandExecutionRequestConflict),
@@ -65,7 +65,7 @@ pub(in crate::application) enum CommandDisposition {
     },
 }
 
-/// Why an admitted command's outcome is not known yet.
+/// Why a command's authoritative outcome is not known yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::application) enum OutcomeUnknownCause {
     /// After the command was durably admitted, or while its admission was being decided,
@@ -73,7 +73,8 @@ pub(in crate::application) enum OutcomeUnknownCause {
     LeadershipLost,
     /// The command is durably admitted and still applying.
     StillApplying,
-    /// The command finished, but its outcome is not yet authoritative on every live node.
+    /// The node cannot establish an authoritative outcome yet, during initialization or while
+    /// waiting for a finished command's publication on every live node.
     NotYetAuthoritative,
 }
 

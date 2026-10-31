@@ -79,7 +79,7 @@ Feature: Positive count settings
         'addr' = 'postgresql://nervix:nervix@127.0.0.1:5432/nervix?sslmode=disable'
       };
       """
-    And these Plexus commands fail with "BATCH MAX MESSAGES must be between 1 and 65536, found 0"
+    And these Plexus commands fail with "BATCH MAX MESSAGES must be between 1 and 4294967295, found 0"
       """
       CREATE POSTGRES TABLE EMITTER postgres_out FROM notifications
         TO postgres_main TABLE 'notifications'

@@ -45,11 +45,12 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::{
     AdmissionVerdict, AdmissionVerdicts, ClusterNodeIdentity, ClusterNodeIncarnation,
-    ClusterNodeName, ClusterSchedule, CoordinationIdentity, DomainClockAuthority, DomainClockState,
-    DomainName, DomainSchedule, DomainStartPoint, DomainState, DomainStatus, NodeEndpoint,
-    NodePrerequisites, NodeServiceUrl, PrerequisiteMismatch, ResourceId, ResourceName,
-    ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion, ResourceVersionStatus,
-    Statement, TransactionImpactReport, UserName,
+    ClusterNodeName, ClusterParameterRecord, ClusterParameterValues, ClusterSchedule,
+    CoordinationIdentity, DomainClockAuthority, DomainClockState, DomainName, DomainSchedule,
+    DomainStartPoint, DomainState, DomainStatus, NodeEndpoint, NodePrerequisites, NodeServiceUrl,
+    PrerequisiteMismatch, ResourceId, ResourceName, ResourceNodeStatus, ResourceUpload,
+    ResourceUploadKey, ResourceVersion, ResourceVersionStatus, Statement, TransactionImpactReport,
+    UserName,
 };
 use nervix_primitives::{
     sync::{
@@ -95,7 +96,9 @@ use tracing::{debug, error, info, warn};
 
 #[cfg(test)]
 mod archive_count_tests;
+mod cluster_parameters;
 mod command_execution;
+pub use cluster_parameters::ClusterParameterPlanningInputs;
 mod connectivity_fault;
 mod domain_mutation;
 mod durable_batch;
@@ -308,6 +311,7 @@ impl ScheduleTopologyInputs {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct DomainPlanningInputs {
+    parameters: Option<ClusterParameterRecord>,
     domain: DomainName,
     state: Option<Box<DomainState>>,
     resources: DomainResourcePlanningInputs,
@@ -316,6 +320,9 @@ pub struct DomainPlanningInputs {
 }
 
 impl DomainPlanningInputs {
+    pub fn parameters(&self) -> Option<&ClusterParameterRecord> {
+        self.parameters.as_ref()
+    }
     pub fn domain(&self) -> &DomainName {
         &self.domain
     }
@@ -382,6 +389,13 @@ pub struct TransactionControlSnapshot {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum ConsensusCommand {
+    SeedClusterParameters {
+        values: ClusterParameterValues,
+    },
+    AlterClusterParameters {
+        reference: nervix_models::CommandExecutionReference,
+        inputs: Box<ClusterParameterPlanningInputs>,
+    },
     AdmitCommandExecution {
         execution: Box<CommandExecution>,
         mutation_domains: BTreeSet<DomainName>,
@@ -609,6 +623,16 @@ pub enum ConsensusResponse {
     Error,
 )]
 pub enum ConsensusConflict {
+    #[error("cluster parameters or models changed while planning ALTER CLUSTER SET")]
+    ClusterParameterInputsChanged,
+    #[error("cluster parameters have not been seeded")]
+    ClusterParametersUnseeded,
+    #[error("the admitted ALTER CLUSTER SET execution is unavailable")]
+    ClusterParameterExecutionMissing,
+    #[error("{issue}")]
+    InvalidClusterParameter {
+        issue: nervix_models::ClusterParameterError,
+    },
     #[error("{0}")]
     Reason(String),
     #[error("command execution reference '{reference}' has expired")]
@@ -659,6 +683,10 @@ pub struct AppliedLogPosition {
 impl std::fmt::Display for ConsensusCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::SeedClusterParameters { .. } => f.write_str("seed-cluster-parameters"),
+            Self::AlterClusterParameters { reference, .. } => {
+                write!(f, "alter-cluster-parameters:{reference}")
+            }
             Self::AdmitCommandExecution { execution, .. } => {
                 write!(f, "admit-command-execution:{}", execution.reference)
             }
@@ -894,6 +922,7 @@ pub struct ConsensusSettings {
 /// whose interconnect endpoint is still unavailable is never a membership admission candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GossipNode {
+    pub parameters: Option<nervix_models::ClusterParameterPublication>,
     pub node_id: ClusterNodeName,
     pub incarnation: ClusterNodeIncarnation,
     pub terminating: bool,
@@ -1011,6 +1040,7 @@ pub struct RaftLogRetention {
 
 #[derive(Debug, Clone)]
 pub struct ConsensusRuntimeState {
+    pub parameters: Option<ClusterParameterRecord>,
     pub revision: u64,
     pub schedule: ClusterSchedule,
     pub domains: BTreeMap<DomainName, DomainState>,
@@ -1370,6 +1400,7 @@ impl ReportedAdmissionRefusals {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct StateMachineData {
+    parameters: Option<ClusterParameterRecord>,
     last_applied_log_id: Option<LogIdOf>,
     // Independently retained revisions share unchanged membership.
     last_membership: Arc<StoredMembershipOf>,
@@ -1431,6 +1462,7 @@ impl StateMachineData {
 
     fn domain_planning_inputs(&self, domain: &DomainName) -> DomainPlanningInputs {
         DomainPlanningInputs {
+            parameters: self.parameters,
             domain: domain.clone(),
             state: self.domains.get(domain).cloned().map(Box::new),
             resources: self.domain_resource_planning_inputs(domain),
@@ -2963,6 +2995,7 @@ impl Observer {
     pub async fn current_runtime_state(&self) -> ConsensusRuntimeState {
         let state = self.inner.store.inner.state();
         ConsensusRuntimeState {
+            parameters: state.parameters,
             revision: state.runtime_revision,
             schedule: (&state.schedule).into(),
             domains: (&state.domains).into(),
@@ -3484,6 +3517,7 @@ impl Proposer {
         let topology = state.schedule_topology_inputs();
         Ok(AutomaticScheduleInput {
             runtime_state: ConsensusRuntimeState {
+                parameters: state.parameters,
                 revision: state.runtime_revision,
                 schedule: (&state.schedule).into(),
                 domains,
@@ -5308,6 +5342,12 @@ fn apply_consensus_command_at(
 ) -> AppliedConsensusCommand {
     let mut changes = StateMachineChanges::default();
     match command {
+        ConsensusCommand::SeedClusterParameters { values } => {
+            return cluster_parameters::seed(state, *values);
+        }
+        ConsensusCommand::AlterClusterParameters { reference, inputs } => {
+            return cluster_parameters::apply(state, reference, inputs);
+        }
         ConsensusCommand::AdmitCommandExecution {
             execution,
             mutation_domains,
@@ -7286,6 +7326,7 @@ mod tests {
     /// every test node shares.
     fn undiscovered_node(name: &str, incarnation: u64) -> GossipNode {
         GossipNode {
+            parameters: None,
             node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
             incarnation: ClusterNodeIncarnation::new(incarnation),
             terminating: false,

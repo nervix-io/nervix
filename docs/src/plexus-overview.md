@@ -27,6 +27,12 @@ The current top-level surface includes:
 - session subscription statements
 - explicit transaction controls: `BEGIN`, `COMMIT`, and `REVERT`
 - describe and show commands
+- cluster administration with `ALTER CLUSTER SET`
+
+`ALTER CLUSTER SET` changes one or more committed cluster parameters atomically, without a node
+restart. It runs outside domain transactions and needs no selected domain. See
+[Node Settings](node-settings.md#committed-parameter-changes) for the parameter names, value types,
+transition checks and bootstrap seed rules.
 
 Core create statements:
 

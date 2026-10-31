@@ -222,6 +222,23 @@ impl fmt::Display for OtelMappingIssue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RegistryError {
+    #[error("{parameter} limit {maximum} is below {actual} required by resource {resource:?}")]
+    ResourceParameterLimit {
+        resource: nervix_models::ResourceId,
+        parameter: nervix_models::ClusterParameterKey,
+        actual: u64,
+        maximum: u64,
+    },
+    #[error(
+        "{parameter} limit {maximum} is below {actual} required by {node:?} in domain '{domain}'"
+    )]
+    ClusterParameterLimit {
+        domain: DomainName,
+        node: nervix_models::NodeRef,
+        parameter: nervix_models::ClusterParameterKey,
+        actual: u64,
+        maximum: u64,
+    },
     #[error("client '{client}' configuration is invalid in domain '{domain}'")]
     ClientConfig {
         domain: DomainName,

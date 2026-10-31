@@ -33,7 +33,11 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{IngestMessageHeaders, RetainedIngestHeaders};
 use nervix_connector_websockets::{SignalingDataEmitter, WebsocketSignalingSession};
 use nervix_models::EndpointType;
-use nervix_primitives::{net::TcpListener, sync::CancellationToken, task::JoinSet};
+use nervix_primitives::{
+    net::TcpListener,
+    sync::{Arc, CancellationToken},
+    task::JoinSet,
+};
 use nervix_recovery::NoReceiver;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
@@ -46,7 +50,10 @@ use tokio_tungstenite::{
 };
 use tracing::warn;
 
-use super::{AppError, service_tasks::ServiceTasks, tls::HttpsListenerCertificates};
+use super::{
+    AppError, node_initialization::NodeInitialization, service_tasks::ServiceTasks,
+    tls::HttpsListenerCertificates,
+};
 use crate::runtime::{
     EndpointDispatchOutcome, EndpointRequestOutcome, EndpointResolution, ResolvedEndpointRoute,
     Runtime,
@@ -229,13 +236,23 @@ impl IngestMessageHeaders for HyperRequestHeaders<'_> {
 
 async fn handle_http_request(
     runtime: Runtime,
+    initialization: Arc<NodeInitialization>,
+    request_tasks: ServiceTasks,
+    shutdown: CancellationToken,
+    request: HyperRequest<HyperIncoming>,
+) -> Result<HyperResponse<EndpointResponseBody>, Infallible> {
+    if shutdown.is_cancelled() || !initialization.is_ready() {
+        return Ok(endpoint_rejection_response(None).map(Either::Left));
+    }
+    dispatch_http_request(runtime, request_tasks, shutdown, request).await
+}
+
+async fn dispatch_http_request(
+    runtime: Runtime,
     request_tasks: ServiceTasks,
     shutdown: CancellationToken,
     mut request: HyperRequest<HyperIncoming>,
 ) -> Result<HyperResponse<EndpointResponseBody>, Infallible> {
-    if shutdown.is_cancelled() {
-        return Ok(endpoint_rejection_response(None).map(Either::Left));
-    }
     let mut host = String::new();
     if let Some(value) = request.headers().get(HOST)
         && let Ok(value) = value.to_str()
@@ -413,6 +430,7 @@ async fn handle_http_request(
 async fn serve_endpoint_connection<S>(
     stream: S,
     runtime: Runtime,
+    initialization: Arc<NodeInitialization>,
     request_tasks: ServiceTasks,
     shutdown: CancellationToken,
 ) -> Result<(), hyper::Error>
@@ -426,6 +444,7 @@ where
             service_fn(move |request| {
                 handle_http_request(
                     runtime.clone(),
+                    initialization.clone(),
                     request_tasks.clone(),
                     request_shutdown.clone(),
                     request,
@@ -445,6 +464,7 @@ where
 
 pub(in crate::application) async fn serve_http(
     runtime: Runtime,
+    initialization: Arc<NodeInitialization>,
     request_tasks: ServiceTasks,
     listener: TcpListener,
     shutdown: CancellationToken,
@@ -465,11 +485,18 @@ pub(in crate::application) async fn serve_http(
             .set_nodelay(true)
             .change_context(AppError::ServeHttp)?;
         let runtime = runtime.clone();
+        let initialization = initialization.clone();
         let request_tasks = request_tasks.clone();
         let request_shutdown = shutdown.clone();
         connection_tasks.spawn(async move {
-            if let Err(error) =
-                serve_endpoint_connection(stream, runtime, request_tasks, request_shutdown).await
+            if let Err(error) = serve_endpoint_connection(
+                stream,
+                runtime,
+                initialization,
+                request_tasks,
+                request_shutdown,
+            )
+            .await
             {
                 warn!(error = %error, "http connection failed");
             }
@@ -481,6 +508,7 @@ pub(in crate::application) async fn serve_http(
 
 pub(in crate::application) async fn serve_https(
     runtime: Runtime,
+    initialization: Arc<NodeInitialization>,
     request_tasks: ServiceTasks,
     certificates: HttpsListenerCertificates,
     listener: TcpListener,
@@ -502,6 +530,7 @@ pub(in crate::application) async fn serve_https(
             .set_nodelay(true)
             .change_context(AppError::ServeHttps)?;
         let runtime = runtime.clone();
+        let initialization = initialization.clone();
         let request_tasks = request_tasks.clone();
         let request_shutdown = shutdown.clone();
         let certificates = certificates.clone();
@@ -520,6 +549,7 @@ pub(in crate::application) async fn serve_https(
                     if let Err(error) = serve_endpoint_connection(
                         tls_stream,
                         runtime,
+                        initialization,
                         request_tasks,
                         request_shutdown,
                     )

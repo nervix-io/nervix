@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** The mutation batch, the statement dispatch behind it, and the command results a
 //!   session reads back.
-//! - **Depends on.** The registry to plan and validate, consensus to replicate, and the runtime to
+//! - **Depends on.** Pure statement routing, the registry to validate, consensus to replicate, and the runtime to
 //!   reconcile what a committed model changes.
 //! - **Must not know.** How a listener delivered the statement.
 
@@ -2434,7 +2434,17 @@ impl SessionServiceImpl {
                 self.show_emitters(domain).await
             }
             Statement::ShowClusterStatus(_) => {
-                command_ok(render_cluster_status(&self.inner.cluster, &self.inner.consensus).await)
+                let status =
+                    render_cluster_status(&self.inner.cluster, &self.inner.consensus).await;
+                let initialization = if self.inner.initialization.is_ready() {
+                    "ready"
+                } else {
+                    "initializing"
+                };
+                command_ok(format!("{status}\nnode.initialization={initialization}"))
+            }
+            Statement::AlterCluster(_) => {
+                command_error("ALTER CLUSTER SET requires durable command admission".to_string())
             }
             Statement::DescribeCluster(_) => {
                 command_ok(describe_cluster(&self.inner.cluster, &self.inner.consensus).await)

@@ -1651,11 +1651,7 @@ fn rejects_batch_limits_outside_their_range() {
     for (clause, diagnostic) in [
         (
             "BATCH MAX MESSAGES 0 MAX SIZE 1MiB",
-            "BATCH MAX MESSAGES must be between 1 and 65536, found 0",
-        ),
-        (
-            "BATCH MAX MESSAGES 65537 MAX SIZE 1MiB",
-            "BATCH MAX MESSAGES must be between 1 and 65536, found 65537",
+            "BATCH MAX MESSAGES must be between 1 and 4294967295, found 0",
         ),
         (
             "BATCH MAX MESSAGES 10 MAX SIZE 0B",

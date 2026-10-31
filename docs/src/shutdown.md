@@ -1209,7 +1209,9 @@ stores as the previous run left them: the preflight creates a directory only whe
 removes the probe file it writes. A returning node that starts with peers to reach is then held to
 the cluster's prerequisites as it rejoins. When a connection it dials is refused before any has
 completed, or the clock of a peer it completed a handshake with is beyond its tolerance, it stops
-through the ordinary phases and exits with status `1`, while the incumbents keep running.
+and exits with status `1`, while the incumbents keep running. A refusal during live-policy
+discovery ends that wait at the stop request and cleans up the started subsystems before returning
+the typed join error. After startup, the ordinary shutdown phases handle the refusal.
 
 ### Whole-Cluster Restart Keeps Ownership
 
@@ -1489,3 +1491,15 @@ released claim becomes available again. Task teardown removes its confirmation/s
 and pooled emitter teardown removes its wait registration; cancellation clears a pending borrow's
 wait through its guard. Handoff watches register before reading their retained entity publication,
 and release publishes thaw before waking them.
+
+## Live Domain Policy
+
+Domain-drain and entity-gate deadlines come from the installed committed parameter record. Each
+operation captures its deadline when it begins. Node drain and shutdown deadlines remain local
+capabilities. Startup installs a live construction policy and admits the matching consensus
+revision before activating graph tasks; it does not replay an unplaced local graph first.
+
+Live-policy discovery runs after public observation starts and is cancelled by the first stop
+request. A node stopped before quorum-confirmed runtime admission has no admitted graph to
+drain; it still closes listeners, joins its supervised tasks and closes storage through the normal
+shutdown owner. A join refusal retains its typed cause through that cleanup.

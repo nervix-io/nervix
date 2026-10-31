@@ -791,7 +791,7 @@ session, is served only by the leader.
 A batch is one canonical Arrow IPC stream: the schema message, exactly one record batch, and the
 end-of-stream marker. It is uncompressed and has no dictionary or extension encodings, and its
 Arrow schema is exactly the input schema in Nervix's Arrow representation of each type, with no
-field metadata. A batch carries at most 65,536 rows and at most the bytes one submission may carry,
+field metadata. A batch carries at most the rows in its producer grant (65,536 by default) and at most the bytes one submission may carry,
 which is the smaller of the producer's granted bytes and what one session frame holds. The node
 that executes the ingestor validates the whole batch, its structure, bounds, and every column,
 before any row is admitted; a batch that fails is refused whole and has no effect on the graph.
@@ -839,10 +839,10 @@ may ask for, the session or node has no room left, or the session holds a transa
 | Limit | Value |
 | --- | --- |
 | Producers per session | 32 |
-| Outstanding bytes per session | 32 MiB |
+| Outstanding bytes per session | Committed producer cap, 32 MiB by default |
 | Outstanding bytes per node, including batches retained for forwarded producers | 128 MiB |
 | Batches one producer may ask to have outstanding | 1,024 |
-| Rows per batch | 65,536 |
+| Rows per batch | Grant's committed client-row cap, 65,536 by default |
 
 A batch holds its share of the credit from the moment it is sent until its outcome is observed. A
 batch sent beyond the credit is refused as `credit exceeded` without reaching the graph, and the

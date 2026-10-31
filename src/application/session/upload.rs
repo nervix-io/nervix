@@ -122,6 +122,13 @@ impl SessionServiceImpl {
             upload_identity: upload_identity.clone(),
         };
 
+        if let Err(error) = self.available_cluster_parameters() {
+            return Ok(identity.failed(
+                UploadFailure::InstallationFailed,
+                format!("{error:#}"),
+                None,
+            ));
+        }
         let leader = self.inner.consensus.current_leader().await;
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             let redirect = self.redirect_to_leader(leader.into()).await;

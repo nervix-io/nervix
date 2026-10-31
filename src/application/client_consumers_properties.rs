@@ -31,8 +31,8 @@ use nervix_arbitrary::{Arbitrary, Domain, fields_of_every_type};
 use nervix_execution::Executor;
 use nervix_interconnect::{DuplexCodec, TransportError};
 use nervix_models::{
-    AckWindow, CLIENT_CONSUMER_SESSION_BYTES, ClientConsumerLimits, ClusterNodeName, DomainName,
-    EmitterName, MAX_CLIENT_CONSUMER_BATCHES, RelayName, Timestamp,
+    AckWindow, ClientConsumerLimits, ClusterNodeName, DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
+    DomainName, EmitterName, MAX_CLIENT_CONSUMER_BATCHES, RelayName, Timestamp,
 };
 use strum::{EnumIter, IntoEnumIterator as _};
 
@@ -375,7 +375,7 @@ fn boundary_frames() -> Vec<ConsumerFrame> {
     let declared_most = ClientConsumerLimits {
         batches: NonZeroU32::new(MAX_CLIENT_CONSUMER_BATCHES)
             .assured("a consumer may hold a batch outstanding"),
-        bytes: NonZeroU64::new(CLIENT_CONSUMER_SESSION_BYTES)
+        bytes: NonZeroU64::new(DEFAULT_CLIENT_CONSUMER_SESSION_BYTES)
             .assured("a consumer may hold bytes outstanding"),
     };
     let least = ClientConsumerLimits {

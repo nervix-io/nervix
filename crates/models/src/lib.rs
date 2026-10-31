@@ -28,6 +28,7 @@ mod canonical;
 mod client_consumer;
 mod client_producer;
 mod cluster_node;
+mod cluster_parameters;
 mod command;
 mod completion;
 mod connector;
@@ -79,18 +80,19 @@ pub use canonical::{
     ingest_quiesce_to_plexus, ingestor_input_body_to_plexus, string_literal,
 };
 pub use client_consumer::{
-    CLIENT_CONSUMER_NODE_BYTES, CLIENT_CONSUMER_SESSION_BYTES, ClientConsumerLimits,
+    CLIENT_CONSUMER_NODE_BYTES, ClientConsumerLimits, DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
     MAX_CLIENT_CONSUMER_BATCHES, MAX_CLIENT_CONSUMERS_PER_SESSION,
 };
 pub use client_producer::{
-    CLIENT_PRODUCER_NODE_BYTES, CLIENT_PRODUCER_SESSION_BYTES, ClientAttachmentId,
-    ClientBatchDefect, ClientEndpointContract, ClientOutcomeUncertainty, ClientProcessingFailure,
-    ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
-    ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy, ClientProducerRefusal,
-    ClientSubmissionOutcome, ClientSubmissionRefusal, MAX_CLIENT_BATCH_ROWS,
-    MAX_CLIENT_PRODUCER_BATCHES, MAX_CLIENT_PRODUCERS_PER_SESSION,
+    CLIENT_PRODUCER_NODE_BYTES, ClientAttachmentId, ClientBatchDefect, ClientEndpointContract,
+    ClientOutcomeUncertainty, ClientProcessingFailure, ClientProducerAdmission,
+    ClientProducerDescription, ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits,
+    ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
+    DEFAULT_CLIENT_BATCH_ROWS, DEFAULT_CLIENT_PRODUCER_SESSION_BYTES, MAX_CLIENT_PRODUCER_BATCHES,
+    MAX_CLIENT_PRODUCERS_PER_SESSION,
 };
 pub use cluster_node::{ClusterNodeIdentity, ClusterNodeIncarnation, CoordinationIdentity};
+pub use cluster_parameters::*;
 pub use command::{
     CommandExecutionReference, CommandExecutionReferenceError,
     CommandExecutionReferenceTimestampError,
@@ -223,8 +225,8 @@ pub use expression::{
     OutputBranch, RangeOperator, RouteConstruction, UnaryOperator,
 };
 pub use http_request::{
-    HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
-    HttpRequestFieldError, HttpTarget,
+    HttpApplicationHeaders, HttpBodyMode, HttpHeaderLimits, HttpHeaderName, HttpHeaderValue,
+    HttpMethod, HttpOrigin, HttpRequestFieldError, HttpTarget,
 };
 pub use ingestor_input::{IngestorInput, TransportIngestorInput};
 pub use json_path::{JsonPath, JsonPathError, JsonPathStep};

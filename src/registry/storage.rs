@@ -39,7 +39,6 @@ use nervix_primitives::sync::{
 };
 use nervix_recovery::Discarded;
 use serde::{Deserialize, Serialize};
-use sorted_vec::SortedSet;
 use tracing::{info, warn};
 
 use crate::registry::{
@@ -76,6 +75,7 @@ impl StoredModelRecord {
 }
 
 pub(crate) struct Registry {
+    parameters: nervix_primitives::publication::ArcSwap<nervix_models::ClusterParameterValues>,
     storage: ModelStorage,
     state: RwLock<Arc<RegistryState>>,
     commit_lock: Mutex<()>,
@@ -85,23 +85,15 @@ pub(crate) struct Registry {
 /// left to run, and for a planned batch that changes no Model.
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeChanges {
-    pub(crate) domain: DomainName,
     pub(crate) graph: Option<ActiveGraph>,
 }
 
-impl RuntimeChanges {
-    pub(crate) fn execution_revision(
-        &self,
-    ) -> error_stack::Result<Option<Arc<super::ExecutionRevision>>, super::ExecutionRevisionError>
-    {
-        match &self.graph {
-            Some(graph) => super::ExecutionRevision::from_graph(&self.domain, graph).map(Some),
-            None => Ok(None),
-        }
-    }
-}
-
 impl Registry {
+    pub(crate) fn install_cluster_parameters(&self, values: nervix_models::ClusterParameterValues) {
+        self.parameters
+            .store(nervix_primitives::sync::StdArc::new(values));
+    }
+
     #[cfg(test)]
     pub(in crate::registry) fn open(path: impl AsRef<Path>) -> Result<Self, Report<RegistryError>> {
         let path = path.as_ref();
@@ -177,6 +169,9 @@ impl Registry {
         log_registry_state("persistent state load result", &state);
 
         Ok(Self {
+            parameters: nervix_primitives::publication::ArcSwap::from_pointee(
+                nervix_models::ClusterParameterValues::default(),
+            ),
             storage,
             state: RwLock::new(Arc::new(state)),
             commit_lock: Mutex::new(()),
@@ -231,22 +226,6 @@ impl Registry {
         mutations: Vec<RegistryMutation>,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
         self.apply_mutations(domain, mutations, "mixed mutation batch")
-    }
-
-    pub(crate) fn startup_runtime_changes(
-        &self,
-    ) -> Result<Vec<RuntimeChanges>, Report<RegistryError>> {
-        let state = self.state.read();
-        let domains = SortedSet::from_unsorted(state.domains.keys().cloned().collect()).into_vec();
-        let mut startup_changes = Vec::new();
-        for domain in domains {
-            let domain_state = &state.domains[&domain];
-            startup_changes.push(RuntimeChanges {
-                domain: domain.clone(),
-                graph: Some(domain_state.graph.clone()),
-            });
-        }
-        Ok(startup_changes)
     }
 
     pub(crate) fn synchronize_cluster_schedule(
@@ -358,6 +337,7 @@ impl Registry {
     pub(crate) fn preflight_transaction_mutations_against(
         domain: &DomainName,
         base_models: ModelIndex,
+        parameters: &nervix_models::ClusterParameterValues,
         mutations: &[RegistryMutation],
         allow_incomplete_candidate: bool,
     ) -> Result<TransactionMutationPreflight, Report<RegistryError>> {
@@ -365,6 +345,7 @@ impl Registry {
             domain,
             mutations,
             "ordered transaction planning",
+            parameters,
             allow_incomplete_candidate,
             base_models,
         )
@@ -407,6 +388,7 @@ impl Registry {
             domain,
             mutations,
             operation_name,
+            &self.parameters.load(),
             allow_incomplete_candidate,
             current_models,
         )
@@ -416,6 +398,7 @@ impl Registry {
         domain: &DomainName,
         mutations: &[RegistryMutation],
         operation_name: &str,
+        parameters: &nervix_models::ClusterParameterValues,
         allow_incomplete_candidate: bool,
         current_models: ModelIndex,
     ) -> Result<TransactionMutationPreflight, Report<RegistryError>> {
@@ -778,6 +761,7 @@ impl Registry {
             .cloned()
             .collect::<HashSet<_>>();
 
+        super::validate_model_parameters(domain, candidate.models(), parameters)?;
         let domain_state = match DomainState::build(domain, &candidate) {
             Ok(state) => state,
             // A caller that allows an incomplete candidate is queuing a step of a transaction that
@@ -826,10 +810,7 @@ impl Registry {
         } else {
             Some(domain_state.graph.clone())
         };
-        let runtime_changes = RuntimeChanges {
-            domain: domain.clone(),
-            graph,
-        };
+        let runtime_changes = RuntimeChanges { graph };
 
         let candidate_models = domain_state.models.clone();
         Ok(TransactionMutationPreflight {
@@ -926,10 +907,7 @@ impl Registry {
         } else {
             Some(domain_state.graph.clone())
         };
-        let runtime_changes = RuntimeChanges {
-            domain: domain.clone(),
-            graph,
-        };
+        let runtime_changes = RuntimeChanges { graph };
         Ok(PlannedMutations {
             domain: domain.clone(),
             batch_size: operation_count,
@@ -1053,10 +1031,7 @@ impl Registry {
         } else {
             Some(base_state.graph.clone())
         };
-        let runtime_changes = RuntimeChanges {
-            domain: planned.domain.clone(),
-            graph,
-        };
+        let runtime_changes = RuntimeChanges { graph };
         let current = self.state.read();
         let mut domains = current.domains.clone();
         if base_state.graph.node_count() == 0 {
@@ -1222,6 +1197,7 @@ impl Registry {
         domain: &DomainName,
         models: &ModelIndex,
     ) -> Result<DomainState, Report<RegistryError>> {
+        super::validate_model_parameters(domain, models.models(), &self.parameters.load())?;
         DomainState::build(domain, models)
     }
 }
@@ -2282,39 +2258,6 @@ mod tests {
                 .expect("read should succeed")
                 .is_none()
         );
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn startup_runtime_changes_include_graph_only_domains() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = DomainName::parse("default").expect("valid domain");
-
-        registry
-            .apply_batch(
-                &domain,
-                vec![
-                    schema("event_schema"),
-                    wire_schema("event_wire"),
-                    codec("event_codec", "event_schema"),
-                    client_model("broker_out"),
-                    relay("notifications", "event_schema"),
-                    emitter("emit", "notifications", "event_codec", "broker_out"),
-                ],
-            )
-            .expect("graph-only batch should succeed");
-
-        let startup_changes = registry
-            .startup_runtime_changes()
-            .expect("startup runtime changes should load");
-        let change = startup_changes
-            .iter()
-            .find(|change| change.domain == domain)
-            .expect("domain runtime changes should exist");
-
-        assert!(change.graph.is_some(), "graph snapshot must be included");
 
         let _ = fs::remove_dir_all(path);
     }

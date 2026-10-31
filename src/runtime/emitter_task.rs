@@ -1940,9 +1940,12 @@ impl EmitterBatchContext<'_> {
                 self.runtime.executor(),
                 self.emitter,
                 batch,
-                input,
-                materialized_values,
-                execution_now,
+                HttpRequestEvaluation {
+                    input,
+                    side_inputs: materialized_values,
+                    execution_now,
+                    header_limits: self.runtime.cluster_parameters().http_header_limits(),
+                },
             )
             .await;
         let prepared = match prepared {

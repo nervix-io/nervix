@@ -14,8 +14,6 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use std::time::Duration;
-
 use ahash::RandomState;
 use error_stack::{Report, ResultExt as _};
 use futures_util::future::BoxFuture;
@@ -30,7 +28,7 @@ use nervix_interconnect::Transport;
 use nervix_models::{
     BuiltinFunctionScope, CommandExecutionReference, DomainName, Model, ModelName, PlacementPolicy,
     RequestedResourceVersion, ResourceId, ResourceName, ResourceUploadKey, ResourceVersionStatus,
-    SemanticReference, TransactionPosition,
+    SemanticReference, Statement, TransactionPosition,
 };
 use nervix_plexus::{
     Token, Word,
@@ -54,11 +52,10 @@ use super::{
     backup::{CaptureSectionKey, CapturedSectionStage, ServerRetainedBackups},
     client_consumers::ClientConsumerRouter,
     client_producers::ClientProducerRouter,
-    command_execution::{
-        CommandAdmission, CommandExecutionOwners, CommandExecutionPolicy, PersistentCommandRequest,
-    },
+    command_execution::{CommandAdmission, CommandExecutionOwners, PersistentCommandRequest},
     command_result::{
         CommandDiagnostic, CommandDisposition, CommandOrigin, CommandResponse, CommandResult,
+        OutcomeUnknownCause,
     },
     completion::{
         ApplicationRevisionParticipants, ApplicationRevisionPhase, wait_for_application_revision,
@@ -164,9 +161,10 @@ pub(in crate::application) struct SessionServiceInner {
     /// the schedule task that installs every admitted revision.
     pub(in crate::application) https_certificates: HttpsListenerCertificates,
     pub(in crate::application) runtime: Runtime,
+    /// Also read by configured endpoint admission and the readiness listener.
+    pub(in crate::application) initialization: Arc<super::node_initialization::NodeInitialization>,
     /// Also held by the initial schedule reconciliation task until process shutdown.
     pub(in crate::application) runtime_admission: Arc<RuntimeAdmission>,
-    pub(in crate::application) replica_count: usize,
     /// Stops external sessions after this node has advertised termination.
     pub(in crate::application) admission_shutdown: CancellationToken,
     /// Keeps internal coordination available until admitted work has drained.
@@ -185,14 +183,8 @@ pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) service_tasks: ServiceTasks,
     pub(in crate::application) auth_rate_limiter: AuthRateLimiter,
     pub(in crate::application) failed_auth_rate_limit_keys: DashMap<String, (), RandomState>,
-    pub(in crate::application) transaction_idle_timeout: Duration,
-    pub(in crate::application) transaction_tombstone_retention: Duration,
-    pub(in crate::application) transaction_max_statements: usize,
-    pub(in crate::application) transaction_max_source_bytes: u64,
-    pub(in crate::application) transaction_max_open: usize,
     pub(in crate::application) transaction_bindings: DashMap<String, String, RandomState>,
     /// Retry validity and history capacity every durable command admission applies.
-    pub(in crate::application) command_execution_policy: CommandExecutionPolicy,
     /// Requests with one durable execution reference join one application owner on this leader.
     pub(in crate::application) command_executions: CommandExecutionOwners,
     /// Calls adopting the same replicated transaction share one executor without serializing
@@ -271,6 +263,32 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             let Some(state) = admission.runtime_state(consensus, shutdown).await else {
                 return Ok(());
             };
+            let Some(parameters) = state.parameters else {
+                drop(installation);
+                nervix_primitives::select! {
+                    _ = shutdown.cancelled() => return Ok(()),
+                    _ = consensus.wait_for_runtime_revision_after(state.revision) => continue,
+                }
+            };
+            if let Some(construction) = runtime.construction_parameters() {
+                match construction.catch_up(parameters).change_context(
+                    crate::runtime::RuntimeError::ClusterParameterPublicationMismatch {
+                        revision: parameters.revision.get(),
+                    },
+                )? {
+                    nervix_models::ClusterParameterCatchUp::Ready => {}
+                    nervix_models::ClusterParameterCatchUp::Pending => {
+                        drop(installation);
+                        nervix_primitives::select! {
+                            _ = shutdown.cancelled() => return Ok(()),
+                            _ = consensus.wait_for_runtime_revision_after(state.revision) => continue,
+                        }
+                    }
+                }
+            }
+            cluster.publish_cluster_parameters(parameters, false).await;
+            runtime.install_cluster_parameters(parameters.values);
+            registry.install_cluster_parameters(parameters.values);
             #[cfg(feature = "testing")]
             if runtime.take_runtime_installation_refusal(local_node_id) {
                 return Err(Report::new(
@@ -284,9 +302,11 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 revision = state.revision,
                 "installing admitted cluster runtime state"
             );
-            if let Err(error) = registry.synchronize_cluster_schedule(&state.schedule) {
-                warn!(error = %error, "failed to synchronize registry from admitted cluster schedule");
-            }
+            registry
+                .synchronize_cluster_schedule(&state.schedule)
+                .change_context(crate::runtime::RuntimeError::SynchronizeRegistry {
+                    revision: state.revision,
+                })?;
             let runtime_application = admission
                 .apply_planned_cluster_state(runtime, local_node_id, &state)
                 .await;
@@ -311,6 +331,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             runtime
                 .pause_runtime_preparation_if_armed(local_node_id)
                 .await;
+            cluster.publish_cluster_parameters(parameters, true).await;
             cluster
                 .set_local_runtime_revision_prepared(state.revision)
                 .await;
@@ -1666,6 +1687,14 @@ impl SessionServiceImpl {
             }
         };
 
+        let observes_cluster = client_statements.iter().all(|parsed| {
+            matches!(
+                parsed.statement,
+                ClientStatement::Server(
+                    Statement::ShowClusterStatus(_) | Statement::DescribeCluster(_)
+                )
+            )
+        });
         // A request that only inspects a transaction reads it rather than changing it, so it
         // takes none of the durable admission, replay and queue-position fencing a transaction
         // request needs, even while the session has one attached.
@@ -1684,6 +1713,27 @@ impl SessionServiceImpl {
                             | ClientStatement::RevertTransaction
                     )
                 }));
+        if (!observes_cluster || is_transaction_request)
+            && let Err(error) = self.available_cluster_parameters()
+        {
+            let may_have_durable_execution = is_transaction_request
+                || client_statements.iter().any(|parsed| {
+                    matches!(
+                        &parsed.statement,
+                        ClientStatement::Server(statement)
+                            if super::statement_routing::is_persistent_statement(statement)
+                    )
+                });
+            let disposition = if may_have_durable_execution {
+                CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::NotYetAuthoritative)
+            } else {
+                CommandDisposition::Failed
+            };
+            return Ok(CommandResponse::executed(CommandResult::new(
+                disposition,
+                format!("{error:#}"),
+            )));
+        }
         let mut execution_guard = None;
         if is_transaction_request {
             let leader = self.inner.consensus.current_leader().await;
@@ -1946,6 +1996,8 @@ pub(in crate::application) fn conflicting_reference(
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use std::time::Duration;
+
     use nervix_models::{
         ClientName, ConnectorKind, EndpointName, EndpointType, HttpIngestorEntity,
         IngestorEntityKind, ModelKind, NodeRef, SyslogIngestorEntity,

@@ -156,7 +156,7 @@ Feature: Published endpoint route lifetimes
     When node "node-1" is stopped
     And node "node-2" is stopped
     And node "node-3" is stopped
-    And node "node-3" is started without waiting for it to catch up
+    And node "node-3" is started until public observation is available
     And endpoint request "uninstalled" is posted on node "node-3" host "restart-{{test_id}}.example.com" path "/events"
       """
       {"user_id":42}

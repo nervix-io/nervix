@@ -41,6 +41,11 @@ const STORAGE_ARCHIVE_ALIGNMENT: usize = 16;
 
 #[derive(Debug, Error)]
 pub enum StorageFailure {
+    #[error(
+        "consensus state metadata cannot load as this build's shape; recreate the node's stored \
+         state"
+    )]
+    StateMetadata(#[source] io::Error),
     #[error("consensus storage operation exceeds its admitted byte budget")]
     Capacity,
     #[error("consensus storage stopped after a failed write; restart the node to recover")]

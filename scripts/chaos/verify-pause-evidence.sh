@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$#" -lt 7 || "$#" -gt 11 ]]; then
-    printf 'usage: %s before|paused|resumed RUN_ID PROJECT SERVICE IMAGE_ID BEFORE_JSON CURRENT_JSON [EVENTS_NDJSON MIN_MS MAX_MS RESULT_JSON]\n' "$0" >&2
+if [[ "$#" -lt 8 || "$#" -gt 12 ]]; then
+    printf 'usage: %s before|paused|resumed RUN_ID PROJECT SERVICE IMAGE_ID BEFORE_JSON CURRENT_JSON PARAMETERS_JSON [EVENTS_NDJSON MIN_MS MAX_MS RESULT_JSON]\n' "$0" >&2
     exit 2
 fi
 
@@ -13,10 +13,11 @@ service="$4"
 image_id="$5"
 before_json="$6"
 current_json="$7"
-events_path="${8:-}"
-min_ms="${9:-}"
-max_ms="${10:-}"
-result_path="${11:-}"
+parameters_json="$8"
+events_path="${9:-}"
+min_ms="${10:-}"
+max_ms="${11:-}"
+result_path="${12:-}"
 
 if [[ ! "${service}" =~ ^nervix-[123]$ ]]; then
     printf 'invalid pause target: %s\n' "${service}" >&2
@@ -26,8 +27,7 @@ fi
 container_name="/${project}-${service}-1"
 volume_name="${project}_node-${service##*-}-data"
 
-# A pause window means something only against the liveness settings the run deployed: the values the
-# runner passed to Compose, or the Compose file's defaults when it passed none.
+# A pause window uses the node's local heartbeat and the cluster policy observed before the fault.
 heartbeat_interval="${CHAOS_RAFT_HEARTBEAT_INTERVAL:-250ms}"
 unavailability_timeout="${CHAOS_NODE_UNAVAILABILITY_TIMEOUT:-10s}"
 
@@ -41,7 +41,9 @@ identity_matches() {
         --arg container_name "${container_name}" \
         --arg volume_name "${volume_name}" \
         --arg heartbeat "NERVIX_RAFT_HEARTBEAT_INTERVAL=${heartbeat_interval}" \
-        --arg unavailability "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=${unavailability_timeout}" '
+        --arg unavailability "${unavailability_timeout}" \
+        --slurpfile parameters "${parameters_json}" '
+        (.[0].Config.Env | map(capture("^NERVIX_NODE_ID=(?<id>.+)$"))) as $nodes |
         length == 1 and
         (.[0].Id | test("^[a-f0-9]{64}$")) and
         .[0].Name == $container_name and
@@ -54,7 +56,13 @@ identity_matches() {
         .[0].Image == $image_id and
         (.[0].Mounts | any(.Type == "volume" and .Name == $volume_name)) and
         (.[0].Config.Env | index($heartbeat) != null) and
-        (.[0].Config.Env | index($unavailability) != null)
+        ($nodes | length) == 1 and
+        ($parameters | length) == 1 and
+        ($parameters[0].revision | type) == "string" and
+        ($parameters[0].revision | test("^[1-9][0-9]*$")) and
+        $parameters[0].committed["node-unavailability-timeout"] == $unavailability and
+        $parameters[0].running[$nodes[0].id].values == $parameters[0].committed and
+        $parameters[0].running[$nodes[0].id].revision == $parameters[0].revision
     ' "${inspection}" >/dev/null
 }
 
@@ -94,7 +102,7 @@ esac
 if [[ "${phase}" != resumed ]]; then
     exit 0
 fi
-if [[ "$#" -ne 11 || ! -s "${events_path}" || ! "${min_ms}" =~ ^[0-9]+$ \
+if [[ "$#" -ne 12 || ! -s "${events_path}" || ! "${min_ms}" =~ ^[0-9]+$ \
     || ! "${max_ms}" =~ ^[0-9]+$ || "${min_ms}" -ge "${max_ms}" ]]; then
     printf 'pause/unpause events and a valid duration window are required for %s\n' "${service}" >&2
     exit 2

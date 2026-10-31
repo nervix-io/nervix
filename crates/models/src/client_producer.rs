@@ -33,18 +33,18 @@ use crate::{AckWindow, SchemaField};
 
 /// The most producers one session may hold open at once.
 pub const MAX_CLIENT_PRODUCERS_PER_SESSION: usize = 32;
-/// The Arrow IPC bytes every producer of one session may have outstanding together.
-pub const CLIENT_PRODUCER_SESSION_BYTES: u64 = 32 * 1024 * 1024;
+/// The default requested session-byte window; admission uses committed cluster parameters.
+pub const DEFAULT_CLIENT_PRODUCER_SESSION_BYTES: u64 = crate::ClientProducerSessionBytes::DEFAULT;
 /// The Arrow IPC bytes every producer served by, or forwarded to, one node may have outstanding
 /// together.
 pub const CLIENT_PRODUCER_NODE_BYTES: u64 = 128 * 1024 * 1024;
 /// The most batches one producer may have outstanding at once.
 pub const MAX_CLIENT_PRODUCER_BATCHES: u32 = 1024;
-/// The most rows one submitted batch may carry.
-pub const MAX_CLIENT_BATCH_ROWS: u32 = 65_536;
+/// The default client row window; the server grants its committed row limit.
+pub const DEFAULT_CLIENT_BATCH_ROWS: u32 = crate::ClientBatchRows::DEFAULT;
 
 const _: () = assert!(
-    CLIENT_PRODUCER_SESSION_BYTES <= CLIENT_PRODUCER_NODE_BYTES,
+    DEFAULT_CLIENT_PRODUCER_SESSION_BYTES <= CLIENT_PRODUCER_NODE_BYTES,
     "one session's producers must fit the budget of the node that serves them",
 );
 const _: () = assert!(
@@ -72,10 +72,9 @@ pub struct ClientProducerLimits {
 }
 
 impl ClientProducerLimits {
-    /// Whether these limits stay within what one producer may ask for.
+    /// Whether the batch count fits the protocol; byte admission uses committed cluster policy.
     pub fn is_within_bounds(&self) -> bool {
         self.batches.get() <= MAX_CLIENT_PRODUCER_BATCHES
-            && self.bytes.get() <= CLIENT_PRODUCER_SESSION_BYTES
     }
 }
 

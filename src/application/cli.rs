@@ -12,6 +12,7 @@ use clap::Subcommand;
 use super::*;
 
 mod capacity;
+mod cluster_parameters;
 mod consensus;
 #[cfg(feature = "deloxide")]
 mod diagnostics;

@@ -700,7 +700,10 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
 
 impl SessionServiceImpl {
     pub(in crate::application) fn transaction_activity(&self) -> TransactionActivity {
-        TransactionActivity::from_timeout(current_timestamp(), self.inner.transaction_idle_timeout)
+        TransactionActivity::from_timeout(
+            current_timestamp(),
+            self.cluster_parameters().transaction_idle_timeout(),
+        )
     }
 
     /// The configuration this session's bound transaction has queued for `domain`. Queued
@@ -1037,12 +1040,19 @@ impl SessionServiceImpl {
                 },
             ));
         }
-        let models = self.inner.registry.transaction_planning_models(domain);
         let control = self
             .inner
             .consensus
             .transaction_control_snapshot(domain)
             .await;
+        let models = match control.planning_inputs.schedule() {
+            Some(schedule) => schedule
+                .nodes
+                .values()
+                .map(|node| node.config.as_ref().clone())
+                .collect(),
+            None => Default::default(),
+        };
         if let Some(execution) = &control.restore_installation
             && statements
                 .iter()
@@ -1079,6 +1089,11 @@ impl SessionServiceImpl {
             schedule_inputs: &schedule_inputs,
         })?;
         let snapshot = TransactionPlanningSnapshot {
+            parameters: control
+                .planning_inputs
+                .parameters()
+                .ok_or_else(|| Report::new(TransactionPlanningError::ClusterParametersUnseeded))?
+                .values,
             domain: domain_state.clone(),
             models,
             resources,
@@ -2509,10 +2524,12 @@ impl SessionServiceImpl {
             return;
         }
         let now = current_timestamp();
-        let finished_before =
-            subtract_timestamp_duration(now, self.inner.transaction_tombstone_retention);
+        let finished_before = subtract_timestamp_duration(
+            now,
+            self.cluster_parameters().transaction_tombstone_retention(),
+        );
         let command_retry_fence =
-            subtract_timestamp_duration(now, self.inner.command_execution_policy.retry_validity());
+            subtract_timestamp_duration(now, self.command_execution_policy().retry_validity());
         self.reconcile_persistent_commands(command_retry_fence, command_retry_fence)
             .await;
         let transactions = self.inner.consensus.current_transactions().await;

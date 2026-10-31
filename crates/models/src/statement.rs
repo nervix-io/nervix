@@ -48,6 +48,7 @@ use crate::{
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum Statement {
+    AlterCluster(crate::AlterCluster),
     CreateDomain(CreateStatement<CreateDomain>),
     AlterDomain(AlterDomain),
     CreateUser(CreateStatement<CreateUser>),
@@ -143,7 +144,8 @@ impl Statement {
             | Self::AlterPlacement(_)
             | Self::RebindResource(_)
             | Self::Drop(_) => true,
-            Self::CreateDomain(_)
+            Self::AlterCluster(_)
+            | Self::CreateDomain(_)
             | Self::AlterDomain(_)
             | Self::CreateUser(_)
             | Self::CreateResource(_)

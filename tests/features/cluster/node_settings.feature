@@ -6,18 +6,22 @@ Feature: Node settings
 
   Scenario Outline: A node restarts with a large fractional snapshot interval after another setting is applied on a cluster of <cluster_size>
     Given runtime replication is configured with replica count 0 and snapshot interval "<snapshot_interval>"
-    And node-1 starts with command-execution-capacity = 64
     And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      ALTER CLUSTER SET COMMAND_EXECUTION_CAPACITY = 64;
+      """
     When node "node-1" is stopped
     And node "node-1" is started
     Then node "node-1" eventually observes a stable leader
+    And node "node-1" eventually reports status containing "node=node-1 state-snapshot-interval running=<reported_interval> revision="
 
     Examples:
-      | cluster_size | snapshot_interval         |
-      | 1            | 169112806400s 601538000ns |
-      | 3            | 169112806400s 601538000ns |
-      | 1            | 169112806400s 601000000ns |
-      | 3            | 169112806400s 601000000ns |
+      | cluster_size | snapshot_interval       | reported_interval                             |
+      | 1            | 4294967294s 601538000ns | 136years 1month 5days 19h 54m 38s 601ms 538us |
+      | 3            | 4294967294s 601538000ns | 136years 1month 5days 19h 54m 38s 601ms 538us |
+      | 1            | 4294967294s 601000000ns | 136years 1month 5days 19h 54m 38s 601ms       |
+      | 3            | 4294967294s 601000000ns | 136years 1month 5days 19h 54m 38s 601ms       |
 
   Scenario Outline: A node given a drain timeout its shutdown timeout cannot hold refuses to start on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started

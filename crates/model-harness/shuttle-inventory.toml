@@ -122,6 +122,7 @@ checks = [
   "application::shutdown::shuttle_tests::shuttle_racing_stop_requests_accept_exactly_one_and_keep_its_deadline",
   "application::termination_signals::shuttle_tests::shuttle_a_repeated_signal_before_the_deadline_ends_the_process_with_the_status_of_that_signal",
   "application::termination_signals::shuttle_tests::shuttle_an_expired_deadline_and_a_repeated_signal_let_exactly_one_forced_exit_end_the_process",
+  "cluster::peer_health_watcher::shuttle_tests::shuttle_a_policy_change_racing_a_retained_health_wait_is_never_missed",
   "runtime::backup_capture_fence::shuttle_tests::shuttle_backup_cut_includes_pre_cut_branch_publication",
   "runtime::backup_state::branch_state_shuttle_tests::shuttle_a_forced_deduplicator_publication_holds_every_key_acknowledged_before_the_cut",
   "runtime::backup_state::branch_state_shuttle_tests::shuttle_a_forced_window_publication_holds_every_step_acknowledged_before_the_cut",

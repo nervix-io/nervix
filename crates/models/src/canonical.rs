@@ -675,6 +675,7 @@ impl Statement {
     /// parsed script can be rendered back statement for statement.
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         match self {
+            Self::AlterCluster(alter) => Ok(alter.to_canonical_plexus()),
             Self::Create(create) => {
                 let rendered = create.body.to_canonical_plexus()?;
                 if !create.if_not_exists {

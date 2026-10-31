@@ -2856,3 +2856,19 @@ That evidence supports the current ingestor and emitter behavior; it does not cl
 Its Kafka A/B measurements found lower bounded-pressure rates and a separate 16-partition commit
 failure that require owner investigation. An integration must preserve its own transport and
 delivery semantics rather than assuming a generic envelope or exactly-once external outcome.
+
+## Committed Host Bounds
+
+The Nervix host validates batch counts and client-emitter batch bytes against the committed
+cluster policy. HTTP request preparation captures typed header-byte and field-count bounds for that publication.
+Transition validation counts known HTTP header names independently of their values and preserves
+guaranteed byte contributions across dynamic replacements. `HttpApplicationHeaders` enforces the
+captured limits and the syntax contract on the evaluated envelope. Connector
+transport ownership and per-record acknowledgement boundaries are unchanged.
+HTTP polling headers are literal plan inputs. Their complete count and byte requirements are
+checked against that same committed policy at model admission and parameter transitions, with
+case-insensitive replacement and the last written value retained. A lowering cannot invalidate
+an existing request. The field-count setting ends at 16,384 application fields, leaving native
+capacity for client and transport fields. The connector receives the validated literal fields
+without a second fixed default.
+Each literal name/value write and the final retained envelope must fit the byte cap.
