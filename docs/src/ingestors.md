@@ -1041,14 +1041,24 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).
 <!-- connector-matrix:ingest-kafka-topic:end -->
 
+`TOPIC` takes a string literal that Kafka accepts as a topic name: 1 to 249 ASCII letters, digits,
+`.`, `_` and `-`, other than `.` and `..`. Nervix preserves its case in both directions, so
+`TOPIC 'Orders.EU'` reads exactly that topic. `OFFSET BY CONSUMER GROUP` takes the group's name as
+a string literal of 1 to 255 bytes without control characters, passed to Kafka as written. The
+ingestor names `ON QUIESCE SUSPEND`, the only quiesce mode it declares: the topic keeps its records
+after they are read, so a suspended ingestor resumes from its position, within the topic's
+retention. It reads a record's headers through `read_header` and `read_headers`.
+
 Offset modes:
 
 - `CONSUMER GROUP '<group>'`: Kafka manages offsets
 - `DOMAIN`: Nervix stores the next offset in replicated runtime state and commits partition-to-instance assignment in the Raft-backed domain schedule
 
-`CREATE KAFKA CLIENT` refuses the Nervix-owned keys `group.id`, `enable.auto.commit`,
-`enable.partition.eof`, `allow.auto.create.topics` and `delivery.report.only.error`. Other property
-names and values are checked offline by librdkafka before commitment and passed through to it.
+`CREATE KAFKA CLIENT` requires `bootstrap.servers`, the brokers that each consumer and producer of
+the client contacts first, and refuses a client without it, which could reach no broker. It refuses
+the Nervix-owned keys `group.id`, `enable.auto.commit`, `enable.partition.eof`,
+`allow.auto.create.topics` and `delivery.report.only.error`. Other property names and values are
+checked offline by librdkafka before commitment and passed through to it.
 
 The statement's offset mode supplies the consumer's `group.id`. Only `OFFSET BY CONSUMER GROUP`
 with `MODE NO ACK` enables `enable.auto.commit`. Every consumer disables `enable.partition.eof`

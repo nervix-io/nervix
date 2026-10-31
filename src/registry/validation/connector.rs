@@ -1131,8 +1131,6 @@ fn validate_envelope_value(
     Ok(())
 }
 
-/// Refuses a Kafka client whose CONFIG sets a key Nervix decides for every Kafka consumer. The
-/// key is matched without regard to ASCII case, so no spelling of it reaches the driver.
 /// The origin accepted by an HTTP emitter, once its client has an explicit, usable request timeout
 /// and complete TLS identity settings. The returned URL is safe to use as the base for
 /// request-target validation; its credentials, path, query and fragment have been ruled out.

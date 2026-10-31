@@ -959,6 +959,21 @@ address's userinfo and query options belong to the driver and are masked in insp
 NATS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 
+`KAFKA TOPIC` shares one topic-name rule between ingestion and emission: 1 to 249 ASCII letters,
+digits, `.`, `_` and `-`, other than `.` and `..`, passed through exactly as written. Its ingestor
+declares `NO ACK`, `ACK SEQUENTIAL` and `ACK PARALLEL`, `SUSPEND` as its only quiesce mode, since
+the topic keeps its records after they are read and a suspended source resumes from its position,
+and a required `OFFSET BY` choice between the domain's replicated offsets and a named consumer
+group. Its emitter declares `NO ACK` and `ACK` with either window, optional batching with no
+protocol-fixed batch limit, since the producer's configurable `message.max.bytes` bounds each record
+it writes, and no envelope or properties. Headers are `ordered_repeats` exact names in both
+directions; the ingestor's metadata is the record's topic, partition and offset. A Kafka client
+requires `bootstrap.servers`, without which no consumer or producer reaches a broker. Every other
+property is librdkafka's, checked offline before commit, except the keys Nervix sets itself on the
+consumers and producers it runs, which the client refuses. The Kafka-specific declaration tests,
+generated grammar conformance and one-/three-node public declaration scenarios qualify these facts
+together.
+
 Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
 endpoint ingestors reference endpoints, while a Syslog listener references a client; all three
 declare every-node execution. Scheduling and placement-reference completion read that capability,

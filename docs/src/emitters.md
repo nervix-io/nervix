@@ -1264,6 +1264,12 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-emit).
 <!-- connector-matrix:emit-kafka-topic:end -->
 
+`TOPIC` uses the same rule as [Kafka ingestion](ingestors.md#kafka): 1 to 249 ASCII letters,
+digits, `.`, `_` and `-`, other than `.` and `..`, produced to exactly as written. `write_header`
+writes the record's headers in the order the program writes them, and the emitter declares no
+envelope clause or `PROPERTIES` block. The `KAFKA CLIENT` it names requires `bootstrap.servers` and
+refuses the Nervix-owned keys the [Kafka ingestion section](ingestors.md#kafka) lists.
+
 `ACK` waits for every record's delivery report through the shared confirmation window. If a publish
 attempt fails, the window first settles the answers already received and returns only unresolved
 members for retry; confirmed records are not sent again by that attempt's retry. An unanswered
