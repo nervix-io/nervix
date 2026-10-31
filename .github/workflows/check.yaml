@@ -1652,6 +1652,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
+          components: llvm-tools
           targets: wasm32-unknown-unknown
 
       - name: Setup Rust nightly
