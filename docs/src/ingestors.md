@@ -610,7 +610,7 @@ Transport-specific schemes and keys:
 - `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`, which is primarily useful for SQS-compatible local/test endpoints. An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
+- `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`, which is primarily useful for SQS-compatible local/test endpoints, and `CREATE SQS CLIENT` refuses a file that holds no certificate it could trust. An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
 - `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
   `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
 
@@ -1841,9 +1841,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | answered |
 | Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup, a receive and a delete: unbounded |
+| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup and a delete: `timeout_ms`; unbounded when omitted<br>a receive, after the one-second long poll it asks the service to hold it for: `timeout_ms`; unbounded when omitted |
 | Driver limits | A request that stalls below 1 byte a second for 5 s is cancelled. |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sqs-queue-ingest).
 <!-- connector-matrix:ingest-sqs-queue:end -->
@@ -1855,13 +1855,18 @@ ingestor reads a message's attributes through `read_header` and `read_headers`. 
 `MODE ACK SEQUENTIAL` and `ON QUIESCE SUSPEND`, the only delivery and quiesce modes it declares: the
 queue keeps each message until the source deletes it, so suspending loses nothing.
 
-The `SQS CLIENT` an ingestor or emitter names declares `endpoint`, which is required, and the
-optional `region`, `access_key_id`, `secret_access_key`, `timeout_ms` and `tls_ca_file`, and
-`CREATE SQS CLIENT` refuses any other key. A client without `region` signs its requests for
-`us-east-1`, and one that omits `access_key_id` or `secret_access_key` signs with a placeholder in
-its place, which only an SQS-compatible endpoint that skips signature checks accepts. `timeout_ms`
-bounds an emitter's send; an ingestor's queue lookup, receives and deletions take the waits the
-table lists.
+The `SQS CLIENT` an ingestor or emitter names declares `endpoint`, `region`, `access_key_id` and
+`secret_access_key`, which are required, and the optional `session_token`, `timeout_ms` and
+`tls_ca_file`. `CREATE SQS CLIENT` refuses any other key and a client that omits a required one.
+Every request is signed for `region` with `access_key_id` and `secret_access_key`, and carries
+`session_token` when those are temporary credentials. `SHOW CREATE CLIENT` and `DESCRIBE` print the
+three credentials as `********`. `timeout_ms` bounds every request of both directions, name
+resolution, connection setup, TLS and the answer included: an ingestor's queue lookup and each
+deletion, and each receive once its one-second long poll has passed, because a service with no
+message holds a receive for that long poll before it answers. Without `timeout_ms` those waits are
+unbounded. `CREATE SQS CLIENT` reads `tls_ca_file` before it commits the client, and refuses a file
+holding a section that is not a certificate, or no certificate at all, as
+`invalid client config key 'tls_ca_file'`: a client that trusted it alone could reach no service.
 
 Starting the ingestor sends no request to the service. Each source instance looks its queue up
 before its first poll and keeps the queue's URL from then on, suspensions included. The source
@@ -1869,13 +1874,15 @@ resolves the host of its client's `endpoint` through the node's asynchronous res
 opens a connection, and dials the answers as [Dialling The
 Answers](name-resolution.md#dialling-the-answers) describes for Smithy's client. Every request is
 still signed for the configured host, and over HTTPS the service certificate must name that host.
-Without `tls_ca_file` the client trusts the platform's native roots and follows the `HTTP_PROXY`,
-`HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` environment variables; with it, the client trusts that CA
-alone and connects directly. A missing name, a silent name server or an unreachable answer fails the
-queue lookup, a poll, or a deletion. The AWS SDK's standard retry mode makes up to three attempts at
-each such request. A failed lookup or poll is then a transient source failure that
-`DESCRIBE INGESTOR` shows and the source retries on its `RETRY POLICY`, so an ingestor started while
-the service is unreachable consumes once the service answers. A queue that does not exist fails the
+Without `tls_ca_file` the client trusts the platform's native roots; with it, the client trusts that
+CA alone. Either way it connects directly: an SQS client takes no proxy, and ignores the
+`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` environment variables of its node. A missing
+name, a silent name server, an unreachable answer or a service that does not answer within
+`timeout_ms` fails the queue lookup, a poll, or a deletion. The AWS SDK makes each request once, so
+a failed lookup or poll is at once a transient source failure that `DESCRIBE INGESTOR` shows, such as
+`the SQS queue lookup did not finish within timeout_ms 5s`, and the source retries it on its
+`RETRY POLICY` alone, so an ingestor started while the service is unreachable consumes once the
+service answers. A queue that does not exist fails the
 lookup with its name, such as `SQS queue 'orders' does not exist`, and is retried the same way;
 Nervix never creates it.
 
@@ -1897,8 +1904,9 @@ ingestor quiesces or stops is never abandoned, because the service hides the mes
 with until its visibility timeout ends: the source sends no further poll and waits for that answer,
 which a responsive service gives within the poll's one-second wait, and a message it brings
 dispatches before the source suspends or closes. Only a service that has not answered within
-10 seconds of the quiesce change or the stop ends that poll unanswered, which `DESCRIBE INGESTOR`
-shows as a transient error; a message the poll was returning then stays invisible until its
+10 seconds of the quiesce change or the stop, or within the poll's `timeout_ms` after its long poll
+when that ends sooner, ends that poll unanswered, which `DESCRIBE INGESTOR` shows as a transient
+error; a message the poll was returning then stays invisible until its
 visibility timeout ends.
 
 ### Prometheus
