@@ -13,6 +13,7 @@ build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
 turmoil_failures := cargo_target_dir + "/turmoil-failures"
+coverage_tools_dir := cargo_target_dir + "/llvm-cov-tools"
 default_jobs := num_jobs() || "4"
 
 # Show the documented recipes, including the Bolero property and fuzz commands.
@@ -62,6 +63,10 @@ prepare-archive-counts-fuzz: (prepare-bolero "registry-archived-models")
 # Run all registered properties with bounded randomized cases and source-adjacent corpus replay.
 test-bolero filter="": bolero-deps
     python3 -m scripts.bolero test {{ quote(filter) }}
+
+# Compile every ordinary harness `test-bolero` runs, as it builds them, without running a property.
+build-bolero filter="": bolero-deps
+    python3 -m scripts.bolero build {{ quote(filter) }}
 
 # List every compiled, registered Bolero target after checking the inventory.
 fuzz-list: bolero-deps
@@ -252,6 +257,7 @@ test: tests-deps
         nervix-model-harness
         nervix-paced-simulation
         nervix-primitives
+        nervix-scenarios
         nervix-server
         nervix-wasm
     )
@@ -260,7 +266,8 @@ test: tests-deps
         workspace_exclusions+=(--exclude "${package}")
     done
     cargo test --all-targets --all-features --workspace "${workspace_exclusions[@]}"
-    cargo test --all-targets --features testing --package nervix-server
+    cargo test --lib --features testing --package nervix-server
+    cargo test --all-targets --package nervix-scenarios
     cargo test --all-targets \
         --package nervix-client-core \
         --package 'nervix-connector*' \
@@ -285,11 +292,11 @@ test-scenarios *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo test --features testing --test scenarios -- {{ args }}
+    cargo test --package nervix-scenarios --test scenarios -- {{ args }}
 
 # Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
 # This supervision check has its own verdict, outside ordinary coverage reports.
-test-backup-cut-cleanup: tests-deps
+test-backup-cut-cleanup: build-deps build-test-cli
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -300,7 +307,7 @@ test-backup-cut-cleanup: tests-deps
     eval "$instrumentation"
     export LLVM_PROFILE_FILE="$evidence/qualification-%p-%m.profraw"
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
-        cargo test --features testing --package nervix-server --test scenarios --no-run --message-format=json > "$evidence/build.jsonl"
+        cargo test --package nervix-scenarios --test scenarios --no-run --message-format=json > "$evidence/build.jsonl"
     python3 -m scripts.backup_cut_cleanup "$evidence"
 
 # Qualify ten consecutive three-node native metadata restores, retaining every attempt without retries.
@@ -316,7 +323,7 @@ test-native-metadata-restore-repeat: tests-deps
     for repetition in {1..10}; do
         log="$attempt/repetition-$repetition.log"
         status=0
-        cargo test --features testing --test scenarios -- \
+        cargo test --package nervix-scenarios --test scenarios -- \
             --input tests/features/cluster/backup_metadata.feature \
             --name '^Native lifecycle and Kafka metadata above the bulk budget on 3 nodes restore exactly$' \
             --concurrency 4 --retry 0 > "$log" 2>&1 || status=$?
@@ -353,7 +360,8 @@ build-diagnostic-scenarios selection: tests-deps
         deloxide|deloxide-order|deloxide-stress) ;;
         *) echo "expected deloxide, deloxide-order or deloxide-stress" >&2; exit 2 ;;
     esac
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --no-run --package nervix-server --features {{ quote("testing," + selection) }} --lib --test scenarios
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --no-run --package nervix-server --features {{ quote("testing," + selection) }} --lib
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --no-run --package nervix-scenarios --features {{ quote(selection) }} --test scenarios
 
 # Reproduce a focused public scenario in one diagnostic selection, with the same prerequisites
 # as the complete lane. This does not replace the lane's inventory and evidence qualification.
@@ -380,7 +388,7 @@ test-diagnostic-scenarios selection feature *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
     export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/debug/nervix-deadlock-report") }}
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --package nervix-server --features {{ quote("testing," + selection) }} --test scenarios -- --input "$diagnostic_input" {{ quote(args) }} 2>&1 | tee "$diagnostic_attempt/scenarios.log"
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --package nervix-scenarios --features {{ quote(selection) }} --test scenarios -- --input "$diagnostic_input" {{ quote(args) }} 2>&1 | tee "$diagnostic_attempt/scenarios.log"
     if ! rg --quiet '^[1-9][0-9]* scenarios?([ (]|$)' "$diagnostic_attempt/scenarios.log"; then
         echo "diagnostic scenario selection executed no scenarios" >&2
         exit 1
@@ -398,7 +406,7 @@ test-diagnostic-harness selection *args: tests-deps
     mkdir -p "$harness_attempts"
     harness_attempt="$(mktemp -d "$harness_attempts/harness.XXXXXX")"
     echo "diagnostic harness attempt: $harness_attempt"
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --package nervix-server --features {{ quote("testing," + selection) }} --test harness_liveness -- {{ quote(args) }} 2>&1 | tee "$harness_attempt/harness.log"
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --package nervix-scenarios --features {{ quote(selection) }} --test harness_liveness -- {{ quote(args) }} 2>&1 | tee "$harness_attempt/harness.log"
     if ! rg --quiet '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$harness_attempt/harness.log"; then
         echo "diagnostic harness selection completed no tests or ignored selected tests" >&2
         exit 1
@@ -514,7 +522,7 @@ test-web-console *args:
     CARGO_TARGET_DIR={{ cargo_target_dir }} cargo test --package nervix-web-console --bin nervix-web-console -- {{ args }}
 
 test-harness-liveness *args: tests-deps
-    cargo test --features testing --test harness_liveness -- {{ args }}
+    cargo test --package nervix-scenarios --test harness_liveness -- {{ args }}
 
 # Measure native consensus transport regressions through the configured compiler cache.
 coverage-consensus output *args:
@@ -535,7 +543,7 @@ test-scenarios-reuse *args: tests-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_TESTCONTAINERS_MODE=reusable
-    cargo test --features testing --test scenarios -- {{ args }}
+    cargo test --package nervix-scenarios --test scenarios -- {{ args }}
 
 # Measure the public client protocol against a release nervix-server process.
 # The JSON report and raw Prometheus scrape record the workload, toolchain, hardware and limits.
@@ -550,7 +558,7 @@ client-wire-baseline samples="100" upload_samples="5" payload_bytes="1024" outpu
     export NERVIX_CLIENT_WIRE_BASELINE_UPLOAD_SAMPLES={{ quote(upload_samples) }}
     export NERVIX_CLIENT_WIRE_BASELINE_PAYLOAD_BYTES={{ quote(payload_bytes) }}
     export NERVIX_CLIENT_WIRE_BASELINE_OUTPUT={{ quote(output) }}
-    cargo test --features testing --test scenarios -- \
+    cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/client_wire_baseline.feature \
         --tags @client_wire_baseline \
         --concurrency 1 \
@@ -735,6 +743,21 @@ test-deloxide-stress-workloads:
 test-deloxide-stress-restore-workloads:
     python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} run deloxide-stress-restore
 
+# Each selection's diagnostic executables, built as its workloads recipe builds them, without
+# running a workload. Like the workloads recipes they have no dependencies, so the native coverage
+# collector builds exactly the lane's executables inside its instrumentation before CI runs the lane.
+build-deloxide-executables:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} build deloxide
+
+build-deloxide-order-executables:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} build deloxide-order
+
+build-deloxide-stress-executables:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} build deloxide-stress
+
+build-deloxide-stress-restore-executables:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} build deloxide-stress-restore
+
 # Prove the lane's supervision on real failing processes: probe workloads that deadlock, fail their
 # diagnostics, hang on an untracked wait, abort, retain an unreviewed potential cycle or overflow
 # their retention must each fail the lane with its own class, keep their output and evidence, and
@@ -784,6 +807,11 @@ test-shuttle-checks filter="":
     if [[ -n "$evidence" ]]; then report=(--report "$evidence"); fi
     python3 -m scripts.shuttle_checks --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }} "${report[@]}"
 
+# Compile every package `test-shuttle-checks` explores, as it builds them, without running a check.
+[private]
+build-shuttle-checks:
+    python3 -m scripts.shuttle_checks build
+
 # Replay a schedule `test-shuttle` persisted under target/shuttle-failures in a fresh process. Its
 # parent directories name the exact package and check, so the schedule cannot run against another
 # invariant.
@@ -818,6 +846,11 @@ test-loom-models filter="":
     report=()
     if [[ -n "$evidence" ]]; then report=(--report "$evidence"); fi
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }} "${report[@]}"
+
+# Compile every package `test-loom-models` explores, as it builds them, without running a model.
+[private]
+build-loom-models:
+    python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} build
 
 # Measure the native runner's inventory, completion and failure artifact paths.
 coverage-loom-runner:
@@ -857,12 +890,7 @@ test-turmoil budget_seconds="480":
     python3 -m unittest --quiet scripts.tests.test_libtest_accounting
     turmoil_rustflags="--cfg tokio_unstable ${RUSTFLAGS:-}"
     export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
-    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
-        --package nervix-primitives --features 'turmoil native' --lib
-    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
-        --package nervix-execution --features turmoil --lib
-    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
-        --package nervix-interconnect --features turmoil --lib --test simulation
+    just build-turmoil-simulations
     logs={{ quote(cargo_target_dir + "/turmoil-suite") }}
     rm -rf "${logs}"
     mkdir -p "${logs}"
@@ -901,6 +929,19 @@ test-turmoil budget_seconds="480":
     python3 -m scripts.libtest_accounting turmoil --inventory tests/turmoil-inventory.toml \
         "${logs}/primitives.log" "${logs}/execution.log" "${logs}/interconnect-library.log" \
         "${logs}/interconnect-simulation.log"
+
+# Compile every test target `test-turmoil` runs, with its flags, and run none of them.
+[private]
+build-turmoil-simulations:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    turmoil_rustflags="--cfg tokio_unstable ${RUSTFLAGS:-}"
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-primitives --features 'turmoil native' --lib
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-execution --features turmoil --lib
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-interconnect --features turmoil --lib --test simulation
 
 # Run the interconnect's Turmoil simulation scenarios. Extra arguments filter or configure the test
 # binary, so one test can run without the execution and library checks. A selection that executes
@@ -1127,16 +1168,25 @@ build-client-conformance:
         ./node_modules/.bin/esbuild probe.ts --bundle --platform=node --format=esm \
             --target=es2022 --outfile="${artifacts}/node/probe.mjs")
 
+# Build the probes, the client library and the scenario suite the conformance run starts, so
+# `test-client-conformance-run` compiles nothing when it follows.
+build-client-conformance-tests: tests-deps build-client-conformance
+    cargo test --no-run --package nervix-scenarios --test scenarios
+
 # Run the cross-language client probes against in-process clusters. Every probe prints the same
 # report, which the scenario compares with its one expected report. Select runtimes with a tag
 # expression, for example `just test-client-conformance '@client_probe_python or @client_probe_java'`.
-test-client-conformance tags="@client_conformance_toolchain" *args: tests-deps build-client-conformance
+test-client-conformance tags="@client_conformance_toolchain" *args: build-client-conformance-tests
+    just test-client-conformance-run {{ quote(tags) }} {{ args }}
+
+# Run the conformance scenarios from what `build-client-conformance-tests` built.
+test-client-conformance-run tags="@client_conformance_toolchain" *args:
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }}
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/debug/libnervix_client_ffi.so") }}
-    cargo test --features testing --test scenarios -- \
+    cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/client_conformance.feature \
         --tags {{ quote(tags) }} {{ args }}
 
@@ -1171,7 +1221,14 @@ plexus-completion-walk-deep *args:
     cargo test -p nervix-plexus --test completion_walk -- \
       --report-only --signature-window 8 --max-states 1000000 {{ args }}
 
-test-coverage: tests-deps
+# Build every test binary the workspace coverage run executes, under the instrumentation of
+# `cargo llvm-cov` and into its target directory, so `test-coverage-run` compiles nothing.
+test-coverage-build: coverage-clean-workspace test-coverage-binaries
+
+# Build the workspace's test binaries beside what the target directory already holds, and record
+# the test executables a run starts. CI builds them after the scenario suite, so both share one
+# target directory and their dependencies compile once.
+test-coverage-binaries: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -1188,6 +1245,7 @@ test-coverage: tests-deps
         nervix-model-harness
         nervix-paced-simulation
         nervix-primitives
+        nervix-scenarios
         nervix-server
         nervix-wasm
     )
@@ -1195,14 +1253,20 @@ test-coverage: tests-deps
     for package in "${mode_packages[@]}"; do
         workspace_exclusions+=(--exclude "${package}")
     done
-    cargo llvm-cov clean --workspace
-    cargo llvm-cov --no-report --all-targets --all-features --workspace \
-        "${workspace_exclusions[@]}"
-    # These server targets cover every server test except the scenario suite, which runs in its
-    # own job.
-    cargo llvm-cov --no-report --lib --bins --benches --test harness_liveness \
-        --features testing --package nervix-server
-    cargo llvm-cov --no-report --all-targets \
+    # The environment and target directory `cargo llvm-cov` builds with, so the report finds every
+    # binary current.
+    source <(cargo llvm-cov show-env --sh 2>/dev/null)
+    export CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }}
+    messages={{ quote(justfile_directory() + "/target/unit-tests/cargo-messages.jsonl") }}
+    mkdir -p "$(dirname "${messages}")"
+    : > "${messages}"
+    coverage() { cargo test --no-run --message-format=json-render-diagnostics "$@" >> "${messages}"; }
+    coverage --all-targets --all-features --workspace "${workspace_exclusions[@]}"
+    # The server's own tests and the harness regressions: every test but the scenario suite, which
+    # runs in its own job.
+    coverage --lib --benches --features testing --package nervix-server
+    coverage --test harness_liveness --package nervix-scenarios
+    coverage --all-targets \
         --package nervix-client-core \
         --package 'nervix-connector*' \
         --package nervix-consensus \
@@ -1212,35 +1276,123 @@ test-coverage: tests-deps
         --package nervix-model-harness \
         --package nervix-paced-simulation \
         --package nervix-wasm
-    cargo llvm-cov --no-report --all-targets --features native --package nervix-primitives
+    coverage --all-targets --features native --package nervix-primitives
+    python3 -m scripts.unit_test_archive plan
+
+# Run the workspace's tests from the binaries `test-coverage-build` left or a restored archive
+# holds, and write their coverage. It compiles nothing: it starts each test executable directly, so
+# a run needs neither the build nor a cache.
+test-coverage-run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    # The profiles go where `cargo llvm-cov report` reads them, beside the executables.
+    source <(CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} cargo llvm-cov show-env --sh 2>/dev/null)
+    python3 -m scripts.unit_test_archive run
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
     # The checkout path the report's sources lie below, which `coverage-merge` strips from them.
     pwd -P > coverage-source-root.txt
 
-test-scenarios-coverage: tests-deps
+test-coverage: test-coverage-build test-coverage-run
+
+# Write the archive the tests job restores: the executables `test-coverage-binaries` left and the
+# generated inputs a test reads, which `scripts/unit_test_archive.py` names.
+test-coverage-pack archive:
+    python3 -m scripts.unit_test_archive pack {{ quote(archive) }}
+
+# Restore the archive `test-coverage-pack` wrote into a checkout of the same revision and path,
+# checking every file it holds and the shared libraries its executables load.
+test-coverage-unpack archive:
+    python3 -m scripts.unit_test_archive unpack {{ quote(archive) }}
+
+# Build the scenario suite and the binaries its scenarios start, under the instrumentation of
+# `cargo llvm-cov`, so `test-scenarios-coverage-run` compiles nothing. Cargo holds a target directory
+# for one build at a time, so each helper binary builds beside the suite in a directory of its own,
+# and is then installed into the target directory of `cargo llvm-cov`, where the suite starts it and
+# `cargo llvm-cov report` reads it.
+test-scenarios-coverage-build: build-deps coverage-clean-workspace (run-with-jobs "test-scenarios-coverage-binaries" "6")
+    #!/usr/bin/env bash
+    set -euo pipefail
+    suite={{ quote(cargo_target_dir + "/llvm-cov-target/debug") }}
+    tools={{ quote(coverage_tools_dir) }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} "${suite}/nervix-plexus-format"
+    install -m 755 "${tools}/cli/debug/nervix-cli" "${suite}/nervix-cli"
+    install -m 755 "${tools}/deadlock-report/debug/nervix-deadlock-report" "${suite}/nervix-deadlock-report"
+    install -m 755 "${tools}/paced-simulation/debug/nervix-paced-simulation" "${suite}/nervix-paced-simulation"
+    install -m 755 "${tools}/paced-simulation/debug/libnervix_client_ffi.so" "${suite}/libnervix_client_ffi.so"
+
+[private, parallel]
+test-scenarios-coverage-binaries: test-scenarios-coverage-suite build-plexus-format build-test-cli (coverage-cli-binary (coverage_tools_dir / "cli")) (coverage-deadlock-report-binary (coverage_tools_dir / "deadlock-report")) (coverage-paced-simulation-binaries (coverage_tools_dir / "paced-simulation"))
+
+[private]
+test-scenarios-coverage-suite:
+    eval "$(cargo llvm-cov show-env --sh 2>/dev/null)" && \
+        CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
+        cargo test --no-run --package nervix-scenarios --test scenarios
+
+# Run the scenario suite from the binaries `test-scenarios-coverage-build` left, and write the
+# coverage of the suite and of the paced-simulation Python driver.
+test-scenarios-coverage-run: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo llvm-cov clean --workspace
-    just coverage-cli-binary
-    just coverage-deadlock-report-binary
     export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
-    just coverage-paced-simulation-binaries
     export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
-    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
-        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
     collection_dir="$(mktemp -d {{ quote(cargo_target_dir + "/paced-simulation-coverage.XXXXXX") }})"
     export COVERAGE_FILE="${collection_dir}/python.coverage"
     export PYTHONPATH="{{ justfile_directory() }}/scripts/paced_simulation_coverage${PYTHONPATH:+:${PYTHONPATH}}"
     export COVERAGE_PROCESS_START="{{ justfile_directory() }}/scripts/paced_simulation_coverage/coverage.ini"
     uv run --no-project --with coverage==7.11.0 cargo llvm-cov --no-report \
-        --features testing --package nervix-server --test scenarios
+        --package nervix-scenarios --test scenarios
     uvx --from coverage==7.11.0 coverage combine --data-file "${collection_dir}/python.coverage"
     mkdir -p {{ quote(cargo_target_dir + "/paced-simulation") }}
     uvx --from coverage==7.11.0 coverage lcov --data-file "${collection_dir}/python.coverage" \
         -o "{{ cargo_target_dir }}/paced-simulation/python.lcov"
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
+    pwd -P > coverage-source-root.txt
+
+test-scenarios-coverage: test-scenarios-coverage-build test-scenarios-coverage-run
+
+# Write the archive the scenario shards restore: the executables `test-scenarios-coverage-build`
+# left and the generated inputs a scenario run reads, which `scripts/scenario_shards.py` names.
+test-scenarios-coverage-pack archive:
+    python3 -m scripts.scenario_shards pack {{ quote(archive) }}
+
+# Restore the archive `test-scenarios-coverage-pack` wrote into a checkout of the same revision and
+# path, checking every file it holds and the shared libraries its executables load.
+test-scenarios-coverage-unpack archive:
+    python3 -m scripts.scenario_shards unpack {{ quote(archive) }}
+
+# Run one shard, written INDEX/COUNT, of the scenario suite from the executables a restored archive
+# holds, and write the coverage of the shard and of the paced-simulation Python driver. It compiles
+# nothing: it runs the scenario executable directly, so a shard needs neither the build nor a cache.
+test-scenarios-coverage-shard shard:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
+    export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
+    collection_dir="$(mktemp -d {{ quote(cargo_target_dir + "/paced-simulation-coverage.XXXXXX") }})"
+    export COVERAGE_FILE="${collection_dir}/python.coverage"
+    export PYTHONPATH="{{ justfile_directory() }}/scripts/paced_simulation_coverage${PYTHONPATH:+:${PYTHONPATH}}"
+    export COVERAGE_PROCESS_START="{{ justfile_directory() }}/scripts/paced_simulation_coverage/coverage.ini"
+    # The profiles go where `cargo llvm-cov report` reads them, beside the restored executables.
+    source <(CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} cargo llvm-cov show-env --sh 2>/dev/null)
+    executable="$(python3 -m scripts.scenario_shards executable)"
+    uv run --no-project --with coverage==7.11.0 "${executable}" --shard {{ quote(shard) }}
+    # A shard may hold no run of the Python driver, and then it has no Python coverage to report.
+    if compgen -G "${collection_dir}/python.coverage.*" > /dev/null; then
+        uvx --from coverage==7.11.0 coverage combine --data-file "${collection_dir}/python.coverage"
+        mkdir -p {{ quote(cargo_target_dir + "/paced-simulation") }}
+        uvx --from coverage==7.11.0 coverage lcov --data-file "${collection_dir}/python.coverage" \
+            -o "{{ cargo_target_dir }}/paced-simulation/python.lcov"
+    else
+        echo "Shard {{ shard }} ran no paced-simulation Python driver, so it reports no Python coverage."
+    fi
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
     pwd -P > coverage-source-root.txt
 
@@ -1348,17 +1500,22 @@ coverage-harness-liveness *args: tests-deps
     echo "harness coverage attempt: $harness_report"
     export CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/harness-coverage") }}
     cargo llvm-cov clean --workspace
-    cargo llvm-cov --no-report --features testing --package nervix-server --test harness_liveness -- {{ quote(args) }} 2>&1 | tee "$harness_report/tests.log"
+    cargo llvm-cov --no-report --package nervix-scenarios --test harness_liveness -- {{ quote(args) }} 2>&1 | tee "$harness_report/tests.log"
     if ! rg --quiet '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$harness_report/tests.log"; then
         echo "harness coverage selection completed no tests or ignored selected tests" >&2
         exit 1
     fi
-    cargo llvm-cov report --package nervix-server --no-default-ignore-filename-regex --lcov --output-path "$harness_report/lcov.info"
+    cargo llvm-cov report --package nervix-scenarios --no-default-ignore-filename-regex --lcov --output-path "$harness_report/lcov.info"
     echo "harness coverage report: $harness_report/lcov.info"
 
 # Export the current ordinary harness profiles after a replay, without another test invocation.
 coverage-harness-liveness-report output:
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/harness-coverage") }} cargo llvm-cov report --package nervix-server --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/harness-coverage") }} cargo llvm-cov report --package nervix-scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+
+# Fetch artifacts of a CI run from their bucket, with the R2_ARTIFACTS_* variables set: pass
+# `--name NAME` or `--pattern GLOB`, and `--path DIR`.
+ci-artifact-download run *args:
+    python3 -m scripts.ci_artifacts download --run {{ quote(run) }} {{ args }}
 
 # Judge whether a pull request's head revision holds the complete evidence a release needs: every
 # check tests/release-evidence.toml requires passed on that revision and the label of every
@@ -1411,7 +1568,7 @@ test-coverage-feature +features: tests-deps
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     for feature in {{ features }}; do
-        cargo llvm-cov --no-report --features testing --package nervix-server \
+        cargo llvm-cov --no-report --package nervix-scenarios \
             --test scenarios -- --input "${feature}" --concurrency 1
     done
     cargo llvm-cov report --package nervix-cli --package nervix-server --lcov \
@@ -1442,7 +1599,7 @@ test-coverage-scenario-filter feature filter:
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
-    cargo llvm-cov --no-report --features testing --package nervix-server \
+    cargo llvm-cov --no-report --package nervix-scenarios \
         --test scenarios -- --input {{ quote(feature) }} --name {{ quote(filter) }} \
         --concurrency 1 --retry 0
 
@@ -1466,7 +1623,7 @@ test-coverage-clients: tests-deps
         tests/features/web-console/plexus_repl.feature \
         tests/features/web-console/domain_clock.feature \
         tests/features/tools/cli_session.feature; do
-        cargo llvm-cov --no-report --features testing --package nervix-server \
+        cargo llvm-cov --no-report --package nervix-scenarios \
             --test scenarios -- --input "${feature}" --concurrency 1
     done
     just coverage-clients-report
@@ -1483,29 +1640,21 @@ coverage-web-console-unit:
 
 # Build the standalone CLI with the same coverage flags as its binary unit tests. Cargo's
 # all-targets test pass alone leaves only the test executable, which public scenarios do not run.
-coverage-cli-binary:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    source <(cargo llvm-cov show-env --sh 2>/dev/null)
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
-        cargo build --package nervix-cli --bin nervix-cli
+coverage-cli-binary target_dir=(cargo_target_dir + "/llvm-cov-target"):
+    eval "$(cargo llvm-cov show-env --sh 2>/dev/null)" && \
+        CARGO_TARGET_DIR={{ quote(target_dir) }} cargo build --package nervix-cli --bin nervix-cli
 
 # The local diagnostic report workflow uses this ordinary instrumented executable.
-coverage-deadlock-report-binary:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    source <(cargo llvm-cov show-env --sh --no-rustc-wrapper 2>/dev/null)
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
+coverage-deadlock-report-binary target_dir=(cargo_target_dir + "/llvm-cov-target"):
+    eval "$(cargo llvm-cov show-env --sh --no-rustc-wrapper 2>/dev/null)" && \
+        CARGO_TARGET_DIR={{ quote(target_dir) }} \
         cargo build --package nervix-deadlock --features report-tool --bin nervix-deadlock-report
 
 # Build the paced simulation's Rust driver, and the shared C binding its Python driver loads, with
 # the same coverage flags, so the public scenarios that run both drivers count the lines they reach.
-coverage-paced-simulation-binaries:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    source <(cargo llvm-cov show-env --sh 2>/dev/null)
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
-        cargo build --package nervix-paced-simulation --package nervix-client-ffi
+coverage-paced-simulation-binaries target_dir=(cargo_target_dir + "/llvm-cov-target"):
+    eval "$(cargo llvm-cov show-env --sh 2>/dev/null)" && \
+        CARGO_TARGET_DIR={{ quote(target_dir) }} cargo build --package nervix-paced-simulation --package nervix-client-ffi
 
 coverage-clients-units:
     cargo llvm-cov --no-report --bins \
@@ -1525,7 +1674,7 @@ coverage-visual-create output="target/visual-create.lcov": tests-deps
     cargo llvm-cov --no-report --bin nervix-web-console --package nervix-web-console
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     for feature in visual_create_schema visual_create_relay visual_create_codec visual_create_client_endpoint visual_create_lookup_udf visual_create_ingestor visual_create_processors; do
-        cargo llvm-cov --no-report --features testing --package nervix-server \
+        cargo llvm-cov --no-report --package nervix-scenarios \
             --test scenarios -- --input "tests/features/web-console/${feature}.feature" \
             --concurrency 1 --retry 0
     done
@@ -1550,11 +1699,11 @@ coverage-otel output="target/otel.lcov": build-web-console
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo llvm-cov --no-clean --features testing --test scenarios \
+    cargo llvm-cov --no-clean --package nervix-scenarios --test scenarios \
         --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- \
         --input {{ quote(justfile_directory() / "tests/features/runtime/otel*.feature") }} \
         --concurrency 4 --retry 0
-    cargo llvm-cov --no-clean --features testing --test scenarios \
+    cargo llvm-cov --no-clean --package nervix-scenarios --test scenarios \
         --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- \
         --input {{ quote(justfile_directory() / "tests/features/runtime/connector_validation*.feature") }} \
         --concurrency 4 --retry 0
@@ -1569,14 +1718,14 @@ coverage-backup-archives output="target/backup-archives.lcov": tests-deps
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     cargo llvm-cov --no-report --lib --package nervix-backup
     cargo llvm-cov --no-report --lib --package nervix-plexus -- backup
-    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+    cargo llvm-cov --no-report --package nervix-scenarios --test scenarios -- \
         --input tests/features/cluster/backup.feature \
         --name 'A quiesced backup restores two WASM branches and Kafka domain offsets' \
         --concurrency 2 --retry 0
     cargo llvm-cov --no-report --features testing --package nervix-server --lib -- materialized_snapshot
     cargo llvm-cov --no-report --features testing --package nervix-server --lib -- backup
     cargo llvm-cov --no-report --features testing --package nervix-server --lib -- runtime::state_store::checkpoint_reader
-    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+    cargo llvm-cov --no-report --package nervix-scenarios --test scenarios -- \
         --input tests/features/cluster/backup_materialized.feature \
         --name 'A resumed materialized cut preserves interleaved branches and generators through restart|Materialized generations larger than the bulk budget resume on every assigned owner and replica' \
         --concurrency 2 --retry 0
@@ -1600,7 +1749,7 @@ coverage-backup-branch-state output="target/backup-branch-state.lcov": tests-dep
     cargo llvm-cov --no-report --features testing --package nervix-server --lib -- \
         deduplicator window_ backup restore branch_state runtime_ack snapshot_staging \
         materialized_snapshot checkpoint_stream arrow_body client_batch
-    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+    cargo llvm-cov --no-report --package nervix-scenarios --test scenarios -- \
         --input 'tests/features/cluster/backup_branch_state*.feature' --concurrency 2 --retry 0
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
         --package nervix-backup --package nervix-models --package nervix-server --package nervix-cli \
@@ -1629,7 +1778,7 @@ coverage-wasm output="target/wasm-representations.lcov": build-web-console wasm-
     cargo llvm-cov --no-report --lib --tests --package nervix-wasm-protocol
     cargo llvm-cov --no-report --lib --package nervix-backup -- wasm_properties
     cargo llvm-cov --no-report --features testing --lib --package nervix-server -- wasm_properties
-    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+    cargo llvm-cov --no-report --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/wasm_processor.feature --name '^Malformed.*output' \
         --concurrency 1 --retry 0
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
@@ -1651,7 +1800,7 @@ coverage-archive-counts output="target/archive-counts.lcov": tests-deps
         registry::storage::tests
     cargo llvm-cov --no-report --features testing --package nervix-server --lib -- \
         runtime::window_state::tests
-    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+    cargo llvm-cov --no-report --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/session_subscription_options.feature \
         --name Blocking.sampled.session --retry 0
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
@@ -1714,7 +1863,7 @@ coverage-scenarios output *args: tests-deps
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
-    cargo llvm-cov --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+    cargo llvm-cov --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Add selected scenarios to the current coverage profiles without rebuilding unchanged artifacts.
 coverage-scenarios-append output *args: tests-deps
@@ -1730,7 +1879,7 @@ coverage-scenarios-append output *args: tests-deps
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
-    cargo llvm-cov --no-clean --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+    cargo llvm-cov --no-clean --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Measure both published paced drivers through their public scenarios, including Python threads
 # and Rust unit tests. The Python report is written beside `output` with a `.python.lcov` suffix.
@@ -1786,7 +1935,7 @@ coverage-redis output="target/redis-dns.lcov": tests-deps
     just coverage-deadlock-report-binary
     export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
-    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+    cargo llvm-cov --no-report --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/redis_dns_resolution.feature --name Redis --retry 0 --concurrency 1
     just coverage-redis-report {{ quote(output) }}
 
@@ -1838,7 +1987,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     run_scenario() {
-        cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+        cargo llvm-cov --no-report --package nervix-scenarios --test scenarios -- \
             --input "$1" --name "$2" --retry 0 --concurrency 1
     }
     run_scenario tests/features/runtime/http_client_ingestion.feature 'DNS.*fixture'
@@ -1935,6 +2084,13 @@ coverage-turmoil output:
 # Run all: `just coverage-native-extras`; one: `just coverage-native-extras bench-smoke`.
 coverage-native-extras *producers:
     python3 -m scripts.native_coverage --target-dir {{ quote(cargo_target_dir) }} run {{ producers }}
+
+# Compile the named producers' instrumented executables without running them: their prepare
+# recipes, then each one's build recipe in the instrumented build `coverage-native-extras` collects
+# from, which then compiles nothing. CI builds `test-shuttle`, `test-loom`, `test-turmoil` and each
+# Deloxide lane selection this way, and publishes its cache before the run.
+coverage-native-extras-build +producers:
+    python3 -m scripts.native_coverage --target-dir {{ quote(cargo_target_dir) }} build {{ producers }}
 
 # CI calls these only after the owning phase succeeds. Exported coverage and compiler evidence
 # live outside these Cargo build outputs; failed phases keep their outputs for diagnosis.
@@ -2337,7 +2493,7 @@ ordinary-clippy-targets: \
     *(clippy-target *clippy_all_features_packages ["--all-features", "--all-targets"]) \
     *(clippy-target *clippy_connector_packages ["--all-targets"]) \
     *(clippy-target *["nervix-execution", "nervix-interconnect", "nervix-model-harness", "nervix-wasm", "nervix-connector-fake"] ["--all-targets"]) \
-    (clippy-target "nervix-server" ["--all-targets", "--features", "benchmarks testing"]) \
+    (clippy-target "nervix-server" ["--all-targets", "--package", "nervix-scenarios", "--features", "benchmarks testing"]) \
     (clippy-target "nervix-client-core" ["--all-targets", "--features", "autocomplete"]) \
     (clippy-target "nervix-paced-simulation" ["--all-targets"]) \
     (clippy-target "nervix-consensus" ["--all-targets", "--features", "testing"]) \
@@ -2389,26 +2545,27 @@ deloxide-clippy-targets: \
     (clippy-target "nervix-deadlock" ["--all-targets", "--features", "deloxide"]) \
     (clippy-target "nervix-paced-simulation" ["--all-targets", "--features", "deloxide"]) \
     (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide"]) \
-    (clippy-target "nervix-server" ["--all-targets", "--features", "deloxide testing"]) \
+    (clippy-target "nervix-server" ["--all-targets", "--package", "nervix-scenarios", "--features", "deloxide testing"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "deloxide-order native"]) \
     (clippy-target "nervix-deadlock" ["--all-targets", "--features", "deloxide-order"]) \
     (clippy-target "nervix-paced-simulation" ["--all-targets", "--features", "deloxide-order"]) \
     (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide-order"]) \
-    (clippy-target "nervix-server" ["--all-targets", "--features", "deloxide-order testing"]) \
+    (clippy-target "nervix-server" ["--all-targets", "--package", "nervix-scenarios", "--features", "deloxide-order testing"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "deloxide-stress native"]) \
     (clippy-target "nervix-deadlock" ["--all-targets", "--features", "deloxide-stress"]) \
     (clippy-target "nervix-paced-simulation" ["--all-targets", "--features", "deloxide-stress"]) \
     (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide-stress"]) \
-    (clippy-target "nervix-server" ["--all-targets", "--features", "deloxide-stress testing"])
+    (clippy-target "nervix-server" ["--all-targets", "--package", "nervix-scenarios", "--features", "deloxide-stress testing"])
 
-# Clippy configurations share four build directories, so a dependency one configuration compiled is
-# fresh for the others in its directory that compile it alike. Cargo keeps the artifacts of
-# different features, profiles, targets and flags, and of the stable and nightly compilers, apart
-# there. The SHA-256 of the package, Cargo arguments and toolchain, modulo four, selects the
-# directory, so a configuration returns to the one that holds its artifacts. Four divides 16, so the
-# hash's last hexadecimal digit decides the remainder.
-hexadecimal_modulo_four(hash) := if hash =~ '[048c]$' { "0" } else if hash =~ '[159d]$' { "1" } else if hash =~ '[26ae]$' { "2" } else { "3" }
-clippy_build_directory(package, args, toolchain) := cargo_target_dir / "clippy" / hexadecimal_modulo_four(sha256(show([package, args, toolchain])))
+# Clippy configurations share sixteen build directories, so a dependency one configuration compiled
+# is fresh for the others in its directory that compile it alike, while Cargo's lock on a directory
+# lets up to sixteen configurations build at once; `--jobs` bounds how many do. With four
+# directories, the four builds holding their locks left a 16-CPU runner's other cores idle. Cargo
+# keeps the artifacts of different features, profiles, targets and flags, and of the stable and
+# nightly compilers, apart there. The last hexadecimal digit of the SHA-256 of the package, Cargo
+# arguments and toolchain selects the directory, so a configuration returns to the one that holds
+# its artifacts.
+clippy_build_directory(package, args, toolchain) := cargo_target_dir / "clippy" / replace_regex(sha256(show([package, args, toolchain])), '^.*(.)$', '$1')
 
 # The shared Clippy command accepts one package and its Cargo arguments. Configurations that share
 # a build directory take turns on its lock. Keep kache configured.
@@ -2666,11 +2823,20 @@ validate-dns-dependencies:
         exit 1
     fi
 
-# Check formatting and validate with the same concurrency default as local validation.
+# Check formatting and validate with the same concurrency default as local validation. The checks run
+# beside each other, each Cargo build in a target directory of its own, so a check never waits for
+# another's directory lock; `jobs` bounds how many recipes run at once. The ratchet's tools build
+# beside them, and the ratchet runs after them, as the dependency of
+# `validate-deloxide-applicability`, which reads its gate: its analyses admit themselves against the
+# host's memory as if nothing else ran, and beside the lints the kernel killed its server analysis
+# for memory (Check 41066649586).
 validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
 
 [private]
-validate-ci-targets: fmt-check lint-targets validate-skill validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
+validate-ci-targets: validate-ci-checks validate-deloxide-applicability
+
+[private, parallel]
+validate-ci-checks: fmt-check lint-targets validate-skill validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies test-go-ci-tool typed-ratchet-build typed-ratchet-source-build install-cargo-crap
 
 # Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
@@ -2723,6 +2889,8 @@ validate-execution-mode-conflicts:
     set -euo pipefail
     # The diagnostics are read as text, so Cargo must not color them even where the caller asks.
     export CARGO_TERM_COLOR=never
+    # Beside the other validation builds, in a directory whose lock no other check takes.
+    export CARGO_TARGET_DIR={{ quote(cargo_target_dir / "validate" / "mode-conflicts") }}
     diagnostics="$(mktemp)"
     trap 'rm -f "${diagnostics}"' EXIT
     expect_failure() {
@@ -2829,13 +2997,13 @@ test-plexus-backup-completion:
 # Parse every runnable Plexus block in the documentation directly through the parser crate. Syntax
 # synopses and statement fragments remain Plexus-labelled but opt out explicitly with `plexus,ignore`.
 validate-plexus-docs:
-    cargo test -p nervix-plexus --test documentation -- --nocapture
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir / "validate" / "plexus-docs") }} cargo test -p nervix-plexus --test documentation -- --nocapture
 
 # Hold tests/connector-capability-inventory.toml to the connector entities' declarations and the
 # scenario suite: every capability an entity declares names a scenario that observes it at run
 # time, every entry names a declared capability once, and every scenario it names exists.
 validate-connector-capabilities:
-    cargo test -p nervix-models --test capability_inventory
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir / "validate" / "connector-capabilities") }} cargo test -p nervix-models --test capability_inventory
 
 # Read the vocabulary directly; no Rust-source or manual-table parser supplies capability facts.
 connector-declarations:
@@ -2901,7 +3069,7 @@ test-docs: typed-ratchet-source-build install-cargo-crap
 # reference chapters are rendered from the current binaries, so a published book can never describe
 # an older build.
 book version="0.1.0-dev": test-docs docs-screenshots
-    python scripts/build_book.py --version {{ version }}
+    python3 scripts/build_book.py --version {{ version }}
 
 validate-skill:
     env GH_PROMPT_DISABLED=1 gh skill publish .agents/skills --dry-run
@@ -2967,14 +3135,14 @@ publish-dir source target zone_id alias="snapshot" bucket="nervix-docs":
     uv run --locked python scripts/publish_docs_alias.py --source {{ source }} --target {{ target }} --alias {{ alias }} --bucket {{ bucket }} --zone-id {{ zone_id }}
 
 purge-cache zone_id:
-    python scripts/purge_cloudflare_cache.py --zone-id {{ zone_id }}
+    python3 scripts/purge_cloudflare_cache.py --zone-id {{ zone_id }}
 
 worker-deploy zone_id="":
     #!/usr/bin/env bash
     set -euo pipefail
     npx --yes wrangler deploy --config cloudflare/docs-worker/wrangler.jsonc
     if [[ -n "{{ zone_id }}" ]]; then
-        python scripts/purge_cloudflare_cache.py --zone-id {{ zone_id }}
+        python3 scripts/purge_cloudflare_cache.py --zone-id {{ zone_id }}
     fi
 
 publish-book target zone_id alias="snapshot" bucket="nervix-docs":
@@ -3681,7 +3849,7 @@ docker-build-linux image_target llvm_version tag platform push cache_from cache_
         --target {{ quote(image_target) }} \
         --progress=plain \
         --platform "${normalized_platform}" \
-        --build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.1}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.2}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg LLVM_VERSION={{ quote(llvm_version) }} \
         --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}" \

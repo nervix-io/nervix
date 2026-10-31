@@ -28,8 +28,8 @@ use nervix_connector::{
     IngestorBatchAcknowledgement, IngestorBatchRequest, IngestorCapabilities, IngestorConnector,
     IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError, IngestorIntakeMessage,
     IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll, IngestorResume,
-    IngestorSettlement, PacedIngestorConnector, ParsedRetryPolicy, RetainedIngestHeaders,
-    next_retry_delay, physical_time::actual_utc_now,
+    IngestorSettlement, PacedIngestorConnector, ParsedRetryPolicy, next_retry_delay,
+    physical_time::actual_utc_now,
 };
 use nervix_models::{DomainClockPeriod, IngestAcknowledgement, PositionClass};
 use nervix_primitives::sync::CancellationToken;
@@ -89,9 +89,9 @@ impl IngestorSpec {
         Report::new(cause).change_context(self.initialize_failure())
     }
 
-    /// The metadata namespace this ingestor's messages expose to its programs, which the entity
-    /// its ingestor reads declares.
-    pub(in crate::runtime) fn metadata_scope(&self) -> IngestorMetadataScope {
+    /// The metadata fields this ingestor's messages expose to its programs, which the entity its
+    /// ingestor reads declares.
+    pub(in crate::runtime) fn metadata_declaration(&self) -> IngestorMetadataDeclaration {
         self.declared_input.entity_kind().capabilities().metadata
     }
 
@@ -103,7 +103,6 @@ impl IngestorSpec {
     ) -> IngestorCapabilities {
         IngestorCapabilities::new(
             self.reads_headers(),
-            self.metadata_scope(),
             self.declared_input
                 .supports_quiesce(self.declared_input.quiesce_mode()),
             instances,
@@ -451,7 +450,6 @@ impl Runtime {
                 shutdown: shutdown_tx.subscribe(),
                 instance_index,
                 readiness,
-                metadata_scope: ingestor.metadata_scope(),
                 buffered_intake,
                 flush_each_intake,
                 unacknowledged_admission,
@@ -527,7 +525,6 @@ pub(super) struct RuntimeIngestorHostSpec {
     pub(super) shutdown: watch::Receiver<bool>,
     pub(super) instance_index: u64,
     pub(super) readiness: ingestor_quiesce::IngestorInstanceReadiness,
-    pub(super) metadata_scope: IngestorMetadataScope,
     pub(super) buffered_intake: bool,
     pub(super) flush_each_intake: bool,
     pub(super) unacknowledged_admission: QueueAdmission,
@@ -589,7 +586,7 @@ impl RuntimeIngestorHost {
             .runtime
             .ingestor_ack_root_trackers(&spec.domain, &spec.ingestor);
         let collector = IngestRouteCollector::new(
-            spec.metadata_scope,
+            spec.output_routes.metadata.clone(),
             INGEST_GROUP_MAX_ROWS,
             spec.metrics.clone(),
         );
@@ -698,40 +695,6 @@ impl RuntimeIngestorHost {
 }
 
 impl RuntimeIngestorHost {
-    /// The metadata a quiesce buffer keeps for a message after the ingestor message is gone.
-    fn retained_metadata(
-        metadata: &IngestMetadataRow<'_>,
-    ) -> IngestorIntakeResult<BufferedIngestMetadata> {
-        match metadata {
-            IngestMetadataRow::Http {
-                status,
-                polled_at,
-                headers,
-            } => Ok(BufferedIngestMetadata::Http {
-                status: *status,
-                polled_at: *polled_at,
-                headers: RetainedIngestHeaders::capture(*headers),
-            }),
-            IngestMetadataRow::Websockets {
-                frame_type,
-                headers,
-            } => Ok(BufferedIngestMetadata::Websockets {
-                frame_type: *frame_type,
-                headers: (*headers).clone(),
-            }),
-            IngestMetadataRow::Syslog { peer_addr } => Ok(BufferedIngestMetadata::Syslog {
-                peer_addr: *peer_addr,
-            }),
-            IngestMetadataRow::Headers { headers } => Ok(BufferedIngestMetadata::Headers(
-                RetainedIngestHeaders::capture(*headers),
-            )),
-            IngestMetadataRow::Kafka { .. } => Err(Report::new(IngestorIntakeError::Retain)
-                .attach_printable(
-                    "Kafka source input supports suspension instead of quiesce buffering",
-                )),
-        }
-    }
-
     /// Unacknowledged input the quiesce control decides on as one payload, which it buffers,
     /// drops, or lets dispatch: input read while the ingestor is quiesced, or a batch whose
     /// decision changed while it waited for the node's extension workers.
@@ -749,7 +712,7 @@ impl RuntimeIngestorHost {
         let mut entries = Vec::with_capacity(messages.len());
         for message in messages {
             nervix_primitives::task::consume_budget().await;
-            let metadata = Self::retained_metadata(&message.metadata)?;
+            let metadata = BufferedIngestMetadata::retain(&message.metadata);
             entries.push((message.payload.to_vec(), metadata));
         }
         let payload = BufferedIngestPayload::batch(entries, actual_utc_now());
@@ -777,7 +740,7 @@ impl RuntimeIngestorHost {
         let mut admitted = Vec::with_capacity(messages.len());
         for message in messages {
             nervix_primitives::task::consume_budget().await;
-            let metadata = Self::retained_metadata(&message.metadata)?;
+            let metadata = BufferedIngestMetadata::retain(&message.metadata);
             let retained = BufferedIngestPayload::new(message.payload, metadata, actual_utc_now());
             match self.quiesce.intake(self.instance_index, retained, false) {
                 IngestorQuiesceIntake::Dispatch(_) => admitted.push(message),
@@ -812,7 +775,7 @@ impl RuntimeIngestorHost {
         messages: Vec<IngestorIntakeMessage<'_>>,
     ) -> IngestorIntakeResult<RuntimeBatchAcknowledgement> {
         let mut collector = IngestRouteCollector::new(
-            self.collector.scope,
+            self.collector.projection.clone(),
             messages.len().max(1),
             self.metrics.clone(),
         );

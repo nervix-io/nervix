@@ -575,7 +575,8 @@ choose a backend.
   or reconfigures it for a node or a test. Every other family of the build stays ordinary.
 - A package that owns a `shuttle`, `loom`, `turmoil` or `deloxide` feature depends on
   `nervix-primitives` directly and forwards the mode to it and to every workspace dependency that
-  owns the same mode.
+  owns the same mode. A package of test targets alone does so through its dev-dependencies, which
+  are what its builds link.
   Cargo unifies features, so ordinary and modeled suites run in separate build invocations with
   explicit features; a workspace-wide `--all-features` command excludes every package that owns a
   mode.
@@ -1272,6 +1273,29 @@ build and the existing tests, and nothing in it changes behavior.
   an instant captured earlier only holds on an idle machine.
 - Browser behavior is tested through the standard web-console cucumber suite and Playwright-facing
   steps, not by bypassing the public browser flow.
+- The scenario suite and the harness regressions are the `nervix-scenarios` package rooted at
+  `tests/`, which has test targets only and dev-dependencies only. Cargo builds a package's binaries
+  for that package's integration tests, so a test target added to `nervix-server` links the whole
+  server a second time, and a normal dependency would carry the server's `testing` feature into
+  ordinary builds.
+- Scenarios run nodes in-process, as Rust values. A test whose subject is a process, such as its
+  signals, exit status, command line, open-file limit or crash, runs its own executable again:
+  `tests/common/process_program.rs` starts `current_exe` with `arg0` set to `nervix-server`, and
+  `main` reads `arg0` before anything else and calls `run_server_process`, the entry point the
+  `nervix-server` executable's own `main` calls. A test never uses `CARGO_BIN_EXE_nervix-server`,
+  looks for a server binary in a target directory, or needs a recipe to build one. A new helper
+  process joins `ProcessProgram` the same way rather than becoming a binary. The one exception is a
+  test whose subject is one particular build, such as the client protocol's release baseline: the
+  recipe that runs it builds that server and names it to the test.
+- A test compiles nothing. It never runs Cargo, a compiler or a package manager. `just` builds every
+  tool a test starts before the test starts: a tool joins `tests-deps` and what
+  `scripts/scenario_shards.py` packs, because a shard has no toolchain. A failed build is then
+  reported as a build failure, a test's deadlines measure the test, and the suite runs from one
+  build wherever it is restored.
+- Testcontainers fully handles every dependency a test needs. `crates/test-environment` declares
+  each service, and testcontainers pulls or builds its image and starts it on first use. A recipe,
+  workflow or CI step never prepares, starts or stops a dependency, and running the tests needs no
+  step before them for it.
 
 ### Repository commands and documentation
 
@@ -1430,14 +1454,14 @@ build and the existing tests, and nothing in it changes behavior.
   `client-conformance`; a pull request that changes the client protocol, the shared binding or a
   probe carries that label.
 - `just chaos suite smoke|soak --image IMAGE` runs the external chaos suites against an already
-  built image; [External Cluster Chaos](docs/src/cluster-chaos.md) documents them. CI runs the
-  smoke suite against a pull request's own images only for a pull request labeled `chaos`, and the
-  soak suite for one labeled `chaos-soak` and nightly on `main`; a pull request that changes the
-  chaos runner, or the membership, failover, recovery or delivery behavior its scenarios verify,
-  carries the `chaos` label. Each suite runs against the release image and against the Deloxide
-  diagnostic image of the same revision, whose label makes every run fail unless the deadlock
-  evidence of each process its nodes started qualifies; a change to the diagnostic image, its
-  evidence collection or a path its scenarios exercise under tracked locks keeps both green.
+  built image; [External Cluster Chaos](docs/src/cluster-chaos.md) documents them. CI runs the smoke
+  suite against a pull request's own images only for a pull request labeled `chaos`, and the soak
+  suite for one labeled `chaos-soak`; a pull request that changes the chaos runner, or the
+  membership, failover, recovery or delivery behavior its scenarios verify, carries the `chaos`
+  label. Each suite runs against the release image and against the Deloxide diagnostic image of the
+  same revision, whose label makes every run fail unless the deadlock evidence of each process its
+  nodes started qualifies; a change to the diagnostic image, its evidence collection or a path its
+  scenarios exercise under tracked locks keeps both green.
 - Directed-link loss proof, for random, burst and combined loss, samples 400 packets at 10 ms
   intervals within the same approximately four-second observation window and 30-second sample
   bound; the probe helper's Docker launch has a separate bound. A loss floor judged over 40
@@ -1456,8 +1480,8 @@ build and the existing tests, and nothing in it changes behavior.
   workflows and fails when the inventory lacks one of their jobs.
 - `just plexus-completion-walk` walks the Plexus completion graph and fails on any branch that cannot be
   completed by accepting the suggestions the parser offers. It is deliberately outside `just test`
-  and runs in CI beside the main tests, in the job that carries the workspace-wide checks. Grammar
-  changes that add a label must keep it passing; a new finding is a defect, not something to record
+  and runs in CI for a pull request labeled `extra-completion-walk`. Grammar changes that add a
+  label carry that label and must keep it passing; a new finding is a defect, not something to record
   in its baseline. `just plexus-completion-walk-deep` relaxes deduplication to reach branches the
   gating budget stops short of.
 - A change to a primitive adapter or a synchronization protocol runs the checks of every mode it
@@ -1494,6 +1518,19 @@ build and the existing tests, and nothing in it changes behavior.
   `just cargo-clippy-shuttle`, also part of `just lint`, lints every Shuttle build with warnings
   denied, including each package `just test-shuttle` explores in test mode, so a warning in a check
   fails validation.
+- CI's `extra-tests` job is optional: each `extra-*` label selects its own steps, and the job is
+  skipped without any. A pull request carries the label of what it affects: `extra-compiler` for a
+  compiler rule or fixture, `extra-primitives` for a primitive, `extra-completion-walk` for grammar,
+  `extra-connector-matrix` for a connector declaration, `extra-runners` for a CI reporter, gate or
+  collector, `extra-doctests` for an API with paired doctests, `extra-miri` and `extra-mutation` for
+  the expiry map, and `extra-bench-smoke` for a benchmark. A new step of that job takes a label, and
+  `tests/release-evidence.toml` requires every one.
+- [Developing Nervix](docs/src/developing-nervix.md#ci-labels) lists every label that changes what
+  CI runs, and a change that adds, removes or renames one keeps that table current in the same
+  change. A pull request carries `benchmark` only when its task requires a measured comparison, and
+  `no-docker` only when nothing in it needs an image. Adding or removing any label cancels a Check
+  in progress and starts it again, so a pull request sets its labels before the run it means to
+  keep.
 - `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
   instrumentation: `test-typed-ratchet`, `bench-smoke`, `plexus-completion-walk`,
   `validate-connector-matrix`, the canonical `test-shuttle` and `test-loom` runners, the canonical
@@ -1553,9 +1590,9 @@ build and the existing tests, and nothing in it changes behavior.
   records the run's event and pull request label snapshot, its suite and Bolero selection, its run
   and attempt, the tested revision and each producer job's result. CI's `coverage-full` job runs it
   after every producer job, including a skipped or failed one, from downloaded artifacts only. The
-  selection derives the required producers: the ordinary report, the modeled primitive
-  conformance and diagnostic-evidence collections, and the producers the `shuttle`, `loom`,
-  `turmoil`, `deloxide` and `fuzz` labels enable. A run without `fuzz` requires the Bolero call's
+  selection derives the required producers: the ordinary report, the diagnostic-evidence
+  collections, and the producers the `extra-primitives`, `shuttle`, `loom`, `turmoil`, `deloxide`
+  and `fuzz` labels enable. A run without `fuzz` requires the Bolero call's
   recorded deliberate skip and refuses a fuzz report, and the call's record must show the
   randomized run's success where `bolero-random` requested it and its deliberate skip elsewhere.
   A missing, stale, foreign, corrupt, failed, incomplete or unselected input fails the union,

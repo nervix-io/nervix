@@ -1,0 +1,36 @@
+name: Upload a CI artifact
+description: Store files of this job in the run's R2 bucket, for later jobs of the run.
+inputs:
+  name:
+    description: Artifact name, unique within the run. A rerun's upload replaces its earlier one.
+    required: true
+  path:
+    description: Files to store, one pattern a line; scripts/ci_artifacts.py states how they are rooted.
+    required: true
+  if-no-files-found:
+    description: warn, error or ignore, when the paths select nothing.
+    default: warn
+  compression-level:
+    description: Gzip level from 1 to 9, or 0 for files that are compressed already.
+    default: "1"
+  retention:
+    description: standard, or transfer for a large artifact only later jobs of this run read.
+    default: standard
+runs:
+  using: composite
+  steps:
+    - name: Upload ${{ inputs.name }}
+      shell: bash
+      env:
+        ARTIFACT_NAME: ${{ inputs.name }}
+        ARTIFACT_PATH: ${{ inputs.path }}
+        IF_NO_FILES_FOUND: ${{ inputs.if-no-files-found }}
+        COMPRESSION_LEVEL: ${{ inputs.compression-level }}
+        RETENTION: ${{ inputs.retention }}
+      run: >-
+        python3 "${GITHUB_WORKSPACE}/scripts/ci_artifacts.py" upload
+        --name "${ARTIFACT_NAME}"
+        --path "${ARTIFACT_PATH}"
+        --if-no-files-found "${IF_NO_FILES_FOUND}"
+        --compression-level "${COMPRESSION_LEVEL}"
+        --retention "${RETENTION}"
