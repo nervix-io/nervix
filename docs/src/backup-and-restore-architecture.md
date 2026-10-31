@@ -183,7 +183,19 @@ after the freeze ends. The leader's backup coordinator runs it in this order:
    or down: that entity's last state lies on a node the cut cannot name.
 4. **Pause.** A replicated pause stops intake as each ingestor's `ON QUIESCE` declares, and every
    live node applies the paused state. Applying the pause spends the cut's budget, as every step
-   before it does.
+   before it does, and the cut's deadline ends it: the coordinator waits for an installation slot,
+   and for every live node to prepare and then ready the paused revision, only until the deadline.
+   When the deadline ends one of those waits, the coordinator resumes the domain at once and the
+   cut is refused in its drain phase, naming the wait the deadline ended. A local installation or
+   activation the coordinator had begun finishes first, so no node is left holding part of a
+   revision, and every node's own reconciliation goes on applying the newest committed revision,
+   which is now the resume: a node that already applied the paused revision applies the resume
+   after it, and one that had not yet installed it installs the resume instead. The replicated
+   pause write itself is not cut short. A write abandoned after it was proposed may still commit
+   and leave the domain paused with no cut left to resume it, so the coordinator waits for the
+   write's outcome; a pause that commits after the deadline is resumed without the coordinator
+   waiting for the cluster to apply it. An alteration's pause keeps waiting for as long as the
+   cluster's own revision budget allows.
 5. **Drain.** Every 50 milliseconds, the coordinator polls every live node and every node the
    schedule assigns the domain's work to for the admitted work it still holds: admitting ingestors
    and generators, outstanding source acknowledgement roots, relays that admitted a batch while the
@@ -220,9 +232,10 @@ after the freeze ends. The leader's backup coordinator runs it in this order:
    release time and the quiesce counters.
 8. **Release.** It always releases the lease, and checks its tenure a last time.
 
-A drain that does not finish by the deadline fails the backup with the counts each node still held
-and resumes the domain; an unavailable emitter keeps its publish and acknowledgement counts outstanding
-until then. A tenure change at any check refuses the cut, still attempts the resume and the release,
+A pause the cluster has not applied by the deadline fails the backup with the wait the deadline
+ended and resumes the domain. A drain that does not finish by the deadline fails the backup with the
+counts each node still held and resumes the domain; an unavailable emitter keeps its publish and
+acknowledgement counts outstanding until then. A tenure change at any check refuses the cut, still attempts the resume and the release,
 and leaves the command applying. The next leader holds no alteration guard for the domain, so its
 reconciliation resumes the domain if it is still paused, and it re-executes every applying backup
 under its execution reference: it rejoins the command's lease, pauses again, cuts, resumes,
@@ -860,7 +873,7 @@ A retained archive's read failure is reported before its download sends the fixe
 | Boundary | Failure | What remains | Recovery |
 | --- | --- | --- | --- |
 | Backup admission | The statement is batched, queued in a transaction, or sent to a follower | Nothing admitted | Send it alone, to the leader the redirect names. |
-| Cut budget | A lease, guard, counters read, drain, configuration capture or owner capture does not finish within the cut's budget | The refusal names its typed active phase, that phase's age, total elapsed cut time and completed phase durations. A pause is undone and the lease released; a failed drain also retains what each node still held | Inspect the phase and owner logs, then send the backup again with an appropriate `TIMEOUT` or after the stalled operation recovers. |
+| Cut budget | A lease, guard, counters read, application of the pause, drain, configuration capture or owner capture does not finish within the cut's budget | The refusal names its typed active phase, that phase's age, total elapsed cut time and completed phase durations. A pause is undone and the lease released; an application of the pause also retains the wait the deadline ended, and a failed drain what each node still held | Inspect the phase and owner logs, then send the backup again with an appropriate `TIMEOUT` or after the stalled operation recovers. |
 | Cut reach | A node the schedule assigns the domain's work to is not reported live when a quiesced cut starts, a scheduled state owner is not reported live when any cut captures, or the schedule places an entity whose state the archive captures on no node | Nothing paused when a quiesced cut refused before its pause, otherwise the pause is undone; the lease is released and no archive is assembled | Send the backup again once the node is back, or once failover has moved its placements or a node can host the entity again. |
 | Leader change during a cut | The tenure check fails | The domain is resumed, by the coordinator or by the next leader's reconciliation, and the command stays applying | The next leader re-executes the backup under the same reference; the client retries the reference to receive its archive. |
 | Outcome recording | Leadership moves, or the leader cannot confirm that it still leads, before the backup's outcome is recorded | The command stays applying, and the client receives `OutcomeUnknown` | The leader that resumes the command, or the client's retry of the reference, runs the backup again with new cuts; the client receives that run's outcome and archive. |
@@ -964,7 +977,8 @@ including archive contents.
 Each domain cut logs its administrative phase entry and completion at `info`, with the domain,
 execution reference, phase duration and total elapsed time. The timeout refusal retains the active
 phase and ordered completed durations, including lease admission, alteration guard, opening
-counters and drain. The controlled boundary after drain is `capture`; configuration capture, owner
+counters and drain. The drain phase includes the pause's application, and a refusal that ended
+that application names, beneath the phase, the wait it ended and the revision it waited for. The controlled boundary after drain is `capture`; configuration capture, owner
 capture and closing counters have distinct phases. Resume and lease release remain cleanup outside
 the cut's deadline and do not receive a new capture budget.
 
