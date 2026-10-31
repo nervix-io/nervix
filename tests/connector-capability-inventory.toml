@@ -959,6 +959,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An SQS QUEUE ingestor whose service stops answering is reported within timeout_ms" },
+]
+
+[[capability]]
 capability = "BATCH"
 entity = "SYSLOG COLLECTOR EMITTER"
 scenarios = [

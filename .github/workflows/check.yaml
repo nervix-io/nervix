@@ -1226,33 +1226,50 @@ jobs:
           name: coverage-tests
           path: coverage-inputs/tests
 
-      # Each shard's report lands in its own directory, named after its artifact.
-      - name: Download scenarios coverage
+      # v8 extracts a single match directly into path, so every artifact names its destination.
+      - name: Download scenarios coverage shard 1
         uses: actions/download-artifact@v8
         with:
-          pattern: coverage-scenarios-*
-          path: coverage-inputs
+          pattern: coverage-scenarios-1
+          path: coverage-inputs/coverage-scenarios-1
+
+      - name: Download scenarios coverage shard 2
+        uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-scenarios-2
+          path: coverage-inputs/coverage-scenarios-2
+
+      - name: Download scenarios coverage shard 3
+        uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-scenarios-3
+          path: coverage-inputs/coverage-scenarios-3
 
       - name: Download native extra coverage
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-native-extras
-          path: coverage-inputs
+          path: coverage-inputs/coverage-native-extras
 
       # One repository-relative report of the ordinary producers, which every step below reads. The
       # merge leaves out the collections of other modes the native extras artifact holds, and fails
       # rather than publish an incomplete report.
       - name: Merge coverage
+        env:
+          EXTRA_TESTS_RESULT: ${{ needs.extra-tests.result }}
+          EXTRA_COVERAGE_REQUIRED: ${{ needs.extra-tests.outputs.coverage-required }}
         run: |
           # Every shard's report is an input, so a shard whose report is missing fails the merge.
           scenarios=()
           for shard in $(seq 1 "${SCENARIO_SHARDS}"); do
             scenarios+=("coverage-inputs/coverage-scenarios-${shard}")
           done
-          # The native extras exist only when an `extra-*` label selected a step that collects them.
+          # A successful selected producer must contribute its artifact; a missing download fails.
           extras=()
-          if [[ -d coverage-inputs/coverage-native-extras ]]; then
-            extras+=(coverage-inputs/coverage-native-extras)
+          if [[ "${EXTRA_TESTS_RESULT}" == "success" ]]; then
+            if [[ "${EXTRA_COVERAGE_REQUIRED}" == "true" ]]; then
+              extras+=(coverage-inputs/coverage-native-extras)
+            fi
           fi
           just coverage-merge coverage-inputs/tests "${scenarios[@]}" "${extras[@]}"
 
@@ -1360,19 +1377,20 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-merged
-          path: coverage-full-inputs
+          path: coverage-full-inputs/coverage-merged
 
       - name: Download native extra coverage
+        if: needs.extra-tests.outputs.coverage-required == 'true'
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-native-extras
-          path: coverage-full-inputs
+          path: coverage-full-inputs/coverage-native-extras
 
       - name: Download diagnostic evidence
         uses: actions/download-artifact@v8
         with:
           pattern: diagnostic-evidence
-          path: coverage-full-inputs
+          path: coverage-full-inputs/diagnostic-evidence
 
       # The artifacts of label-enabled producers and of the Bolero call. A pattern that matches no
       # artifact downloads nothing; the union then names what the selection required and lacks.
@@ -1380,37 +1398,55 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-shuttle
-          path: coverage-full-inputs
+          path: coverage-full-inputs/coverage-shuttle
 
       - name: Download Loom coverage
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-loom
-          path: coverage-full-inputs
+          path: coverage-full-inputs/coverage-loom
 
       - name: Download Turmoil coverage
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-turmoil
-          path: coverage-full-inputs
+          path: coverage-full-inputs/coverage-turmoil
 
-      - name: Download Deloxide lane coverage
+      - name: Download deloxide lane coverage
         uses: actions/download-artifact@v8
         with:
-          pattern: deloxide-*
-          path: coverage-full-inputs
+          pattern: deloxide-deloxide
+          path: coverage-full-inputs/deloxide-deloxide
+
+      - name: Download deloxide-order lane coverage
+        uses: actions/download-artifact@v8
+        with:
+          pattern: deloxide-deloxide-order
+          path: coverage-full-inputs/deloxide-deloxide-order
+
+      - name: Download deloxide-stress lane coverage
+        uses: actions/download-artifact@v8
+        with:
+          pattern: deloxide-deloxide-stress
+          path: coverage-full-inputs/deloxide-deloxide-stress
+
+      - name: Download deloxide-stress-restore lane coverage
+        uses: actions/download-artifact@v8
+        with:
+          pattern: deloxide-deloxide-stress-restore
+          path: coverage-full-inputs/deloxide-deloxide-stress-restore
 
       - name: Download combined fuzz coverage
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-bolero-fuzz
-          path: coverage-full-inputs
+          path: coverage-full-inputs/coverage-bolero-fuzz
 
       - name: Download Bolero selection
         uses: actions/download-artifact@v8
         with:
           pattern: bolero-selection
-          path: coverage-full-inputs
+          path: coverage-full-inputs/bolero-selection
 
       - name: Combine coverage
         if: ${{ !cancelled() }}
@@ -1632,6 +1668,14 @@ jobs:
   extra-tests:
     name: extra-tests
     needs: [test-selection]
+    outputs:
+      coverage-required: >-
+        ${{ contains(github.event.pull_request.labels.*.name, 'extra-runners') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-compiler') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-bench-smoke') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-primitives') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-completion-walk') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-connector-matrix') }}
     # It runs for a pull request with an `extra-*` label, and each label selects its own steps, so
     # a pull request pays only for the checks it asks for.
     if: >-

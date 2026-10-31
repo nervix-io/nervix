@@ -7,7 +7,8 @@ minimum and a maximum connection count as part of its definition.
 HTTP clients are outside this contract, including ClickHouse, HTTP polling, Prometheus, Sentry,
 OTEL, SQS, Iceberg REST, and the object-store transports. Broker clients, WebSockets, Syslog, and
 ZeroMQ keep their transport-specific connection policies. The pool clauses are available only for
-the four types listed above.
+the four types listed above. [ClickHouse connections](#clickhouse-connections) describes how a
+ClickHouse client, which has no bounded pool, reuses its connections.
 
 ## Declaring the bounds
 
@@ -280,3 +281,22 @@ There is no `ALTER CLIENT`. Change either bound the same way as any other part o
 definition: `DROP CLIENT` and `CREATE <CONNECTOR> CLIENT` in one transaction. A client that runtime entities
 reference is replaced together with them, under the existing transactional quiesce contract for
 those entities.
+
+## ClickHouse connections
+
+A ClickHouse client takes no `POOL SIZE` clause, and no declared bound limits how many connections
+it opens. None of this chapter's pool rules apply to it: there is no pool per client, per domain,
+per node, and no minimum is maintained. Each running ClickHouse emitter builds its own HTTP client
+from the client's configuration, so separate emitters of one client never share a connection, and
+adding emitters adds connections.
+
+An emitter sends one insert at a time, and an insert uses one connection until ClickHouse answers
+it, so an emitter uses one connection at a time, also while it writes the rows of a refused insert
+again one by one. A connection an insert finishes with stays open for the emitter's next insert
+until it has been idle for the client's `pool_idle_timeout_ms`, 2000 milliseconds unless the client
+sets it, and is closed after that. The client keeps idle connections without a count limit, and the
+next insert that finds none opens a new connection, resolving the host again. `tcp_keepalive_ms`,
+60000 milliseconds unless the client sets it, starts TCP keep-alive probes on a connection that has
+been idle that long. `timeout_ms` bounds each insert, its connection included; none of these keys
+bounds how many connections an emitter opens over time. [Emitters](./emitters.md#clickhouse)
+describes the client's keys.
