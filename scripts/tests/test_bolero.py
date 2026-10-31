@@ -319,6 +319,7 @@ class InventoryTests(unittest.TestCase):
             "remote-relay-rows-malformed",
             "relay-wire-messages",
             "bulk-request-envelope-wire",
+            "receive-admission-outcomes-wire",
             "relay-wire-messages-malformed",
             "client-producer-link-frames",
             "client-producer-link-frames-malformed",

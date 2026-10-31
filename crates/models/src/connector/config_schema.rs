@@ -208,6 +208,9 @@ pub enum ClientConfigValue {
     DriverUrl(DriverUrl),
     Choice(&'static [&'static str]),
     File(ClientConfigFile),
+    /// Exactly the levels its template names, such as `tenant/namespace`: each nonempty, without
+    /// whitespace or control characters, and separated by `/`. The template is also its label.
+    Levels(&'static str),
 }
 
 impl ClientConfigValue {
@@ -229,7 +232,39 @@ impl ClientConfigValue {
             }
             Self::Choice(_) => "declared choice",
             Self::File(_) => "file path, with resource mount templates resolved before use",
+            Self::Levels(template) => template,
         }
+    }
+
+    /// Whether `value` names exactly the levels `template` names, each nonempty and without
+    /// whitespace or control characters.
+    fn holds_levels(template: &str, value: &str) -> bool {
+        let levels: Vec<&str> = value.split('/').collect();
+        if levels.len() != template.split('/').count() {
+            return false;
+        }
+        for level in levels {
+            if level.is_empty() {
+                return false;
+            }
+            if level
+                .chars()
+                .any(|ch| ch.is_whitespace() || ch.is_control())
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether `value`, which parses as `count`, is the count an integer kind admits: written as
+    /// plain decimal digits, without the sign the integer parser also accepts, and not zero for a
+    /// positive integer.
+    fn admits_count(self, value: &str, count: u64) -> bool {
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+        self != Self::PositiveInteger || count != 0
     }
 
     fn validate(self, key: &str, value: &str) -> Result<(), Report<ClientConfigSchemaError>> {
@@ -249,10 +284,7 @@ impl ClientConfigValue {
             }
             Self::UnsignedInteger | Self::PositiveInteger => {
                 let count = value.parse::<u64>().change_context(invalid())?;
-                if value.is_empty()
-                    || !value.bytes().all(|byte| byte.is_ascii_digit())
-                    || (self == Self::PositiveInteger && count == 0)
-                {
+                if !self.admits_count(value, count) {
                     return Err(Report::new(invalid()));
                 }
             }
@@ -284,6 +316,11 @@ impl ClientConfigValue {
             }
             Self::Choice(choices) => {
                 if !choices.contains(&value) {
+                    return Err(Report::new(invalid()));
+                }
+            }
+            Self::Levels(template) => {
+                if !Self::holds_levels(template, value) {
                     return Err(Report::new(invalid()));
                 }
             }

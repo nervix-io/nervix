@@ -2546,6 +2546,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/wire__admission_properties__bolero_receive_admission_outcomes_preserve_every_field/corpus"
+domain_version = 1
+features = []
+id = "receive-admission-outcomes-wire"
+invariant = "Typed decoder admission reports project to the exact refusal variant, traffic class, byte/queue fields and stream status, then preserve the complete response envelope through the production encoder and decoder; dropping it returns every charge."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-interconnect"
+random_iterations = 64
+source = "crates/interconnect/src/wire_admission_properties.rs"
+test = "wire::admission_properties::bolero_receive_admission_outcomes_preserve_every_field"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_bulk_request_envelopes_preserve_payload_and_release_charges/corpus"
 domain_version = 1
 features = []
@@ -3447,7 +3462,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 17
+domain_version = 18
 features = []
 id = "client-config-schema"
 invariant = "Bounded entries drawn from every current client key schema preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."

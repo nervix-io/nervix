@@ -7,11 +7,11 @@
 //!   accepted with its client's address, when it accepted it and when it stopped serving it, the
 //!   connections it forwards to its dependency or holds unanswered, the gate that pauses both
 //!   directions of every forwarded one, resetting them, and rewriting the broker address a Pulsar
-//!   topic lookup answers with.
+//!   topic lookup answers with, and when a ready producer-creation reply reached its client.
 //! - **Depends on.** Tokio's TCP sockets and codecs, the primitives boundary's watch channel and
 //!   cancellation, the harness port pool, and the Pulsar frame codec.
 //! - **Must not know.** DNS, Nervix, or the protocol a forwarded connection carries beyond Pulsar's
-//!   lookup answer.
+//!   lookup and producer-creation answers.
 //!
 //! # Why the port comes from the pool
 //!
@@ -67,6 +67,8 @@ pub(crate) struct AcceptedConnection {
     pub(crate) peer: SocketAddr,
     /// When the proxy stopped forwarding or holding it, or nothing while it still does.
     pub(crate) ended_at: Option<Instant>,
+    /// The ready producer-creation reply was flushed to this client at this instant.
+    pub(crate) pulsar_producer_ready_at: Option<Instant>,
 }
 
 /// Records when the proxy stops forwarding or holding one accepted connection, however its task
@@ -74,6 +76,24 @@ pub(crate) struct AcceptedConnection {
 struct ConnectionEnd {
     accepted: watch::Sender<Vec<AcceptedConnection>>,
     ordinal: usize,
+}
+
+impl ConnectionEnd {
+    fn record_pulsar_producer_ready(&self) {
+        let ready_at = Instant::now();
+        self.accepted.send_modify(|accepted| {
+            if let Some(connection) = accepted.get_mut(self.ordinal) {
+                connection.pulsar_producer_ready_at.get_or_insert(ready_at);
+            }
+        });
+    }
+}
+
+/// The protocol and observations of the exact connection this task forwards.
+struct ForwardingContext<'a> {
+    protocol: ForwardingProtocol,
+    local_addr: SocketAddr,
+    connection: &'a ConnectionEnd,
 }
 
 impl Drop for ConnectionEnd {
@@ -178,6 +198,7 @@ impl StallableTcpProxy {
                         accepted_at: Instant::now(),
                         peer,
                         ended_at: None,
+                        pulsar_producer_ready_at: None,
                     });
                 });
                 let ended = ConnectionEnd {
@@ -191,7 +212,6 @@ impl StallableTcpProxy {
                         protocol,
                     } => {
                         nervix_primitives::task::spawn(async move {
-                            let _ended = ended;
                             let Ok(mut upstream) = TcpStream::connect((host.as_str(), port)).await
                             else {
                                 return;
@@ -203,8 +223,11 @@ impl StallableTcpProxy {
                                 paused,
                                 resets,
                                 connection_cancellation,
-                                protocol,
-                                local_addr,
+                                ForwardingContext {
+                                    protocol,
+                                    local_addr,
+                                    connection: &ended,
+                                },
                             )
                             .await;
                             if let ForwardingEnd::ResetRequested = end {
@@ -274,6 +297,34 @@ impl StallableTcpProxy {
         self.paused.send_replace(paused);
     }
 
+    /// Pause an established Pulsar producer without interrupting its creation.
+    pub(crate) async fn pause_pulsar_after_producer_ready(
+        &self,
+        within: Duration,
+    ) -> io::Result<()> {
+        let mut accepted = self.accepted.subscribe();
+        nervix_primitives::time::timeout(
+            within,
+            accepted.wait_for(|connections| {
+                connections.iter().any(|connection| {
+                    connection.ended_at.is_none() && connection.pulsar_producer_ready_at.is_some()
+                })
+            }),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "no live Pulsar producer creation reply reached its client within {within:?}"
+                ),
+            )
+        })?
+        .map_err(io::Error::other)?;
+        self.set_paused(true);
+        Ok(())
+    }
+
     /// End a scenario's timed dependency fault while another action runs. The returned future
     /// owns its controls, so the action can borrow the scenario independently.
     pub(crate) fn resume_after(
@@ -310,8 +361,7 @@ async fn forward_through_stall_gate(
     paused: watch::Receiver<bool>,
     mut resets: watch::Receiver<()>,
     cancellation: CancellationToken,
-    protocol: ForwardingProtocol,
-    local_addr: SocketAddr,
+    context: ForwardingContext<'_>,
 ) -> ForwardingEnd {
     let (downstream_read, downstream_write) = downstream.split();
     let (upstream_read, upstream_write) = upstream.split();
@@ -322,7 +372,7 @@ async fn forward_through_stall_gate(
         cancellation.clone(),
     );
     let downstream_copy = async {
-        match protocol {
+        match context.protocol {
             ForwardingProtocol::Tcp => {
                 copy_through_stall_gate(upstream_read, downstream_write, paused, cancellation).await
             }
@@ -332,7 +382,8 @@ async fn forward_through_stall_gate(
                     downstream_write,
                     paused,
                     cancellation,
-                    local_addr,
+                    context.local_addr,
+                    context.connection,
                 )
                 .await
             }
@@ -424,6 +475,7 @@ async fn forward_pulsar_responses<Reader, Writer>(
     mut paused: watch::Receiver<bool>,
     cancellation: CancellationToken,
     local_addr: SocketAddr,
+    connection: &ConnectionEnd,
 ) -> io::Result<()>
 where
     Reader: AsyncRead + Unpin,
@@ -450,8 +502,16 @@ where
         if let Some(lookup) = &mut message.command.lookup_topic_response {
             lookup.broker_service_url = Some(format!("pulsar://{local_addr}"));
         }
+        let producer_ready = message
+            .command
+            .producer_success
+            .as_ref()
+            .is_some_and(|reply| reply.producer_ready.unwrap_or(true));
         wait_for_proxy_resume(&mut paused, &cancellation).await?;
         writer.send(message).await.map_err(io::Error::other)?;
+        if producer_ready {
+            connection.record_pulsar_producer_ready();
+        }
     }
 }
 

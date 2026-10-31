@@ -197,6 +197,70 @@ Feature: Session protocol
       CREATE SCHEMA uncertain_record (
       """
 
+  Scenario Outline: A leader that cannot confirm its lease during <phase> reports that, not a move
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "lapsed_leader"
+    Given the leader refuses the <phase> of execution reference "lapsed-lease-{{test_id}}" as a leader whose lease lapsed
+    When this Plexus command request with execution reference "lapsed-lease-{{test_id}}" begins executing in the background on the leader node
+      """
+      CREATE SCHEMA unconfirmed_record (
+        value STRING
+      );
+      """
+    Then the background command request reports an unknown outcome because the leader could not confirm its lease
+    And the leader refused the <phase> of execution reference "lapsed-lease-{{test_id}}" as a leader whose lease lapsed
+    And node "{{lapsed_leader}}" eventually reports leader "{{lapsed_leader}}"
+    When this Plexus command request with execution reference "lapsed-lease-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA unconfirmed_record (
+        value STRING
+      );
+      """
+    Then the last command request succeeded
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA unconfirmed_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA unconfirmed_record (
+      """
+
+    Examples:
+      | phase        |
+      | admission    |
+      | finalization |
+
+  Scenario: A leader that cannot confirm its lease while a command applies reports that, not a move
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA pause_event (key I64);
+      CREATE RELAY pause_input SCHEMA pause_event UNBRANCHED;
+      START;
+      """
+    Then the current leader node is saved as placeholder "lapsed_leader"
+    Given the leader refuses the next model publication in domain "{{domain}}" and the pause release after it with "a lapsed leader lease"
+    When this Plexus command request with execution reference "lapsed-applying-{{test_id}}" begins executing in the background on the leader node
+      """
+      CREATE RELAY lapsed_publication SCHEMA pause_event UNBRANCHED;
+      """
+    Then the background command request reports an unknown outcome because the leader could not confirm its lease
+    And the refusal of the model publication in domain "{{domain}}" and of its pause release was delivered
+    And node "{{lapsed_leader}}" eventually reports leader "{{lapsed_leader}}"
+    When this Plexus command request with execution reference "lapsed-applying-{{test_id}}" is executed on the leader node
+      """
+      CREATE RELAY lapsed_publication SCHEMA pause_event UNBRANCHED;
+      """
+    Then the last command request succeeded
+
   Scenario: A leader setup step learns the outcome of a command its leader admitted before losing leadership
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"

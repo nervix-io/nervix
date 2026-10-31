@@ -11,13 +11,13 @@ use nervix_models::{
     KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicIngestor, MqttIngestMode,
     MqttIngestorEntity, MqttQos, MqttSession, MqttTopicIngestor, NatsIngestMode,
     NatsIngestorEntity, NatsSubjectIngestor, PrometheusIngestMode, PrometheusIngestorEntity,
-    PrometheusQueryIngestor, PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionOwnership,
-    PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestorEntity, RabbitMqQueueIngestor,
-    RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SqsIngestMode,
-    SqsIngestorEntity, SqsQueueIngestor, SyslogIngestMode, SyslogIngestorEntity,
-    SyslogListenerIngestor, TransportIngestorInput, WebsocketsConnectionIngestor,
-    WebsocketsEndpointIngestor, WebsocketsIngestMode, WebsocketsIngestorEntity, ZeroMqIngestMode,
-    ZeroMqIngestorEntity, ZeroMqPullIngestor,
+    PrometheusQueryIngestor, PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription,
+    PulsarSubscriptionOwnership, PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestorEntity,
+    RabbitMqQueueIngestor, RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor,
+    RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SyslogIngestMode,
+    SyslogIngestorEntity, SyslogListenerIngestor, TransportIngestorInput,
+    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
+    WebsocketsIngestorEntity, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
 };
 
 use crate::{
@@ -219,7 +219,7 @@ impl Arbitrary<'_> {
             topic,
             subscription: PulsarSubscription { name, ownership },
             instances: self.positive_u64(),
-            mode: self.kafka_mode(),
+            mode: self.pulsar_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -438,6 +438,22 @@ impl Arbitrary<'_> {
                 retry_policy: self.retry_policy(),
             },
             _ => KafkaIngestMode::NoAck,
+        }
+    }
+
+    fn pulsar_mode(&mut self) -> PulsarIngestMode {
+        match self.entropy.byte() % 3 {
+            0 => PulsarIngestMode::AckParallel {
+                max: self.positive_u64(),
+                batch_timeout: self.duration(),
+                timeout: self.duration(),
+                retry_policy: self.retry_policy(),
+            },
+            1 => PulsarIngestMode::AckSequential {
+                timeout: self.duration(),
+                retry_policy: self.retry_policy(),
+            },
+            _ => PulsarIngestMode::NoAck,
         }
     }
 

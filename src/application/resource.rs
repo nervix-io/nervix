@@ -1027,13 +1027,12 @@ impl SessionServiceImpl {
             .fault_injection()
             .refuses_resource_publication(self.inner.consensus.local_node_id())
         {
-            return Err(
-                Report::new(ConsensusError::LeadershipLost { leader_id: None }).change_context(
-                    ResourceUploadError::Publish {
-                        id: manifest.resource.id.clone(),
-                    },
-                ),
-            );
+            return Err(Report::new(ConsensusError::LeadershipLost {
+                observed: nervix_consensus::LeadershipObservation::NoLeader,
+            })
+            .change_context(ResourceUploadError::Publish {
+                id: manifest.resource.id.clone(),
+            }));
         }
         self.inner
             .consensus
@@ -2150,7 +2149,9 @@ mod tests {
         let id = ResourceId::new(domain, resource, 1);
 
         let lapsed = UploadResumption::from_refused_publication(
-            Report::new(ConsensusError::LeadershipLost { leader_id: None }),
+            Report::new(ConsensusError::LeadershipLost {
+                observed: nervix_consensus::LeadershipObservation::UnconfirmedLease { term: 1 },
+            }),
             &id,
         );
         let UploadResumption::Deferred(lapsed) = lapsed else {
@@ -2158,7 +2159,8 @@ mod tests {
         };
         assert_eq!(
             format!("{lapsed:#}"),
-            "failed to publish resource 'refused@1': raft proposal lost leadership"
+            "failed to publish resource 'refused@1': this node cannot propose as the leader: this \
+             node leads term 1 but could not confirm its lease"
         );
 
         let conflict = UploadResumption::from_refused_publication(

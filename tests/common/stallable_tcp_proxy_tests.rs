@@ -26,7 +26,7 @@ use nervix_primitives::{
 use pulsar::message::{
     Codec as PulsarCodec, Message as PulsarFrame,
     proto::{
-        BaseCommand, CommandLookupTopic, CommandLookupTopicResponse,
+        BaseCommand, CommandLookupTopic, CommandLookupTopicResponse, CommandProducerSuccess,
         base_command::Type as CommandType,
         command_lookup_topic_response::LookupType as TopicLookupType,
     },
@@ -476,4 +476,80 @@ async fn a_pulsar_proxy_advertises_itself_in_topic_lookup_answers() {
     answering
         .await
         .assured("the stand-in broker answers without panicking");
+}
+
+#[nervix_primitives::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pulsar_pause_waits_for_the_ready_reply_to_reach_the_client() {
+    struct BrokerPort(u16);
+    impl Drop for BrokerPort {
+        fn drop(&mut self) {
+            release_test_ports(&[self.0]);
+        }
+    }
+    let port = BrokerPort(crate::port_pool::next_port().assured("the broker reserves its port"));
+    let broker = TcpListener::bind((Ipv4Addr::LOCALHOST, port.0))
+        .await
+        .assured("the stand-in broker binds");
+    let address = broker
+        .local_addr()
+        .assured("the bound broker has an address");
+    let proxy = StallableTcpProxy::start_pulsar(address.ip().to_string(), address.port())
+        .await
+        .assured("the Pulsar proxy starts");
+    let client = TcpStream::connect(proxy.local_addr())
+        .await
+        .assured("the client connects to the proxy");
+    let (upstream, _) = broker.accept().await.assured("the proxy connects upstream");
+    let mut broker = Framed::new(upstream, PulsarCodec);
+    let mut client = Framed::new(client, PulsarCodec);
+    let pause = proxy.pause_pulsar_after_producer_ready(OUTCOME_BOUND);
+    tokio::pin!(pause);
+    assert!(
+        futures_util::poll!(&mut pause).is_pending(),
+        "the fault must not pause producer creation before its reply"
+    );
+    for ready in [false, true] {
+        let reply = PulsarFrame {
+            command: BaseCommand {
+                r#type: i32::from(CommandType::ProducerSuccess),
+                producer_success: Some(CommandProducerSuccess {
+                    request_id: 7,
+                    producer_name: "fixture-producer".to_string(),
+                    producer_ready: Some(ready),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        };
+        broker
+            .send(reply.clone())
+            .await
+            .assured("the broker answers creation");
+        if ready {
+            pause
+                .as_mut()
+                .await
+                .assured("the established producer may be paused");
+        }
+        let observed = timeout(OUTCOME_BOUND, client.next())
+            .await
+            .assured("the creation reply precedes the pause")
+            .assured("the proxy remains connected")
+            .assured("the reply remains a complete frame");
+        assert_eq!(
+            observed.command, reply.command,
+            "producer creation retains every command field"
+        );
+        assert!(
+            observed.payload.is_none(),
+            "a creation reply has no payload"
+        );
+        if !ready {
+            assert!(
+                futures_util::poll!(&mut pause).is_pending(),
+                "a queued producer has not become ready"
+            );
+        }
+    }
 }

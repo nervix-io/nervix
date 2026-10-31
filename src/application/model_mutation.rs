@@ -799,7 +799,7 @@ impl SessionServiceImpl {
     ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
         #[cfg(feature = "testing")]
         if let Some(refusal) = self.inner.runtime.take_model_publication_refusal(_domain) {
-            return Err(Report::new(ConsensusError::from(refusal))
+            return Err(Report::new(self.refused_write(refusal))
                 .change_context(nervix_consensus::ConsensusTransactionError::Consensus)
                 .change_context(TransactionCommitError::Proposal));
         }
@@ -829,7 +829,7 @@ impl SessionServiceImpl {
 
         let leader = Box::pin(self.inner.consensus.current_leader()).await;
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-            return Box::pin(self.not_leader_response(query, leader)).await;
+            return Box::pin(self.not_leader_response(query, leader.into())).await;
         }
 
         #[cfg(feature = "testing")]
@@ -1722,10 +1722,9 @@ impl SessionServiceImpl {
                             error = %err,
                             "failed to publish schedule for model mutation batch"
                         );
-                        if let ConsensusError::LeadershipLost { leader_id } =
-                            error.current_context()
+                        if let ConsensusError::LeadershipLost { observed } = error.current_context()
                         {
-                            return Box::pin(self.not_leader_response(query, leader_id.clone()))
+                            return Box::pin(self.not_leader_response(query, observed.clone()))
                                 .await;
                         }
                         return failed_schedule_publication(&domain, err, query);
@@ -2141,7 +2140,7 @@ impl SessionServiceImpl {
         if requires_leader(&statement) {
             let leader = self.inner.consensus.current_leader().await;
             if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-                return self.not_leader_response(query, leader).await;
+                return self.not_leader_response(query, leader.into()).await;
             }
             #[cfg(feature = "testing")]
             self.inner
