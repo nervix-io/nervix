@@ -1723,6 +1723,12 @@ jobs:
         with:
           fetch-depth: 2
 
+      # Every label's step below builds with a toolchain the repository declares, and the native
+      # collector reads that toolchain's own llvm-profdata, so the declared toolchains and their
+      # components install first, whichever labels select the steps.
+      - name: Install the declared toolchains
+        run: just toolchains-install
+
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
@@ -1756,9 +1762,7 @@ jobs:
 
       - name: Capability doctests
         if: contains(github.event.pull_request.labels.*.name, 'extra-doctests')
-        run: |
-          just toolchains-install
-          just test-capability-docs
+        run: just test-capability-docs
 
       - name: Runner diagnostics before Expiry map Miri
         if: contains(github.event.pull_request.labels.*.name, 'extra-miri')
