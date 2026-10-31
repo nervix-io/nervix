@@ -862,7 +862,7 @@ destination schema changes.
 
 | Emitter | One write | `MAX SIZE` measures |
 | --- | --- | --- |
-| ClickHouse | One `INSERT INTO <table> FORMAT JSONEachRow` request | The request body, one JSON line and newline per row, before the client compresses it |
+| ClickHouse | One `INSERT INTO <table> FORMAT JSONEachRow` request | The request body, one JSON line and newline per row, before the driver compresses it with LZ4 |
 | Postgres | One `INSERT ... SELECT ... FROM unnest(...)` statement binding one text array per mapped column | The statement text and every bound array as the extended-query protocol encodes it: a 20-byte array header, then a four-byte length and the value's text for each row |
 | MySQL | One multi-row `INSERT ... VALUES (...), (...)` statement | The statement text and every bound value as the binary protocol encodes it |
 | MongoDB | One unordered `insert_many`, or one unordered bulk write of upserts under `ON CONFLICT` | Each inserted document as the driver writes it, with the `_id` it adds to a document that has none, or each upsert's filter and update documents |
@@ -915,8 +915,9 @@ Each emitter writes a `BYTES` value in its native binary form: the octets themse
 `String`, the `bytea` hex format Postgres reads back as the same octets, the octets bound to a MySQL
 binary or blob column, and generic BSON binary data in MongoDB. An `ARRAY` or `VEC` value is a JSON
 array in ClickHouse's `JSONEachRow` and in the JSON text Postgres and MySQL bind for it, and a BSON
-array in MongoDB; inside that JSON text a `BYTES` element is the padded base64 text every Nervix JSON
-value carries octets as.
+array in MongoDB. A `BYTES` element of a ClickHouse array keeps its own octets, as a `BYTES` value
+outside an array does. Inside the JSON text Postgres and MySQL bind, a `BYTES` element is the padded
+base64 text every Nervix JSON value carries octets as.
 
 ## Altering emitters
 
@@ -1168,9 +1169,10 @@ Transport-specific expectations:
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
-- `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
-  An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses
-  `tls_cert_file` and `tls_key_file`.
+- `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`,
+  and `CREATE SQS CLIENT` refuses a `tls_ca_file` that holds no certificate it could trust. An SQS
+  connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and
+  `tls_key_file`.
 - `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; its `tls_ca_file` adds
   a trust root beside the platform's native roots, and `tls_cert_file` with `tls_key_file` presents
   a client certificate.
@@ -1855,7 +1857,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start: unbounded<br>a send: `timeout_ms`; unbounded when omitted |
+| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start and a send: `timeout_ms`; unbounded when omitted |
 | Driver limits | A batch request holds at most 10 entries and 256 KiB; a record above 256 KiB is rejected. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
@@ -1881,18 +1883,21 @@ to U+D7FF, U+E000 to U+FFFD and U+10000 to U+10FFFF. Every other C0 control and 
 U+FFFE and U+FFFF are forbidden, while the other noncharacters fall inside those ranges and are
 sent.
 
-Set the SQS client's optional `timeout_ms` CONFIG key to bound both the complete service operation
-and its single SDK attempt. Nervix disables the AWS SDK's internal retries, so a timeout returns to
-the emitter and the mode's declared `RETRY POLICY` owns all retry pacing.
+Set the SQS client's optional `timeout_ms` CONFIG key to bound each request, the queue lookup at
+start and every send, as both the complete service operation and its single SDK attempt. Nervix
+disables the AWS SDK's internal retries in both directions, so a request that runs out of
+`timeout_ms` returns to the emitter, which `DESCRIBE EMITTER` shows as
+`an SQS send did not finish within timeout_ms 5s`, and the mode's declared `RETRY POLICY` owns all
+retry pacing.
 
 The client resolves the host of its `endpoint` through the node's asynchronous resolver each time it
 opens a connection, and tries the answers in order; a literal IPv4 or IPv6 address is dialled as
 written. Every request is still signed for the configured host, and over HTTPS the service
 certificate must name that host, whichever address accepted the connection. The lookup counts
 against the SDK's 3.1-second connect timeout and against `timeout_ms`. Without `tls_ca_file` the
-client trusts the platform's native roots and follows the `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`
-and `NO_PROXY` environment variables; with it, the client trusts that CA alone and connects
-directly. A missing name, a silent name server or an unreachable answer fails the queue lookup or
+client trusts the platform's native roots; with it, the client trusts that CA alone. Either way it
+connects directly and ignores the `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`
+environment variables of its node. A missing name, a silent name server or an unreachable answer fails the queue lookup or
 the send, which the emitter retries on its `RETRY POLICY`; nothing is acknowledged until SQS
 answers.
 
@@ -2451,9 +2456,25 @@ CREATE CLICKHOUSE CLIENT ch
 `'database'`, `'tls_ca_file'`, `'tls_cert_file'`, `'tls_key_file'`, `'tcp_keepalive_ms'`, and
 `'pool_idle_timeout_ms'`; unknown keys are refused.
 The timeout bounds both sending an insert body and waiting for ClickHouse to finish the insert and
-return its result. An `https` address requires `'tls_ca_file'` pointing to mounted trust material.
-An `http` address refuses all three TLS file keys. A client certificate and key must be supplied
-together.
+return its result.
+
+`'addr'` is the `http` or `https` URL of ClickHouse's HTTP interface. Every insert goes to its host,
+port and path with a query string the client composes itself: the `INSERT` statement, `'database'`
+when it is set, and `decompress=1`. A query string written in `'addr'` is not sent. ClickHouse
+authenticates each insert by `'user'` and `'password'`, which the client sends as the
+`X-ClickHouse-User` and `X-ClickHouse-Key` request headers; without `'user'`, ClickHouse applies its
+`default` user. `'database'` names the database of a one-part `TABLE`; a two-part `TABLE` names its
+own.
+
+An `https` address requires `'tls_ca_file'` pointing to mounted trust material. An `http` address
+refuses all three TLS file keys. The certificates in `'tls_ca_file'` are added to the bundled public
+roots and the node's own trust store; they do not replace them. A client certificate and key must be
+supplied together, as PEM files in `'tls_cert_file'` and `'tls_key_file'`. The client presents that
+certificate whenever the server's TLS handshake asks for one, for a server that verifies client
+certificates. The certificate identifies the connection, not the user: the client never sends
+ClickHouse's `X-ClickHouse-SSL-Certificate-Auth` header, so ClickHouse does not authenticate the user
+by the certificate, and a ClickHouse user identified with `ssl_certificate` cannot insert through a
+ClickHouse client.
 
 `tcp_keepalive_ms` sets the TCP idle interval before keep-alive probes begin; its declared default
 is 60000 milliseconds. `pool_idle_timeout_ms` limits how long an unused HTTP connection may be
@@ -2463,6 +2484,14 @@ expressed in milliseconds, matching the socket's precision and supported range. 
 timeout below the server's `keep_alive_timeout`, and set TCP keep-alive below an intervening NAT or
 load balancer's idle limit. These settings apply to HTTP
 and HTTPS. They govern connection reuse and probing; `timeout_ms` bounds each insert.
+
+A ClickHouse client takes no `POOL SIZE` clause, and no declared bound limits its connections. Each
+running ClickHouse emitter builds its own HTTP client from the client's configuration, so separate
+emitters of one client never share a connection. An emitter sends one insert at a time and uses one
+connection while the insert waits for its answer. The connection then stays open for the emitter's
+next insert until it has been idle for `pool_idle_timeout_ms`, and closes after that; the client
+keeps idle connections without a count limit. The database clients that declare a bounded pool are
+described in [Database client pools](./database-client-pools.md).
 
 `DESCRIBE CLIENT ch` reports the configured keys and effective declared defaults, marking an
 omitted default with `(default)` and redacting confidential values. `SHOW CREATE CLIENT ch`
@@ -2480,13 +2509,18 @@ host's answer changes, and the next connection resolves again.
 ClickHouse requires the [batching clause](#batching). A flush is written as inserts of at most
 `MAX MESSAGES` rows whose `JSONEachRow` body is at most `MAX SIZE` bytes, as
 [Database writes](#database-writes) describes, and each successful insert is an acknowledgment.
+The ClickHouse driver compresses each insert body with LZ4, in ClickHouse's compressed-block format,
+and `decompress=1` tells the server to decompress it. Compression is the driver's default: Nervix
+neither configures it nor offers a key to change it, and `MAX SIZE` measures the body before it is
+compressed.
 ClickHouse writes each `JSONEachRow` line directly from the mapped Arrow columns in `VALUES`
 order, using the same typed JSON column writer as schemaful JSON emission. Null mapped values are
 written as `null`, including null list elements. Column names are escaped once for each write, and
 string values use their carrier's escape classification. `TABLE` names preserve their case and
 contain one part (`'Orders'`) or two nonempty dot-separated parts (`'sales.Orders'`). Nervix quotes
 each part with backticks in the insert SQL, so `sales.Orders` is sent as
-`` `sales`.`Orders` ``. A third part or empty part is refused when the emitter is declared.
+`` `sales`.`Orders` ``. The table-name alphabet admits no backtick, so no quoted part needs
+escaping. A third part or empty part is refused when the emitter is declared.
 
 The ClickHouse `VALUES` encoding contract is:
 
@@ -2509,6 +2543,16 @@ unavailable.
 `F32` columns keep ClickHouse's JSON number formatting after widening to `F64`; schemaful JSON
 codecs format `F32` directly. A `BYTES` value is written as its own octets, which a `String` column
 stores unchanged, where schemaful JSON codecs write padded base64.
+
+ClickHouse answers a failed insert with an exception whose name its response text carries in
+parentheses, such as `(CANNOT_PARSE_NUMBER)`. The emitter treats an insert as refused for its rows
+only when that name is `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN`, `CANNOT_PARSE_DATE`,
+`CANNOT_PARSE_DATETIME`, `CANNOT_PARSE_NUMBER`, `CANNOT_PARSE_TEXT`, `TOO_LARGE_STRING_SIZE` or
+`VIOLATED_CONSTRAINT`, or when the answer's text contains `413 Payload Too Large` or
+`413 Request Entity Too Large`, as a proxy in front of ClickHouse answers an oversized body; the
+emitter names that refusal `PAYLOAD_TOO_LARGE`. Every other failure is infrastructure-wide: another
+exception name, a lost connection, an expired `timeout_ms` or a failed lookup leaves the insert's
+rows unresolved, and the emitter retries them on its `RETRY POLICY`.
 For ClickHouse, Postgres, and MySQL, a failed multi-row insert is classified first as
 record-specific or infrastructure-wide. Infrastructure failures retry with backpressure. A
 record-specific failure is isolated by re-executing the insert one record at a time so healthy rows
