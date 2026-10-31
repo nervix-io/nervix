@@ -29,6 +29,7 @@ pub(in crate::runtime) struct PreparedRuntimeStateHandoff {
     pub(in crate::runtime) destination: ClusterNodeName,
     pub(in crate::runtime) source_incarnation: ClusterNodeIncarnation,
     pub(in crate::runtime) destination_incarnation: ClusterNodeIncarnation,
+    pub(in crate::runtime) unit: nervix_models::Unit,
     pub(in crate::runtime) base_schedule_fingerprint: [u8; 32],
     pub(in crate::runtime) target_schedule_fingerprint: [u8; 32],
     pub(in crate::runtime) activation_authorization: OwnershipHandoffActivationAuthorization,
@@ -81,6 +82,7 @@ pub(super) struct OwnershipHandoffTransitionRef<'a> {
     pub(super) destination_incarnation: ClusterNodeIncarnation,
     pub(super) domain: &'a DomainName,
     pub(super) entity: &'a NodeRef,
+    pub(super) unit: nervix_models::Unit,
     pub(super) base_schedule_fingerprint: [u8; 32],
     pub(super) target_schedule_fingerprint: [u8; 32],
 }
@@ -98,6 +100,7 @@ impl<'a> From<&'a nervix_interconnect::ActivateOwnershipHandoffStateRequest>
             destination_incarnation: request.destination_incarnation,
             domain: &request.domain,
             entity: &request.entity,
+            unit: request.unit,
             base_schedule_fingerprint: request.base_schedule_fingerprint,
             target_schedule_fingerprint: request.target_schedule_fingerprint,
         }
@@ -117,6 +120,7 @@ impl<'a> From<&'a nervix_interconnect::ConfirmOwnershipHandoffStateRequest>
             destination_incarnation: request.destination_incarnation,
             domain: &request.domain,
             entity: &request.entity,
+            unit: request.unit,
             base_schedule_fingerprint: request.base_schedule_fingerprint,
             target_schedule_fingerprint: request.target_schedule_fingerprint,
         }
@@ -131,6 +135,7 @@ impl PreparedRuntimeStateHandoff {
             && self.destination == *transition.destination
             && self.source_incarnation == transition.source_incarnation
             && self.destination_incarnation == transition.destination_incarnation
+            && self.unit == transition.unit
             && self.base_schedule_fingerprint == transition.base_schedule_fingerprint
             && self.target_schedule_fingerprint == transition.target_schedule_fingerprint
     }
@@ -141,11 +146,19 @@ impl PreparedRuntimeStateHandoff {
         schedule_fingerprint: [u8; 32],
     ) -> bool {
         if self.target_schedule_fingerprint != schedule_fingerprint
-            || !node.is_primary_on(&self.destination)
+            || node
+                .units
+                .get(&self.unit)
+                .and_then(|unit| unit.primary_node.as_ref())
+                != Some(&self.destination)
         {
             return false;
         }
-        let Some(transition) = node.ownership_transition.as_ref() else {
+        let Some(transition) = node
+            .units
+            .get(&self.unit)
+            .and_then(|unit| unit.ownership_transition.as_ref())
+        else {
             return false;
         };
         transition.id == self.operation_id
@@ -164,6 +177,7 @@ pub(in crate::runtime) struct ActivatedRuntimeStateHandoff {
     pub(super) destination: ClusterNodeName,
     pub(super) source_incarnation: ClusterNodeIncarnation,
     pub(super) destination_incarnation: ClusterNodeIncarnation,
+    pub(super) unit: nervix_models::Unit,
     pub(super) base_schedule_fingerprint: [u8; 32],
     pub(super) target_schedule_fingerprint: [u8; 32],
 }
@@ -176,6 +190,7 @@ impl ActivatedRuntimeStateHandoff {
             && self.destination == *transition.destination
             && self.source_incarnation == transition.source_incarnation
             && self.destination_incarnation == transition.destination_incarnation
+            && self.unit == transition.unit
             && self.base_schedule_fingerprint == transition.base_schedule_fingerprint
             && self.target_schedule_fingerprint == transition.target_schedule_fingerprint
     }
@@ -200,55 +215,60 @@ impl Runtime {
             .collect::<Vec<_>>();
         let mut discarded = 0_usize;
         for (entity, prepared) in preparations {
-            let committed_or_active = if let Some(change) =
-                revision_plan.domains.get(&entity.domain)
-            {
-                let schedule_fingerprint = change.revision.ownership_handoff_fingerprint;
-                let scheduled = change.revision.nodes.get(&entity.node);
-                let committed = scheduled.is_some_and(|scheduled| {
-                    prepared.belongs_to_committed_transition(scheduled, schedule_fingerprint)
-                });
-                if committed {
-                    true
+            let committed_or_active =
+                if let Some(change) = revision_plan.domains.get(&entity.entity.domain) {
+                    let schedule_fingerprint = change.revision.ownership_handoff_fingerprint;
+                    let scheduled = change.revision.nodes.get(&entity.entity.node);
+                    let committed = scheduled.is_some_and(|scheduled| {
+                        prepared.belongs_to_committed_transition(scheduled, schedule_fingerprint)
+                    });
+                    if committed {
+                        true
+                    } else {
+                        let source_incarnation = node_incarnations.get(&prepared.source);
+                        let destination_incarnation = node_incarnations.get(&prepared.destination);
+                        let participants_match = source_incarnation
+                            == Some(&prepared.source_incarnation)
+                            && destination_incarnation == Some(&prepared.destination_incarnation);
+                        let source_still_owns_entity = if let Some(node) = scheduled
+                            && let Some(unit) = node.units.get(&entity.unit)
+                        {
+                            unit.primary_node.as_ref() == Some(&prepared.source)
+                        } else {
+                            false
+                        };
+                        prepared.coordination.same_process_as(authority)
+                            && participants_match
+                            && prepared.base_schedule_fingerprint == schedule_fingerprint
+                            && source_still_owns_entity
+                            && self.entity_gate_operation_owns_entity(
+                                &prepared.coordination,
+                                &entity.entity.domain,
+                                &entity.entity.node,
+                                EntityGatePurpose::OwnershipHandoff,
+                            )
+                    }
                 } else {
-                    let source_incarnation = node_incarnations.get(&prepared.source);
-                    let destination_incarnation = node_incarnations.get(&prepared.destination);
-                    let participants_match = source_incarnation
-                        == Some(&prepared.source_incarnation)
-                        && destination_incarnation == Some(&prepared.destination_incarnation);
-                    let source_still_owns_entity =
-                        scheduled.and_then(ExecutionNode::primary_node) == Some(&prepared.source);
-                    prepared.coordination.same_process_as(authority)
-                        && participants_match
-                        && prepared.base_schedule_fingerprint == schedule_fingerprint
-                        && source_still_owns_entity
-                        && self.entity_gate_operation_owns_entity(
-                            &prepared.coordination,
-                            &entity.domain,
-                            &entity.node,
-                            EntityGatePurpose::OwnershipHandoff,
-                        )
-                }
-            } else {
-                false
-            };
+                    false
+                };
             if committed_or_active {
                 continue;
             }
             self.discard_prepared_ownership_handoff_state(
                 &prepared.coordination,
                 &prepared.operation_id,
-                &entity.domain,
-                &entity.node,
+                &entity.entity.domain,
+                &entity.entity.node,
+                entity.unit,
             )
             .change_context(OwnershipHandoffError::Persistence)?;
             discarded = discarded
                 .checked_add(1)
                 .assured("the discarded count cannot exceed the collected preparation count");
             debug!(
-                domain = entity.domain.as_str(),
-                kind = entity.kind().as_str(),
-                name = entity.identifier().as_str(),
+                domain = entity.entity.domain.as_str(),
+                kind = entity.entity.kind().as_str(),
+                name = entity.entity.identifier().as_str(),
                 coordination = %prepared.coordination,
                 operation_id = prepared.operation_id,
                 authority = %authority,

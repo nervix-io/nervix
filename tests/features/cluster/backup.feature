@@ -341,6 +341,59 @@ Feature: Configuration backup into a public archive
       | 1            |
       | 3            |
 
+  # Every live node applied the pause before the drain's first poll, so each poll reads the work
+  # its node holds and installs nothing: a node whose installation is held still answers it.
+  Scenario Outline: A quiesced cut drains while no node can install runtime state
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA held_event ( id I64, source STRING );
+      CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( id integer, source string );
+      CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE RELAY held_input SCHEMA held_event UNBRANCHED;
+      CREATE RELAY held_output SCHEMA held_event UNBRANCHED;
+      CREATE VHOST edge backup-held-installation-{{test_id}}.example.com;
+      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR held_source
+        FROM held_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
+        TO held_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION held_forward FROM held_input UNBRANCHED
+        TO held_output INHERIT ALL
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION held_output_seen TO held_output;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the backup cut for domain "{{domain}}" will pause before its drain
+    And the backup cut for domain "{{domain}}" will pause before its capture
+    When the CLI begins backing up "domain {{domain}} --timeout 60s --backup-wait-timeout 3m" from node "{{leader}}" into "held-installation.nvxb" in the background
+    Then the backup cut for domain "{{domain}}" has reached its drain pause
+    When runtime installation on every node is paused
+    And the backup drain pause for domain "{{domain}}" is released
+    Then the backup cut for domain "{{domain}}" has reached its pause
+    When runtime installation on every node is released
+    And the backup cut pause for domain "{{domain}}" is released
+    Then the background CLI backup finishes
+    And the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When http payload is posted to node "{{leader}}" with host "backup-held-installation-{{test_id}}.example.com" path "/events"
+      """
+      {"id":1,"source":"after"}
+      """
+    Then within "60s" the relay subscription receives a payload
+      """
+      {"id":1,"source":"after"}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: An unavailable emitter times out a backup drain with outstanding work
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers with
@@ -385,6 +438,67 @@ Feature: Configuration backup into a public archive
     And backup archive "stalled.nvxb" does not exist
     When HTTP receiver "api" releases its held responses with "respond 204"
     And http payload is posted to host "backup-stalled-{{test_id}}.example.com" path "/events"
+      """
+      [{"event_id":"2"}]
+      """
+    Then HTTP receiver "api" eventually receives at least 2 requests
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # A cut's TIMEOUT counts from before its lease, and applying its pause across the cluster spends
+  # the same budget. The cut is held for 12 seconds once its pause is applied, as a slow application
+  # would hold it, so its drain has only what is left of the 20-second budget. The drain cannot
+  # finish while the emitter's publish is held, and it is refused at the cut's own deadline, never
+  # after a budget measured afresh once the pause was applied. The 12 seconds that separate the two
+  # also absorb the one poll round that overshoots the deadline on a loaded runner.
+  Scenario Outline: A backup drain ends at its cut's deadline after a slow pause application
+    Given HTTP receiver "api" is running
+    And HTTP receiver "api" answers with
+      """
+      hold response until released
+      """
+    And HTTP receiver "api" answers unscripted requests with "respond 204"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (event_id STRING);
+      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY outgoing SCHEMA event UNBRANCHED;
+      CREATE VHOST edge backup-slow-pause-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP CLIENT api_client CONFIG {
+        'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
+      };
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'POST' PATH concat('/events/', input.event_id)
+          MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "backup-slow-pause-{{test_id}}.example.com" path "/events"
+      """
+      [{"event_id":"1"}]
+      """
+    Then HTTP receiver "api" eventually receives at least 1 requests
+    Then the current leader node is saved as placeholder "leader"
+    Given the backup cut for domain "{{domain}}" will be held for 12 seconds once its pause is applied
+    When the CLI backs up "domain {{domain}} --timeout 20s" from node "{{leader}}" into "slow-pause.nvxb" reporting JSON
+    Then the CLI backup failed with JSON error code "BACKUP_REFUSED"
+    And the CLI backup failure mentions "publishing_emitters"
+    And the CLI drain timeout reports at least its 20 second budget elapsed and less than 12 seconds beyond it
+    And backup archive "slow-pause.nvxb" does not exist
+    When HTTP receiver "api" releases its held responses with "respond 204"
+    And http payload is posted to host "backup-slow-pause-{{test_id}}.example.com" path "/events"
       """
       [{"event_id":"2"}]
       """

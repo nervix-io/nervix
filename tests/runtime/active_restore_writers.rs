@@ -80,6 +80,7 @@ impl Replacement {
                     source_incarnation: ClusterNodeIncarnation::new(31),
                     destination_incarnation: ClusterNodeIncarnation::new(32),
                     entity: &entity,
+                    unit: placement.unit,
                     base_schedule_fingerprint: [4; 32],
                     target_schedule_fingerprint: [5; 32],
                 };
@@ -98,6 +99,7 @@ impl Replacement {
                     destination: &destination,
                     destination_incarnation: ClusterNodeIncarnation::new(32),
                     entity: &entity,
+                    unit: placement.unit,
                     target_schedule_fingerprint: [5; 32],
                 };
                 store

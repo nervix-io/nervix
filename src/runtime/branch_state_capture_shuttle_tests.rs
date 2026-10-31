@@ -58,6 +58,7 @@ fn placement(kind: ModelKind, state: RuntimeState) -> RuntimeStatePlacement {
         state,
         kind,
         identifier: ModelName::parse("branch_state").assured("the identifier is well formed"),
+        unit: nervix_models::Unit::Single,
         branch_key: None,
     }
 }

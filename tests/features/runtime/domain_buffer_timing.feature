@@ -73,7 +73,7 @@ Feature: Domain-paced branch buffering
     # and the collection each still close 50ms after they open, while a physical clock would hold
     # each for a minute. The caller deliberately resumes after the receive budget; the independent
     # reader must still collect every row within it.
-    Then within "5s" the relay subscription receives payloads with its caller delayed by "6s"
+    Then within "10s" the relay subscription receives payloads with its caller delayed by "11s"
       """
       key={"tenant":"alpha"} payload={"path":"fast","sequence":1,"tenant":"alpha"}
       key={"tenant":"alpha"} payload={"path":"fast","sequence":2,"tenant":"alpha"}
@@ -160,7 +160,7 @@ Feature: Domain-paced branch buffering
     # Each relay owner fans out one batch at a time, every branch included, so each batch waits
     # for the owner's delay on both relays. The rows still arrive well inside the budget, while a
     # physical clock would hold the first window alone for a minute.
-    Then within "5s" the relay subscription receives payloads with its caller delayed by "6s"
+    Then within "10s" the relay subscription receives payloads with its caller delayed by "11s"
       """
       key={"tenant":"alpha"} payload={"path":"fast","sequence":1,"tenant":"alpha"}
       key={"tenant":"alpha"} payload={"path":"fast","sequence":2,"tenant":"alpha"}
@@ -224,7 +224,7 @@ Feature: Domain-paced branch buffering
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       CREATE SUBSCRIPTION observed_subscription TO observed;
-      START AT '2000-01-01T00:00:00Z' TIME RATE 0.0001;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 0.000001;
       """
     And http payload is posted to host "immediate-buffering-{{test_id}}.example.com" path "/events"
       """
@@ -234,9 +234,12 @@ Feature: Domain-paced branch buffering
       """
       {"tenant":"beta","sequence":1,"path":"immediate"}
       """
-    # Keep the original receive deadline while this caller waits beyond it. At rate 0.0001,
-    # a wrongly logical 100us batching minimum would already require one physical second.
-    Then within "500ms" the relay subscription receives payloads with its caller delayed by "1s"
+    # A wrongly logical 100us batching minimum would hold each route for a hundred physical
+    # seconds at this rate, ten times the receive budget, so the budget rejects the wrong clock
+    # while leaving relay delivery between three nodes room on a loaded runner. The caller
+    # deliberately resumes after the budget; the independent reader must still collect every row
+    # within it.
+    Then within "10s" the relay subscription receives payloads with its caller delayed by "11s"
       """
       key={"tenant":"alpha"} payload={"path":"immediate","sequence":1,"tenant":"alpha"}
       key={"tenant":"beta"} payload={"path":"immediate","sequence":1,"tenant":"beta"}
@@ -306,7 +309,10 @@ Feature: Domain-paced branch buffering
       {"tenant":"alpha","sequence":1,"path":"collect"}
       {"tenant":"beta","sequence":1,"path":"collect"}
       """
-    Then within "2s" the relay subscription receives payloads no sooner than "300ms" after they were published
+    # Each collection holds its branch for one physical second at this rate, and the lower bound
+    # measures that hold. The upper bound only has to outlast the hold and relay delivery between
+    # three nodes on a loaded runner; a row left to the one-hour flush would never arrive.
+    Then within "10s" the relay subscription receives payloads no sooner than "300ms" after they were published
       """
       {"path":"collect","sequence":1,"tenant":"alpha"}
       {"path":"collect","sequence":1,"tenant":"beta"}
