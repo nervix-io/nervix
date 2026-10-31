@@ -20,7 +20,9 @@
 
 use std::future::Future;
 
-use nervix_connector::{IngestMetadataRow, RetainedIngestHeaders};
+use nervix_connector::{
+    IngestMetadataRow, IngestRowHeaders, RetainedIngestHeaders, RetainedIngestMetadata,
+};
 use nervix_models::parse_duration_text;
 
 use super::*;
@@ -371,57 +373,82 @@ impl IngestorQuiescePublication {
     }
 }
 
-/// One buffered message's ingest metadata.
+/// One buffered message's ingest metadata, owned.
 ///
 /// A quiesced ingestor replays its payloads after the source messages are gone, so the
-/// buffer owns these values and appends them into the group's builders on replay.
+/// buffer owns these values and appends them into the group's builders on replay. It keeps the
+/// value of every field the message's entity declares, whichever of them the ingestor's programs
+/// read, so a replayed message builds the same columns a delivered one would.
 #[derive(Debug, Clone)]
-pub(in crate::runtime) enum BufferedIngestMetadata {
-    Http {
-        status: u16,
-        polled_at: Timestamp,
-        headers: RetainedIngestHeaders,
-    },
-    Websockets {
-        frame_type: nervix_models::WebsocketsFrameType,
-        // Retains the message's exact connection header snapshot without copying it per frame.
-        headers: Arc<RetainedIngestHeaders>,
-    },
-    Syslog {
-        peer_addr: std::net::SocketAddr,
-    },
-    Headers(RetainedIngestHeaders),
+pub(in crate::runtime) struct BufferedIngestMetadata {
+    fields: RetainedIngestMetadata,
+    headers: BufferedIngestHeaders,
+    position: Option<TransportPosition>,
+}
+
+/// How a buffered message keeps its transport headers.
+#[derive(Debug, Clone)]
+enum BufferedIngestHeaders {
+    /// A copy taken when the message was buffered.
+    Copied(RetainedIngestHeaders),
+    /// The exact snapshot the message shared with the rest of its connection, kept by reference
+    /// rather than copied per message.
+    Shared(Arc<RetainedIngestHeaders>),
 }
 
 impl BufferedIngestMetadata {
+    /// Takes what `row` lends, so the buffer keeps it after the ingestor message is gone.
+    pub(in crate::runtime) fn retain(row: &IngestMetadataRow<'_>) -> Self {
+        let headers = match row.headers {
+            IngestRowHeaders::Borrowed(headers) => {
+                BufferedIngestHeaders::Copied(RetainedIngestHeaders::capture(headers))
+            }
+            IngestRowHeaders::Shared(headers) => BufferedIngestHeaders::Shared(headers.clone()),
+        };
+        Self {
+            fields: RetainedIngestMetadata::capture(row.fields),
+            headers,
+            position: row.position.map(TransportPosition::retain),
+        }
+    }
+
+    /// The metadata of a message that carries `headers` alone, such as an endpoint request.
+    pub(in crate::runtime) fn headers(headers: RetainedIngestHeaders) -> Self {
+        Self {
+            fields: RetainedIngestMetadata::none(),
+            headers: BufferedIngestHeaders::Copied(headers),
+            position: None,
+        }
+    }
+
+    /// The metadata of a message a paced source returned owned: the values of the fields its
+    /// entity declares, and its headers. A paced transport names no position.
+    pub(in crate::runtime) fn polled(
+        fields: RetainedIngestMetadata,
+        headers: RetainedIngestHeaders,
+    ) -> Self {
+        Self {
+            fields,
+            headers: BufferedIngestHeaders::Copied(headers),
+            position: None,
+        }
+    }
+
     /// The metadata of a buffered message whose source carries no transport headers.
     #[cfg(test)]
     pub(in crate::runtime) fn without_headers() -> Self {
-        Self::Headers(RetainedIngestHeaders::none())
+        Self::headers(RetainedIngestHeaders::none())
     }
 
     pub(super) fn row(&self) -> IngestMetadataRow<'_> {
-        match self {
-            Self::Http {
-                status,
-                polled_at,
-                headers,
-            } => IngestMetadataRow::Http {
-                status: *status,
-                polled_at: *polled_at,
-                headers,
-            },
-            Self::Websockets {
-                frame_type,
-                headers,
-            } => IngestMetadataRow::Websockets {
-                frame_type: *frame_type,
-                headers,
-            },
-            Self::Syslog { peer_addr } => IngestMetadataRow::Syslog {
-                peer_addr: *peer_addr,
-            },
-            Self::Headers(headers) => IngestMetadataRow::Headers { headers },
+        let headers = match &self.headers {
+            BufferedIngestHeaders::Copied(headers) => IngestRowHeaders::Borrowed(headers),
+            BufferedIngestHeaders::Shared(headers) => IngestRowHeaders::Shared(headers),
+        };
+        IngestMetadataRow {
+            fields: &self.fields,
+            headers,
+            position: self.position.as_ref().map(TransportPosition::borrowed),
         }
     }
 }

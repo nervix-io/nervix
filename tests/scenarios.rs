@@ -1,3 +1,22 @@
+//! The public scenario suite: the Cucumber steps over the features in `tests/features`, run against
+//! the nodes this process starts.
+//!
+//! Outside the layer order: a harness test crate, the `scenarios` target of `nervix-scenarios`.
+//!
+//! - **Owns.** The steps, the world they share and the run of the suite, and the choice at the top
+//!   of `main` of what a process of this executable runs.
+//! - **Depends on.** Any layer, the harness modules in `tests/common`, and what the `just` recipe
+//!   running the suite built and provisioned.
+//! - **Must not know.** How anything it starts is built. No product code names it.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "the scenario suite drives every layer from outside the order"
+    )
+)]
+
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -6,7 +25,7 @@ use std::{
     io::{Read as _, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU64,
-    os::unix::process::ExitStatusExt as _,
+    os::unix::process::{CommandExt as _, ExitStatusExt as _},
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
@@ -33,6 +52,7 @@ use cucumber::{
     given, then, when,
     writer::{self, Stats as _},
 };
+use error_stack::Report;
 use futures_util::{
     StreamExt as _, TryStreamExt,
     future::{join_all, try_join_all},
@@ -77,10 +97,12 @@ use nervix_primitives::{
 use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, ModelPublicationRefusalKind, SchedulerMode, WasmStateResetRequestError,
-    application::{InternalTransportMode, SettingOverride, ShutdownPhaseOutcome},
+    application::{
+        AppError, InternalTransportMode, SettingOverride, ShutdownPhaseOutcome, run_server_process,
+    },
     memory_pressure::MemoryPressureConfig,
 };
-use nervix_test_environment::{TestParallelism, TestParallelismArgs};
+use nervix_test_environment::{TestParallelism, TestParallelismArgs, workspace_root};
 use nervix_wasm::{
     WasmAckSidecar, WasmAckToken, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow,
     WasmRoutedOutput,
@@ -138,6 +160,10 @@ use crate::common::{
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
+    process_program::{
+        ProcessProgram, SERVER_PROGRAM, build_tools_directory, dependency_lifecycle_helper_command,
+        scenario_executable,
+    },
     raw_session::{
         SessionScope, TestSubscriptionEvent, TestUpload, TestUploadPart, WireOutcome as _,
         command_output, fresh_execution_reference, outcome_awaits_leader,
@@ -152,6 +178,7 @@ use crate::common::{
         FeatureLimit, SCENARIO_RETRIES, ScenarioAdmission, ScenarioLength, ScenarioRunSlots,
         prioritize_features,
     },
+    scenario_shard::{ScenarioShard, ScenarioShardArgs},
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
@@ -221,7 +248,6 @@ const DOMAIN_WRITE_LOAD_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 /// The execution class a follower charges its decoded append batches to.
 const COMMANDS_MEMORY_LABEL: &str = "class=\"commands\"";
 const BULK_MEMORY_LABEL: &str = "class=\"bulk\"";
-const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
 const DEPENDENCY_LIFECYCLE_STARTED: &str = "NERVIX_DEPENDENCY_LIFECYCLE_STARTED=";
 
 /// What a scenario's own steps did, as its after hook sees it.
@@ -3369,17 +3395,14 @@ async fn then_ephemeral_dependency_is_cleaned_up_when_test_process_is_killed(
     use tokio::io::AsyncBufReadExt as _;
 
     let scope = format!("lifecycle-{}", Uuid::now_v7().as_simple());
-    let mut child = tokio::process::Command::new(
-        std::env::current_exe().expect("scenario executable path should be available"),
-    )
-    .env(DEPENDENCY_LIFECYCLE_HELPER_ENV, &scope)
-    .env("NERVIX_TESTCONTAINERS_MODE", "ephemeral")
-    .env("TESTCONTAINERS_COMMAND", "keep")
-    .kill_on_drop(true)
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()
-    .expect("dependency lifecycle helper should start");
+    let mut child = dependency_lifecycle_helper_command(&scope)
+        .env("NERVIX_TESTCONTAINERS_MODE", "ephemeral")
+        .env("TESTCONTAINERS_COMMAND", "keep")
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("dependency lifecycle helper should start");
     let stdout = child
         .stdout
         .take()
@@ -3447,8 +3470,8 @@ enum IngestorLogicTransportFixture {
 
 #[when("the nervix-server help is requested")]
 fn when_nervix_server_help_is_requested(world: &mut ScenarioWorld) {
-    let binary = env!("CARGO_BIN_EXE_nervix-server");
-    let output = Command::new(binary)
+    let output = Command::new(scenario_executable())
+        .arg0(SERVER_PROGRAM)
         .arg("--help")
         .output()
         .expect("nervix-server help command must run");
@@ -4666,19 +4689,14 @@ fn then_server_process_log_does_not_contain(world: &mut ScenarioWorld, fragment:
     );
 }
 
-/// Resolves the formatter beside the server binary.
-///
-/// `CARGO_BIN_EXE_` is only defined for binaries of the test target's own package, and the
-/// formatter lives in its own crate, so it is located by its neighbour in the same target
-/// directory. `just test-scenarios` builds it through `tests-deps`.
+/// Resolves the formatter among the tools the build left beside this executable. `just
+/// test-scenarios` builds it through `tests-deps`.
 fn plexus_format_binary() -> PathBuf {
-    let candidate = Path::new(env!("CARGO_BIN_EXE_nervix-server"))
-        .parent()
-        .expect("the server binary must live in a directory")
-        .join("nervix-plexus-format");
+    let candidate = build_tools_directory().join("nervix-plexus-format");
     assert!(
         candidate.exists(),
-        "nervix-plexus-format must be built beside nervix-server; run `just test-scenarios`"
+        "nervix-plexus-format must be built beside the scenario executable; run `just \
+         test-scenarios`"
     );
     candidate
 }
@@ -4688,10 +4706,7 @@ fn scenario_cli_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("NERVIX_TEST_CLI_PATH") {
         return PathBuf::from(path);
     }
-    let candidate = Path::new(env!("CARGO_BIN_EXE_nervix-server"))
-        .parent()
-        .assured("the server binary has a parent directory")
-        .join("nervix-cli");
+    let candidate = build_tools_directory().join("nervix-cli");
     assert!(candidate.exists(), "tests-deps must build nervix-cli");
     candidate
 }
@@ -4761,7 +4776,7 @@ impl ScenarioWorld {
                 process.arg("--tls").arg("required");
                 process
                     .arg("--tls-ca-cert")
-                    .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tls/dev/ca.pem"));
+                    .arg(workspace_root().join("tls/dev/ca.pem"));
             }
             process
                 .arg("--dns-resolver-config")
@@ -5723,14 +5738,6 @@ fn then_the_plexus_file_is_unchanged(world: &mut ScenarioWorld, name: String) {
     let root = formatter_root(world);
     let actual = std::fs::read_to_string(root.join(&name)).expect("Plexus file must be readable");
     assert_eq!(actual, expected, "{name} was rewritten");
-}
-
-#[then("the legacy nervix server executable is absent")]
-fn then_legacy_nervix_server_executable_is_absent(_world: &mut ScenarioWorld) {
-    assert!(
-        option_env!("CARGO_BIN_EXE_nervix").is_none(),
-        "the legacy nervix binary target must not be built"
-    );
 }
 
 impl IngestorLogicTransportFixture {
@@ -8663,7 +8670,6 @@ async fn given_concurrent_transaction_limit_is_configured(world: &mut ScenarioWo
     world.cluster_config.transaction_max_open = limit;
 }
 
-#[cfg(feature = "testing")]
 #[given("the production sticky scheduler is configured")]
 async fn given_production_sticky_scheduler_is_configured(world: &mut ScenarioWorld) {
     assert!(
@@ -9777,7 +9783,7 @@ const ONNX_FIXTURE_MODELS: [&str; 7] = [
 ];
 
 fn onnx_fixture_path(fixture: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    workspace_root()
         .join("tests")
         .join("fixtures")
         .join("onnx")
@@ -9936,7 +9942,7 @@ async fn place_wasm_processor_fixture_with_layout(
             .await
             .expect("old fixture directory should be removed");
     }
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = workspace_root();
     let (source_path, artifact_file) = match guest {
         "rust" => (
             repo_root
@@ -17331,7 +17337,7 @@ async fn run_cli_inspection(
         .unwrap_or_else(|| {
             let target_dir = std::env::var_os("CARGO_TARGET_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+                .unwrap_or_else(|| workspace_root().join("target"));
             target_dir.join("debug/nervix-cli")
         });
     let query = expand_placeholders(world, docstring(step));
@@ -33375,7 +33381,17 @@ async fn then_node_eventually_reports_interconnect_status(
         .expect("interconnect status did not converge");
 }
 
-fn main() {
+fn main() -> Result<(), Report<AppError>> {
+    // A process started under the server's name is the server, and none of the suite below runs.
+    let helper_scope = match ProcessProgram::of_this_process() {
+        ProcessProgram::Server => return run_server_process(),
+        ProcessProgram::DependencyLifecycleHelper { scope } => Some(scope),
+        ProcessProgram::Suite => None,
+    };
+    // Cargo runs a test in its package's directory, and every path a scenario names is relative to
+    // the workspace, as the paths given to `--input` are.
+    std::env::set_current_dir(workspace_root())
+        .expect("the suite runs on the machine that built it");
     TestDependencies::configure_process_lifecycle();
     // A diagnostic build tracks the blocking locks of every in-process node with one detector,
     // installed once for the whole process before any tracked lock or runtime worker exists.
@@ -33388,14 +33404,11 @@ fn main() {
         .thread_stack_size(8 * 1024 * 1024)
         .build()
         .expect("scenario runtime should build");
-    let execution = catch_unwind(AssertUnwindSafe(|| {
-        if let Some(scope) = std::env::var_os(DEPENDENCY_LIFECYCLE_HELPER_ENV) {
-            runtime.block_on(run_dependency_lifecycle_helper(
-                scope.to_string_lossy().into_owned(),
-            ))
-        } else {
-            runtime.block_on(run_scenarios(parallelism))
-        }
+    let execution = catch_unwind(AssertUnwindSafe(|| match helper_scope {
+        Some(scope) => runtime.block_on(run_dependency_lifecycle_helper(
+            scope.to_string_lossy().into_owned(),
+        )),
+        None => runtime.block_on(run_scenarios(parallelism)),
     }));
     // Both bounded, because a run whose result is already decided must still end in time for that
     // result to be uploaded. Stopping containers and dropping a multi-threaded runtime both wait
@@ -33415,11 +33428,12 @@ fn main() {
     if let SuiteOutcome::TimedOut(_) = &outcome {
         eprintln!("{dependency_teardown}");
         outcome.end_process();
-        return;
+        return Ok(());
     }
 
     assert!(dependency_teardown.is_clean(), "{dependency_teardown}");
     outcome.end_process();
+    Ok(())
 }
 
 /// The environment variable naming the directory a diagnostic scenario binary records its deadlock
@@ -33519,13 +33533,19 @@ struct ScenarioRunArgs {
     parallelism: TestParallelismArgs,
     #[command(flatten)]
     watchdog: SuiteWatchdogArgs,
+    #[command(flatten)]
+    shard: ScenarioShardArgs,
 }
 
-/// Parse the same Gherkin inputs and CLI options as Cucumber's basic parser, then take the
-/// limited feature chains up before the bulk. Cucumber may schedule all parsed scenarios at
-/// once; admission to a feature and to a run slot happens in the before hook.
+/// Parse the same Gherkin inputs and CLI options as Cucumber's basic parser, keep a shard's own
+/// scenario runs when the run is one shard of a sharded run, then take the limited feature chains
+/// up before the bulk. Cucumber may schedule all parsed scenarios at once; admission to a feature
+/// and to a run slot happens in the before hook.
 #[derive(Clone, Debug, Default)]
-struct PrioritizedScenarioParser;
+struct PrioritizedScenarioParser {
+    /// The shard this run executes, or `None` when it executes every run it selects.
+    shard: Option<ScenarioShard>,
+}
 
 impl<I: AsRef<Path>> cucumber::parser::Parser<I> for PrioritizedScenarioParser {
     type Cli = cucumber::parser::basic::Cli;
@@ -33536,8 +33556,14 @@ impl<I: AsRef<Path>> cucumber::parser::Parser<I> for PrioritizedScenarioParser {
 
     fn parse(self, input: I, cli: Self::Cli) -> Self::Output {
         let parsed = cucumber::parser::Parser::parse(cucumber::parser::Basic::new(), input, cli);
+        let shard = self.shard;
         futures_util::stream::once(async move {
             let mut features = parsed.collect::<Vec<_>>().await;
+            if let Some(shard) = shard {
+                let selection = shard.keep_own_runs(&mut features);
+                println!("scenario {selection}");
+                append_cucumber_log_line(&format!("scenario {selection}"));
+            }
             prioritize_features(&mut features, |feature| {
                 feature.as_ref().ok().map(|feature| feature.name.as_str())
             });
@@ -33586,6 +33612,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         );
     }
     let watchdog = cli.custom.watchdog.watchdog();
+    let shard = cli.custom.shard.shard();
     let concurrency_factor = cli.custom.parallelism.concurrency_factor();
     let default_max_concurrent_scenarios = parallelism.max_concurrent_scenarios(concurrency_factor);
     let effective_max_concurrent_scenarios = cli
@@ -33600,7 +33627,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     // jemalloc's purges cost in a process of this many threads.
     purge_freed_memory_in_the_background();
     truncate_cucumber_log();
-    begin_suite_measurement(effective_max_concurrent_scenarios, watchdog.budget());
+    begin_suite_measurement(effective_max_concurrent_scenarios, watchdog.budget(), shard);
     append_cucumber_log_line(&format!(
         "scenario parallelism: run_slots={effective_max_concurrent_scenarios} \
          concurrency_factor={concurrency_factor} tokio_worker_threads={} suite_budget={:?} \
@@ -33617,7 +33644,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     .normalized()
     .repeat_failed();
     let run = ScenarioWorld::cucumber::<&str>()
-        .with_parser(PrioritizedScenarioParser)
+        .with_parser(PrioritizedScenarioParser { shard })
         .max_concurrent_scenarios(usize::MAX)
         .retries(SCENARIO_RETRIES)
         .before(move |feature, rule, scenario, world| {

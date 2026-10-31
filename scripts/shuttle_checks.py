@@ -6,6 +6,9 @@
 `just test-shuttle-replay-check` runs `replay-check`. The inventory in
 `crates/model-harness/shuttle-inventory.toml` registers every check by package and test.
 
+`build` compiles the Shuttle build of every inventory package exactly as `run` lists it, and runs
+nothing, so a later `run` compiles nothing.
+
 `run` lists the library tests whose full names contain `shuttle_` in every inventory package, built
 with its `shuttle` feature, and checks them against the inventory: a run over the whole inventory
 fails when a registered check is missing or ignored, or when a discovered check is not registered.
@@ -599,6 +602,14 @@ def replay_check(commands: Commands, inventory: Inventory, target: Path) -> int:
     return 0
 
 
+def build_checks(commands: Commands, inventory: Inventory) -> int:
+    for package in inventory.packages():
+        built = commands.run(cargo_test(package, "--no-run"))
+        if built.status != 0:
+            raise RunnerError(f"cannot build the Shuttle build of {package}")
+    return 0
+
+
 def list_checks(commands: Commands, inventory: Inventory) -> int:
     for package in inventory.packages():
         discovery = discover(commands, package)
@@ -635,6 +646,7 @@ def main(
     replay_parser = subcommands.add_parser("replay")
     replay_parser.add_argument("schedule", type=Path)
     subcommands.add_parser("replay-check")
+    subcommands.add_parser("build")
     subcommands.add_parser("list")
     subcommands.add_parser("packages")
     arguments = parser.parse_args(argv)
@@ -646,6 +658,8 @@ def main(
         if arguments.command == "packages":
             print("\n".join(inventory.packages()))
             return 0
+        if arguments.command == "build":
+            return build_checks(commands, inventory)
         if arguments.command == "list":
             return list_checks(commands, inventory)
         if arguments.command == "replay":

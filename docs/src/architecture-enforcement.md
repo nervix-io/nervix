@@ -140,13 +140,15 @@ representations and every generated location in ordinary and sanitizer execution
 
 An analysis compilation needs about the memory of rustc's own check of its target, and the server
 library's dwarfs every other: it peaks between about 11 and 13.5 GiB in each of the ten declared
-configurations that compile it, while no other analysis compilation reaches 2 GiB. Configurations
-run one after another, and inside one the server library compiles after the crates it depends on,
-so one validation holds little more than one server analysis at a time. Validations in several
-worktrees of one host run at the same time, though, and nothing else admits them against the
-host's memory: kache, the compiler wrapper the host configures, runs a chain with a workspace
-wrapper directly, outside its own memory-weighted scheduler. Five server analyses at once exceed a
-62 GiB host, and the kernel's out-of-memory killer ends one of them.
+configurations that compile it, while no other analysis compilation reaches 2 GiB. Every
+configuration builds in a directory of its own, and up to four configurations analyze at once, a
+bound `--jobs` or `NERVIX_TYPED_RATCHET_JOBS` sets otherwise; the evidence keeps the declared order
+whatever order they end in, and once one analysis fails no configuration starts another.
+Configurations at once, and validations in several worktrees of one host, would hold several server
+analyses at a time, and nothing else admits them against the host's memory: kache, the compiler
+wrapper the host configures, runs a chain with a workspace wrapper directly, outside its own
+memory-weighted scheduler. Five server analyses at once exceed a 62 GiB host, and the kernel's
+out-of-memory killer ends one of them.
 
 `tools/nervix-lint/configurations.toml` declares the admission: a threshold, a wait limit and a
 reservation for every compilation, by crate and target kind, that peaks above the threshold. The

@@ -23,6 +23,7 @@ use super::{
     scenario_schedule::{
         AdmissionWait, LONG_RUNNING_ATTEMPT, LONG_RUNNING_TAG, ScenarioLength, ScenarioRun,
     },
+    scenario_shard::ScenarioShard,
 };
 
 /// Where one scenario is between its first step and the end of its cleanup.
@@ -273,6 +274,8 @@ struct SuiteMeasurements {
     runner_thread: Option<RunnerThread>,
     /// How busy the runtime's workers had been when the run began, when it began inside one.
     workers_began: Option<WorkerBusy>,
+    /// The shard this run executes, when it is one shard of a sharded run.
+    shard: Option<ScenarioShard>,
 }
 
 static MEASUREMENTS: LazyLock<Mutex<SuiteMeasurements>> =
@@ -307,6 +310,15 @@ impl SuiteMeasurements {
         )
     }
 
+    /// Which runs this run executed: one shard's, whose count the scenario log names, or every
+    /// run it selected.
+    fn shard_line(&self) -> String {
+        match self.shard {
+            Some(shard) => format!("Shard: {shard}; the scenario log names the runs it kept."),
+            None => "Shard: none; the run executed every scenario run it selected.".to_string(),
+        }
+    }
+
     /// How busy the runtime's workers, which run every in-process node, were over a run of
     /// `length`.
     fn workers_line(&self, length: Duration) -> String {
@@ -331,12 +343,18 @@ impl SuiteMeasurements {
     }
 }
 
-/// Starts measuring a run of `slots` run slots and `budget`, polled on the calling thread.
-pub(crate) fn begin_suite_measurement(slots: usize, budget: Duration) {
+/// Starts measuring a run of `slots` run slots and `budget`, executing `shard` when it is one
+/// shard of a sharded run, polled on the calling thread.
+pub(crate) fn begin_suite_measurement(
+    slots: usize,
+    budget: Duration,
+    shard: Option<ScenarioShard>,
+) {
     *MEASUREMENTS.lock() = SuiteMeasurements {
         began: Some(Instant::now()),
         slots,
         budget,
+        shard,
         runner_thread: Some(RunnerThread::current()),
         workers_began: WorkerBusy::of_current_runtime(),
         ..SuiteMeasurements::default()
@@ -402,6 +420,7 @@ pub(crate) fn suite_summary() -> String {
             length.as_secs_f64(),
             measurements.budget.as_secs_f64()
         ),
+        measurements.shard_line(),
         format!(
             "Run slots: {}; utilization: {utilization:.1}%; scenario work: {:.1} slot-seconds.",
             measurements.slots,
