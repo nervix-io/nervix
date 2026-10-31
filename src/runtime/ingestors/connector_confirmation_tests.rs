@@ -79,7 +79,7 @@ impl IngestorMessage for ConfirmingDelivery {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::Headers { headers: self }
+        IngestMetadataRow::headers(self)
     }
 }
 
