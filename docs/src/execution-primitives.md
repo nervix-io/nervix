@@ -16,9 +16,10 @@ Shuttle, Loom, Turmoil or the Deloxide diagnostic mode. A build uses one mode ac
 dependency graph. Every package that owns a `shuttle`, `loom`, `turmoil` or `deloxide` feature
 forwards it to the primitive crate, and Cargo unifies
 that crate's features, so a vocabulary type, an engine and the server compiled into one test binary
-all use the same backend. Selection depends only on features, never on `cfg(test)`. Enabling two
-modes fails to compile with a diagnostic that names both, including when two different dependencies
-each enable one.
+all use the same backend. A package of test targets alone forwards it through its dev-dependencies,
+which are what its builds link. Selection depends only on features, never on `cfg(test)`. Enabling
+two modes fails to compile with a diagnostic that names both, including when two different
+dependencies each enable one.
 
 A closed channel returns its unaccepted value as an ordinary ownership refusal. The modeled
 watch adapter declares that classification on its `SendError` type, matching the selected native

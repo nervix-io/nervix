@@ -239,10 +239,8 @@ A run needs a Linux Docker host with the following.
   inside container network namespaces. Each run proves this on the worker before it starts; see
   [Network Preflight](#network-preflight).
   - GitHub-hosted `ubuntu-24.04` workers qualify once the job has loaded `sch_prio`, `sch_sfq` and
-    `sch_netem`.
-  - The repository's CI shards run on Ubicloud `ubicloud-standard-4` workers, whose job loads the
-    same modules before it pulls the image and stops the shard there when the kernel cannot
-    provide one.
+    `sch_netem`. The repository's CI shards run on them, and their job loads those modules before it
+    pulls the image and stops the shard there when the kernel cannot provide one.
 
 A host may run several runs and suites at once. Each run owns its Compose project, network, volumes
 and labels, and runs share nothing but the Docker daemon and the host's capacity. Concurrent runs
@@ -2772,7 +2770,6 @@ The triggers are:
 | --- | --- |
 | A pull request from a branch of this repository, labeled `chaos` | Smoke, against both images built from it |
 | A pull request from a branch of this repository, labeled `chaos-soak` | Soak, against both images |
-| The nightly build of `main`, at 02:00 UTC | Soak, against both images. That build publishes neither a manifest nor the book |
 | A manual run of the `Chaos` workflow | The named suite against a named immutable image `REPOSITORY@sha256:DIGEST`, of a named kind and optionally a revision. It builds nothing |
 
 A pull request labeled `no-docker` builds no image and so runs no suite. A label that builds no
@@ -2791,9 +2788,12 @@ other methods, which a chaos run never substitutes for:
 The `plan` job reads the shards and their budgets from `just chaos suite shards`. It resolves the
 image to its digest, so every shard runs the same immutable image. A manual run must name a digest.
 
-Each shard then runs on its own Ubicloud `ubicloud-standard-4` Docker worker: a virtual machine
-with GitHub's `ubuntu-24.04` runner image and the 4 CPUs and 16 GB of the GitHub-hosted workers
-the suite was qualified on. The job works in this order:
+Each shard then runs on its own GitHub-hosted `ubuntu-24.04` Docker worker, with the 4 CPUs and 16
+GB the suite was qualified on. For a time the shards ran on Boat's workers instead, where a
+container's run, inspection or stop took 8 to 29 seconds against the 30-second bound of a fault
+operation: in Docker Build run 40987706437 three of fourteen soak shards failed their network
+qualification, two at the 600-second cap of the controls and one whose control outlived its own
+120-second bound while cleaning up. The job works in this order:
 
 1. It loads the `sch_prio`, `sch_sfq` and `sch_netem` modules, and fails when the kernel cannot
    provide one.
@@ -2854,8 +2854,7 @@ Label a pull request `chaos` when it changes either of these:
 
 Use `chaos-soak` to run the whole matrix against the pull request's own images, and select both
 labels when qualifying the complete matrix. A change to the diagnostic image, its evidence
-collection, or a path its scenarios exercise under tracked locks keeps both kinds of image green. A
-nightly run of another commit does not qualify a candidate revision.
+collection, or a path its scenarios exercise under tracked locks keeps both kinds of image green.
 
 `tests/release-evidence.toml` lists the smoke and soak suites against both images as release
 evidence, and `just release-evidence <pull-request>` holds a pull request's head revision to it; see
@@ -3064,7 +3063,8 @@ owner crash found the defect in which a Kafka ingestor kept through a replica mo
 committing its domain offsets. The task records each entry's ledger, outcome and timings, and the
 staging volume's samples.
 
-**The current suites.** The current suites run nightly against both images of `main`:
+**The current suites.** The current suites ran nightly against both images of `main` until CI
+stopped scheduling runs on 29 October 2026:
 
 - In Docker Build run [38861733263](https://github.com/nervix-io/nervix/actions/runs/38861733263),
   of revision `8bc67c9a`, every shard of the soak suite passed on both the release and the

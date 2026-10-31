@@ -81,6 +81,17 @@ instrumented.
 
 The record times every stage it reaches, so a check's budget can be set from what preparation,
 the instrumented run, export and finishing each took.
+
+`just coverage-native-extras-build [producer ...]` runs `build`, which compiles a producer's
+instrumented executables without running its check, so CI can publish the build's cache before the
+check runs. A producer that supports it declares a build recipe, which compiles everything its
+instrumented recipe runs, executes none of it, and has no dependencies of its own. `build` runs the
+prepare recipes, then the build recipe in the instrumented environment a collection gives its
+instrumented recipe, holding the instrumented build directory as a collection does. Only the attempt
+and evidence paths, which nothing reads while compiling, differ, so the check that `run` collects
+afterwards compiles nothing. A build collects nothing and writes no record: Cargo's runner records
+into a temporary attempt that the build removes, and an execution there fails the build, because a
+build recipe only compiles.
 """
 
 from __future__ import annotations
@@ -96,6 +107,7 @@ import signal
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -207,6 +219,9 @@ class Producer:
     # requires; `None` for a check that is not the lane. The lane builds in the mode's build.
     lane: str | None = None
     instrumented_crates: InstrumentedCrates = InstrumentedCrates.EVERY
+    # The recipe that compiles, in the instrumented build, every executable the instrumented recipe
+    # runs and runs none of them; `None` for a check that builds and runs in one step.
+    build: str | None = None
 
     def rerun(self, filter_text: str = "") -> str:
         command = f"just coverage-native-extras {self.name}"
@@ -263,14 +278,17 @@ PRODUCERS: tuple[Producer, ...] = (
         name="test-shuttle", mode="shuttle",
         prepare=("build-web-console", "wasm-processor-guests", "download-onnxruntime"),
         instrumented="test-shuttle-checks", finish=(), filterable=True,
+        build="build-shuttle-checks",
     ),
     Producer(
         name="test-loom", mode="loom", prepare=("build-web-console",),
         instrumented="test-loom-models", finish=(), filterable=True,
+        build="build-loom-models",
     ),
     Producer(
         name="test-turmoil", mode="turmoil", prepare=(),
         instrumented="test-turmoil", finish=(),
+        build="build-turmoil-simulations",
     ),
     Producer(
         name="test-deadlock-evidence-order", mode="deloxide-order", prepare=(),
@@ -289,6 +307,7 @@ PRODUCERS: tuple[Producer, ...] = (
             name=f"test-{selection}", mode=feature, prepare=("tests-deps",),
             instrumented=f"test-{selection}-workloads", finish=(), lane=selection,
             instrumented_crates=InstrumentedCrates.WORKSPACE,
+            build=f"build-{selection}-executables",
         )
         for selection, feature in (
             ("deloxide", "deloxide"),
@@ -335,6 +354,18 @@ def validate_composition(producer: Producer, recipes: Mapping[str, object]) -> N
             f"`{producer.instrumented}` depends on {', '.join(instrumented_dependencies)}, which "
             f"would run inside the instrumentation; make them prepare recipes of `{producer.name}`"
         )
+    if producer.build is not None:
+        build = recipes.get(producer.build)
+        if not isinstance(build, Mapping):
+            raise RunnerError(
+                f"the justfile has no `{producer.build}` recipe, which builds `{producer.name}`"
+            )
+        build_dependencies = dependency_names(build)
+        if build_dependencies:
+            raise RunnerError(
+                f"`{producer.build}` depends on {', '.join(build_dependencies)}, which would run "
+                f"inside the instrumentation; make them prepare recipes of `{producer.name}`"
+            )
     if producer.instrumented == producer.name:
         if producer.prepare or producer.finish:
             raise RunnerError(
@@ -1524,6 +1555,58 @@ def collect(
     return Collected(0, attempt, record)
 
 
+def build(
+    commands: Commands,
+    workspace: Workspace,
+    toolchain: Toolchain,
+    environment: Mapping[str, str],
+    producer: Producer,
+) -> int:
+    """Compile one producer's instrumented executables without running its check."""
+
+    if producer.build is None:
+        raise RunnerError(f"`{producer.name}` has no build recipe; it builds and runs in one step")
+    mode_workspace = Workspace(workspace.root, workspace.target, mode=producer.mode)
+    for recipe in producer.prepare:
+        status = commands.stream(["just", recipe], environment=environment)
+        if status != 0:
+            print(f"native coverage: `just {recipe}` exited with status {status}", file=sys.stderr)
+            return status
+
+    build_environment = dict(environment)
+    if producer.toolchain:
+        build_environment["RUSTUP_TOOLCHAIN"] = producer.toolchain
+        toolchain = load_toolchain(commands, build_environment)
+
+    # Cargo's runner needs an attempt to record into. A build runs nothing, so the attempt is a
+    # temporary one, which only shows that the build recipe ran nothing.
+    with tempfile.TemporaryDirectory(prefix="native-coverage-build-") as directory:
+        attempt = Path(directory)
+        (attempt / PROFILES).mkdir()
+        instrumented = instrumentation(
+            commands, mode_workspace, toolchain, attempt, build_environment, producer.instrumented_crates
+        )
+        with mode_workspace.build_lock():
+            status = commands.stream(["just", producer.build], environment=instrumented.environment)
+        if status != 0:
+            print(
+                f"native coverage: `just {producer.build}` exited with status {status}",
+                file=sys.stderr,
+            )
+            return status
+        if (attempt / EXECUTIONS).exists():
+            raise RunnerError(
+                f"`just {producer.build}` ran an executable through Cargo's runner; a build recipe "
+                f"only compiles what `{producer.instrumented}` runs"
+            )
+    print(
+        f"native coverage: built {producer.name} ({producer.mode}) in "
+        f"{mode_workspace.display(mode_workspace.build())}",
+        flush=True,
+    )
+    return 0
+
+
 def summary(workspace: Workspace, producer: Producer, collected: Collected) -> list[str]:
     content = collected.record.content
     heading = f"native coverage: {producer.name} ({producer.mode}) {content['verdict']}"
@@ -1612,6 +1695,31 @@ def run(
     return 0
 
 
+def build_producers(
+    commands: Commands,
+    workspace: Workspace,
+    names: Sequence[str],
+    producers: Sequence[Producer],
+    environment: Mapping[str, str],
+) -> int:
+    selected = select_producers(names, producers)
+    unbuilt = [producer.name for producer in selected if producer.build is None]
+    if unbuilt:
+        raise RunnerError(f"{', '.join(unbuilt)} build and run in one step; name producers with a build recipe")
+    dumped = commands.capture(["just", "--dump", "--dump-format", "json"])
+    if dumped.status != 0:
+        raise RunnerError(f"just could not describe the justfile: {dumped.stderr.strip()}")
+    recipes = json.loads(dumped.stdout).get("recipes", {})
+    for producer in selected:
+        validate_composition(producer, recipes)
+    toolchain = load_toolchain(commands)
+    for producer in selected:
+        status = build(commands, workspace, toolchain, environment, producer)
+        if status != 0:
+            return status
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -1640,6 +1748,10 @@ def main(
     run_parser.add_argument("producers", nargs="*", metavar="producer", help=f"one of {names}")
     run_parser.add_argument("--filter", default="", help="canonical Shuttle test or Loom invariant filter")
     run_parser.add_argument("--output", type=Path, help="copy one complete report to this path")
+    build_parser = subcommands.add_parser(
+        "build", help="compile the named producers' instrumented executables without running them"
+    )
+    build_parser.add_argument("producers", nargs="+", metavar="producer", help=f"one of {names}")
     subcommands.add_parser("exec", help="Cargo's runner inside `run`; not for direct use")
     parsed = parser.parse_args(arguments)
 
@@ -1648,10 +1760,18 @@ def main(
     commands = commands_for(root)
     try:
         with interruptible():
+            if parsed.command == "build":
+                return build_producers(commands, workspace, parsed.producers, producers, current)
             return run(commands, workspace, parsed.producers, producers, current, parsed.filter, parsed.output)
     except RunnerError as error:
         print(f"native coverage: {error}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("native coverage: interrupted by SIGINT", file=sys.stderr)
+        return 128 + signal.SIGINT
+    except Interrupted as interruption:
+        print(f"native coverage: interrupted by {interruption}", file=sys.stderr)
+        return 128 + interruption.number
 
 
 if __name__ == "__main__":

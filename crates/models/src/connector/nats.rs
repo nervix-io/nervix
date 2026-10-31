@@ -34,7 +34,7 @@ use crate::{
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
     IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm,
     OptionPresence, OptionValue, PositionClass,
 };
@@ -197,7 +197,7 @@ impl IngestorDeclaration for NatsSubjectIngestor {
         headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
         // A message also carries the subject it was published to and its reply subject, but the
         // declaration projects neither as a typed field, so programs read its payload and headers.
-        metadata: IngestorMetadataScope::Headers,
+        metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Nats),
         // Core NATS hands each message to one member of the queue group and retains nothing for it,

@@ -29,8 +29,8 @@ use crate::{
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody,
-    IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference, IngestorReferenceKind,
-    PositionClass,
+    IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorMetadataField,
+    IngestorMetadataType, IngestorReference, IngestorReferenceKind, PositionClass,
 };
 
 configured_client!(Syslog: unpooled, config CLIENT_CONFIG, CreateClientSyslog => SyslogConfigEntry);
@@ -140,10 +140,17 @@ const SYSLOG_COLLECTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &[],
 };
 
+/// The peer a syslog message arrived from.
+const SYSLOG_LISTENER_METADATA: IngestorMetadataDeclaration =
+    IngestorMetadataDeclaration::new(&[IngestorMetadataField::new(
+        "peer_addr",
+        IngestorMetadataType::String,
+    )]);
+
 impl IngestorDeclaration for SyslogListenerIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         headers: None,
-        metadata: IngestorMetadataScope::Syslog,
+        metadata: SYSLOG_LISTENER_METADATA,
         executes_on_every_cluster_node: true,
         reference: IngestorReferenceKind::Client(ConnectorKind::Syslog),
         position_class: PositionClass::None,

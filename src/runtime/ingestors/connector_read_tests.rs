@@ -191,7 +191,7 @@ impl IngestorMessage for GatheredMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::Headers { headers: self }
+        IngestMetadataRow::headers(self)
     }
 }
 

@@ -12,6 +12,7 @@ from typing import Callable, Mapping, Sequence
 
 from scripts.loom_models import (
     GENERATED_INPUTS,
+    build_models,
     Commands,
     Discovery,
     Inventory,
@@ -553,6 +554,26 @@ class RunTests(unittest.TestCase):
         self.assertEqual(metadata["revision"], "0123abcd")
         self.assertEqual(metadata["loom"], "0.7.2")
         self.assertTrue((evidence / "output.log").is_file())
+
+
+class BuildTests(unittest.TestCase):
+    def test_a_build_compiles_every_inventory_package_as_a_run_lists_it_and_runs_nothing(self) -> None:
+        with TemporaryDirectory() as temporary:
+            commands = ScriptedCommands(Path(temporary), lambda arguments: Outcome(0, ""))
+            self.assertEqual(build_models(commands, inventory()), 0)
+        self.assertEqual(
+            commands.commands,
+            [[
+                "cargo", "test", "--profile", "loom", "--package", "nervix-execution",
+                "--features", "loom", "--lib", "--no-run",
+            ]],
+        )
+
+    def test_a_failed_build_names_its_package(self) -> None:
+        with TemporaryDirectory() as temporary:
+            commands = ScriptedCommands(Path(temporary), lambda arguments: Outcome(101, "error"))
+            with self.assertRaisesRegex(RunnerError, "cannot build the Loom build of nervix-execution"):
+                build_models(commands, inventory())
 
 
 class ReplayTests(unittest.TestCase):
