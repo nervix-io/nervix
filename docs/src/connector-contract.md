@@ -278,8 +278,8 @@ each integration connects through it.
 Composition passes the resolver's handle into the HTTP polling and Prometheus source plans and into
 the HTTP request, Sentry, OTEL HTTP, and Iceberg emitter plans. The shared `HttpClientConfig` installs
 it on the Reqwest 0.13 clients of HTTP polling, Prometheus, Sentry and OTEL HTTP. The HTTP request
-emitter resolves each request's target host itself, as its [request transport](#emitter-boundary)
-describes. Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg object
+emitter resolves each request's target host, or its client's declared proxy's host, itself, as its
+[request transport](#emitter-boundary) describes. Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg object
 storage uses OpenDAL 0.57 with a Reqwest 0.13 client that the connector builds with the node
 resolver and installs through `HttpClientLayer`; the layer also supplies HTTP calls made by
 OpenDAL's credential providers through its accessor info. The object-store client's optional
@@ -318,6 +318,47 @@ with the HTTP client. A client's `timeout_ms` includes DNS resolution, connectio
 response handling; the resolver's own 30 second ceiling only bounds clients without a shorter
 request timeout, which includes the Iceberg REST client. DNS failures use the host's existing retry
 policy and do not create application-level probes or acknowledgements.
+
+### HTTP client transport
+
+An `HTTP CLIENT` means the same transport whichever statement uses it, and three owners hold that
+one contract:
+
+- The shared `HttpClientConfig` in `nervix-connector` builds every Reqwest client an HTTP-speaking
+  connector sends through: HTTP polling, Prometheus, Sentry and OTEL HTTP. Such a client resolves
+  names through the node resolver, never reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+  `NO_PROXY` or their lowercase forms, follows no redirect by itself, bounds each request by the
+  client's `timeout_ms` where the client sets it, and presents the client's TLS trust and identity.
+  It also reads the one proxy a client declares with its `proxy` key, as a `DeclaredProxy`: a
+  Reqwest client sends every request through it, and the HTTP request emitter's own transport reads
+  the same declaration. Prometheus, Sentry and OTEL HTTP declare neither `proxy` nor
+  `follow_redirects`, so their clients use no proxy and follow no redirect.
+- The HTTP connector's redirect rule decides, for polling and emitting alike, whether a redirect
+  answer repeats its request: only when the client declares `follow_redirects = true`; only for a
+  `301`, `302`, `307` or `308`, or a `303` to a `GET` or `HEAD`, which asks for the retrieval such a
+  request already is; only when the answer carries exactly one `Location`, which resolves against
+  the answered request's URL to that request's origin, the same scheme, host and port, without user
+  information; and at most 10 times for one request, the limit
+  `CreateClientHttp::TRANSPORT` declares. The request is repeated unchanged: the same method,
+  headers and body, at the `Location` without its fragment. Any other answer is the response, as it
+  is for a client that does not opt in.
+- The HTTP polling ingestor and the HTTP request emitter each send the repeated request
+  themselves, so a request and the redirects it follows share its one `timeout_ms`: polling gives
+  each request what is left of it, and the emitter starts each request's `OperationBudget` from
+  what is left.
+
+Through a declared proxy, the node resolves only the proxy's host. An `http` target is sent to the
+proxy in absolute form, and an `https` target tunnels through it with `CONNECT`, after which TLS
+verifies the configured host; an `https` proxy is itself verified with the client's trust and
+offered the client's identity. User information in the proxy URL is percent-decoded and sent as
+`Basic` `Proxy-Authorization` credentials to the proxy alone. For the emitter, a proxy it cannot
+reach and a tunnel the proxy refuses are infrastructure failures of the attempt, as any other
+connection failure is.
+
+A failed poll's report names its status or Reqwest's error without the request's URL, and never
+the endpoint's path or query, a request header value or a response header. The emitter's attempt
+failures likewise never name an evaluated target, a header value, a body or the proxy's
+credentials.
 
 ### DNS for RabbitMQ
 
@@ -710,10 +751,10 @@ shows each gap until its connector closes it. A `PROMETHEUS QUERY` or `HTTP REQU
 bounded by its statement's `MAX BODY SIZE` (16 MiB where omitted). A response that exceeds the
 bound fails the poll, which the ingestor reports as its transient error, and the next poll reads
 again. The HTTP polling request's method and literal headers are carried by the typed ingestor plan;
-its client supplies the required total `timeout_ms` and TLS settings. The polling client reads no
-proxy from the environment and follows redirects only when `follow_redirects` is true. Its optional
-`proxy` is the only proxy it uses. An HTTP response carries its status and scheduled poll instant
-into the same metadata group as its response headers, including when quiescence buffers the poll.
+its client supplies the required total `timeout_ms` and TLS settings. The polling client follows
+redirects and uses a proxy only as [HTTP client transport](#http-client-transport) describes. An
+HTTP response carries its status and scheduled poll instant into the same metadata group as its
+response headers, including when quiescence buffers the poll.
 
 A per-connection bound does not bound the total when the listener accepts an unlimited number of
 connections. The Syslog listener declares frame assembly and completed frames waiting for its
@@ -2207,20 +2248,24 @@ same buffer that retains batch payloads. Every attempt hands the connector the r
 unchanged, ahead of any request prepared after them, so a retry repeats the request the destination
 may already hold. One connector publish call awaits at most one request across the emitter
 execution's served sources and branches. It sends them in their handed-over order, each on a
-fresh HTTP/1.1 connection using the node resolver and the shared rustls trust and client-identity
-configuration. The connection closes after final headers; no unread body can be reused. Its one
-physical `timeout_ms` spans DNS, connect, TLS, send, interim headers and complete final headers,
-and one `OperationBudget` divides it: resolving the target's host through the node resolver takes
-at most half of it, each answer is then dialled in resolution order within an equal share of what
-is left when its attempt starts, so an answer whose handshake never completes leaves the next one
-time to connect, and what remains bounds TLS, the send and the final headers. A lookup that runs out
-of its half fails the attempt as a DNS timeout, and an answer that runs out of its share fails it as
-a connection that was not accepted in time when no later answer connects. The connector sends no
-startup probe, follows no redirect, stores no response cookie, answers no authentication challenge
-with another request, and has no independent retry policy. The host alone schedules another
-application attempt.
+fresh connection using the node resolver and the shared rustls trust and client-identity
+configuration, through the client's declared proxy when it declares one. The connection closes
+after final headers; no unread body can be reused. One attempt's physical `timeout_ms` spans DNS,
+connect, the proxy's TLS and tunnel, TLS, send, interim headers and complete final headers, of the
+request and of every redirect its client follows, and an `OperationBudget` started from what is
+left when each request begins divides it: resolving the target's host, or the proxy's, through the
+node resolver takes at most half of it, each answer is then dialled in resolution order within an
+equal share of what is left when its attempt starts, so an answer whose handshake never completes
+leaves the next one time to connect, and what remains bounds TLS, the send and the final headers. A
+lookup that runs out of its half fails the attempt as a DNS timeout, and an answer that runs out of
+its share fails it as a connection that was not accepted in time when no later answer connects.
+The connector sends no startup probe, follows a redirect only as
+[HTTP client transport](#http-client-transport) describes, stores no response cookie, answers no
+authentication challenge with another request, and has no independent retry policy. The host alone
+schedules another application attempt.
 
-The transport generates `Host`, `Connection: close` and `Content-Length`: the length of a present
+Over HTTP/1.1 the transport generates `Host` and `Connection: close`, and over HTTP/2 hyper sends
+the authority as `:authority`. The request declares `Content-Length`: the length of a present
 body, and `0` for a bodyless request whose method defines request content, `POST`, `PUT` or
 `PATCH` in any ASCII case, as RFC 9110 asks of a client so that a server requiring a length accepts
 it. Another bodyless request declares no length. It does not add `Accept-Encoding` or
@@ -2228,13 +2273,18 @@ it. Another bodyless request declares no length. It does not add `Accept-Encodin
 can supply `Accept`, content type, authorization and cookie values. Without an application
 `Accept`, the transport adds `Accept: */*`.
 
-Each interim and final response header block is checked for at most 128 fields and 64 KiB of name
-and value bytes; invalid final framing fails before the status is classified. Complete valid final
+hyper speaks HTTP over that connection, HTTP/2 where the endpoint's TLS negotiates it and HTTP/1.1
+otherwise, so no HTTP is written or parsed by the connector itself. hyper refuses an HTTP/1.1
+response head of more than 100 fields or 417,792 bytes, or an HTTP/2 header list of 16,384 bytes
+or more as HTTP/2 counts it,
+and invalid final framing, before the status is classified, and the connector refuses a status
+above `599`. Complete valid final
 `2xx` headers deliver one request, without awaiting or interpreting its body. `408`, `425`, `429`,
-`5xx`, `401`, `403`, `407` and transport or header failures end the attempt with the current and
-later requests unresolved; the authentication statuses retain a distinct infrastructure reason.
-Other `3xx`/`4xx` and `101` reject their one request with a structured external message error,
-then publication continues with the next request. The host applies delivered and rejected
+`5xx`, `401`, `403`, `407`, a proxy that cannot be reached or refuses its tunnel, and transport or
+header failures end the attempt with the current and later requests unresolved; the authentication
+statuses retain a distinct infrastructure reason. Other `3xx`/`4xx`, including a redirect the
+client does not follow, and `101` reject their one request with a structured external message
+error, then publication continues with the next request. The host applies delivered and rejected
 members, branches and acknowledgements and keeps unresolved prepared bytes for retry.
 
 A failed attempt keeps its cause beneath the attempt's own error: the resolver's lookup failure,

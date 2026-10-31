@@ -479,7 +479,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   [HTTP requests](../../../docs/src/emitters.md#http-requests). Complete valid `2xx` response
   headers deliver the record without waiting for the response body. `401`, `403`, `407`, `408`,
   `425`, `429`, and `5xx` retain it for retry; other `3xx`/`4xx` statuses and `101` reject that
-  record through `ON MESSAGE ERROR`. A retained request holds later records behind it, and an
+  record through `ON MESSAGE ERROR`. An HTTP client follows a redirect, on both sides, only with
+  `'follow_redirects' = true` and only to its own origin, and uses only its declared `'proxy'`,
+  never one from the environment; see
+  [HTTP client transport](../../../docs/src/emitters.md#http-client-transport). A retained request holds later records behind it, and an
   `ATTACHED` emitter keeps every unresolved record's upstream acknowledgement open. One valid
   `Retry-After`, in whole seconds or as an HTTP date, can lengthen the physical wait beyond `MAX`.
   A lost response can repeat a request the endpoint applied, so give the endpoint a stable key
