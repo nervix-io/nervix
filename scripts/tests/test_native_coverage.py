@@ -306,6 +306,40 @@ class InventoryTests(unittest.TestCase):
             if installation != -1:
                 installed.add(condition)
 
+    def test_extra_tests_set_up_uv_before_each_step_whose_recipes_run_it(self) -> None:
+        workflow = (REPOSITORY / ".github/workflows/check.yaml").read_text(encoding="utf-8")
+        justfile = (REPOSITORY / "justfile").read_text(encoding="utf-8")
+        job = job_section(workflow, "extra-tests")
+        # A recipe whose own body runs uv needs uv set up under the step's own label, or under none,
+        # because each extra-tests step runs only under its own label. Recipes the body reaches only
+        # through its dependencies are outside this check.
+        set_up: set[str | None] = set()
+        for name, condition, text in step_sections(job):
+            if "uses: astral-sh/setup-uv" in text:
+                set_up.add(condition)
+            for recipe in re.findall(r"\bjust ([a-z0-9][a-z0-9-]*)", text):
+                if not re.search(r"\buvx\b|\buv run\b", recipe_body(justfile, recipe)):
+                    continue
+                with self.subTest(step=name, recipe=recipe):
+                    self.assertTrue(
+                        None in set_up or condition in set_up,
+                        f"`just {recipe}` runs uv under {condition!r} without setting up uv under "
+                        "that condition first",
+                    )
+
+
+def recipe_body(justfile: str, recipe: str) -> str:
+    """The indented body that follows a recipe's header line in the justfile."""
+    header = re.search(rf"^{re.escape(recipe)}(?=[ :])[^\n]*\n", justfile, re.MULTILINE)
+    if header is None:
+        raise AssertionError(f"no recipe {recipe}")
+    body = []
+    for line in justfile[header.end() :].splitlines():
+        if line and not line[0].isspace():
+            break
+        body.append(line)
+    return "\n".join(body)
+
 
 def job_section(workflow: str, name: str) -> str:
     starts = list(re.finditer(r"^  ([a-z][a-z-]*):\n", workflow, re.MULTILINE))

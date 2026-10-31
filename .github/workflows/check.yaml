@@ -1902,6 +1902,12 @@ jobs:
           just toolchains-install
           just coverage-native-extras test-typed-ratchet
 
+      # The ratchet's Python coverage runs under uv, which the extra-runners steps set up only for
+      # their own label.
+      - name: Setup uv for the ratchet's Python coverage
+        if: contains(github.event.pull_request.labels.*.name, 'extra-compiler')
+        uses: astral-sh/setup-uv@v6
+
       - name: Runner diagnostics before Compiler cache changes, interruption and runner qualification
         if: contains(github.event.pull_request.labels.*.name, 'extra-compiler')
         uses: ./.github/actions/runner-diagnostics
