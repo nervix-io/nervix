@@ -266,9 +266,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | answered |  |
 | Buffers | The connector holds no buffer between its transport and the host. |  |
-| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup, a receive and a delete: unbounded |  |
+| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup and a delete: `timeout_ms`; unbounded when omitted<br>a receive, after the one-second long poll it asks the service to hold it for: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | A request that stalls below 1 byte a second for 5 s is cancelled. |  |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### WEBSOCKETS CONNECTION ingest
 
@@ -538,7 +538,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | The connector holds no buffer between its transport and the host. |  |
-| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start: unbounded<br>a send: `timeout_ms`; unbounded when omitted |  |
+| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start and a send: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | A batch request holds at most 10 entries and 256 KiB; a record above 256 KiB is rejected. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
@@ -977,10 +977,11 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `access_key_id` | optional | string | Nervix; strict | yes | none |
+| `access_key_id` | required | string | Nervix; strict | yes | none |
 | `endpoint` | required | URL (http or https) | Nervix; strict | no | none |
-| `region` | optional | string | Nervix; strict | no | none |
-| `secret_access_key` | optional | string | Nervix; strict | yes | none |
+| `region` | required | string | Nervix; strict | no | none |
+| `secret_access_key` | required | string | Nervix; strict | yes | none |
+| `session_token` | optional | string | Nervix; strict | yes | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 | `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
 

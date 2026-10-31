@@ -547,17 +547,25 @@ Answers](./name-resolution.md#dialling-the-answers), and applies the URL's port 
 default. The required positive `timeout_ms` bounds the send and the response of an insert, and the
 connection and its lookup run inside that response wait.
 
-An SQS client installs a Smithy HTTP client whose connector resolves through the node resolver with
-`build_with_resolver`. Without `tls_ca_file` the client is the SDK's default HTTPS client with that
-resolver: AWS-LC, the platform's native roots, and a proxy taken from `HTTP_PROXY`, `HTTPS_PROXY`,
-`ALL_PROXY` and `NO_PROXY` or their lowercase forms, whose host the node resolver resolves while the
-proxy resolves the service. With `tls_ca_file` it trusts that CA alone and uses no proxy, as before.
-The SDK signs each request with SigV4 for the configured endpoint before the connector resolves its
-host, so the signature, the `Host` header and the certificate check all name that host, whichever
-address accepted the connection. The SDK's default 3.1-second connect timeout, and the operation and
-attempt timeouts an emitter's `timeout_ms` sets, include the lookup. The client names static credentials
-and its region, so `aws-config` never consults the default credential or region chains that could
-reach IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS never asks for
+An SQS ingestor and an SQS emitter build their client the same way, from the keys the client
+declares, and install a Smithy HTTP client whose connector resolves through the node resolver with
+Smithy's public `build_with_resolver`: AWS-LC, the platform's native roots without `tls_ca_file` or
+that CA alone with it, and no proxy. The client declares no proxy key, so it never reads
+`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` or their lowercase forms, with or without a
+custom CA. Smithy parses a CA chain only when it builds a connector, and panics on a section that is
+not base64 or on a certificate rustls does not take as a trust anchor, so the connector parses
+`tls_ca_file` first, with the same parser and root store. A section it cannot parse is
+`TlsClientConfigError::ParseCaCertificate`, a certificate rustls refuses is `AddCaCertificate`, and
+a file without a certificate, which would trust no service, is `EmptyCaFile`, each beneath
+`InvalidSqsClientKey` naming `tls_ca_file`. The same parse runs offline when `CREATE SQS CLIENT`
+admits the client. The SDK signs each request with SigV4 for the configured endpoint before the
+connector resolves its host, so the signature, the `Host` header and the certificate check all name
+that host, whichever address accepted the connection. The SDK's default 3.1-second connect timeout,
+and the operation and attempt timeouts `timeout_ms` sets for every request of both directions,
+include the lookup; a receive's start after the one-second long poll it asks the service to hold it
+for. The client names static credentials, with `session_token` where they are temporary ones, and its
+region, so `aws-config` never consults the default credential or region chains that could reach
+IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS never asks for
 a token because it signs with SigV4; the loader receives the same HTTP client, so that chain would
 use the node resolver too.
 
@@ -576,12 +584,12 @@ query-compatible code `AWS.SimpleQueueService.NonExistentQueue` or, as ElasticMQ
 JSON protocol's error type `QueueDoesNotExist`. Any other failure to reach the service, including a
 certificate that does not name the configured host, is described by every cause of the driver's
 connection error, which describes the connection and never a record; a service's own response keeps
-its existing description. None of these failures rejects a record or acknowledges input. The host
-retries each on its declared backoff. An SQS emitter keeps the SDK's own retries disabled, while an SQS
-source keeps the SDK's standard retry mode, which makes up to three attempts at a request whose
-connection failed, lookup failures included, before the source reports the failure. Pooled
-connections stay open when their host's answer changes or expires; the next connection resolves
-again.
+its existing description. None of these failures rejects a record or acknowledges input. Both
+directions keep the SDK's own retries disabled, so the SDK makes each request once and the host
+retries a failed one on the entity's declared backoff alone. A request that runs out of `timeout_ms`
+keeps the contract's `DeadlineElapsed` as its innermost cause, naming the request and the key.
+Pooled connections stay open when their host's answer changes or expires; the next connection
+resolves again.
 
 SQS unit checks retain a bound, non-listening socket for each refused endpoint until the request
 finishes. The socket keeps another parallel fixture from listening on that address while still
@@ -937,10 +945,11 @@ since the queue keeps a message until the source deletes it, and `SINGLE` or `BA
 where a `.fifo` queue requires `FIFO GROUP` and a standard queue refuses it. Message attributes are
 its headers in both directions, as `last_wins` exact names; the emitter declares no envelope and
 optional batching up to the 256 KiB SQS admits in one message. An SQS client declares only the keys
-its connections read: `endpoint`, `region`, `access_key_id`, `secret_access_key` and `tls_ca_file`
-in both directions, and `timeout_ms`, which bounds an emitter's send. An SQS connection trusts
-`tls_ca_file`, or the platform's roots without it, and presents no client certificate, so the
-client declares neither client-identity key.
+its connections read, each in both directions: the required `endpoint`, `region`, `access_key_id`
+and `secret_access_key`, and the optional `session_token`, `timeout_ms`, which bounds every request,
+and `tls_ca_file`. An SQS connection trusts `tls_ca_file`, or the platform's roots without it, takes
+no proxy and presents no client certificate, so the client declares neither a proxy nor a
+client-identity key.
 The SQS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 
@@ -1469,7 +1478,7 @@ in one of these ways:
 | `RABBITMQ QUEUE` | Ends at once while waiting for the first delivery or between deliveries of a parallel batch, returning every gathered delivery. A transport failure found after gathering is retained and reported on the next read, after the gathered deliveries reach the host. |
 | `NATS STREAM` | Ends at once while waiting for the first delivery or between deliveries of a parallel batch, returning every gathered delivery. Its pull request stays outstanding, so a delivery that reaches the instance's inbox afterwards waits there for the next read, which sends no new pull request until that one has brought what it asked for or ended. A transport failure found after gathering is retained and reported on the next read. |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
-| `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
+| `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation, or within the receive's `timeout_ms` after its long poll when that ends sooner, ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
 
 An MQTT read takes its publishes from its connection's read-ahead, which the connection's driver
 task fills while it polls the client's event loop; see
@@ -2174,8 +2183,9 @@ rows and every later request's unresolved for the host to retry, so a retry pack
 the same requests again.
 
 The database emitters divide the whole run. ClickHouse measures the `JSONEachRow` body of an insert,
-each row's line encoded once and sent as a slice of one buffer. Postgres measures the one `unnest`
-statement every insert of the write executes and the text arrays it binds, exactly as the driver
+each row's line encoded once and sent as a slice of one buffer, before its driver compresses the body
+with LZ4. Postgres measures the one `unnest` statement every insert of the write executes and the
+text arrays it binds, exactly as the driver
 encodes them; its declared batch maximum, which `CREATE` holds `MAX SIZE` to, is the largest
 protocol message the server reads, so the measure also bounds the Bind message that carries the
 arrays. MySQL measures each multi-row statement and every

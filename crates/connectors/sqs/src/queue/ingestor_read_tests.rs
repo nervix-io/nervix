@@ -21,11 +21,13 @@ use nervix_primitives::{
 use tokio::io::AsyncWriteExt as _;
 
 use super::{
-    CANCELLED_RECEIVE_BUDGET, QueueReceive, SQS, SqsQueueIngestor, SqsQueueIngestorError,
-    SqsQueueIngestorMessage, SqsQueueIngestorResult,
+    CANCELLED_RECEIVE_BUDGET, LONG_POLL, QueueReceive, SQS, SqsQueueIngestor,
+    SqsQueueIngestorError, SqsQueueIngestorMessage, SqsQueueIngestorPosition,
+    SqsQueueIngestorResult,
 };
 use crate::queue::connection_tests::{
-    Fixture, QUEUE, RefusedEndpoint, batch_request, client_config, open_source, read_request,
+    Fixture, GENEROUS_BUDGET, QUEUE, RefusedEndpoint, batch_request, client_config, open_source,
+    read_request, silent_service,
 };
 
 /// The body of the one message a stand-in answers a receive with.
@@ -290,6 +292,123 @@ async fn a_receive_that_cannot_reach_the_service_fails_the_read() {
             report.downcast_ref::<SqsQueueIngestorError>(),
             Some(SqsQueueIngestorError::Receive)
         ),
+        "{report:?}"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_receive_the_service_never_answers_ends_within_timeout_ms_after_its_long_poll() {
+    let fixture = Fixture::start().await;
+    let budget = Duration::from_millis(300);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("a loopback port is available");
+    let port = listener
+        .local_addr()
+        .expect("a bound listener has an address")
+        .port();
+    let mut config = client_config(&format!("http://127.0.0.1:{port}"));
+    config.push(nervix_models::ClientConfigEntry {
+        key: "timeout_ms".to_string(),
+        value: budget.as_millis().to_string(),
+    });
+    let mut source = open_source(&config, fixture.dns()).await;
+    source.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
+    // The service takes the receive and never answers it, holding its connection open.
+    let service = nervix_primitives::task::spawn(async move {
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .expect("the read under test dials this listener");
+        let request = read_request(&mut stream).await;
+        (request, stream)
+    });
+
+    let started = Instant::now();
+    let read = timeout(
+        GENEROUS_BUDGET,
+        source.next_batch(batch_request(), &IngestorReadCancellation::new()),
+    )
+    .await
+    .expect("a receive the service never answers ends within its long poll and timeout_ms");
+    let waited = started.elapsed();
+
+    let Err(report) = read else {
+        panic!("a receive the service never answers brings no message");
+    };
+    assert_eq!(
+        report.current_context(),
+        &IngestorError::Read { connector: SQS }
+    );
+    assert_eq!(
+        report
+            .downcast_ref::<nervix_connector::DeadlineElapsed>()
+            .map(|elapsed| (elapsed.operation, elapsed.key, elapsed.bound)),
+        Some((
+            "an SQS receive after its long poll",
+            nervix_models::DeadlineKey::Timeout,
+            budget
+        )),
+        "{report:?}"
+    );
+    // The deadline counts from the end of the long poll the receive asked the service to hold it
+    // for, so the read waited at least that long poll and its timeout_ms.
+    let bound = LONG_POLL
+        .checked_add(budget)
+        .expect("a one-second long poll and a 300 ms deadline fit a duration");
+    assert!(
+        waited >= bound,
+        "the receive ended after {waited:?}, before its long poll and timeout_ms"
+    );
+    let (request, _held) = service.await.expect("the stand-in does not panic");
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("x-amz-target: amazonsqs.receivemessage"),
+        "{request}"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_delete_the_service_never_answers_ends_within_timeout_ms() {
+    let fixture = Fixture::start().await;
+    let budget = Duration::from_millis(300);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("a loopback port is available");
+    let port = listener
+        .local_addr()
+        .expect("a bound listener has an address")
+        .port();
+    let (accepted, _connections) = nervix_primitives::sync::mpsc::channel(8);
+    let _service = silent_service(listener, accepted);
+    let mut config = client_config(&format!("http://127.0.0.1:{port}"));
+    config.push(nervix_models::ClientConfigEntry {
+        key: "timeout_ms".to_string(),
+        value: budget.as_millis().to_string(),
+    });
+    let mut source = open_source(&config, fixture.dns()).await;
+    source.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
+    let position = SqsQueueIngestorPosition {
+        receipt_handle: Some("receipt-handle".to_string()),
+    };
+
+    let acknowledged = timeout(GENEROUS_BUDGET, source.acknowledge(&[position]))
+        .await
+        .expect("a delete the service never answers ends within the client's timeout_ms");
+
+    let Err(report) = acknowledged else {
+        panic!("a delete the service never answers acknowledges nothing");
+    };
+    assert_eq!(
+        report.current_context(),
+        &IngestorError::Acknowledge { connector: SQS }
+    );
+    assert_eq!(
+        report
+            .downcast_ref::<nervix_connector::DeadlineElapsed>()
+            .map(|elapsed| (elapsed.operation, elapsed.key, elapsed.bound)),
+        Some(("an SQS delete", nervix_models::DeadlineKey::Timeout, budget)),
         "{report:?}"
     );
 }
