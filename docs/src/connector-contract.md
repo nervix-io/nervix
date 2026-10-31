@@ -1146,6 +1146,9 @@ domain offsets all read those same plans; none of them reads the ingestor's Mode
 ingestor binds its codec, node filter, routes and branched entrypoints against the installed domain
 surfaces and parses its declared acknowledgement before any connector instance opens, so a start
 that fails leaves nothing running.
+The current ingestor schedule places one `Single` execution unit; Kafka's transport partition
+assignments remain inside that unit. Its domain-offset plan reads the unit's primary, and the
+host keys its replicated offset checkpoint by that same unit.
 
 A source plan combines connector-specific settings, validated capabilities, and the host's ACK
 policy. Capabilities state whether header reads are available, whether quiesce is supported, the

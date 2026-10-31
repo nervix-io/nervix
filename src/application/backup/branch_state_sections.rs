@@ -67,7 +67,12 @@ impl SessionServiceImpl {
             }) else {
                 continue;
             };
-            if node.primary_node.as_ref() != Some(self.inner.consensus.local_node_id()) {
+            if node
+                .units
+                .get(&placement.unit)
+                .and_then(|unit| unit.primary_node.as_ref())
+                != Some(self.inner.consensus.local_node_id())
+            {
                 continue;
             }
             if placement.state.schema() != StateSchema::Fingerprinted(node.schema_fingerprint) {
@@ -123,6 +128,7 @@ impl SessionServiceImpl {
         let descriptor = DeduplicatorStateDescriptor {
             domain: domain.clone(),
             entity: entity.clone(),
+            unit: captured.placement.unit,
             schema,
             branch_fingerprint: branch,
             branch: archive_branch(captured.placement.branch_key),
@@ -137,7 +143,12 @@ impl SessionServiceImpl {
         let mut staged = vec![CapturedSection {
             key: capture_key(
                 request,
-                SectionPath::deduplicator_descriptor(domain, &entity, branch.as_ref()),
+                SectionPath::deduplicator_descriptor(
+                    domain,
+                    &entity,
+                    captured.placement.unit,
+                    branch.as_ref(),
+                ),
             ),
             content: SectionContent::Record(DeduplicatorStateDescriptor::KIND),
             artifact: self.stage_captured_section(bytes, domain).await?,
@@ -155,7 +166,13 @@ impl SessionServiceImpl {
             staged.push(CapturedSection {
                 key: capture_key(
                     request,
-                    SectionPath::deduplicator_keys(domain, &entity, branch.as_ref(), index),
+                    SectionPath::deduplicator_keys(
+                        domain,
+                        &entity,
+                        captured.placement.unit,
+                        branch.as_ref(),
+                        index,
+                    ),
                 ),
                 content: SectionContent::DeduplicatorKeys,
                 artifact: self.stage_branch_state_group(keys, domain).await?,
@@ -213,6 +230,7 @@ impl SessionServiceImpl {
         let descriptor = WindowStateDescriptor {
             domain: domain.clone(),
             entity: entity.clone(),
+            unit: captured.placement.unit,
             schema,
             model: window_schemas.model,
             branch_fingerprint: branch,
@@ -232,7 +250,12 @@ impl SessionServiceImpl {
         let mut staged = vec![CapturedSection {
             key: capture_key(
                 request,
-                SectionPath::window_descriptor(domain, &entity, branch.as_ref()),
+                SectionPath::window_descriptor(
+                    domain,
+                    &entity,
+                    captured.placement.unit,
+                    branch.as_ref(),
+                ),
             ),
             content: SectionContent::Record(WindowStateDescriptor::KIND),
             artifact: self.stage_captured_section(bytes, domain).await?,
@@ -249,7 +272,13 @@ impl SessionServiceImpl {
             staged.push(CapturedSection {
                 key: capture_key(
                     request,
-                    SectionPath::window_input_rows(domain, &entity, branch.as_ref(), index),
+                    SectionPath::window_input_rows(
+                        domain,
+                        &entity,
+                        captured.placement.unit,
+                        branch.as_ref(),
+                        index,
+                    ),
                 ),
                 content: SectionContent::WindowInputRows,
                 artifact: self.stage_branch_state_group(input, domain).await?,
@@ -263,7 +292,13 @@ impl SessionServiceImpl {
             staged.push(CapturedSection {
                 key: capture_key(
                     request,
-                    SectionPath::window_argument_columns(domain, &entity, branch.as_ref(), index),
+                    SectionPath::window_argument_columns(
+                        domain,
+                        &entity,
+                        captured.placement.unit,
+                        branch.as_ref(),
+                        index,
+                    ),
                 ),
                 content: SectionContent::WindowArgumentColumns,
                 artifact: self.stage_branch_state_group(arguments, domain).await?,

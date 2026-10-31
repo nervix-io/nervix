@@ -362,6 +362,7 @@ fn state_frame_placement(generation: u64) -> StatePlacementEnvelope {
         },
         kind: ModelKind::WasmProcessor,
         identifier: ModelName::parse("guest").assured("fixture processor is valid"),
+        unit: nervix_models::Unit::Single,
         branch_key: None,
     }
 }

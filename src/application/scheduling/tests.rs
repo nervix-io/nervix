@@ -241,11 +241,11 @@ fn move_next_scheduled_node_for_drain_moves_only_one_node_in_canonical_order() {
         })
     );
     assert_eq!(
-        schedule.nodes[0].assigned_nodes,
+        schedule.nodes[0].single_unit().assigned_nodes,
         vec![named::<ClusterNodeName>("node-2")]
     );
     assert_eq!(
-        schedule.nodes[1].assigned_nodes,
+        schedule.nodes[1].single_unit().assigned_nodes,
         vec![named::<ClusterNodeName>("node-3")]
     );
 }
@@ -290,11 +290,11 @@ fn planned_drain_uses_canonical_runtime_node_order() {
         })
     );
     assert_eq!(
-        schedule.nodes[0].primary_node.as_ref(),
+        schedule.nodes[0].single_unit().primary_node.as_ref(),
         Some(&named::<ClusterNodeName>("node-2"))
     );
     assert_eq!(
-        schedule.nodes[1].primary_node.as_ref(),
+        schedule.nodes[1].single_unit().primary_node.as_ref(),
         Some(&named::<ClusterNodeName>("node-1"))
     );
 }
@@ -359,11 +359,11 @@ fn planned_drain_uses_the_first_member_to_order_placement_groups() {
         })
     );
     assert_eq!(
-        schedule.nodes[0].primary_node.as_ref(),
+        schedule.nodes[0].single_unit().primary_node.as_ref(),
         Some(&named::<ClusterNodeName>("node-2"))
     );
     assert_eq!(
-        schedule.nodes[1].primary_node.as_ref(),
+        schedule.nodes[1].single_unit().primary_node.as_ref(),
         Some(&named::<ClusterNodeName>("node-1"))
     );
 }
@@ -420,11 +420,11 @@ fn planned_drain_prefers_policy_target_and_retains_former_owner_as_first_replica
         })
     );
     assert_eq!(
-        schedule.nodes[0].primary_node.as_ref(),
+        schedule.nodes[0].single_unit().primary_node.as_ref(),
         Some(&named::<ClusterNodeName>("node-1"))
     );
     assert_eq!(
-        schedule.nodes[0].assigned_nodes,
+        schedule.nodes[0].single_unit().assigned_nodes,
         vec![
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-2"),
@@ -502,7 +502,7 @@ fn drain_require_group_prefers_policy_target_over_common_replica() {
         schedule
             .nodes
             .values()
-            .all(|node| node.primary_node.as_ref()
+            .all(|node| node.single_unit().primary_node.as_ref()
                 == Some(&ClusterNodeName::parse("node-1").expect("valid name")))
     );
     assert_eq!(
@@ -510,7 +510,7 @@ fn drain_require_group_prefers_policy_target_over_common_replica() {
         Some(&named::<ClusterNodeName>("node-1"))
     );
     assert!(schedule.nodes.values().all(|node| {
-        node.assigned_nodes
+        node.single_unit().assigned_nodes
             == vec![
                 named::<ClusterNodeName>("node-1"),
                 named::<ClusterNodeName>("node-2"),
@@ -561,11 +561,11 @@ fn planned_drain_replaces_an_unavailable_replica_with_the_former_owner() {
         })
     );
     assert_eq!(
-        schedule.nodes[0].primary_node.as_ref(),
+        schedule.nodes[0].single_unit().primary_node.as_ref(),
         Some(&named::<ClusterNodeName>("node-1"))
     );
     assert_eq!(
-        schedule.nodes[0].assigned_nodes,
+        schedule.nodes[0].single_unit().assigned_nodes,
         vec![
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-2")
@@ -608,7 +608,7 @@ fn planned_schedule_move_prefers_the_former_owner_for_the_first_replica_slot() {
     );
 
     assert_eq!(
-        planned.nodes[0].assigned_nodes,
+        planned.nodes[0].single_unit().assigned_nodes,
         vec![
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-2")
@@ -654,11 +654,11 @@ fn merge_existing_schedule_data_prefers_policy_target_when_primary_dies() {
     );
 
     assert_eq!(
-        next.nodes[0].primary_node.as_ref(),
+        next.nodes[0].single_unit().primary_node.as_ref(),
         Some(&named::<ClusterNodeName>("node-1"))
     );
     assert_eq!(
-        next.nodes[0].assigned_nodes,
+        next.nodes[0].single_unit().assigned_nodes,
         vec![named::<ClusterNodeName>("node-1")]
     );
 }
@@ -693,11 +693,11 @@ fn merge_existing_schedule_data_falls_back_to_fresh_assignment_without_live_repl
     );
 
     assert_eq!(
-        next.nodes[0].primary_node.as_ref(),
+        next.nodes[0].single_unit().primary_node.as_ref(),
         Some(&named::<ClusterNodeName>("node-1"))
     );
     assert_eq!(
-        next.nodes[0].assigned_nodes,
+        next.nodes[0].single_unit().assigned_nodes,
         vec![named::<ClusterNodeName>("node-1")]
     );
 }
@@ -740,7 +740,7 @@ fn merge_existing_schedule_data_preserves_matching_ingestor_schedule_and_assignm
         Some(preserved_schedule)
     );
     assert_eq!(
-        next.nodes[0].assigned_nodes,
+        next.nodes[0].single_unit().assigned_nodes,
         vec![named::<ClusterNodeName>("node-1")]
     );
 }
@@ -784,11 +784,11 @@ fn server_intakes_follow_live_membership_through_schedule_reconciliation() {
     for predecessor in [None, Some(&desired)] {
         let mut next = desired.clone();
         SessionServiceImpl::merge_existing_schedule_data(&mut next, predecessor, &live);
-        assert_eq!(next.nodes[0].assigned_nodes, live);
+        assert_eq!(next.nodes[0].single_unit().assigned_nodes, live);
         assert!(live.iter().all(|node| next.nodes[0].executes_on(node)));
         let previous = next.clone();
         SessionServiceImpl::merge_existing_schedule_data(&mut next, Some(&previous), &live[..2]);
-        assert_eq!(next.nodes[0].assigned_nodes, live[..2]);
+        assert_eq!(next.nodes[0].single_unit().assigned_nodes, live[..2]);
     }
 }
 
@@ -860,8 +860,12 @@ fn merge_existing_schedule_data_rejects_a_split_require_group() {
         ],
     );
 
-    assert!(next.nodes.values().all(|node| node.primary_node.as_ref()
-        == Some(&ClusterNodeName::parse("node-1").expect("valid name"))));
+    assert!(
+        next.nodes
+            .values()
+            .all(|node| node.single_unit().primary_node.as_ref()
+                == Some(&ClusterNodeName::parse("node-1").expect("valid name")))
+    );
     assert_eq!(
         next.placement_groups[0].primary_node.as_ref(),
         Some(&named::<ClusterNodeName>("node-1"))
@@ -907,8 +911,12 @@ fn merge_existing_schedule_data_preserves_an_intact_require_group() {
         ],
     );
 
-    assert!(next.nodes.values().all(|node| node.primary_node.as_ref()
-        == Some(&ClusterNodeName::parse("node-2").expect("valid name"))));
+    assert!(
+        next.nodes
+            .values()
+            .all(|node| node.single_unit().primary_node.as_ref()
+                == Some(&ClusterNodeName::parse("node-2").expect("valid name")))
+    );
     assert_eq!(
         next.placement_groups[0].primary_node.as_ref(),
         Some(&named::<ClusterNodeName>("node-2"))
@@ -965,7 +973,7 @@ fn drain_relocates_a_require_group_as_one_unit() {
         schedule
             .nodes
             .values()
-            .all(|node| node.primary_node.as_ref()
+            .all(|node| node.single_unit().primary_node.as_ref()
                 == Some(&ClusterNodeName::parse("node-1").expect("valid name")))
     );
     assert_eq!(
@@ -1021,7 +1029,7 @@ fn failover_relocates_a_require_group_to_one_target() {
         schedule
             .nodes
             .values()
-            .all(|node| node.primary_node.as_ref() == Some(group_host))
+            .all(|node| node.single_unit().primary_node.as_ref() == Some(group_host))
     );
 }
 
@@ -1050,8 +1058,11 @@ fn failover_starts_a_new_guest_state_lifetime_for_every_branch() {
     let mut replaced = WasmStateGenerations::first();
     replaced.begin_every_branch();
     let recovered = &schedule.nodes[0];
-    assert_eq!(recovered.primary_node.as_ref(), Some(&node_named("node-3")));
-    assert!(recovered.ownership_transition.is_some());
+    assert_eq!(
+        recovered.single_unit().primary_node.as_ref(),
+        Some(&node_named("node-3"))
+    );
+    assert!(recovered.single_unit().ownership_transition.is_some());
     assert_eq!(recovered.wasm_state_generations(), Some(&replaced));
 }
 
@@ -1087,8 +1098,11 @@ fn a_planned_drain_keeps_the_guest_state_lifetime() {
 
     assert!(moved.is_some());
     let drained = &schedule.nodes[0];
-    assert_eq!(drained.primary_node.as_ref(), Some(&node_named("node-1")));
-    assert!(drained.ownership_transition.is_some());
+    assert_eq!(
+        drained.single_unit().primary_node.as_ref(),
+        Some(&node_named("node-1"))
+    );
+    assert!(drained.single_unit().ownership_transition.is_some());
     assert_eq!(
         drained.wasm_state_generations(),
         Some(&WasmStateGenerations::first())
@@ -1219,7 +1233,7 @@ fn failover_does_not_promote_a_cordoned_live_replica() {
 
     assert!(!moves.is_empty());
     assert_eq!(
-        schedule.nodes[0].primary_node.as_ref(),
+        schedule.nodes[0].single_unit().primary_node.as_ref(),
         Some(&named::<ClusterNodeName>("node-1"))
     );
 }
@@ -1270,11 +1284,11 @@ fn failover_promotes_live_replica_before_policy_target() {
         }]
     );
     assert_eq!(
-        schedule.nodes[0].primary_node.as_ref(),
+        schedule.nodes[0].single_unit().primary_node.as_ref(),
         Some(&named::<ClusterNodeName>("node-3"))
     );
     assert_eq!(
-        schedule.nodes[0].assigned_nodes,
+        schedule.nodes[0].single_unit().assigned_nodes,
         vec![
             named::<ClusterNodeName>("node-3"),
             named::<ClusterNodeName>("node-1")

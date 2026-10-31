@@ -238,6 +238,8 @@ class InventoryTests(unittest.TestCase):
             "models-prerequisite-records",
             "models-admission-verdicts",
             "models-archived-models",
+            "scheduled-units",
+            "execution-revision-units",
             "models-archived-counts",
             "consensus-archived-counts",
             "registry-archived-models",

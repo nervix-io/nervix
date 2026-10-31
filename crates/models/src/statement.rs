@@ -12,7 +12,7 @@
 )]
 
 use std::{
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::{Deref, DerefMut},
 };
 
@@ -1897,8 +1897,31 @@ pub struct CreateBranch {
     pub name: BranchName,
     pub schema: SchemaName,
     pub ttl: String,
+    pub partitions: BranchPartitions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eviction: Option<BranchEviction>,
+}
+
+/// The positive number of independently placed parts of a branch. Current Plexus constructs one
+/// direct part; the language does not yet accept a partition clause.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum BranchPartitions {
+    Direct(NonZeroU32),
+}
+
+impl BranchPartitions {
+    pub const ONE: Self = Self::Direct(NonZeroU32::MIN);
 }
 
 #[derive(

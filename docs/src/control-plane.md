@@ -648,6 +648,9 @@ recorded stay applied.
 
 Node drain, the ownership move of a graceful-shutdown drain, placement consolidation, and `RELOCATE`
 are planned ownership handoffs.
+The schedule names each moved execution by its logical node and `Unit`; current graphs use one
+`Single` unit per node. Capture, preparation, activation, freeze and forced-recovery records carry
+that unit, so a sibling unit's checkpoint or prepared transition cannot satisfy the move.
 Nervix computes the complete target schedule before it engages a hold. It then fences dispatch at
 the affected subgraph boundary on every live node that runs part of it, stops new intake for each
 moved ingestor, and drains work already admitted to the moved unit. Ownership-handoff intake does

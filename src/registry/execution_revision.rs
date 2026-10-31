@@ -14,11 +14,12 @@ use std::collections::BTreeMap;
 
 use error_stack::{Report, ResultExt as _};
 use indexmap::IndexMap;
+use meticulous::OptionExt as _;
 use nervix_models::{
     ClusterNodeName, ClusterSchedule, DomainName, DomainSchedule, DynamicModelUpdate, FlushPolicy,
-    KafkaPartitionSchedule, ModelKind, ModelName, NodeRef, OwnershipStateComponent,
+    KafkaPartitionSchedule, ModelKind, ModelName, NodeRef, NodeUnitRef, OwnershipStateComponent,
     OwnershipStateRecoveryOutcome, OwnershipTransition, ResolvedBranching, ScheduledNode,
-    SchemaFingerprint, StatePurge, WasmStateGenerations, WasmStateReset,
+    SchemaFingerprint, StatePurge, Unit, WasmStateGenerations, WasmStateReset,
 };
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
@@ -50,8 +51,35 @@ pub(crate) enum ExecutionRevisionError {
     RevisionIdentity { domain: DomainName },
 }
 
-/// Placement and state identity of one node. Its executable configuration has already been
-/// converted into the domain's typed plans.
+/// Placement and guest-state lifetime of one execution unit in a typed revision.
+#[derive(Debug, Clone)]
+pub(crate) struct ExecutionUnit {
+    pub(crate) primary_node: Option<ClusterNodeName>,
+    pub(crate) assigned_nodes: Vec<ClusterNodeName>,
+    pub(crate) ownership_transition: Option<OwnershipTransition>,
+    pub(crate) wasm_state_generations: Option<WasmStateGenerations>,
+}
+
+impl ExecutionUnit {
+    pub(crate) fn execution_node(&self) -> Option<&ClusterNodeName> {
+        self.primary_node
+            .as_ref()
+            .or(match self.assigned_nodes.as_slice() {
+                [node] => Some(node),
+                _ => None,
+            })
+    }
+
+    pub(crate) fn replica_nodes(&self) -> Vec<&ClusterNodeName> {
+        self.assigned_nodes
+            .iter()
+            .filter(|node| Some(*node) != self.primary_node.as_ref())
+            .collect()
+    }
+}
+
+/// State identity of one logical node and its independently placed units. Its executable
+/// configuration has already been converted into the domain's typed plans.
 #[derive(Debug, Clone)]
 pub(crate) struct ExecutionNode {
     pub(crate) identifier: ModelName,
@@ -59,14 +87,11 @@ pub(crate) struct ExecutionNode {
     pub(crate) resolved_branching: Option<ResolvedBranching>,
     pub(crate) schema_fingerprint: SchemaFingerprint,
     pub(crate) kafka_partition_schedule: Option<KafkaPartitionSchedule>,
-    pub(crate) primary_node: Option<ClusterNodeName>,
-    pub(crate) assigned_nodes: Vec<ClusterNodeName>,
-    pub(crate) ownership_transition: Option<OwnershipTransition>,
+    pub(crate) units: IndexMap<Unit, ExecutionUnit>,
     pub(crate) materialized_relay: bool,
     pub(crate) ownership_state_components: Vec<OwnershipStateComponent>,
     pub(crate) gate_relays: Vec<nervix_models::RelayName>,
-    pub(crate) wasm_state_generations: Option<WasmStateGenerations>,
-    executes_on_every_cluster_node: bool,
+    pub(crate) executes_on_every_cluster_node: bool,
 }
 
 impl ExecutionNode {
@@ -82,16 +107,27 @@ impl ExecutionNode {
             resolved_branching: node.resolved_branching.clone(),
             schema_fingerprint: node.schema_fingerprint,
             kafka_partition_schedule: node.kafka_partition_schedule.clone(),
-            primary_node: node.primary_node.clone(),
-            assigned_nodes: node.assigned_nodes.clone(),
-            ownership_transition: node.ownership_transition.clone(),
+            units: node
+                .units
+                .iter()
+                .map(|(unit, scheduled)| {
+                    (
+                        *unit,
+                        ExecutionUnit {
+                            primary_node: scheduled.primary_node.clone(),
+                            assigned_nodes: scheduled.assigned_nodes.clone(),
+                            ownership_transition: scheduled.ownership_transition.clone(),
+                            wasm_state_generations: scheduled.wasm_state_generations.clone(),
+                        },
+                    )
+                })
+                .collect(),
             materialized_relay,
             ownership_state_components: node.ownership_state_components(),
             gate_relays: entity_pause_relays_for_schedule(
                 schedule,
                 std::slice::from_ref(&node.identity()),
             ),
-            wasm_state_generations: node.wasm_state_generations().cloned(),
             executes_on_every_cluster_node: node.config.executes_on_every_cluster_node(),
         }
     }
@@ -105,7 +141,13 @@ impl ExecutionNode {
     }
 
     pub(crate) fn wasm_state_generations(&self) -> Option<&WasmStateGenerations> {
-        self.wasm_state_generations.as_ref()
+        self.single_unit().wasm_state_generations.as_ref()
+    }
+
+    pub(crate) fn single_unit(&self) -> &ExecutionUnit {
+        self.units
+            .get(&Unit::Single)
+            .assured("current revisions contain exactly one Single unit per node")
     }
 
     pub(crate) fn ownership_state_components(&self) -> Vec<OwnershipStateComponent> {
@@ -113,23 +155,24 @@ impl ExecutionNode {
     }
 
     pub(crate) fn is_assigned_to(&self, node: &ClusterNodeName) -> bool {
-        self.assigned_nodes.contains(node)
+        self.single_unit().assigned_nodes.contains(node)
     }
 
     pub(crate) fn assigned_single_node(&self) -> Option<&ClusterNodeName> {
-        match self.assigned_nodes.as_slice() {
+        match self.single_unit().assigned_nodes.as_slice() {
             [node] => Some(node),
             _ => None,
         }
     }
 
     pub(crate) fn primary_node(&self) -> Option<&ClusterNodeName> {
-        self.primary_node.as_ref()
+        self.single_unit().primary_node.as_ref()
     }
 
     pub(crate) fn replica_nodes(&self) -> Vec<&ClusterNodeName> {
         let primary = self.primary_node();
-        self.assigned_nodes
+        self.single_unit()
+            .assigned_nodes
             .iter()
             .filter(|node| Some(*node) != primary)
             .collect()
@@ -238,10 +281,19 @@ impl ExecutionRevision {
         }))
     }
 
-    /// Keep the ownership-handoff bytes identical to the committed schedule's established form.
+    /// Fingerprint the committed placement and guest-state lifetime of every unit.
     pub(crate) fn ownership_fingerprint(
         schedule: &DomainSchedule,
     ) -> error_stack::Result<[u8; 32], ExecutionRevisionError> {
+        #[derive(serde::Serialize)]
+        struct ScheduledUnitFingerprint<'a> {
+            unit: Unit,
+            primary_node: &'a Option<ClusterNodeName>,
+            assigned_nodes: &'a [ClusterNodeName],
+            wasm_state_generations: Option<&'a WasmStateGenerations>,
+            wasm_state_reset: Option<&'a WasmStateReset>,
+        }
+
         #[derive(serde::Serialize)]
         struct ScheduledNodeFingerprint<'a> {
             identifier: &'a ModelName,
@@ -249,10 +301,7 @@ impl ExecutionRevision {
             resolved_branching: &'a Option<ResolvedBranching>,
             schema_fingerprint: SchemaFingerprint,
             kafka_partition_schedule: &'a Option<KafkaPartitionSchedule>,
-            primary_node: &'a Option<ClusterNodeName>,
-            assigned_nodes: &'a [ClusterNodeName],
-            wasm_state_generations: Option<&'a WasmStateGenerations>,
-            wasm_state_reset: Option<&'a WasmStateReset>,
+            units: Vec<ScheduledUnitFingerprint<'a>>,
         }
 
         #[derive(serde::Serialize)]
@@ -271,10 +320,17 @@ impl ExecutionRevision {
                 resolved_branching: &node.resolved_branching,
                 schema_fingerprint: node.schema_fingerprint,
                 kafka_partition_schedule: &node.kafka_partition_schedule,
-                primary_node: &node.primary_node,
-                assigned_nodes: &node.assigned_nodes,
-                wasm_state_generations: node.wasm_state_generations(),
-                wasm_state_reset: node.wasm_state_reset(),
+                units: node
+                    .units
+                    .iter()
+                    .map(|(unit, scheduled)| ScheduledUnitFingerprint {
+                        unit: *unit,
+                        primary_node: &scheduled.primary_node,
+                        assigned_nodes: &scheduled.assigned_nodes,
+                        wasm_state_generations: scheduled.wasm_state_generations.as_ref(),
+                        wasm_state_reset: scheduled.wasm_state_reset.as_ref(),
+                    })
+                    .collect(),
             })
             .collect();
         let fingerprint = DomainScheduleFingerprint {
@@ -297,9 +353,31 @@ impl ExecutionRevision {
     fn source_digest(
         schedule: &DomainSchedule,
     ) -> error_stack::Result<[u8; 32], ExecutionRevisionError> {
-        // JSON object keys cannot encode typed NodeRef values. Keep the complete keyed schedule
-        // as an ordered sequence of pairs so both the identity and scheduled node are hashed.
-        let nodes: Vec<_> = schedule.nodes.iter().collect();
+        // JSON object keys cannot encode NodeRef or numbered Unit values. Preserve the complete
+        // ordered schedule as pairs at both map boundaries.
+        #[derive(serde::Serialize)]
+        struct NodeDigest<'a> {
+            identity: &'a NodeRef,
+            identifier: &'a ModelName,
+            config: &'a nervix_models::Model,
+            resolved_branching: &'a Option<ResolvedBranching>,
+            schema_fingerprint: SchemaFingerprint,
+            kafka_partition_schedule: &'a Option<KafkaPartitionSchedule>,
+            units: Vec<(&'a Unit, &'a nervix_models::ScheduledUnit)>,
+        }
+        let nodes = schedule
+            .nodes
+            .iter()
+            .map(|(identity, node)| NodeDigest {
+                identity,
+                identifier: &node.identifier,
+                config: node.config.as_ref(),
+                resolved_branching: &node.resolved_branching,
+                schema_fingerprint: node.schema_fingerprint,
+                kafka_partition_schedule: &node.kafka_partition_schedule,
+                units: node.units.iter().collect(),
+            })
+            .collect::<Vec<_>>();
         let encoded = serde_json::to_vec(&(&schedule.domain, nodes, &schedule.placement_groups))
             .map_err(|error| {
                 Report::new(ExecutionRevisionError::RevisionIdentity {
@@ -359,7 +437,7 @@ pub(crate) enum ExecutionDelta {
 
 pub(crate) struct EntitySwapExecution {
     pub(crate) entities: Vec<NodeRef>,
-    pub(crate) reassignments: Vec<NodeRef>,
+    pub(crate) reassignments: Vec<NodeUnitRef>,
     pub(crate) dynamic_updates: Vec<DynamicExecutionUpdate>,
     pub(crate) state_purges: BTreeMap<NodeRef, Vec<StatePurge>>,
     pub(crate) gate_relays: Vec<nervix_models::RelayName>,
@@ -437,21 +515,27 @@ impl ExecutionDelta {
                 let mut forced_recovery_relays = Vec::new();
                 let gate_relays = if let Some(schedule) = desired {
                     let mut gated = entities.clone();
-                    gated.extend(reassignments.iter().cloned());
+                    gated.extend(reassignments.iter().map(|unit| unit.node.clone()));
                     let mut forced = Vec::new();
-                    for entity in &reassignments {
-                        let Some(node) = schedule.nodes.get(entity) else {
+                    for reassigned in &reassignments {
+                        let Some(node) = schedule.nodes.get(&reassigned.node) else {
                             continue;
                         };
                         let Some(previous) = existing else {
                             continue;
                         };
-                        let Some(before) = previous.nodes.get(entity) else {
+                        let Some(before) = previous.nodes.get(&reassigned.node) else {
+                            continue;
+                        };
+                        let (Some(before_unit), Some(after_unit)) = (
+                            before.units.get(&reassigned.unit),
+                            node.units.get(&reassigned.unit),
+                        ) else {
                             continue;
                         };
                         // A completed transition remains in the schedule through later replica
                         // changes. Only a new execution-owner move retires delivery channels.
-                        if before.execution_node() == node.execution_node() {
+                        if before_unit.primary_node == after_unit.primary_node {
                             continue;
                         }
                         if let Some(OwnershipTransition {
@@ -459,9 +543,9 @@ impl ExecutionDelta {
                                 OwnershipStateRecoveryOutcome::Unverified
                                 | OwnershipStateRecoveryOutcome::Reset,
                             ..
-                        }) = &node.ownership_transition
+                        }) = &after_unit.ownership_transition
                         {
-                            forced.push(entity.clone());
+                            forced.push(reassigned.node.clone());
                         }
                     }
                     forced_recovery_relays = entity_pause_relays_for_schedule(schedule, &forced);
@@ -485,7 +569,8 @@ impl ExecutionDelta {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::{OptionExt as _, ResultExt as _};
+    use meticulous::ResultExt as _;
+    use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{CreateRelay, CreateSchema, Model, RelayBranching, SchemaField};
     use nonzero_ext::nonzero;
 
@@ -529,8 +614,8 @@ mod tests {
             .nodes
             .get_mut(&relay)
             .assured("the fixture schedules its relay");
-        node.primary_node = Some(owner.clone());
-        node.assigned_nodes = vec![owner.clone()];
+        node.single_unit_mut().primary_node = Some(owner.clone());
+        node.single_unit_mut().assigned_nodes = vec![owner.clone()];
 
         let revision = ExecutionRevision::from_schedule(&schedule)
             .assured("a schema and its relay form one complete execution revision");
@@ -555,6 +640,74 @@ mod tests {
             ExecutionRevision::ownership_fingerprint(&schedule)
                 .assured("the committed schedule has a stable handoff fingerprint")
         );
+    }
+
+    #[test]
+    fn bolero_execution_revision_preserves_unit_placement_and_reassignment() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(128)
+            .for_each(|bytes: &[u8]| {
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+                let relay = NodeRef::new(ModelKind::Relay, named::<ModelName>("events"));
+                let unit = Unit::Partition(u32::from(arbitrary.entropy().byte()));
+                let owner = named::<ClusterNodeName>("node-1");
+                let destination = named::<ClusterNodeName>("node-2");
+                let mut before = schedule(nonzero!(2usize));
+                let node = before
+                    .nodes
+                    .get_mut(&relay)
+                    .assured("the fixture schedules its relay");
+                node.single_unit_mut().primary_node = Some(owner.clone());
+                node.single_unit_mut().assigned_nodes = vec![owner.clone()];
+                let mut partition = node.single_unit().clone();
+                partition.primary_node = Some(destination.clone());
+                partition.assigned_nodes = vec![destination.clone()];
+                node.units.insert(unit, partition);
+
+                let revision = ExecutionRevision::from_schedule(&before)
+                    .assured("the unit-keyed schedule plans");
+                let planned = &revision.nodes[&relay];
+                assert_eq!(
+                    planned.units[&Unit::Single].primary_node.as_ref(),
+                    Some(&owner)
+                );
+                assert_eq!(
+                    planned.units[&unit].primary_node.as_ref(),
+                    Some(&destination)
+                );
+                assert_eq!(
+                    revision.ownership_handoff_fingerprint,
+                    ExecutionRevision::ownership_fingerprint(&before)
+                        .assured("the schedule fingerprints"),
+                );
+
+                let mut after = before.clone();
+                let moved = after
+                    .nodes
+                    .get_mut(&relay)
+                    .assured("the relay remains scheduled");
+                moved
+                    .units
+                    .get_mut(&unit)
+                    .assured("the partition remains scheduled")
+                    .primary_node = Some(owner.clone());
+                moved
+                    .units
+                    .get_mut(&unit)
+                    .assured("the partition remains scheduled")
+                    .assigned_nodes = vec![owner.clone()];
+                assert!(matches!(
+                    ScheduleDelta::between(Some(&before), Some(&after)),
+                    ScheduleDelta::EntitySwap { reassignments, .. }
+                        if reassignments == vec![NodeUnitRef::new(relay.clone(), unit)]
+                ));
+                assert_ne!(
+                    revision.ownership_handoff_fingerprint,
+                    ExecutionRevision::ownership_fingerprint(&after)
+                        .assured("the moved unit fingerprints"),
+                );
+            });
     }
 
     #[test]
@@ -609,19 +762,19 @@ mod tests {
             .nodes
             .get_mut(&relay)
             .assured("the fixture schedules its relay");
-        node.primary_node = Some(source.clone());
-        node.assigned_nodes = vec![source];
+        node.single_unit_mut().primary_node = Some(source.clone());
+        node.single_unit_mut().assigned_nodes = vec![source];
         let mut after = before.clone();
         let node = after
             .nodes
             .get_mut(&relay)
             .assured("the fixture schedules its relay");
-        node.primary_node = Some(destination.clone());
-        node.assigned_nodes = vec![destination];
+        node.single_unit_mut().primary_node = Some(destination.clone());
+        node.single_unit_mut().assigned_nodes = vec![destination];
 
         assert!(
             matches!(ExecutionDelta::between(Some(&before), Some(&after)),
-            ExecutionDelta::EntitySwap(change) if change.reassignments == vec![relay])
+            ExecutionDelta::EntitySwap(change) if change.reassignments == vec![NodeUnitRef::new(relay, Unit::Single)])
         );
     }
 
@@ -642,17 +795,17 @@ mod tests {
             .nodes
             .get_mut(&relay)
             .assured("the fixture contains its relay");
-        node.primary_node = Some(source.clone());
-        node.assigned_nodes = vec![source.clone()];
+        node.single_unit_mut().primary_node = Some(source.clone());
+        node.single_unit_mut().assigned_nodes = vec![source.clone()];
         let mut after = before.clone();
         let node = after
             .nodes
             .get_mut(&relay)
             .assured("the target contains the same relay");
-        node.primary_node = Some(destination.clone());
-        node.assigned_nodes = vec![destination.clone()];
+        node.single_unit_mut().primary_node = Some(destination.clone());
+        node.single_unit_mut().assigned_nodes = vec![destination.clone()];
         if let Some(state_recovery) = recovery {
-            node.ownership_transition = Some(OwnershipTransition {
+            node.single_unit_mut().ownership_transition = Some(OwnershipTransition {
                 id: "forced-routing-test".into(),
                 source,
                 destination,
@@ -671,7 +824,10 @@ mod tests {
             Vec::new()
         };
         assert_eq!(change.forced_recovery_relays, expected);
-        assert_eq!(change.reassignments, vec![relay]);
+        assert_eq!(
+            change.reassignments,
+            vec![NodeUnitRef::new(relay, Unit::Single)]
+        );
         assert!(matches!(
             ExecutionDelta::between(Some(&after), Some(&after)),
             ExecutionDelta::Unchanged
@@ -706,9 +862,9 @@ mod tests {
             .nodes
             .get_mut(&relay)
             .assured("the fixture contains its relay");
-        node.primary_node = Some(owner.clone());
-        node.assigned_nodes = vec![owner.clone()];
-        node.ownership_transition = Some(OwnershipTransition {
+        node.single_unit_mut().primary_node = Some(owner.clone());
+        node.single_unit_mut().assigned_nodes = vec![owner.clone()];
+        node.single_unit_mut().ownership_transition = Some(OwnershipTransition {
             id: "retained-routing-transition".into(),
             source: named("node-3"),
             destination: owner,
@@ -720,6 +876,7 @@ mod tests {
             .nodes
             .get_mut(&relay)
             .assured("the target contains the relay")
+            .single_unit_mut()
             .assigned_nodes
             .push(named("node-2"));
         let ExecutionDelta::EntitySwap(change) =
@@ -731,6 +888,9 @@ mod tests {
             change.forced_recovery_relays,
             Vec::<nervix_models::RelayName>::new()
         );
-        assert_eq!(change.reassignments, vec![relay]);
+        assert_eq!(
+            change.reassignments,
+            vec![NodeUnitRef::new(relay, Unit::Single)]
+        );
     }
 }

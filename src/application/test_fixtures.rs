@@ -501,6 +501,7 @@ pub(in crate::application) fn placement_group(
     primary_node: &ClusterNodeName,
 ) -> PlacementGroupSchedule {
     PlacementGroupSchedule {
+        unit: nervix_models::Unit::Single,
         members,
         primary_node: Some(primary_node.clone()),
     }

@@ -7,7 +7,8 @@
 use error_stack::Report;
 use nervix_models::{
     BranchKeyFingerprint, DomainName, FieldName, ModelKind, ModelName, RemoteRuntimeElementValue,
-    RemoteRuntimeField, RemoteRuntimeValue, SchemaFingerprint, Timestamp, WasmStateGeneration,
+    RemoteRuntimeField, RemoteRuntimeValue, SchemaFingerprint, Timestamp, Unit,
+    WasmStateGeneration,
 };
 
 use crate::{
@@ -19,7 +20,7 @@ use crate::{
     },
 };
 
-const STATE_RECORD_VERSION: u16 = 1;
+const STATE_RECORD_VERSION: u16 = 2;
 
 /// One branch's committed WASM guest save. The raw blob is a separate section at the descriptor's
 /// corresponding guest-blob path.
@@ -27,6 +28,7 @@ const STATE_RECORD_VERSION: u16 = 1;
 pub struct WasmStateDescriptor {
     pub domain: DomainName,
     pub entity: ModelName,
+    pub unit: Unit,
     pub schema: SchemaFingerprint,
     pub branch_fingerprint: Option<BranchKeyFingerprint>,
     pub branch: Option<Vec<StateField>>,
@@ -47,6 +49,7 @@ pub struct KafkaPartitionOffset {
 pub struct KafkaOffsetsRecord {
     pub domain: DomainName,
     pub entity: ModelName,
+    pub unit: Unit,
     pub schema: SchemaFingerprint,
     pub revision: u64,
     /// The explicit domain start already applied by the source, if any.
@@ -68,6 +71,7 @@ pub struct BranchLifecycleRecord {
     pub domain: DomainName,
     pub owner_kind: ModelKind,
     pub entity: ModelName,
+    pub unit: Unit,
     pub schema: SchemaFingerprint,
     pub revision: u64,
     pub branches: Vec<BranchLifecycleEntry>,
@@ -84,6 +88,7 @@ impl ArchiveRecord for WasmStateDescriptor {
             &WasmStateDescriptorWire {
                 domain: self.domain.as_str().to_string(),
                 entity: self.entity.as_str().to_string(),
+                unit: self.unit,
                 schema: *self.schema.as_digest(),
                 branch_fingerprint: self
                     .branch_fingerprint
@@ -107,6 +112,7 @@ impl ArchiveRecord for WasmStateDescriptor {
         Ok(Self {
             domain: parse_domain(path, &wire.domain)?,
             entity: parse_entity(path, &wire.entity)?,
+            unit: wire.unit,
             schema: SchemaFingerprint::from_digest(wire.schema),
             branch_fingerprint: wire.branch_fingerprint.map(BranchKeyFingerprint::new),
             branch: wire.branch,
@@ -118,12 +124,13 @@ impl ArchiveRecord for WasmStateDescriptor {
 
 impl ArchiveRecord for KafkaOffsetsRecord {
     const KIND: RecordKind = RecordKind::KafkaOffsets;
-    const VERSION: u16 = 2;
+    const VERSION: u16 = 3;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         StreamedKafkaOffsets {
             domain: self.domain.clone(),
             entity: self.entity.clone(),
+            unit: self.unit,
             schema: self.schema,
             revision: self.revision,
             applied_start_generation: self.applied_start_generation,
@@ -148,6 +155,7 @@ impl ArchiveRecord for KafkaOffsetsRecord {
         Ok(Self {
             domain: parse_domain(path, &wire.domain)?,
             entity: parse_entity(path, &wire.entity)?,
+            unit: wire.unit,
             schema: SchemaFingerprint::from_digest(wire.schema),
             revision: wire.revision,
             applied_start_generation: wire.applied_start_generation,
@@ -173,6 +181,7 @@ impl ArchiveRecord for BranchLifecycleRecord {
             domain: self.domain.clone(),
             owner_kind: self.owner_kind,
             entity: self.entity.clone(),
+            unit: self.unit,
             schema: self.schema,
             revision: self.revision,
             branches: self.branches.iter().cloned(),
@@ -195,6 +204,7 @@ impl ArchiveRecord for BranchLifecycleRecord {
                 .parse()
                 .map_err(|_| invalid(path, "state owner kind"))?,
             entity: parse_entity(path, &wire.entity)?,
+            unit: wire.unit,
             schema: SchemaFingerprint::from_digest(wire.schema),
             revision: wire.revision,
             branches: wire
@@ -397,6 +407,7 @@ mod tests {
             value: StateValue::String("north".to_string()),
         }];
         let descriptor = WasmStateDescriptor {
+            unit: nervix_models::Unit::Single,
             domain: domain(),
             entity: entity(),
             schema: SchemaFingerprint::from_digest([3; 32]),
@@ -415,6 +426,7 @@ mod tests {
         );
 
         let offsets = KafkaOffsetsRecord {
+            unit: nervix_models::Unit::Single,
             domain: domain(),
             entity: entity(),
             schema: SchemaFingerprint::from_digest([3; 32]),
@@ -440,6 +452,7 @@ mod tests {
         );
 
         let lifecycle = BranchLifecycleRecord {
+            unit: nervix_models::Unit::Single,
             domain: domain(),
             owner_kind: ModelKind::WasmProcessor,
             entity: entity(),
@@ -462,6 +475,7 @@ mod tests {
     #[test]
     fn runtime_state_records_validate_order_and_incarnation() {
         let offsets = KafkaOffsetsRecord {
+            unit: nervix_models::Unit::Single,
             domain: domain(),
             entity: entity(),
             schema: SchemaFingerprint::from_digest([3; 32]),
@@ -484,6 +498,7 @@ mod tests {
         assert!(KafkaOffsetsRecord::decode("offsets.rkyv", &bytes).is_err());
 
         let lifecycle = BranchLifecycleRecord {
+            unit: nervix_models::Unit::Single,
             domain: domain(),
             owner_kind: ModelKind::WasmProcessor,
             entity: entity(),

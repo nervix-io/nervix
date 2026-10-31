@@ -305,6 +305,7 @@ impl PublishedWindow {
             },
             kind: ModelKind::WindowProcessor,
             identifier: named("latency_window"),
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         };
         let state = runtime
@@ -622,6 +623,7 @@ impl AppliedRelay {
             },
             kind: ModelKind::Relay,
             identifier: named("latest_orders"),
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         };
         let schema = test_schema(&[("status", ParseAsType::String)]);

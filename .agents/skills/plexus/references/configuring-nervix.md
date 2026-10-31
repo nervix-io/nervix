@@ -634,7 +634,9 @@ Choose checks relevant to the configured graph:
   expiry outcomes.
 
 For a parse error, follow the reported expected token and compare clause order with the relevant
-public example. For a validation error, trace exact types, declaration order, domain ownership,
+public example. For an MQTT QoS or session-pairing refusal, use the underlined token and the
+connector's Ingestors or Emitters section to choose an accepted value or quiesce mode.
+For a validation error, trace exact types, declaration order, domain ownership,
 branch compatibility, construction completeness, and connector capabilities. For missing data,
 check domain lifecycle, source offsets, timestamps, filters, branch keys, route filters, flush
 boundaries, input collection boundaries, and external entity provisioning in that order.

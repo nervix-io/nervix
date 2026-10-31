@@ -584,6 +584,10 @@ The ownership move at the start of drain support is the same planned handoff use
 `RELOCATE`, and placement consolidation. [Control Plane](./control-plane.md#planned-ownership-handoffs-and-failover)
 owns the general contract; this section states what shutdown adds.
 
+The move identifies one scheduled node and unit. The destination's prepared and activated
+checkpoints and the source's capture freeze use that same unit, so moving one unit does not
+discard a sibling unit's state. Current schedules have only `Single` units.
+
 The complete target schedule is computed before anything is held. The coordinator then fences
 dispatch at the affected subgraph boundary on every live node that runs part of it, stops intake for
 each moved ingestor, and drains the work already admitted to the moved unit, including

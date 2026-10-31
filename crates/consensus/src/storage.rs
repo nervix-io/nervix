@@ -95,10 +95,10 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_timestamp_logs";
-const KEYSPACE_META: &str = "raft_timestamp_meta";
-const KEYSPACE_STATE_MACHINE: &str = "raft_timestamp_state";
-const KEYSPACE_SNAPSHOT: &str = "raft_timestamp_snapshots";
+const KEYSPACE_LOGS: &str = "raft_unit_timestamp_logs";
+const KEYSPACE_META: &str = "raft_unit_timestamp_meta";
+const KEYSPACE_STATE_MACHINE: &str = "raft_unit_timestamp_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_unit_timestamp_snapshots";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
 const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
 
@@ -230,7 +230,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterParameters = 9,
+    ClusterState = 10,
 }
 
 #[derive(Debug)]
@@ -288,7 +288,7 @@ impl TryFrom<StateMetadataRecord> for StateMetadata {
 impl From<&StateMachineData> for StateMetadata {
     fn from(state: &StateMachineData) -> Self {
         Self {
-            encoding: StateEncoding::ClusterParameters,
+            encoding: StateEncoding::ClusterState,
             last_applied_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
@@ -321,7 +321,7 @@ impl StateMetadata {
 impl StateMachineData {
     fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
         let StateMetadata {
-            encoding: StateEncoding::ClusterParameters,
+            encoding: StateEncoding::ClusterState,
             last_applied_log_id,
             last_membership,
             runtime_revision,

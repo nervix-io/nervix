@@ -2649,10 +2649,13 @@ mod tests {
             .await
             .expect_err("mismatched published metadata must fail");
 
-        assert!(matches!(
-            error.current_context(),
-            ResourceStoreError::ResourceMetadataMismatch
-        ));
+        assert!(
+            matches!(
+                error.current_context(),
+                ResourceStoreError::ResourceMetadataMismatch
+            ),
+            "unexpected replica install error: {error:?}"
+        );
         assert!(!replica_store.staging_root(&replica_id).exists());
         assert!(!replica_store.version_root(&replica_id).exists());
     }

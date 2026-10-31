@@ -1594,8 +1594,9 @@ impl SessionServiceImpl {
             let Some(desired_node) = desired.nodes.get(&node.identity()) else {
                 continue;
             };
-            if desired_node.assigned_nodes.is_empty()
+            if desired_node.single_unit().assigned_nodes.is_empty()
                 || desired_node
+                    .single_unit()
                     .assigned_nodes
                     .iter()
                     .any(|assigned| assigned == node_id)
@@ -1647,7 +1648,7 @@ impl SessionServiceImpl {
         let old_primary = if let Some(current_group_primary) = current_group_primary {
             Some(current_group_primary)
         } else if let Some(node) = current_nodes.first() {
-            node.primary_node.clone()
+            node.single_unit().primary_node.clone()
         } else {
             None
         };
@@ -1658,8 +1659,8 @@ impl SessionServiceImpl {
                 primary != unavailable_node_id && live_nodes.contains(primary);
             if primary_is_available {
                 let primary_owns_every_member = current_nodes.iter().all(|node| {
-                    node.primary_node.as_ref() == Some(primary)
-                        && node.assigned_nodes.contains(primary)
+                    node.single_unit().primary_node.as_ref() == Some(primary)
+                        && node.single_unit().assigned_nodes.contains(primary)
                 });
                 if primary_owns_every_member {
                     preserved_live_primary = Some(primary.clone());
@@ -1676,7 +1677,7 @@ impl SessionServiceImpl {
         }
         if desired_target.is_none()
             && let Some(desired_node) = desired_nodes.first()
-            && let Some(candidate) = desired_node.primary_node.as_ref()
+            && let Some(candidate) = desired_node.single_unit().primary_node.as_ref()
         {
             let candidate_is_eligible = target_nodes.contains(candidate);
             if candidate_is_eligible {
@@ -1686,7 +1687,7 @@ impl SessionServiceImpl {
         if desired_target.is_none()
             && let Some(desired_node) = desired_nodes.first()
         {
-            for candidate in &desired_node.assigned_nodes {
+            for candidate in &desired_node.single_unit().assigned_nodes {
                 let candidate_is_eligible = target_nodes.contains(candidate);
                 if candidate_is_eligible {
                     desired_target = Some(candidate.clone());
@@ -1697,7 +1698,7 @@ impl SessionServiceImpl {
 
         let first_current_node = current_nodes.first()?;
         let mut common_replicas = Vec::new();
-        for candidate in &first_current_node.assigned_nodes {
+        for candidate in &first_current_node.single_unit().assigned_nodes {
             if candidate == unavailable_node_id {
                 continue;
             }
@@ -1708,7 +1709,7 @@ impl SessionServiceImpl {
 
             let candidate_is_assigned_to_every_member = current_nodes
                 .iter()
-                .all(|node| node.assigned_nodes.contains(candidate));
+                .all(|node| node.single_unit().assigned_nodes.contains(candidate));
             if candidate_is_assigned_to_every_member {
                 common_replicas.push(candidate.clone());
             }
@@ -1730,7 +1731,7 @@ impl SessionServiceImpl {
         let promoted_replica = if primary_changed {
             let target_was_assigned_to_every_member = current_nodes
                 .iter()
-                .all(|node| node.assigned_nodes.contains(&target));
+                .all(|node| node.single_unit().assigned_nodes.contains(&target));
             if target_was_assigned_to_every_member {
                 Some(target.clone())
             } else {
@@ -1743,15 +1744,16 @@ impl SessionServiceImpl {
         for ((member, current_node), desired_node) in
             group.members.iter().zip(current_nodes).zip(desired_nodes)
         {
-            let current_assignment_slots = current_node.assigned_nodes.len();
-            let desired_assignment_slots = desired_node.assigned_nodes.len();
+            let current_assignment_slots = current_node.single_unit().assigned_nodes.len();
+            let desired_assignment_slots = desired_node.single_unit().assigned_nodes.len();
             let assignment_slots = current_assignment_slots
                 .max(desired_assignment_slots)
                 .max(1);
             let ordered_candidates = desired_node
+                .single_unit()
                 .assigned_nodes
                 .iter()
-                .chain(&current_node.assigned_nodes)
+                .chain(&current_node.single_unit().assigned_nodes)
                 .chain(target_nodes);
             let assigned_nodes = relocation.ordered_assignment(
                 &target,
@@ -1776,13 +1778,13 @@ impl SessionServiceImpl {
                  schedule",
             );
             if let Some(ownership_transition) = ownership_transition {
-                node.ownership_transition = Some(ownership_transition);
+                node.single_unit_mut().ownership_transition = Some(ownership_transition);
                 if relocation.replaces_owner_state() {
                     node.begin_wasm_state_generation();
                 }
             }
-            node.primary_node = Some(target.clone());
-            node.assigned_nodes = assigned_nodes;
+            node.single_unit_mut().primary_node = Some(target.clone());
+            node.single_unit_mut().assigned_nodes = assigned_nodes;
         }
         if let Some(current_group) = schedule
             .placement_groups
@@ -1820,7 +1822,7 @@ impl SessionServiceImpl {
         }
 
         let label = format!("{} {}", node.kind().as_ref(), node.identifier.as_str());
-        let old_primary = node.primary_node.clone();
+        let old_primary = node.single_unit().primary_node.clone();
         let preserved_live_primary = if let Some(primary) = old_primary.as_ref() {
             let primary_is_available =
                 primary != unavailable_node_id && live_nodes.contains(primary);
@@ -1834,14 +1836,14 @@ impl SessionServiceImpl {
         };
 
         let mut desired_target = None;
-        if let Some(candidate) = desired_node.primary_node.as_ref() {
+        if let Some(candidate) = desired_node.single_unit().primary_node.as_ref() {
             let candidate_is_eligible = target_nodes.contains(candidate);
             if candidate_is_eligible {
                 desired_target = Some(candidate.clone());
             }
         }
         if desired_target.is_none() {
-            for candidate in &desired_node.assigned_nodes {
+            for candidate in &desired_node.single_unit().assigned_nodes {
                 let candidate_is_eligible = target_nodes.contains(candidate);
                 if candidate_is_eligible {
                     desired_target = Some(candidate.clone());
@@ -1851,7 +1853,7 @@ impl SessionServiceImpl {
         }
 
         let mut existing_replica = None;
-        for candidate in &node.assigned_nodes {
+        for candidate in &node.single_unit().assigned_nodes {
             let candidate_is_available = candidate != unavailable_node_id;
             let candidate_is_target_eligible = target_nodes.contains(candidate);
             if candidate_is_available && candidate_is_target_eligible {
@@ -1870,15 +1872,16 @@ impl SessionServiceImpl {
                 target_nodes.first()?.clone()
             }
         };
-        let current_assignment_slots = node.assigned_nodes.len();
-        let desired_assignment_slots = desired_node.assigned_nodes.len();
+        let current_assignment_slots = node.single_unit().assigned_nodes.len();
+        let desired_assignment_slots = desired_node.single_unit().assigned_nodes.len();
         let assignment_slots = current_assignment_slots
             .max(desired_assignment_slots)
             .max(1);
         let ordered_candidates = desired_node
+            .single_unit()
             .assigned_nodes
             .iter()
-            .chain(&node.assigned_nodes)
+            .chain(&node.single_unit().assigned_nodes)
             .chain(target_nodes);
         let assigned_nodes = relocation.ordered_assignment(
             &target,
@@ -1889,7 +1892,7 @@ impl SessionServiceImpl {
             ordered_candidates,
         );
         let primary_changed = old_primary.as_ref() != Some(&target);
-        let target_was_already_assigned = node.assigned_nodes.contains(&target);
+        let target_was_already_assigned = node.single_unit().assigned_nodes.contains(&target);
         let promotes_existing_replica = primary_changed && target_was_already_assigned;
         let promoted_replica = if promotes_existing_replica {
             Some(target.clone())
@@ -1907,13 +1910,13 @@ impl SessionServiceImpl {
         }
 
         if let Some(ownership_transition) = ownership_transition {
-            node.ownership_transition = Some(ownership_transition);
+            node.single_unit_mut().ownership_transition = Some(ownership_transition);
             if relocation.replaces_owner_state() {
                 node.begin_wasm_state_generation();
             }
         }
-        node.primary_node = Some(target.clone());
-        node.assigned_nodes = assigned_nodes;
+        node.single_unit_mut().primary_node = Some(target.clone());
+        node.single_unit_mut().assigned_nodes = assigned_nodes;
 
         let fallback_node = if primary_changed && promoted_replica.is_none() {
             Some(target)
@@ -1941,9 +1944,11 @@ impl SessionServiceImpl {
         let generated_desired = desired.is_none().then(|| {
             let mut generated = schedule.clone();
             for node in generated.nodes.values_mut() {
-                let replica_slots = node.assigned_nodes.len().max(1);
-                node.assigned_nodes = target_nodes.iter().take(replica_slots).cloned().collect();
-                node.primary_node = node.assigned_nodes.first().cloned();
+                let replica_slots = node.single_unit().assigned_nodes.len().max(1);
+                node.single_unit_mut().assigned_nodes =
+                    target_nodes.iter().take(replica_slots).cloned().collect();
+                node.single_unit_mut().primary_node =
+                    node.single_unit().assigned_nodes.first().cloned();
             }
             for group in &mut generated.placement_groups {
                 group.primary_node = target_nodes.first().cloned();
@@ -1967,7 +1972,8 @@ impl SessionServiceImpl {
                 continue;
             };
             let has_unavailable_assignment = current_nodes.iter().any(|node| {
-                node.assigned_nodes
+                node.single_unit()
+                    .assigned_nodes
                     .iter()
                     .any(|node_id| !live_nodes.contains(node_id))
             });
@@ -1981,7 +1987,7 @@ impl SessionServiceImpl {
             } else {
                 current_nodes
                     .iter()
-                    .flat_map(|node| node.assigned_nodes.iter())
+                    .flat_map(|node| node.single_unit().assigned_nodes.iter())
                     .find(|node_id| !live_nodes.contains(*node_id))
                     .cloned()
             };
@@ -2010,10 +2016,11 @@ impl SessionServiceImpl {
             if grouped_members.contains(&node.identity()) {
                 continue;
             }
-            if node.assigned_nodes.is_empty() {
+            if node.single_unit().assigned_nodes.is_empty() {
                 continue;
             }
             let unavailable_node_ids = node
+                .single_unit()
                 .assigned_nodes
                 .iter()
                 .filter(|node_id| !live_nodes.contains(*node_id))
@@ -2072,11 +2079,11 @@ impl SessionServiceImpl {
                 .collect::<Option<Vec<_>>>();
             let common_primary = if let Some(nodes) = existing_nodes.as_ref()
                 && let Some(first) = nodes.first()
-                && let Some(primary) = first.primary_node.as_ref()
+                && let Some(primary) = first.single_unit().primary_node.as_ref()
                 && live_node_ids.contains(primary)
                 && nodes.iter().all(|node| {
-                    node.primary_node.as_ref() == Some(primary)
-                        && node.assigned_nodes.contains(primary)
+                    node.single_unit().primary_node.as_ref() == Some(primary)
+                        && node.single_unit().assigned_nodes.contains(primary)
                 }) {
                 Some(primary.clone())
             } else {
@@ -2088,14 +2095,16 @@ impl SessionServiceImpl {
                     let Some(node) = schedule.nodes.get_mut(member) else {
                         continue;
                     };
-                    let desired_assigned_nodes = node.assigned_nodes.clone();
+                    let desired_assigned_nodes = node.single_unit().assigned_nodes.clone();
                     let replica_slots = existing_node
+                        .single_unit()
                         .assigned_nodes
                         .len()
                         .max(desired_assigned_nodes.len())
                         .max(1);
                     let mut assigned_nodes = vec![primary.clone()];
                     for assigned in existing_node
+                        .single_unit()
                         .assigned_nodes
                         .iter()
                         .chain(&desired_assigned_nodes)
@@ -2105,15 +2114,15 @@ impl SessionServiceImpl {
                         }
                     }
                     assigned_nodes.truncate(replica_slots);
-                    node.primary_node = Some(primary.clone());
-                    node.assigned_nodes = assigned_nodes;
+                    node.single_unit_mut().primary_node = Some(primary.clone());
+                    node.single_unit_mut().assigned_nodes = assigned_nodes;
                 }
             }
             schedule.placement_groups[group_index].primary_node = if let Some(member) =
                 members.first()
                 && let Some(node) = schedule.nodes.get(member)
             {
-                node.primary_node.clone()
+                node.single_unit().primary_node.clone()
             } else {
                 None
             };
@@ -2129,31 +2138,37 @@ impl SessionServiceImpl {
             if Self::scheduled_node_should_follow_desired_assignment(node) {
                 continue;
             }
-            if existing_node.assigned_nodes.is_empty() {
+            if existing_node.single_unit().assigned_nodes.is_empty() {
                 continue;
             }
             if existing_node
+                .single_unit()
                 .assigned_nodes
                 .iter()
                 .all(|node_id| live_node_ids.contains(node_id))
             {
-                node.primary_node = existing_node.primary_node.clone();
-                node.assigned_nodes = existing_node.assigned_nodes.clone();
+                node.single_unit_mut().primary_node =
+                    existing_node.single_unit().primary_node.clone();
+                node.single_unit_mut().assigned_nodes =
+                    existing_node.single_unit().assigned_nodes.clone();
                 continue;
             }
 
             let desired_node = node.clone();
             let target_nodes = desired_node
+                .single_unit()
                 .assigned_nodes
                 .iter()
                 .filter(|node_id| live_node_ids.contains(*node_id))
                 .cloned()
                 .collect::<BTreeSet<_>>();
-            let desired_primary_node = node.primary_node.clone();
-            let desired_assigned_nodes = node.assigned_nodes.clone();
-            node.primary_node = existing_node.primary_node.clone();
-            node.assigned_nodes = existing_node.assigned_nodes.clone();
+            let desired_primary_node = node.single_unit().primary_node.clone();
+            let desired_assigned_nodes = node.single_unit().assigned_nodes.clone();
+            node.single_unit_mut().primary_node = existing_node.single_unit().primary_node.clone();
+            node.single_unit_mut().assigned_nodes =
+                existing_node.single_unit().assigned_nodes.clone();
             let unavailable_nodes = existing_node
+                .single_unit()
                 .assigned_nodes
                 .iter()
                 .filter(|node_id| !live_node_ids.contains(*node_id))
@@ -2175,8 +2190,8 @@ impl SessionServiceImpl {
                 }
             }
             if !relocated {
-                node.primary_node = desired_primary_node;
-                node.assigned_nodes = desired_assigned_nodes;
+                node.single_unit_mut().primary_node = desired_primary_node;
+                node.single_unit_mut().assigned_nodes = desired_assigned_nodes;
             }
         }
 
@@ -2184,8 +2199,9 @@ impl SessionServiceImpl {
             let Some(existing_node) = existing.nodes.get(&node.identity()) else {
                 continue;
             };
-            if node.primary_node == existing_node.primary_node {
-                node.ownership_transition = existing_node.ownership_transition.clone();
+            if node.single_unit().primary_node == existing_node.single_unit().primary_node {
+                node.single_unit_mut().ownership_transition =
+                    existing_node.single_unit().ownership_transition.clone();
             }
         }
     }

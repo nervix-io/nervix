@@ -28,6 +28,7 @@ impl Runtime {
         coordination: &CoordinationIdentity,
         domain: &DomainName,
         entity: &NodeRef,
+        unit: nervix_models::Unit,
         base_schedule_fingerprint: [u8; 32],
     ) -> OwnershipHandoffResult<Vec<nervix_interconnect::OwnershipHandoffCheckpoint>> {
         if !self.entity_gate_operation_owns_entity(
@@ -43,7 +44,7 @@ impl Runtime {
                 entity.identifier.as_str()
             )));
         }
-        self.capture_frozen_ownership_handoff_state(domain, entity, base_schedule_fingerprint)
+        self.capture_frozen_ownership_handoff_state(domain, entity, unit, base_schedule_fingerprint)
             .await
     }
 
@@ -51,6 +52,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         entity: &NodeRef,
+        unit: nervix_models::Unit,
         base_schedule_fingerprint: [u8; 32],
     ) -> OwnershipHandoffResult<Vec<nervix_interconnect::OwnershipHandoffCheckpoint>> {
         let scheduled = self.ownership_handoff_scheduled_node(domain, entity)?;
@@ -64,6 +66,7 @@ impl Runtime {
             placement.domain == *domain
                 && placement.kind == entity.kind
                 && placement.identifier == entity.identifier
+                && placement.unit == unit
         };
         let final_branch_lru = if entity.kind.is_processor() {
             let commands = {
@@ -200,11 +203,12 @@ impl Runtime {
         }
         if Self::node_has_branch_lifecycle(entity.kind) {
             let branch_lru = self
-                .state_placement(
+                .state_placement_for_unit(
                     domain,
                     RuntimeStateKind::BranchLru,
                     entity.kind,
                     entity.identifier.clone(),
+                    unit,
                     None,
                 )
                 .change_context_lazy(|| OwnershipHandoffError::StatePlacement {
@@ -242,7 +246,7 @@ impl Runtime {
             }
         }
         let expected =
-            self.expected_ownership_handoff_placements(domain, &scheduled, &checkpoints)?;
+            self.expected_ownership_handoff_placements(domain, &scheduled, unit, &checkpoints)?;
         checkpoints.retain(|(placement, _)| expected.contains(placement));
         described.retain(|(placement, _)| expected.contains(placement));
         let captured = checkpoints

@@ -1873,6 +1873,7 @@ mod tests {
             kind: nervix_models::ModelKind::WindowProcessor,
             identifier: nervix_models::ModelName::parse("latency_window")
                 .assured("a valid model name"),
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         };
         let state = ReplicatedWindowProcessorState::new(placement, None);

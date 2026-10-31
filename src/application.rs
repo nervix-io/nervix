@@ -2243,6 +2243,7 @@ impl Application {
                                     &request.coordination,
                                     &request.domain,
                                     &request.entity,
+                                    request.unit,
                                     request.base_schedule_fingerprint,
                                 )
                                 .await
@@ -2349,6 +2350,7 @@ impl Application {
                                 &request.operation_id,
                                 &request.domain,
                                 &request.entity,
+                                request.unit,
                             );
                         match result {
                             Ok(()) => Ok(()),

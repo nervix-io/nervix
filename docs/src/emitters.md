@@ -1572,6 +1572,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-emit).
 <!-- connector-matrix:emit-mqtt-topic:end -->
 
+CREATE refuses an unsupported QoS number with its value and accepted levels, such as
+`MQTT emitter QOS must be 0, 1, or 2, found 3`, underlining the supplied number.
+
 QoS 0 acknowledges client acceptance. When the emitter stops, it waits within the stop or shutdown
 deadline for its client to send the publishes it still holds, which a client cut off from its
 broker holds until it connects again; publishes still unsent at that deadline fail the stop and are

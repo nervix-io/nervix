@@ -16161,19 +16161,38 @@ async fn then_the_background_plexus_execution_fails_with(
     expected: String,
 ) {
     let expected = expand_placeholders(world, &expected);
-    let task = world
-        .background_plexus
-        .take()
-        .expect("a background Plexus execution must be active");
-    let error = task
-        .await
-        .expect("background Plexus task must not panic")
-        .expect_err("background Plexus execution must fail");
+    let error = take_background_plexus_failure(world).await;
     assert!(
         error.contains(&expected),
         "background Plexus error must contain '{expected}', got: {error}"
     );
     world.last_command_error = Some(error);
+}
+
+#[then(expr = "the background Plexus execution fails because either {string} or {string}")]
+async fn then_the_background_plexus_execution_fails_because_either(
+    world: &mut ScenarioWorld,
+    first: String,
+    second: String,
+) {
+    let first = expand_placeholders(world, &first);
+    let second = expand_placeholders(world, &second);
+    let error = take_background_plexus_failure(world).await;
+    assert!(
+        error.contains(&first) || error.contains(&second),
+        "background Plexus error must contain '{first}' or '{second}', got: {error}"
+    );
+    world.last_command_error = Some(error);
+}
+
+async fn take_background_plexus_failure(world: &mut ScenarioWorld) -> String {
+    let task = world
+        .background_plexus
+        .take()
+        .expect("a background Plexus execution must be active");
+    task.await
+        .expect("background Plexus task must not panic")
+        .expect_err("background Plexus execution must fail")
 }
 
 #[then("the background Plexus execution is discarded")]

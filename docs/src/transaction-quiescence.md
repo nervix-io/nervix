@@ -150,7 +150,10 @@ version bindings, domain lifecycle, ownership moves, activations and deactivatio
 state resets, force flushes, and affected topology. An HTTPS `VHOST` version refresh can therefore
 be `DYNAMIC` while every live node still installs a new listener certificate. A running-domain
 primary move raises an otherwise dynamic model or placement change to `ENTITY_PAUSE`; replica-role
-changes alone do not. A schedule rebuild can raise a narrower model change to `DOMAIN_PAUSE`. In
+changes alone do not. Schedule reassignments identify the moved node and unit; the transaction
+report folds those identities to their logical node when attributing ownership and its affected
+subgraph. Current schedules have one `Single` unit, so the reported scope is unchanged. A schedule
+rebuild can raise a narrower model change to `DOMAIN_PAUSE`. In
 a stopped domain, a model or resource rebinding has no running work to pause and reports
 `DYNAMIC`, although the changed configuration still matters at the next start. Explicit `START`
 and `STOP` are individual `NO_PAUSE` steps with lifecycle effects; they determine whether later
