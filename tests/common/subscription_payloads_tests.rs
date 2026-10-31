@@ -16,13 +16,13 @@ use nervix_primitives::{
 
 use crate::subscription_payloads::{PayloadSubscription, SubscriptionPayloads};
 
-/// The receive budget of the slow historical domain's Immediate outline.
-const IMMEDIATE_BUDGET: Duration = Duration::from_millis(500);
-/// What the Immediate outline's 100-microsecond batching minimum would take at `TIME RATE 0.0001`
-/// if it were scaled as logical time.
-const IMMEDIATE_WRONG_CLOCK_CADENCE: Duration = Duration::from_secs(1);
-/// The receive budget of the paced branch-buffering outline.
-const PACED_BUDGET: Duration = Duration::from_secs(5);
+/// The receive budget the paced branch-buffering and slow historical Immediate outlines share.
+const RECEIVE_BUDGET: Duration = Duration::from_secs(5);
+/// How long both outlines delay collecting the result of their sample, beyond its receive budget.
+const CALLER_DELAY: Duration = Duration::from_secs(6);
+/// What the Immediate outline's 100-microsecond batching minimum would hold at
+/// `TIME RATE 0.000001` if it were scaled as logical time.
+const IMMEDIATE_WRONG_CLOCK_CADENCE: Duration = Duration::from_secs(100);
 /// What the paced outline's one-minute logical flush and collection would each hold if they ran
 /// on the physical clock instead of the domain's `TIME RATE 1200`.
 const PACED_WRONG_CLOCK_CADENCE: Duration = Duration::from_secs(60);
@@ -53,7 +53,7 @@ async fn immediate_rows_are_received_before_the_delayed_caller_first_polls() {
     let (reads, mut read) = mpsc::channel(2);
     let began_at = Instant::now();
     let observation = SubscriptionPayloads::new(&expected)
-        .observe(ScriptedSubscription { rows, reads }, IMMEDIATE_BUDGET);
+        .observe(ScriptedSubscription { rows, reads }, RECEIVE_BUDGET);
 
     advance(Duration::from_millis(100)).await;
     for payload in &expected {
@@ -70,7 +70,7 @@ async fn immediate_rows_are_received_before_the_delayed_caller_first_polls() {
     })
     .await;
 
-    advance(Duration::from_secs(1)).await;
+    advance(CALLER_DELAY).await;
     let observed = observation.await;
     assert!(
         drained.is_ok(),
@@ -79,7 +79,7 @@ async fn immediate_rows_are_received_before_the_delayed_caller_first_polls() {
     assert_eq!(observed.receipts.len(), expected.len());
     for (receipt, expected) in observed.receipts.iter().zip(expected) {
         assert_eq!(receipt.payload, expected);
-        assert!(receipt.received_at.duration_since(began_at) < IMMEDIATE_BUDGET);
+        assert!(receipt.received_at.duration_since(began_at) < RECEIVE_BUDGET);
     }
     drop(observed.subscription);
 }
@@ -94,7 +94,7 @@ async fn timely_second_sequences_survive_a_caller_stalled_after_the_first_row() 
     send.send(expected[0].clone())
         .await
         .assured("the observer owns the receiver");
-    let observation = SubscriptionPayloads::new(&expected).observe(subscription, PACED_BUDGET);
+    let observation = SubscriptionPayloads::new(&expected).observe(subscription, RECEIVE_BUDGET);
     let mut observation = std::pin::pin!(observation);
     assert!(poll!(observation.as_mut()).is_pending());
     assert_eq!(read.recv().await, Some(expected[0].clone()));
@@ -115,7 +115,7 @@ async fn timely_second_sequences_survive_a_caller_stalled_after_the_first_row() 
         }
     })
     .await;
-    advance(Duration::from_secs(6)).await;
+    advance(CALLER_DELAY).await;
     let observed = observation.await;
     assert!(
         drained.is_ok(),
@@ -124,7 +124,7 @@ async fn timely_second_sequences_survive_a_caller_stalled_after_the_first_row() 
     assert_eq!(observed.receipts.len(), expected.len());
     for (receipt, expected) in observed.receipts.iter().zip(expected) {
         assert_eq!(receipt.payload, expected);
-        assert!(receipt.received_at.duration_since(began_at) < PACED_BUDGET);
+        assert!(receipt.received_at.duration_since(began_at) < RECEIVE_BUDGET);
     }
     drop(observed.subscription);
 }
@@ -142,7 +142,7 @@ async fn a_duplicate_first_row_cannot_replace_a_missing_second_sequence() {
             .assured("the observer owns the receiver");
     }
     let began_at = Instant::now();
-    let observation = SubscriptionPayloads::new(&expected).observe(subscription, PACED_BUDGET);
+    let observation = SubscriptionPayloads::new(&expected).observe(subscription, RECEIVE_BUDGET);
     let result = std::panic::AssertUnwindSafe(observation)
         .catch_unwind()
         .await;
@@ -154,7 +154,7 @@ async fn a_duplicate_first_row_cannot_replace_a_missing_second_sequence() {
     };
     assert!(message.contains("timed out waiting for subscription payloads"));
     assert!(message.contains("beta:2"));
-    assert_eq!(began_at.elapsed(), PACED_BUDGET);
+    assert_eq!(began_at.elapsed(), RECEIVE_BUDGET);
     drop(send);
 }
 
@@ -165,7 +165,7 @@ async fn a_disconnected_subscription_reports_its_cause_without_waiting_for_the_b
     drop(send);
     let began_at = Instant::now();
     let observation = SubscriptionPayloads::new(&["alpha:2".to_string()])
-        .observe(ScriptedSubscription { rows, reads }, PACED_BUDGET);
+        .observe(ScriptedSubscription { rows, reads }, RECEIVE_BUDGET);
     let result = std::panic::AssertUnwindSafe(observation)
         .catch_unwind()
         .await;
@@ -195,15 +195,12 @@ impl PayloadSubscription for WrongClockSubscription {
 }
 
 #[nervix_primitives::test(start_paused = true)]
-async fn each_sample_budget_rejects_the_cadence_of_the_wrong_clock() {
-    for (budget, cadence) in [
-        (IMMEDIATE_BUDGET, IMMEDIATE_WRONG_CLOCK_CADENCE),
-        (PACED_BUDGET, PACED_WRONG_CLOCK_CADENCE),
-    ] {
+async fn the_receive_budget_rejects_the_cadence_of_each_wrong_clock() {
+    for cadence in [IMMEDIATE_WRONG_CLOCK_CADENCE, PACED_WRONG_CLOCK_CADENCE] {
         nervix_primitives::task::consume_budget().await;
         let began_at = Instant::now();
         let observation = SubscriptionPayloads::new(&["alpha:2".to_string()])
-            .observe(WrongClockSubscription { cadence }, budget);
+            .observe(WrongClockSubscription { cadence }, RECEIVE_BUDGET);
         let result = std::panic::AssertUnwindSafe(observation)
             .catch_unwind()
             .await;
@@ -215,7 +212,7 @@ async fn each_sample_budget_rejects_the_cadence_of_the_wrong_clock() {
         };
         assert!(message.contains("timed out waiting for subscription payloads"));
         assert!(message.contains("alpha:2"));
-        assert_eq!(began_at.elapsed(), budget);
+        assert_eq!(began_at.elapsed(), RECEIVE_BUDGET);
     }
 }
 
@@ -231,25 +228,23 @@ impl PayloadSubscription for LateReceiptSubscription {
 
 #[nervix_primitives::test(start_paused = true)]
 async fn a_final_row_at_or_after_the_deadline_cannot_complete_the_sample() {
-    for budget in [IMMEDIATE_BUDGET, PACED_BUDGET] {
-        for lateness in [Duration::ZERO, Duration::from_nanos(1)] {
-            nervix_primitives::task::consume_budget().await;
-            let read_elapsed = budget + lateness;
-            let began_at = Instant::now();
-            let observation = SubscriptionPayloads::new(&["alpha:2".to_string()])
-                .observe(LateReceiptSubscription(read_elapsed), budget);
-            let result = std::panic::AssertUnwindSafe(observation)
-                .catch_unwind()
-                .await;
-            let Err(failure) = result else {
-                panic!("a final row recorded at or after the deadline must fail the sample");
-            };
-            let Some(message) = failure.downcast_ref::<String>() else {
-                panic!("a late final row must report the receive timeout");
-            };
-            assert!(message.contains("timed out waiting for subscription payloads"));
-            assert!(message.contains("alpha:2"));
-            assert_eq!(began_at.elapsed(), read_elapsed);
-        }
+    for lateness in [Duration::ZERO, Duration::from_nanos(1)] {
+        nervix_primitives::task::consume_budget().await;
+        let read_elapsed = RECEIVE_BUDGET + lateness;
+        let began_at = Instant::now();
+        let observation = SubscriptionPayloads::new(&["alpha:2".to_string()])
+            .observe(LateReceiptSubscription(read_elapsed), RECEIVE_BUDGET);
+        let result = std::panic::AssertUnwindSafe(observation)
+            .catch_unwind()
+            .await;
+        let Err(failure) = result else {
+            panic!("a final row recorded at or after the deadline must fail the sample");
+        };
+        let Some(message) = failure.downcast_ref::<String>() else {
+            panic!("a late final row must report the receive timeout");
+        };
+        assert!(message.contains("timed out waiting for subscription payloads"));
+        assert!(message.contains("alpha:2"));
+        assert_eq!(began_at.elapsed(), read_elapsed);
     }
 }
