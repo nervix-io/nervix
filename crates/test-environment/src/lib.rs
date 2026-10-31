@@ -55,10 +55,12 @@ use thiserror::Error;
 pub mod collector_exports;
 pub mod collector_output;
 pub mod dns_authority;
+mod http_readiness;
 mod postgres_clients;
 mod reaper;
 
 use collector_output::{CollectorFollower, CollectorOutput};
+use http_readiness::HttpReadiness;
 pub use postgres_clients::PostgresClients;
 use reaper::ResourceReaper;
 
@@ -78,6 +80,7 @@ const OTEL_COLLECTOR_CONFIG: &[u8] =
     include_bytes!("../../../docker/opentelemetry-collector/config.yaml");
 const DEPENDENCY_CONFIGURATION_SOURCE: &[u8] = include_bytes!("lib.rs");
 const DEPENDENCY_CONFIGURATION_FILES: &[&[u8]] = &[
+    include_bytes!("http_readiness.rs"),
     include_bytes!("../../../docker/clickhouse/https.xml"),
     include_bytes!("../../../docker/mock-server/Dockerfile"),
     include_bytes!("../../../docker/mock-server/app.py"),
@@ -281,6 +284,10 @@ pub enum ContainerMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContainerReadiness {
     MappedTcp(ContainerPort),
+    Http {
+        port: ContainerPort,
+        path: &'static str,
+    },
     Running,
 }
 
@@ -512,26 +519,42 @@ tlsRequireTrustedClientCertOnConnect=false
 EOF
 exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c "$config"
 "#;
+        let namespace_path = "/admin/v2/namespaces/public/default";
+        let readiness_client = HttpReadiness::client()?;
         let container = self
-            .start_container("pulsar", 6650.tcp(), "Pulsar", || {
-                GenericImage::new("apachepulsar/pulsar", "4.1.0")
-                    .with_exposed_port(6650.tcp())
-                    .with_exposed_port(6651.tcp())
-                    .with_exposed_port(8080.tcp())
-                    .with_wait_for(WaitFor::message_on_stdout("messaging service is ready"))
-                    .with_copy_to(
-                        CopyTargetOptions::new("/pulsar/bin/nervix-start-tls.sh").with_mode(0o755),
-                        start_script.to_vec(),
-                    )
-                    .with_copy_to("/pulsar/certs/ca.pem", tls.ca_pem.clone())
-                    .with_copy_to("/pulsar/certs/node.pem", tls.node_pem.clone())
-                    .with_copy_to(
-                        CopyTargetOptions::new("/pulsar/certs/node-key.pem").with_mode(0o644),
-                        tls.node_key_pem.clone(),
-                    )
-                    .with_cmd(["sh", "/pulsar/bin/nervix-start-tls.sh"])
-                    .with_startup_timeout(STARTUP_TIMEOUT)
-            })
+            .start_container_with_readiness(
+                "pulsar",
+                ContainerReadiness::Http {
+                    port: 8080.tcp(),
+                    path: namespace_path,
+                },
+                "Pulsar public/default namespace",
+                || {
+                    GenericImage::new("apachepulsar/pulsar", "4.1.0")
+                        .with_exposed_port(6650.tcp())
+                        .with_exposed_port(6651.tcp())
+                        .with_exposed_port(8080.tcp())
+                        .with_wait_for(WaitFor::http(
+                            HttpWaitStrategy::new(namespace_path)
+                                .with_port(8080.tcp())
+                                .with_client(readiness_client.clone())
+                                .with_expected_status_code(200_u16),
+                        ))
+                        .with_copy_to(
+                            CopyTargetOptions::new("/pulsar/bin/nervix-start-tls.sh")
+                                .with_mode(0o755),
+                            start_script.to_vec(),
+                        )
+                        .with_copy_to("/pulsar/certs/ca.pem", tls.ca_pem.clone())
+                        .with_copy_to("/pulsar/certs/node.pem", tls.node_pem.clone())
+                        .with_copy_to(
+                            CopyTargetOptions::new("/pulsar/certs/node-key.pem").with_mode(0o644),
+                            tls.node_key_pem.clone(),
+                        )
+                        .with_cmd(["sh", "/pulsar/bin/nervix-start-tls.sh"])
+                        .with_startup_timeout(STARTUP_TIMEOUT)
+                },
+            )
             .await?;
         let plaintext_port = mapped_port(&container, 6650, "Pulsar").await?;
         let tls_port = mapped_port(&container, 6651, "Pulsar TLS").await?;
@@ -2420,6 +2443,21 @@ async fn wait_for_container<I: Image>(
     match readiness {
         ContainerReadiness::MappedTcp(port) => {
             wait_for_container_tcp(container, port, dependency).await
+        }
+        ContainerReadiness::Http { port, path } => {
+            let host_port = container
+                .get_host_port_ipv4(port)
+                .await
+                .map_err(testcontainers_error(dependency))?;
+            HttpReadiness::new(host_port, path)
+                .wait(REUSABLE_READY_TIMEOUT)
+                .await
+                .map_err(|error| {
+                    io::Error::other(format!(
+                        "{dependency} container {} failed its readiness probe: {error}",
+                        container.id()
+                    ))
+                })
         }
         ContainerReadiness::Running => container
             .is_running()

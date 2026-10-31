@@ -15,7 +15,7 @@
 )]
 
 use error_stack::Report;
-use nervix_models::{DomainName, ModelName, RemoteRuntimeRecordMetadata, SchemaFingerprint};
+use nervix_models::{DomainName, ModelName, RemoteRuntimeRecordMetadata, SchemaFingerprint, Unit};
 use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::{
@@ -34,6 +34,7 @@ pub const MATERIALIZED_COLUMNS_BYTES: u64 = 8 * 1024 * 1024;
 pub struct MaterializedRelayDescriptor {
     pub domain: DomainName,
     pub entity: ModelName,
+    pub unit: Unit,
     pub schema: SchemaFingerprint,
     pub revision: u64,
     pub fence: u64,
@@ -54,6 +55,7 @@ pub struct MaterializedRecordIdentity {
 pub struct MaterializedIdentitiesRecord {
     pub domain: DomainName,
     pub entity: ModelName,
+    pub unit: Unit,
     pub group: u32,
     pub identities: Vec<MaterializedRecordIdentity>,
 }
@@ -62,6 +64,7 @@ pub struct MaterializedIdentitiesRecord {
 struct DescriptorWire {
     domain: String,
     entity: String,
+    unit: Unit,
     schema: [u8; 32],
     revision: u64,
     fence: u64,
@@ -74,13 +77,14 @@ struct DescriptorWire {
 struct IdentitiesWire {
     domain: String,
     entity: String,
+    unit: Unit,
     group: u32,
     identities: Vec<MaterializedRecordIdentity>,
 }
 
 impl ArchiveRecord for MaterializedRelayDescriptor {
     const KIND: RecordKind = RecordKind::MaterializedRelayDescriptor;
-    const VERSION: u16 = 1;
+    const VERSION: u16 = 2;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         encode_record(
@@ -89,6 +93,7 @@ impl ArchiveRecord for MaterializedRelayDescriptor {
             &DescriptorWire {
                 domain: self.domain.as_str().to_string(),
                 entity: self.entity.as_str().to_string(),
+                unit: self.unit,
                 schema: *self.schema.as_digest(),
                 revision: self.revision,
                 fence: self.fence,
@@ -119,6 +124,7 @@ impl ArchiveRecord for MaterializedRelayDescriptor {
                     field: "entity",
                 })
             })?,
+            unit: wire.unit,
             schema: SchemaFingerprint::from_digest(wire.schema),
             revision: wire.revision,
             fence: wire.fence,
@@ -131,7 +137,7 @@ impl ArchiveRecord for MaterializedRelayDescriptor {
 
 impl ArchiveRecord for MaterializedIdentitiesRecord {
     const KIND: RecordKind = RecordKind::MaterializedIdentities;
-    const VERSION: u16 = 1;
+    const VERSION: u16 = 2;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         let bytes = encode_record(
@@ -140,6 +146,7 @@ impl ArchiveRecord for MaterializedIdentitiesRecord {
             &IdentitiesWire {
                 domain: self.domain.as_str().to_string(),
                 entity: self.entity.as_str().to_string(),
+                unit: self.unit,
                 group: self.group,
                 identities: self.identities.clone(),
             },
@@ -183,6 +190,7 @@ impl ArchiveRecord for MaterializedIdentitiesRecord {
                     field: "entity",
                 })
             })?,
+            unit: wire.unit,
             group: wire.group,
             identities: wire.identities,
         })
@@ -213,6 +221,7 @@ mod tests {
                 let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
                 let groups = arbitrary.entropy().count(4);
                 let mut descriptor = MaterializedRelayDescriptor {
+                    unit: nervix_models::Unit::Single,
                     domain: arbitrary.name(),
                     entity: arbitrary.name(),
                     schema: SchemaFingerprint::from_digest(std::array::from_fn(|_| {
@@ -265,6 +274,7 @@ mod tests {
                         .checked_add(rows)
                         .verified("at most four groups of eight rows are generated");
                     records.push(MaterializedIdentitiesRecord {
+                        unit: nervix_models::Unit::Single,
                         domain: descriptor.domain.clone(),
                         entity: descriptor.entity.clone(),
                         group: u32::try_from(group).assured("at most four groups fit in u32"),
@@ -310,7 +320,7 @@ mod tests {
             MaterializedRelayDescriptor::KIND,
             MaterializedIdentitiesRecord::KIND,
         ] {
-            for (tag, version) in [(kind.tag(), 2_u16), (u16::MAX, 1)] {
+            for (tag, version) in [(kind.tag(), u16::MAX), (u16::MAX, 1)] {
                 let mut bytes = crate::section::RECORD_MAGIC.to_vec();
                 bytes.extend_from_slice(&tag.to_le_bytes());
                 bytes.extend_from_slice(&version.to_le_bytes());
@@ -334,6 +344,7 @@ mod tests {
     #[test]
     fn materialized_record_counts_and_branch_keys_are_validated() {
         let descriptor = DescriptorWire {
+            unit: nervix_models::Unit::Single,
             domain: "tenant".into(),
             entity: "state".into(),
             schema: [1; 32],
@@ -354,6 +365,7 @@ mod tests {
             }]),
         ] {
             let record = IdentitiesWire {
+                unit: nervix_models::Unit::Single,
                 domain: "tenant".into(),
                 entity: "state".into(),
                 group: 0,

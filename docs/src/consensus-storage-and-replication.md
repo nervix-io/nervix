@@ -456,15 +456,21 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_timestamp_logs`,
-`raft_timestamp_meta`, `raft_timestamp_state`, and `raft_timestamp_snapshots`. Opening it validates
-the complete keyspace namespace before reading any records. This namespace identifies the current
-Model shape, including the required serialized Sentry platform field and an ingestor's
-`TIMESTAMP AT metadata.<field>` source. Its state metadata requires the current `RestoredLifecycle` encoding,
-including the durable restore installation gate. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
+The dedicated database owns exactly four current keyspaces: `raft_unit_timestamp_logs`,
+`raft_unit_timestamp_meta`, `raft_unit_timestamp_state`, and `raft_unit_timestamp_snapshots`.
+Opening it validates the complete keyspace namespace before reading any records. This namespace
+identifies the current Model shape, including the required serialized Sentry platform field and
+an ingestor's `TIMESTAMP AT metadata.<field>` source. Its state metadata requires the current
+`RestoredLifecycle` encoding, including the durable restore installation gate and the unit-keyed
+committed schedule. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
 and snapshot installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).
+
+The committed domain schedule stores the current unit map on every scheduled node. Each unit owns
+its placement, ownership transition and WASM generations. The state metadata's encoding check
+rejects a database written without this schedule shape before state-machine recovery reads its
+records; the node's state must then be recreated.
 
 This layout has one current shape. A consensus database containing an unknown keyspace, a malformed
 current archive, or incomplete or inconsistent current state fails with `invalid consensus record

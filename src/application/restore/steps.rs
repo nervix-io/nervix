@@ -189,6 +189,7 @@ impl SessionServiceImpl {
     ) -> Result<RestoreStateAuthority, StepFailure> {
         struct RestoredStateSection {
             reference: NodeRef,
+            unit: nervix_models::Unit,
             schema: SchemaFingerprint,
             branch_fingerprint: Option<BranchKeyFingerprint>,
             branch_key: Option<Vec<RemoteRuntimeField>>,
@@ -244,6 +245,7 @@ impl SessionServiceImpl {
                 }
                 let RestoredStateSection {
                     reference,
+                    unit,
                     schema,
                     branch_fingerprint,
                     branch_key,
@@ -253,6 +255,7 @@ impl SessionServiceImpl {
                     DescribedRuntimeState::BranchLifecycle { lifecycle, .. } => {
                         RestoredStateSection {
                             reference: NodeRef::new(lifecycle.owner_kind, lifecycle.entity.clone()),
+                            unit: lifecycle.unit,
                             schema: lifecycle.schema,
                             branch_fingerprint: None,
                             branch_key: None,
@@ -268,6 +271,7 @@ impl SessionServiceImpl {
                         }
                         RestoredStateSection {
                             reference: NodeRef::new(ModelKind::Ingestor, offsets.entity.clone()),
+                            unit: offsets.unit,
                             schema: offsets.schema,
                             branch_fingerprint: None,
                             branch_key: None,
@@ -279,6 +283,7 @@ impl SessionServiceImpl {
                         let reference = NodeRef::new(ModelKind::Relay, descriptor.entity.clone());
                         RestoredStateSection {
                             reference,
+                            unit: descriptor.unit,
                             schema: descriptor.schema,
                             branch_fingerprint: None,
                             branch_key: None,
@@ -296,6 +301,7 @@ impl SessionServiceImpl {
                                 ModelKind::Deduplicator,
                                 descriptor.entity.clone(),
                             ),
+                            unit: descriptor.unit,
                             schema: descriptor.schema,
                             branch_fingerprint: descriptor.branch_fingerprint,
                             branch_key: remote_branch_key(descriptor.branch.as_ref()),
@@ -310,6 +316,7 @@ impl SessionServiceImpl {
                             ModelKind::WindowProcessor,
                             descriptor.entity.clone(),
                         ),
+                        unit: descriptor.unit,
                         schema: descriptor.schema,
                         branch_fingerprint: descriptor.branch_fingerprint,
                         branch_key: remote_branch_key(descriptor.branch.as_ref()),
@@ -323,6 +330,7 @@ impl SessionServiceImpl {
                             ModelKind::WasmProcessor,
                             descriptor.entity.clone(),
                         ),
+                        unit: descriptor.unit,
                         schema: descriptor.schema,
                         branch_fingerprint: descriptor.branch_fingerprint,
                         branch_key: remote_branch_key(descriptor.branch.as_ref()),
@@ -338,13 +346,17 @@ impl SessionServiceImpl {
                     tracing::warn!(domain = %domain.target, entity = %reference.identifier, "skipped state for an entity absent from the restored schedule");
                     continue;
                 };
+                let Some(placed_unit) = node.units.get(&unit) else {
+                    tracing::warn!(domain = %domain.target, entity = %reference.identifier, "skipped state for a unit absent from the restored schedule");
+                    continue;
+                };
                 if schema != node.schema_fingerprint {
                     tracing::warn!(domain = %domain.target, entity = %reference.identifier, "skipped state with a mismatched schema fingerprint");
                     continue;
                 }
                 let runtime_state = match runtime_state {
                     RuntimeState::WasmProcessor { schema, .. } => {
-                        let Some(generations) = node.wasm_state_generations() else {
+                        let Some(generations) = placed_unit.wasm_state_generations.as_ref() else {
                             return Err(StepFailure::Failed(format!(
                                 "restored WASM processor '{}' has no published state generation",
                                 reference.identifier
@@ -476,6 +488,7 @@ impl SessionServiceImpl {
                         state: runtime_state,
                         kind: reference.kind,
                         identifier: reference.identifier,
+                        unit,
                         branch_key,
                     },
                     branch_fingerprint,
@@ -483,7 +496,7 @@ impl SessionServiceImpl {
                     length,
                     digest,
                 };
-                for owner_or_replica in &node.assigned_nodes {
+                for owner_or_replica in &placed_unit.assigned_nodes {
                     nervix_primitives::task::consume_budget().await;
                     let inventory = inventories.entry(owner_or_replica.clone()).or_default();
                     inventory.checkpoints =

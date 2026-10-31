@@ -430,6 +430,11 @@ answers a Model canonical Plexus cannot spell with a fixed diagnostic.
 
 ### Plexus Language And Formatter
 
+MQTT QoS refusals identify the supplied number, its source span, and the levels that the ingestor
+or emitter accepts. A refused `ON QUIESCE SUSPEND` identifies `SUSPEND` and its required
+`SESSION PERSISTENT QOS 1` pairing. Completion offers the quiesce modes the written session can
+use; a clean session or QoS 0 offers `BUFFER` and `DROP`.
+
 The language layer reports rejected source the same way. Lexing and parsing each create the report
 at the stage that failed, and its context names that stage and holds the rejected text with every
 diagnostic's message and byte span into it. A batch of statements is lexed once and each statement
@@ -607,7 +612,11 @@ stored bytes have, such as a key without its domain separator or a restore whose
 differs, beneath `EncodeState` or `DecodeState`, so the rendered chain still reads `failed to decode
 runtime state: runtime state key has no domain separator`. A memory or storage refusal while a
 materialized relay's restored snapshot is opened is a storage admission or execution failure, never
-a decoding failure. A caller keeps the storage report beneath its own context:
+a decoding failure. The required execution-unit marker, tag and ordinal in a state key report a
+missing marker, truncation, invalid unit or missing separator as distinct `StoredStateIssue` causes under
+`DecodeState`; no unit is inferred from an incomplete key.
+
+A caller keeps the storage report beneath its own context:
 `RuntimeStateOperationError::Persistence` for a replica's installation or a snapshot task,
 `OwnershipHandoffError::Persistence` for a handoff, and the domain build's `ExecutionBuildError`
 step, which names the node and the state kind, for a state assignment.
@@ -701,17 +710,21 @@ Deadline failures are infrastructure outcomes and leave pending rows on the host
 they do not become definite record rejections.
 
 An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP emitter: a timeout, a
-DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
-authentication status with its number. The emitter keeps the resolver's `DnsLookupError`, the
-response-header failure, the socket or TLS error, or the `AddressShareElapsed` of an address that
-accepted no connection within its share of `timeout_ms` as the context beneath it, and attaches the
+DNS, connection, TLS, send or response-header failure, an invalid destination, a declared proxy that
+could not be reached, a tunnel request the proxy did not answer or refused with its status, or a
+retryable or authentication status with its number. A failure to reach the proxy keeps its own DNS,
+connection or TLS failure beneath `HttpAttemptError::Proxy`. The emitter keeps the resolver's
+`DnsLookupError`, hyper's error for an exchange or a response head hyper could not complete, the
+socket or TLS error, or the `AddressShareElapsed` of an address that accepted no connection within
+its share of `timeout_ms` as the context beneath it, and attaches the
 description of the whole chain, such as
 `HTTP TLS handshake failed: invalid peer certificate: UnknownIssuer`, to its publish failure. The
 emitter reports that description as its transient error and runtime event for as long as the
 request stays pending, which `DESCRIBE EMITTER` shows. It names the status or the cause of the
-connection and never the evaluated target, a header value, a credential or a body. A refused
-request is not an attempt failure: it is a record rejection with code `external`, operation
-`publish` and its numeric status.
+connection and never the evaluated target, a redirect's `Location`, a header value, a credential,
+the proxy's credentials or a body. A refused request is not an attempt failure: it is a record
+rejection with code `external`, operation `publish` and its numeric status, and so is a redirect
+its client does not follow.
 
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
 and attaches its safe message for diagnostics; an invalid request program never starts the emitter.
@@ -1649,9 +1662,9 @@ failure, which the host does not retry.
 
 An HTTP polling request whose response exceeds `MAX BODY SIZE` fails that poll with a typed
 `ResponseTooLarge` cause. DNS, connection, TLS, response-body and timeout failures retain their
-typed transport causes with the request URL removed. A non-`2xx` answer reports its numeric status
-without target or header values. The ingestor host applies its general-error policy and may poll
-again on its next cadence.
+typed transport causes with the request URL removed. A non-`2xx` answer, a redirect the client
+does not follow included, reports its numeric status without target, `Location` or header values.
+The ingestor host applies its general-error policy and may poll again on its next cadence.
 
 An HTTP emitter rejects a record at the first request field that fails, in the order it evaluates
 them: `METHOD`, `PATH`, and then each header write. A failed expression keeps the `evaluation`
@@ -1665,13 +1678,14 @@ completes, so every rejection of it after admission gives the handler the same i
 attempted codec record that a request-field failure does.
 
 An HTTP endpoint's complete final `2xx` headers deliver the record. Other `3xx`/`4xx` statuses,
-except `401`, `403`, `407`, `408`, `425` and `429`, reject only their record with code `external`
-and operation `publish`; `101` has the same outcome. The rejection message includes the numeric
+except `401`, `403`, `407`, `408`, `425` and `429` and a redirect the client follows, reject only
+their record with code `external` and operation `publish`; `101` has the same outcome. The rejection message includes the numeric
 status but no evaluated destination, headers or body. The exception statuses and `5xx` keep the
 request pending as infrastructure failures; `401`, `403` and `407` name authentication or
 authorization in their typed cause. DNS, connection, TLS, timeout, malformed or oversized response
-headers, invalid final framing and loss before complete final headers are infrastructure failures
-as well. The connector reports them without a request URL or sensitive response value. The emitter
+headers, invalid final framing, loss before complete final headers, and a declared proxy that
+cannot be reached or refuses its tunnel are infrastructure failures as well. The connector reports
+them without a request URL or sensitive response value. The emitter
 host owns their retry schedule and keeps the prepared request and ACK lease while they are pending.
 A valid `Retry-After` on a retained status can only lengthen that schedule: it never turns a
 delivered or rejected record into a retry, and an invalid one is ignored rather than reported.
@@ -2498,7 +2512,8 @@ digest-mismatched current chunk set or a conflicting publication inventory. `Res
 `Cancelled`, `Synchronize` and storage admission preserve their owning failure boundary.
 `CheckpointPlacementTooLarge` rejects an encoding beyond the bounded storage key allowance.
 `InvalidStorageFormat` requires recreation of the node state directory when the required current
-format marker is missing or invalid.
+format marker is missing or invalid. The unit-keyed checkpoint format uses a distinct marker, so
+state written under an earlier key shape fails at open rather than disappearing from a read.
 
 `RestoreStagingQuota` carries the node's unpublished checkpoint limit, current usage and incoming
 checkpoint footprint; `RestoreStagingSize` rejects an unrepresentable accounting sum. A quota

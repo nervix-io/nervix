@@ -68,6 +68,7 @@ impl WasmCheckpointBenchmark {
                     },
                     kind: ModelKind::WasmProcessor,
                     identifier: processor.clone(),
+                    unit: nervix_models::Unit::Single,
                     branch_key: Some(key),
                 };
                 ReplicatedWasmProcessorState::new(

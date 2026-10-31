@@ -602,6 +602,7 @@ fn planned_relocation_schedule(
         if let Some(desired_node) = desired.nodes.get(member) {
             candidates.extend(
                 desired_node
+                    .single_unit()
                     .assigned_nodes
                     .iter()
                     .filter(|node_id| schedulable_nodes.contains(*node_id))
@@ -626,8 +627,8 @@ fn planned_relocation_schedule(
                 .checked_add(1)
                 .assured("a slot count clamped to a collected list leaves room for the primary"),
         );
-        node.primary_node = Some(destination.clone());
-        node.assigned_nodes = assigned_nodes;
+        node.single_unit_mut().primary_node = Some(destination.clone());
+        node.single_unit_mut().assigned_nodes = assigned_nodes;
     }
 
     for group in &mut planned.placement_groups {
@@ -934,9 +935,12 @@ mod tests {
             .nodes
             .get(&member("route"))
             .expect("member must remain scheduled");
-        assert_eq!(node.primary_node.as_ref(), Some(&node_name("node-2")));
         assert_eq!(
-            node.assigned_nodes,
+            node.single_unit().primary_node.as_ref(),
+            Some(&node_name("node-2"))
+        );
+        assert_eq!(
+            node.single_unit().assigned_nodes,
             vec![node_name("node-2"), node_name("node-1")]
         );
     }
@@ -958,7 +962,7 @@ mod tests {
             .nodes
             .get(&member("route"))
             .expect("member must remain scheduled");
-        assert_eq!(node.assigned_nodes, vec![node_name("node-2")]);
+        assert_eq!(node.single_unit().assigned_nodes, vec![node_name("node-2")]);
     }
 
     #[nervix_primitives::test]

@@ -330,6 +330,7 @@ fn bolero_captured_lifecycle_streams_its_complete_archive_record() {
                         domain: record_domain,
                         owner_kind: ModelKind::Ingestor,
                         entity: record_entity,
+                        unit: nervix_models::Unit::Single,
                         schema,
                         revision: lifecycle.revision,
                         branches: branches.map(BranchLifecycleEntry::from),
@@ -355,6 +356,7 @@ fn bolero_captured_lifecycle_streams_its_complete_archive_record() {
                     domain,
                     owner_kind: ModelKind::Ingestor,
                     entity: ModelName::parse("metrics").assured("literal name is valid"),
+                    unit: nervix_models::Unit::Single,
                     schema,
                     revision,
                     branches: expected,
@@ -426,6 +428,7 @@ fn bolero_captured_kafka_offsets_stream_in_archive_order() {
                     let record = StreamedKafkaOffsets {
                         domain: record_domain,
                         entity: record_entity,
+                        unit: nervix_models::Unit::Single,
                         schema,
                         revision: offsets.revision,
                         applied_start_generation: offsets.applied_start_generation(),
@@ -461,6 +464,7 @@ fn bolero_captured_kafka_offsets_stream_in_archive_order() {
                 KafkaOffsetsRecord {
                     domain,
                     entity: ModelName::parse("source").assured("literal name is valid"),
+                    unit: nervix_models::Unit::Single,
                     schema,
                     revision,
                     applied_start_generation,

@@ -1171,6 +1171,7 @@ mod tests {
             name: named("by_blob"),
             schema: named("binary_branch_schema"),
             ttl: "5m".to_string(),
+            partitions: nervix_models::BranchPartitions::ONE,
             eviction: None,
         };
         let models = ModelIndex::from_iter([branch_schema_with_types(

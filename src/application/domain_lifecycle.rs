@@ -383,6 +383,11 @@ impl SessionServiceImpl {
         domain: &DomainName,
         timeout: Duration,
     ) -> Result<(), Report<DomainAlterError>> {
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_backup_cut_if_armed(domain, crate::fault_injection::BackupCutBoundary::Drain)
+            .await;
         let coordination = self
             .inner
             .interconnect

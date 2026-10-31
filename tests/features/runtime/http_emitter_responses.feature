@@ -243,12 +243,12 @@ Feature: HTTP REQUEST emitter response classification
       | 3            | 202                    | respond 202                                         |
       | 1            | 204                    | respond 204                                         |
       | 3            | 204                    | respond 204                                         |
-      | 1            | 128 fields             | respond 204; extra headers 128                      |
-      | 3            | 128 fields             | respond 204; extra headers 128                      |
-      | 1            | 64 KiB fields          | respond 204; header value bytes 65522               |
-      | 3            | 64 KiB fields          | respond 204; header value bytes 65522               |
-      | 1            | bounded interim fields | respond 204; interim 103; interim extra headers 128 |
-      | 3            | bounded interim fields | respond 204; interim 103; interim extra headers 128 |
+      | 1            | 100 fields             | respond 204; extra headers 100                      |
+      | 3            | 100 fields             | respond 204; extra headers 100                      |
+      | 1            | 256 KiB field          | respond 204; header value bytes 262144              |
+      | 3            | 256 KiB field          | respond 204; header value bytes 262144              |
+      | 1            | bounded interim fields | respond 204; interim 103; interim extra headers 100 |
+      | 3            | bounded interim fields | respond 204; interim 103; interim extra headers 100 |
 
   @http_emitter_responses
   Scenario Outline: A successful response whose body <case> is neither awaited nor read to its end
@@ -365,7 +365,7 @@ Feature: HTTP REQUEST emitter response classification
     # The retry is held unresolved, so the response that failed record 1's attempt stays reported.
     And within "30s" DESCRIBE EMITTER "published" on the leader node contains
       """
-      transient error: HTTP response header exchange failed: HTTP response headers <failure>
+      transient error: HTTP response header exchange failed: <failure>
       """
     When HTTP receiver "api" releases its held responses with "respond 204"
     Then HTTP receiver "api" eventually receives at least 3 requests
@@ -381,20 +381,20 @@ Feature: HTTP REQUEST emitter response classification
     And HTTP receiver "api" has captured exactly 3 requests
 
     Examples:
-      | cluster_size | case                       | response                                                   | failure                     |
-      | 1            | 129 fields                 | respond 204; extra headers 129                             | exceed 128 fields or 64 KiB |
-      | 3            | 129 fields                 | respond 204; extra headers 129                             | exceed 128 fields or 64 KiB |
-      | 1            | 129 fields with status 200 | respond 200; extra headers 129                             | exceed 128 fields or 64 KiB |
-      | 3            | 129 fields with status 200 | respond 200; extra headers 129                             | exceed 128 fields or 64 KiB |
-      | 1            | over 64 KiB fields         | respond 204; header value bytes 65523                      | exceed 128 fields or 64 KiB |
-      | 3            | over 64 KiB fields         | respond 204; header value bytes 65523                      | exceed 128 fields or 64 KiB |
-      | 1            | 129 interim fields         | respond 204; interim 103; interim extra headers 129        | exceed 128 fields or 64 KiB |
-      | 3            | 129 interim fields         | respond 204; interim 103; interim extra headers 129        | exceed 128 fields or 64 KiB |
-      | 1            | over 64 KiB interim        | respond 204; interim 103; interim header value bytes 65523 | exceed 128 fields or 64 KiB |
-      | 3            | over 64 KiB interim        | respond 204; interim 103; interim header value bytes 65523 | exceed 128 fields or 64 KiB |
-      | 1            | malformed final framing    | respond 200; header Content-Length: nonsense               | are malformed               |
-      | 3            | malformed final framing    | respond 200; header Content-Length: nonsense               | are malformed               |
-      | 1            | malformed final name       | respond 200; header Bad Name: value                        | are malformed               |
-      | 3            | malformed final name       | respond 200; header Bad Name: value                        | are malformed               |
-      | 1            | outside the status range   | respond 600                                                | are malformed               |
-      | 3            | outside the status range   | respond 600                                                | are malformed               |
+      | cluster_size | case                       | response                                                    | failure                                                    |
+      | 1            | 101 fields                 | respond 204; extra headers 101                              | message head is too large                                  |
+      | 3            | 101 fields                 | respond 204; extra headers 101                              | message head is too large                                  |
+      | 1            | 101 fields with status 200 | respond 200; extra headers 100                              | message head is too large                                  |
+      | 3            | 101 fields with status 200 | respond 200; extra headers 100                              | message head is too large                                  |
+      | 1            | oversized head             | respond 204; header value bytes 524288                      | message head is too large                                  |
+      | 3            | oversized head             | respond 204; header value bytes 524288                      | message head is too large                                  |
+      | 1            | 101 interim fields         | respond 204; interim 103; interim extra headers 101         | message head is too large                                  |
+      | 3            | 101 interim fields         | respond 204; interim 103; interim extra headers 101         | message head is too large                                  |
+      | 1            | oversized interim head     | respond 204; interim 103; interim header value bytes 524288 | message head is too large                                  |
+      | 3            | oversized interim head     | respond 204; interim 103; interim header value bytes 524288 | message head is too large                                  |
+      | 1            | malformed final framing    | respond 200; header Content-Length: nonsense                | invalid content-length parsed                              |
+      | 3            | malformed final framing    | respond 200; header Content-Length: nonsense                | invalid content-length parsed                              |
+      | 1            | malformed final name       | respond 200; header Bad Name: value                         | invalid HTTP header parsed                                 |
+      | 3            | malformed final name       | respond 200; header Bad Name: value                         | invalid HTTP header parsed                                 |
+      | 1            | outside the status range   | respond 600                                                 | HTTP response status 600 is outside the range HTTP defines |
+      | 3            | outside the status range   | respond 600                                                 | HTTP response status 600 is outside the range HTTP defines |

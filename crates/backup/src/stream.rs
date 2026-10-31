@@ -18,7 +18,7 @@ use std::{
 };
 
 use error_stack::Report;
-use nervix_models::{DomainName, ModelKind, ModelName, SchemaFingerprint};
+use nervix_models::{DomainName, ModelKind, ModelName, SchemaFingerprint, Unit};
 use rkyv::{
     Archive, Place, Serialize,
     rancor::{self, Fallible, Source},
@@ -47,6 +47,7 @@ const SCRATCH_SLACK_BYTES: usize = 256;
 pub struct StreamedKafkaOffsets<I> {
     pub domain: DomainName,
     pub entity: ModelName,
+    pub unit: Unit,
     pub schema: SchemaFingerprint,
     pub revision: u64,
     pub applied_start_generation: Option<u64>,
@@ -59,6 +60,7 @@ pub struct StreamedBranchLifecycle<I> {
     pub domain: DomainName,
     pub owner_kind: ModelKind,
     pub entity: ModelName,
+    pub unit: Unit,
     pub schema: SchemaFingerprint,
     pub revision: u64,
     /// Every branch in LRU order. It is walked once for its scratch and once for each serializer
@@ -88,6 +90,7 @@ where
         let root = KafkaOffsetsStream {
             domain: self.domain.as_str().to_string(),
             entity: self.entity.as_str().to_string(),
+            unit: self.unit,
             schema: *self.schema.as_digest(),
             revision: self.revision,
             applied_start_generation: self.applied_start_generation,
@@ -157,6 +160,7 @@ where
             domain: self.domain.as_str().to_string(),
             owner_kind: self.owner_kind.as_str().to_string(),
             entity: self.entity.as_str().to_string(),
+            unit: self.unit,
             schema: *self.schema.as_digest(),
             revision: self.revision,
             branches: CheckedEntries {
@@ -198,6 +202,7 @@ where
 struct KafkaOffsetsStream<'a, I: ExactSizeIterator<Item = KafkaPartitionWire> + Clone> {
     domain: String,
     entity: String,
+    unit: Unit,
     schema: [u8; 32],
     revision: u64,
     applied_start_generation: Option<u64>,
@@ -214,6 +219,7 @@ struct BranchLifecycleStream<'a, I: ExactSizeIterator<Item = BranchLifecycleEntr
     domain: String,
     owner_kind: String,
     entity: String,
+    unit: Unit,
     schema: [u8; 32],
     revision: u64,
     #[rkyv(with = IteratorAsVec<CheckedEntry<'a, BranchLifecycleEntryWire>>, omit_bounds)]
@@ -495,6 +501,7 @@ mod tests {
         let wire = KafkaOffsetsWire {
             domain: record.domain.as_str().to_string(),
             entity: record.entity.as_str().to_string(),
+            unit: record.unit,
             schema: *record.schema.as_digest(),
             revision: record.revision,
             applied_start_generation: record.applied_start_generation,
@@ -515,6 +522,7 @@ mod tests {
             domain: record.domain.as_str().to_string(),
             owner_kind: record.owner_kind.as_str().to_string(),
             entity: record.entity.as_str().to_string(),
+            unit: record.unit,
             schema: *record.schema.as_digest(),
             revision: record.revision,
             branches: record
@@ -536,6 +544,7 @@ mod tests {
         record: &KafkaOffsetsRecord,
     ) -> StreamedKafkaOffsets<std::vec::IntoIter<KafkaPartitionOffset>> {
         StreamedKafkaOffsets {
+            unit: record.unit,
             domain: record.domain.clone(),
             entity: record.entity.clone(),
             schema: record.schema,
@@ -549,6 +558,7 @@ mod tests {
         record: &BranchLifecycleRecord,
     ) -> StreamedBranchLifecycle<std::vec::IntoIter<BranchLifecycleEntry>> {
         StreamedBranchLifecycle {
+            unit: record.unit,
             domain: record.domain.clone(),
             owner_kind: record.owner_kind,
             entity: record.entity.clone(),
@@ -628,6 +638,7 @@ mod tests {
             });
         }
         BranchLifecycleRecord {
+            unit: nervix_models::Unit::Single,
             domain: DomainName::parse("payments").assured("the domain is an accepted literal"),
             owner_kind: ModelKind::Ingestor,
             entity: ModelName::parse("source").assured("the entity is an accepted literal"),
@@ -786,6 +797,7 @@ mod tests {
     fn a_record_above_the_limit_reports_its_whole_length_and_forwards_no_more_than_the_limit() {
         let topic = "t".repeat(200);
         let stream = StreamedKafkaOffsets {
+            unit: nervix_models::Unit::Single,
             domain: DomainName::parse("payments").assured("the domain is an accepted literal"),
             entity: ModelName::parse("source").assured("the entity is an accepted literal"),
             schema: SchemaFingerprint::from_digest([5; 32]),

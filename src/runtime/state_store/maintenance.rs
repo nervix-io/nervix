@@ -468,6 +468,7 @@ pub(in crate::runtime::state_store) mod tests {
             kind: ModelKind::Ingestor,
             identifier: ModelName::parse("source").assured("the test name is valid"),
             state: RuntimeState::KafkaOffset,
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         }
     }
