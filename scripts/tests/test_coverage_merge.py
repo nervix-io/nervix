@@ -587,7 +587,7 @@ class WorkflowTests(unittest.TestCase):
                 self.assertNotIn("            lcov.info\n", upload)
                 self.assertNotIn("pwd > coverage-source-root.txt", job)
         for recipe in (
-            "test-coverage-phase",
+            "test-coverage-run",
             "test-scenarios-coverage-run",
             "test-scenarios-coverage-shard",
             "coverage-report-workspace",

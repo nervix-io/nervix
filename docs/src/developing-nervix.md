@@ -276,7 +276,7 @@ For repository-wide validation:
 just validate
 ```
 
-The `checks`, `tests`, and `scenarios-build` CI jobs install the Go formatters through
+The `checks` and `scenarios-build` CI jobs install the Go formatters through
 `scripts/install_go_ci_tool.py`: dockerfmt is pinned to v0.5.4 and ghokin to v3.9.0. The installer
 uses Go 1.26 in each job, keeps the public Go checksum database enabled, and disallows an implicit
 toolchain download. It retries only a transport failure while reading that database, at most three
@@ -413,13 +413,14 @@ machines, and the US bucket on GitHub's hosted runners and on Blacksmith's US ru
 ### CI artifacts
 
 Jobs exchange files and leave their reports and logs through GitHub's artifact service, and
-`gh run download <run> --name <artifact>` reads them. The one exception is the scenario suite's
-archive, which `scenarios-build` hands to every `scenarios` shard. A shard has nothing to run
-without it, so it passes through one R2 bucket, which fails independently of GitHub. Only those two
-steps use `.github/actions/ci-artifact-upload` and `.github/actions/ci-artifact-download`.
+`gh run download <run> --name <artifact>` reads them. The exceptions are the two archives
+`scenarios-build` packs: `scenario-suite`, which every `scenarios` shard restores, and `unit-tests`,
+which the `tests` job restores. A test job has nothing to run without its archive, so they pass
+through one R2 bucket, which fails independently of GitHub. Only the steps that upload and download
+them use `.github/actions/ci-artifact-upload` and `.github/actions/ci-artifact-download`.
 `scripts/ci_artifacts.py` states the format: a tar stream cut into 128 MiB parts, each sent and
 retried on its own, and a manifest written last, so an unfinished upload cannot be read. A rerun of
-a shard keeps the archive, and a rerun of `scenarios-build` replaces it.
+a test job keeps its archive, and a rerun of `scenarios-build` replaces both.
 
 | Repository setting | Kind | Value |
 | --- | --- | --- |
@@ -428,17 +429,17 @@ a shard keeps the archive, and a rerun of `scenarios-build` replaces it.
 | `R2_ARTIFACTS_ACCESS_KEY_ID` | Secret | The access key of an Object Read & Write token scoped to that bucket |
 | `R2_ARTIFACTS_SECRET_ACCESS_KEY` | Secret | That token's secret access key |
 
-Those two steps receive them as environment variables of the same names, and no other step does.
+Those steps receive them as environment variables of the same names, and no other step does.
 The bucket is private, and its lifecycle rules are the only retention, matching key prefixes:
 
 | Prefix | Rule | Holds |
 | --- | --- | --- |
-| `transfer/` | Delete after 1 day | The archive's parts |
-| `runs/` | Delete after 30 days | The archive's manifest, which outlives its parts so that a late reader is told they expired |
+| `transfer/` | Delete after 1 day | The archives' parts |
+| `runs/` | Delete after 30 days | The archives' manifests, which outlive their parts so that a late reader is told they expired |
 
-A shard rerun more than a day after its build finds the archive's parts gone and says so, and
-`scenarios-build` has to run again. With the same settings in the environment, read a run's archive
-while the bucket holds it:
+A rerun of a test job more than a day after its build finds the archive's parts gone and says so,
+and `scenarios-build` has to run again. With the same settings in the environment, read a run's
+archive while the bucket holds it:
 
 ```bash
 just ci-artifact-download <run> --name scenario-suite --path archive

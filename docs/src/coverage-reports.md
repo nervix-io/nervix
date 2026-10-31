@@ -37,7 +37,7 @@ counters.
 
 | Producer | Execution and exported evidence |
 | --- | --- |
-| `just test-coverage` (`tests`) | Ordinary workspace unit, binary, benchmark test-mode and harness-liveness tests. Packages that own execution modes run separately with ordinary features, so an all-features invocation never combines modes. Exports `lcov-workspace.info` and `coverage-source-root.txt` as `coverage-tests`. |
+| `just test-coverage` (`scenarios-build` and `tests`) | Ordinary workspace unit, binary, benchmark test-mode and harness-liveness tests. Packages that own execution modes run separately with ordinary features, so an all-features invocation never combines modes. Exports `lcov-workspace.info` and `coverage-source-root.txt` as `coverage-tests`. |
 | `just test-scenarios-coverage` (`scenarios-build` and the `scenarios` shards) | The public Cucumber suite, including the server it links and its instrumented CLI, report tool, paced Rust driver and shared binding. Each shard exports the same report/root pair for its share of the suite, and the paced Python drivers' `python.lcov` when it ran them, as `coverage-scenarios-<I>`. |
 | `coverage-native-extras test-typed-ratchet` (`extra-tests`) | Source-contract compiler fixtures, including their paired fixture doctests and loaded procedural macro objects, using the analysis compiler's matching LLVM tools. Product API doctests and modeled fixture checks finish separately without instrumentation. |
 | `coverage-native-extras bench-smoke` (`extra-tests`) | The smoke recipe's benchmark bodies in test mode. Other Cargo benchmark test targets run in `test-coverage`. Instrumented timings are not performance evidence. |
@@ -241,10 +241,12 @@ and the test sources the run executed. Each writes the absolute checkout path it
 `test-coverage-build` and `test-scenarios-coverage-build` compile every binary under the
 instrumentation and leave it in the target directory of `cargo llvm-cov`, the scenario build's helper
 binaries after building beside the suite in directories of their own, and `test-coverage-run` and
-`test-scenarios-coverage-run` run them and export the report, compiling nothing. CI runs the tests'
-two as separate steps and publishes the job's cache between them. The scenario suite runs in
-[shards](./integration-test-lifecycle.md#scenario-shards): `scenarios-build` builds once, publishes
-its cache and packs the executables, and each shard restores them and runs
+`test-scenarios-coverage-run` run them and export the report, compiling nothing. CI builds both in
+the `scenarios-build` job, in one target directory, publishes its cache and packs one archive for
+each. The `tests` job restores
+[its archive](./integration-test-lifecycle.md#unit-test-archive) and runs `test-coverage-run`, which
+starts each test executable directly. The scenario suite runs in
+[shards](./integration-test-lifecycle.md#scenario-shards): each shard restores its archive and runs
 `test-scenarios-coverage-shard`, which runs its share of the suite and exports the pair from that
 share's profiles, compiling nothing. `just coverage-report-workspace` writes the same pair from the
 profiles a focused recipe collected. CI uploads the pairs as the `coverage-tests` artifact and one

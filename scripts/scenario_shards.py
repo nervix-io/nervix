@@ -23,7 +23,7 @@ The archive holds these files, under their paths below the checkout:
 - the ONNX fixtures and the ONNX Runtime package the ONNX scenarios load, and the WASM guests the
   WASM processor scenarios upload;
 - `target/scenario-suite/manifest.json`, which names the revision and the checkout the build ran in,
-  the scenario executable, and every file with its size.
+  and every file with its size.
 
 Executables hold absolute paths below the checkout they were built in, such as the tools a
 scenario starts and the Playwright driver, so a shard must run in a checkout at the same path.
@@ -33,7 +33,10 @@ libraries this runner lacks, before any scenario starts.
 
 A shard compiles nothing. It runs the scenario executable directly rather than through Cargo, which
 would compare the restored files with sources whose modification times the checkout set and
-rebuild them. `executable` prints the path of the scenario executable the manifest names.
+rebuild them. `executable` prints the path of the scenario executable among the manifest's files.
+
+`write_archive` and `restore_archive` serve any archive of a build, and
+`scripts/unit_test_archive.py` carries the workspace's unit tests with them.
 """
 
 from __future__ import annotations
@@ -47,7 +50,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -108,14 +111,12 @@ class Manifest:
 
     revision: str
     root: str
-    executable: str
     files: tuple[SuiteFile, ...]
 
     def to_json(self) -> dict[str, object]:
         return {
             "revision": self.revision,
             "root": self.root,
-            "executable": self.executable,
             "files": [file.to_json() for file in self.files],
         }
 
@@ -124,20 +125,19 @@ class Manifest:
         try:
             document = json.loads(path.read_text())
         except FileNotFoundError as error:
-            raise ShardError(f"{path} is missing; restore the scenario suite archive first") from error
+            raise ShardError(f"{path} is missing; restore its archive first") from error
         except json.JSONDecodeError as error:
             raise ShardError(f"{path} is not JSON: {error}") from error
         if not isinstance(document, dict):
             raise ShardError(f"{path} must hold a JSON object")
         revision = document.get("revision")
         root = document.get("root")
-        executable = document.get("executable")
         files = document.get("files")
-        if not isinstance(revision, str) or not isinstance(root, str) or not isinstance(executable, str):
-            raise ShardError(f"{path} must name its revision, its root and its executable")
+        if not isinstance(revision, str) or not isinstance(root, str):
+            raise ShardError(f"{path} must name its revision and its root")
         if not isinstance(files, list):
             raise ShardError(f"{path} must list its files")
-        return Manifest(revision, root, executable, tuple(SuiteFile.from_json(entry) for entry in files))
+        return Manifest(revision, root, tuple(SuiteFile.from_json(entry) for entry in files))
 
     def total_size(self) -> int:
         total = 0
@@ -211,7 +211,7 @@ def coverage_objects(root: Path, pattern: re.Pattern[str]) -> list[Path]:
     """Every object below the coverage build's debug directory, relative to `root`."""
     debug = root / COVERAGE_DEBUG
     if not debug.is_dir():
-        raise ShardError(f"{debug} is missing; run `just test-scenarios-coverage-build` first")
+        raise ShardError(f"{debug} is missing; build the tests first")
     objects = []
     for directory, subdirectories, files in os.walk(debug):
         current = Path(directory)
@@ -276,6 +276,13 @@ def runtime_inputs(root: Path, executable: Path) -> list[Path]:
     inputs: list[Path] = []
     for driver in playwright_drivers(root, executable):
         inputs.extend(files_below(root, driver))
+    inputs.extend(generated_inputs(root))
+    return inputs
+
+
+def generated_inputs(root: Path) -> list[Path]:
+    """The generated files any test may read: the ONNX fixtures and runtime and the WASM guests."""
+    inputs: list[Path] = []
     fixtures = sorted((root / ONNX_FIXTURES).glob("*.onnx"))
     if not fixtures:
         raise ShardError(f"{ONNX_FIXTURES} holds no ONNX fixture; run `just generate-test-onnx` first")
@@ -312,21 +319,18 @@ def revision(root: Path) -> str:
     return completed.stdout.strip()
 
 
-def pack(root: Path, archive: Path) -> Manifest:
-    """Write the archive of the coverage build and its runtime inputs, and return its manifest."""
+def write_archive(root: Path, archive: Path, manifest_path: Path, paths: Sequence[Path]) -> Manifest:
+    """Write the files at `paths`, and a manifest of them at `manifest_path`, into one archive."""
     if shutil.which(COMPRESSION[0]) is None:
         raise ShardError(f"{COMPRESSION[0]} is not installed")
-    objects = coverage_objects(root, object_pattern(workspace_targets(root)))
-    executable = scenario_executable(objects)
-    paths = [*objects, *runtime_inputs(root, executable)]
     files = []
     for path in paths:
         files.append(SuiteFile(path.as_posix(), (root / path).lstat().st_size))
-    manifest = Manifest(revision(root), str(root.resolve()), executable.as_posix(), tuple(files))
-    manifest_path = root / MANIFEST
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(manifest.to_json(), indent=1) + "\n")
-    listing = "\0".join([*[file.path for file in files], MANIFEST.as_posix()]) + "\0"
+    manifest = Manifest(revision(root), str(root.resolve()), tuple(files))
+    written = root / manifest_path
+    written.parent.mkdir(parents=True, exist_ok=True)
+    written.write_text(json.dumps(manifest.to_json(), indent=1) + "\n")
+    listing = "\0".join([*[file.path for file in files], manifest_path.as_posix()]) + "\0"
     archive.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     with archive.open("wb") as output:
@@ -348,13 +352,16 @@ def pack(root: Path, archive: Path) -> Manifest:
     elapsed = time.monotonic() - started
     print(
         f"packed {len(files)} files, {manifest.total_size() / 2**30:.2f} GiB, into {archive}: "
-        f"{archive.stat().st_size / 2**30:.2f} GiB in {elapsed:.1f}s; scenario executable {executable}"
+        f"{archive.stat().st_size / 2**30:.2f} GiB in {elapsed:.1f}s"
     )
     return manifest
 
 
-def unpack(root: Path, archive: Path) -> Manifest:
-    """Restore the archive into the checkout at `root` and check what it restored."""
+def restore_archive(
+    root: Path, archive: Path, manifest_path: Path, environment: Mapping[str, str] | None = None
+) -> Manifest:
+    """Restore an archive into the checkout at `root` and check what it restored, resolving shared
+    libraries in the `environment` its executables will run in."""
     if shutil.which(COMPRESSION[0]) is None:
         raise ShardError(f"{COMPRESSION[0]} is not installed")
     if not archive.is_file():
@@ -372,7 +379,7 @@ def unpack(root: Path, archive: Path) -> Manifest:
         raise ShardError(
             f"restoring {archive} failed: {COMPRESSION[0]} exited {decompress_status}, tar exited {tar_status}"
         )
-    manifest = Manifest.read(root / MANIFEST)
+    manifest = Manifest.read(root / manifest_path)
     current = revision(root)
     if manifest.revision != current:
         raise ShardError(f"{archive} was built from revision {manifest.revision}, and this checkout is {current}")
@@ -390,26 +397,41 @@ def unpack(root: Path, archive: Path) -> Manifest:
             raise ShardError(f"{archive} did not restore {file.path}") from error
         if size != file.size:
             raise ShardError(f"{archive} restored {file.path} with {size} bytes, not {file.size}")
-    missing = missing_libraries(root, manifest)
+    missing = missing_libraries(root, manifest, environment)
     if missing:
         lines = "\n".join(f"  {path}: {', '.join(libraries)}" for path, libraries in missing.items())
         raise ShardError(f"this runner lacks shared libraries the restored files load:\n{lines}")
     elapsed = time.monotonic() - started
     print(
         f"restored {len(manifest.files)} files, {manifest.total_size() / 2**30:.2f} GiB, of revision "
-        f"{manifest.revision} in {elapsed:.1f}s; scenario executable {manifest.executable}"
+        f"{manifest.revision} in {elapsed:.1f}s"
     )
     return manifest
 
 
-def missing_libraries(root: Path, manifest: Manifest) -> dict[str, list[str]]:
+def pack(root: Path, archive: Path) -> Manifest:
+    """Write the archive of the scenario suite's build and its runtime inputs."""
+    objects = coverage_objects(root, object_pattern(workspace_targets(root)))
+    executable = scenario_executable(objects)
+    print(f"scenario executable {executable}")
+    return write_archive(root, archive, MANIFEST, [*objects, *runtime_inputs(root, executable)])
+
+
+def unpack(root: Path, archive: Path) -> Manifest:
+    """Restore the scenario suite's archive into the checkout at `root`."""
+    return restore_archive(root, archive, MANIFEST)
+
+
+def missing_libraries(
+    root: Path, manifest: Manifest, environment: Mapping[str, str] | None = None
+) -> dict[str, list[str]]:
     """The shared libraries each restored ELF file loads that `ldd` cannot find on this runner."""
     missing: dict[str, list[str]] = {}
     for file in manifest.files:
         path = root / file.path
         if path.is_symlink() or not is_elf(path):
             continue
-        completed = subprocess.run(["ldd", str(path)], capture_output=True, text=True)
+        completed = subprocess.run(["ldd", str(path)], capture_output=True, text=True, env=environment)
         absent = []
         for line in completed.stdout.splitlines():
             if "not found" in line:
@@ -443,7 +465,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.command == "unpack":
             unpack(ROOT, arguments.archive)
         else:
-            print(ROOT / Manifest.read(ROOT / MANIFEST).executable)
+            files = Manifest.read(ROOT / MANIFEST).files
+            print(ROOT / scenario_executable([Path(file.path) for file in files]))
     except ShardError as error:
         print(f"scenario shards: {error}", file=sys.stderr)
         return 1

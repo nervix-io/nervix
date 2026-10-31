@@ -178,7 +178,6 @@ class ArchiveTests(unittest.TestCase):
         root = self.shard_checkout(build)
         restored = self.unpack(root)
         self.assertEqual(restored, packed)
-        self.assertEqual(restored.executable, "target/llvm-cov-target/debug/deps/scenarios-4d0e03c611a711f3")
         for path, content in expected.items():
             if content is None:
                 self.assertTrue((root / path).is_symlink(), path)
@@ -190,7 +189,7 @@ class ArchiveTests(unittest.TestCase):
             (debug / "deps" / "nervix_cli-0f92e8a94feb2377").stat().st_ino,
             "a hard link stays one file",
         )
-        self.assertTrue(os.access(root / restored.executable, os.X_OK))
+        self.assertTrue(os.access(root / shards.COVERAGE_DEBUG / "deps" / "scenarios-4d0e03c611a711f3", os.X_OK))
         packed_paths = {file.path for file in packed.files}
         driver = "target/llvm-cov-target/debug/build/playwright-rs-5e6f/out/playwright-driver/playwright-1.62.1-linux"
         self.assertIn(f"{driver}/node", packed_paths)
@@ -232,7 +231,9 @@ class ArchiveTests(unittest.TestCase):
         with mock.patch.object(shards, "ROOT", build.root), redirect_stdout(output):
             status = shards.main(["executable"])
         self.assertEqual(status, 0)
-        self.assertEqual(output.getvalue().strip(), str(build.root / packed.executable))
+        self.assertEqual(
+            output.getvalue().strip(), str(build.root / shards.COVERAGE_DEBUG / "deps" / "scenarios-4d0e03c611a711f3")
+        )
 
     def test_a_shard_refuses_an_archive_of_another_revision(self) -> None:
         build, _ = self.build()
@@ -334,9 +335,9 @@ class WorkflowTests(unittest.TestCase):
         build = self.job("scenarios-build")
         self.assertIn('python3 -m scripts.scenario_shards matrix "${SCENARIO_SHARDS}"', build)
         self.assertIn("shards: ${{ steps.shards.outputs.shards }}", build)
-        steps = ["just test-scenarios-coverage-build", "Publish kache cache after the build",
+        steps = ["just test-scenarios-coverage-build",
                  'just test-scenarios-coverage-pack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"',
-                 "name: scenario-suite\n", "just test-backup-cut-cleanup"]
+                 "Publish kache cache after the build", "name: scenario-suite\n", "just test-backup-cut-cleanup"]
         positions = [build.index(step) for step in steps]
         self.assertEqual(positions, sorted(positions))
         upload = build[build.index("name: scenario-suite\n"):]

@@ -44,7 +44,6 @@ KACHE_JOBS = {
         "checks",
         "diagnostic-evidence",
         "deloxide",
-        "tests",
         "scenarios-build",
         "coverage",
         "client-conformance",
@@ -60,7 +59,7 @@ KACHE_JOBS = {
 # The jobs that build before they run, with the cache published and reported between the two, so the
 # run's outcome cannot lose what the build filled and each phase's time is visible on its own.
 BUILD_PHASE_JOBS = {
-    "check.yaml": {"tests", "scenarios-build", "client-conformance", "shuttle", "loom", "turmoil", "deloxide"},
+    "check.yaml": {"scenarios-build", "client-conformance", "shuttle", "loom", "turmoil", "deloxide"},
     "docker-build.yaml": set(),
     "bolero.yaml": {"bolero-random", "bolero-fuzz"},
 }

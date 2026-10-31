@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Tests of the scenario archive's bucket: path selection, the transfer, and its two steps."""
+"""Tests of the test archives' bucket: path selection, the transfer, and the steps that use it."""
 
 from __future__ import annotations
 
@@ -456,20 +456,22 @@ class WorkflowTests(unittest.TestCase):
                 checkout = text.find("uses: actions/checkout@")
                 self.assertNotEqual(checkout, -1, f"{path.name} {job} has no checkout")
                 self.assertLess(checkout, action.start(), f"{path.name} {job} checks out too late")
-        self.assertEqual(used, 2)
+        self.assertEqual(used, 4)
 
-    def test_the_scenario_archive_alone_passes_through_the_bucket(self) -> None:
+    def test_the_test_archives_alone_pass_through_the_bucket(self) -> None:
         used = set()
         for path in WORKFLOWS:
             for job, text in jobs_of(path.read_text(encoding="utf-8")).items():
                 for step in steps_of(text):
                     for action in ACTIONS:
                         if f"uses: {action}" in step:
-                            used.add((path.name, job, action))
-                            self.assertIn("name: scenario-suite\n", step)
+                            name = re.search(r"^ +name: ([a-z-]+)$", step.split("with:", 1)[1], flags=re.M)
+                            used.add((path.name, job, action, name.group(1)))
         self.assertEqual(used, {
-            ("check.yaml", "scenarios-build", ACTIONS[0]),
-            ("check.yaml", "scenarios", ACTIONS[1]),
+            ("check.yaml", "scenarios-build", ACTIONS[0], "scenario-suite"),
+            ("check.yaml", "scenarios-build", ACTIONS[0], "unit-tests"),
+            ("check.yaml", "scenarios", ACTIONS[1], "scenario-suite"),
+            ("check.yaml", "tests", ACTIONS[1], "unit-tests"),
         })
 
     def test_the_steps_that_use_the_bucket_receive_it_and_no_others_do(self) -> None:
@@ -484,7 +486,7 @@ class WorkflowTests(unittest.TestCase):
                     self.assertIn(f"{name}: ${{{{ vars.{name} }}}}\n", step)
                 for name in SECRETS:
                     self.assertIn(f"{name}: ${{{{ secrets.{name} }}}}\n", step)
-        self.assertEqual(receiving, 2)
+        self.assertEqual(receiving, 4)
 
     def test_a_step_passes_only_inputs_the_action_declares(self) -> None:
         declared = {}

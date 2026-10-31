@@ -537,7 +537,7 @@ inherits the profile location of the scenario binary that starts it, so the Rust
 binding loaded by the Python driver write their profiles into the same report when they exit.
 
 The CI `scenarios-build` job uses the shared native
-[CI linker](./developing-nervix.md#validation-and-tests) for the server, CLI and scenario harness,
+[CI linker](./developing-nervix.md#validation-and-tests) for the server, CLI, unit tests and scenario harness,
 including their instrumented builds. Coverage flags do not replace Wild linker selection.
 
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
@@ -630,8 +630,8 @@ The CI jobs divide the work at the scenario boundary:
 
 | Job | Work |
 | --- | --- |
-| `tests` | Instrumented workspace build and all tests except the scenario target |
-| `scenarios-build` | Instrumented scenario executable, CLI and paced simulation drivers, built once and packed with the generated inputs a run reads into the archive every shard restores, and the failed backup cut cleanup check |
+| `tests` | Every test except the scenario target, [run from the restored archive](#unit-test-archive) without compiling |
+| `scenarios-build` | The instrumented unit tests, scenario executable, CLI and paced simulation drivers, built once in one target directory and packed with the generated inputs a run reads into the archives the `tests` job and every shard restore, and the failed backup cut cleanup check |
 | `scenarios (I of N)` | One [shard](#scenario-shards) of the scenario suite at factor 3, run from the restored archive without compiling, with its coverage report and scenario logs |
 | `coverage` | After tests, scenarios and extra tests, publishes the [ordinary workspace report](./coverage-reports.md#the-ordinary-workspace-report). Merge and analysis integrity are mandatory; patch percentages and CRAP scores are advisory |
 | `coverage-full` | After every producer job, including a skipped or failed one: `just coverage-full` combines the ordinary report, the modeled and diagnostic native collections and the requested live fuzz campaigns into the [full workspace union](./coverage-reports.md#the-full-workspace-union), validated against the run's event and label snapshot and every producer job's result. It downloads artifacts only, fails on a missing, stale or incomplete input, and publishes its contributor breakdown as the job summary and the `coverage-full` artifact |
@@ -652,7 +652,7 @@ transport, selected by `CARGO_NET_GIT_FETCH_WITH_CLI=true`. `Cargo.lock` still p
 A dependency download that fails before a test starts provides no test execution or coverage
 qualification evidence.
 
-The `checks`, `tests`, and `scenarios-build` jobs use Go 1.26 and check out the source before
+The `checks` and `scenarios-build` jobs use Go 1.26 and check out the source before
 installing their pinned Go formatters. This makes the installer and the later cache publication and
 report scripts available when a tool setup step fails. The installer retains every attempt in a
 `go-tool-bootstrap-<job>` artifact and retries transport errors reading Go's public module proxy or
@@ -786,8 +786,8 @@ shared remote stay enabled. The `Start kache remote` step that follows the actio
 2. exports `KACHE_CONFIG`, the credentials, and the job's `KACHE_MANIFEST_KEY` and
    `KACHE_NAMESPACE` to the job's later steps. A matrix job's key includes its matrix value, so
    every build variant keeps its own manifest and shards. `scenarios-build` keeps the key
-   `scenarios-<os>-<arch>` it had before the suite split into shards: a key with no manifest starts
-   a job with nothing to prefetch.
+   `scenarios-<os>-<arch>` it had before the suite split into shards, also for the unit tests it
+   builds now: a key with no manifest starts a job with nothing to prefetch.
 3. prepares the store before any kache process opens it. Nothing on a single-use runner needs to
    survive a crash, and on Boat kache's downloads spent most of their time waiting for the lock of
    its SQLite index, whose holders wait on the disk. When `/dev/shm` is a tmpfs with at least a GiB
@@ -829,12 +829,12 @@ During the build the daemon publishes each entry the build stores: kache records
 intent, uploads the entry in the background, and retries an upload that failed for a retryable
 reason every five seconds.
 
-The `tests`, `scenarios-build`, `client-conformance`, `shuttle`, `loom`, `turmoil` and `deloxide`
+The `scenarios-build`, `client-conformance`, `shuttle`, `loom`, `turmoil` and `deloxide`
 jobs and the Bolero randomized and sanitizer jobs build before they run. The build step compiles
 every binary the run executes, under the same instrumentation and into the same target directory, so
-the run compiles nothing; `just test-coverage-build`, `just test-scenarios-coverage-build`, `just
-build-client-conformance-tests`, `just coverage-native-extras-build`, `just build-bolero` and `just
-prepare-bolero-shard` are those build steps. `Publish kache cache after the build` then publishes
+the run compiles nothing; `just test-scenarios-coverage-build` with `just test-coverage-binaries`,
+`just build-client-conformance-tests`, `just coverage-native-extras-build`, `just build-bolero` and
+`just prepare-bolero-shard` are those build steps. `Publish kache cache after the build` then publishes
 the job's cache as described below, into `$RUNNER_TEMP/kache-build-report`, and `Publish kache
 report after the build` reports it. Both run only when the build succeeded. A run that then fails or
 reaches the job's time limit cannot lose what the build stored, the jobs building beside it already
@@ -2815,8 +2815,9 @@ held by a consensus commit delay that only its scenario's cleanup releases.
 
 CI runs the suite in shards. The `scenarios-build` job builds the instrumented scenario executable,
 CLI, paced simulation driver, shared binding and report tool once with
-`just test-scenarios-coverage-build`, publishes its cache, and packs them with the generated inputs
-a run reads into one archive with `just test-scenarios-coverage-pack`. Cargo holds a target directory
+`just test-scenarios-coverage-build`, and packs them with the generated inputs a run reads into one
+archive with `just test-scenarios-coverage-pack`, before it builds the
+[unit tests](#unit-test-archive) in the same target directory and publishes its cache. Cargo holds a target directory
 for one build at a time, so the recipe builds each helper beside the suite in a directory of its own
 below `target/llvm-cov-tools`, and then installs it into the target directory of `cargo llvm-cov`. `scripts/scenario_shards.py`
 names what the archive holds: every executable `cargo llvm-cov report` reads as an object, the
@@ -2857,11 +2858,32 @@ minute in the unsharded job, so the shards start once it ends. Its 90-minute lim
 took up to 13 minutes on Boat, a build that took 10 to 26 minutes warm or a cold one, cache
 publication, packing and the upload.
 
+### Unit Test Archive
+
+The `scenarios-build` job also builds the workspace's unit tests, benchmarks in test mode and
+harness regressions, with `just test-coverage-binaries`, in the target directory of the scenario
+suite, so the dependencies they share compile once. It keeps Cargo's messages, and
+`scripts/unit_test_archive.py` reads the test executables from them. The scenario pack takes every
+object in the target directory, so it runs before the unit tests join the suite there. After the
+cache is published, `just test-coverage-pack` writes the second archive: every other object
+`cargo llvm-cov report` reads, the list of test executables, and the generated inputs a test reads.
+The scenario executable stays out, because the shards run it.
+
+The `tests` job needs that build, and restores the archive with `just test-coverage-unpack`, under
+the checks a shard's restore makes. `just test-coverage-run` then compiles nothing. Cargo would
+compare the restored files with sources whose modification times the checkout set and rebuild them,
+so the recipe starts each test executable itself, one at a time as `cargo test` does: from its
+package's directory, with that directory as `CARGO_MANIFEST_DIR`, which is what the workspace's
+tests and their libraries read of Cargo's environment at run time, and with the loader's path Cargo
+gives them, because a procedural macro crate's tests link the toolchain's `libstd`. It goes on after
+a failure and names every test executable that failed. `cargo llvm-cov report` then exports the job's report from
+the restored objects.
+
 ### The CI Reserve
 
 Each shard's suite runs inside `just test-scenarios-coverage-shard` in a CI `scenarios` job, after
 the `scenarios-build` job has built the instrumented executables, published its cache and packed
-the archive, and after the shard has restored it. The `tests` job runs beside the build on another
+the archive, and after the shard has restored it. The `tests` job runs beside the shards on another
 runner. A shard job's `timeout-minutes` is 115, and the suite budget is derived from it so that the
 job ends on its own.
 
@@ -2908,7 +2930,7 @@ artifact.
 
 A suite that passes ends before its budget, so the reserve then holds the coverage export and the
 uploads. A shard compiles nothing and publishes no cache: `scenarios-build` publishes what its build
-filled, as [cache publication](#cache-publication) describes, before it packs the archive.
+filled, as [cache publication](#cache-publication) describes, before it packs the unit tests' archive.
 
 Run 40419254390 completed 3,703 attempts in 2,971.1 seconds with 98.9% utilization and
 141,081.3 slot-seconds, the first run after the scenario build optimized the parser that had held
@@ -2966,11 +2988,11 @@ review changes no synchronization protocol or tracked lock path, so Deloxide doe
 budget changes themselves. The inventory and workflow contract tests validate the affected guards.
 
 A same-commit rerun of a scenario shard replaces that shard's three report artifacts: its scenario
-logs, runner load and scenario coverage. A rerun of `scenarios-build` replaces the archive, its
-runner load and its kache report. This lets a rerun publish its own diagnostics under GitHub
-Actions' immutable artifact names. A shard rerun restores the archive without rebuilding for the
-day the [R2 bucket](./developing-nervix.md#ci-artifacts) keeps it, and a later one reports that the
-archive expired, so `scenarios-build` has to run again. When the coverage job is rerun, its advisory
+logs, runner load and scenario coverage. A rerun of `tests` replaces its coverage, runner load and
+test logs. A rerun of `scenarios-build` replaces both archives, its runner load and its kache report. This lets a rerun publish its own diagnostics under GitHub
+Actions' immutable artifact names. A rerun of a shard or of `tests` restores its archive without
+rebuilding for the day the [R2 bucket](./developing-nervix.md#ci-artifacts) keeps it, and a later
+one reports that the archive expired, so `scenarios-build` has to run again. When the coverage job is rerun, its advisory
 reporter updates its marked PR comment for the same PR head instead of adding a comment.
 
 ### Runner Stalls

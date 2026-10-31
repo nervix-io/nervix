@@ -1222,20 +1222,13 @@ plexus-completion-walk-deep *args:
       --report-only --signature-window 8 --max-states 1000000 {{ args }}
 
 # Build every test binary the workspace coverage run executes, under the instrumentation of
-# `cargo llvm-cov` and into its target directory, so `test-coverage-run` compiles nothing. CI
-# publishes the job's cache between the two, so a slow or failed run leaves the build's cache
-# behind and a timeout names the phase it ended in.
-test-coverage-build: (test-coverage-phase "build")
+# `cargo llvm-cov` and into its target directory, so `test-coverage-run` compiles nothing.
+test-coverage-build: coverage-clean-workspace test-coverage-binaries
 
-# Run the workspace's tests from the binaries `test-coverage-build` left, and write their coverage.
-test-coverage-run: (test-coverage-phase "run")
-
-test-coverage: test-coverage-build test-coverage-run
-
-# One list of the coverage invocations, so the build and the run cannot drift apart: a target the
-# build left out, or built with other flags, would compile during the run instead.
-[private]
-test-coverage-phase phase: tests-deps
+# Build the workspace's test binaries beside what the target directory already holds, and record
+# the test executables a run starts. CI builds them after the scenario suite, so both share one
+# target directory and their dependencies compile once.
+test-coverage-binaries: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -1260,23 +1253,14 @@ test-coverage-phase phase: tests-deps
     for package in "${mode_packages[@]}"; do
         workspace_exclusions+=(--exclude "${package}")
     done
-    case {{ quote(phase) }} in
-        build)
-            cargo llvm-cov clean --workspace
-            # The environment and target directory `cargo llvm-cov` builds with, so the run finds
-            # every binary current.
-            source <(cargo llvm-cov show-env --sh 2>/dev/null)
-            export CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }}
-            coverage() { cargo test --no-run "$@"; }
-            ;;
-        run)
-            coverage() { cargo llvm-cov --no-report "$@"; }
-            ;;
-        *)
-            echo "test-coverage-phase: phase must be build or run, not {{ phase }}" >&2
-            exit 2
-            ;;
-    esac
+    # The environment and target directory `cargo llvm-cov` builds with, so the report finds every
+    # binary current.
+    source <(cargo llvm-cov show-env --sh 2>/dev/null)
+    export CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }}
+    messages={{ quote(justfile_directory() + "/target/unit-tests/cargo-messages.jsonl") }}
+    mkdir -p "$(dirname "${messages}")"
+    : > "${messages}"
+    coverage() { cargo test --no-run --message-format=json-render-diagnostics "$@" >> "${messages}"; }
     coverage --all-targets --all-features --workspace "${workspace_exclusions[@]}"
     # The server's own tests and the harness regressions: every test but the scenario suite, which
     # runs in its own job.
@@ -1293,11 +1277,33 @@ test-coverage-phase phase: tests-deps
         --package nervix-paced-simulation \
         --package nervix-wasm
     coverage --all-targets --features native --package nervix-primitives
-    if [[ {{ quote(phase) }} == run ]]; then
-        cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
-        # The checkout path the report's sources lie below, which `coverage-merge` strips from them.
-        pwd -P > coverage-source-root.txt
-    fi
+    python3 -m scripts.unit_test_archive plan
+
+# Run the workspace's tests from the binaries `test-coverage-build` left or a restored archive
+# holds, and write their coverage. It compiles nothing: it starts each test executable directly, so
+# a run needs neither the build nor a cache.
+test-coverage-run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    # The profiles go where `cargo llvm-cov report` reads them, beside the executables.
+    source <(CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} cargo llvm-cov show-env --sh 2>/dev/null)
+    python3 -m scripts.unit_test_archive run
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
+    # The checkout path the report's sources lie below, which `coverage-merge` strips from them.
+    pwd -P > coverage-source-root.txt
+
+test-coverage: test-coverage-build test-coverage-run
+
+# Write the archive the tests job restores: the executables `test-coverage-binaries` left and the
+# generated inputs a test reads, which `scripts/unit_test_archive.py` names.
+test-coverage-pack archive:
+    python3 -m scripts.unit_test_archive pack {{ quote(archive) }}
+
+# Restore the archive `test-coverage-pack` wrote into a checkout of the same revision and path,
+# checking every file it holds and the shared libraries its executables load.
+test-coverage-unpack archive:
+    python3 -m scripts.unit_test_archive unpack {{ quote(archive) }}
 
 # Build the scenario suite and the binaries its scenarios start, under the instrumentation of
 # `cargo llvm-cov`, so `test-scenarios-coverage-run` compiles nothing. Cargo holds a target directory
