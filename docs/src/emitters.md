@@ -1166,7 +1166,7 @@ Transport-specific expectations:
 - `REDIS`: use `rediss://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
+- `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
 - `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
   An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses
   `tls_cert_file` and `tls_key_file`.
@@ -1381,10 +1381,16 @@ every message in flight on it. With `ACK`, a message the broker receives and ref
 Pulsar emitters use the same client config surface as Pulsar ingestors:
 
 - `'addr'`: broker address such as `'pulsar://127.0.0.1:6650'`
-- optional `'namespace'`: defaults short topic names to `persistent://public/default/<topic>`; fully qualified topic names are accepted as-is
+- optional `'namespace'`: the tenant and namespace, written `'tenant/namespace'`, that a short
+  topic name is placed in, so `TOPIC 'orders'` writes `persistent://<namespace>/orders`; defaults
+  to `public/default`. Fully qualified topic names are sent as written.
 - optional `'tls_ca_file'`: PEM-encoded CA bundle for `pulsar+ssl://...` connections
 - optional `'tls_allow_insecure_connection'`: `true` or `false`; defaults to `false`
 - optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
+
+As the [ingestor manual](ingestors.md#pulsar) states, `CREATE PULSAR CLIENT` refuses the three TLS
+keys with a plaintext `pulsar://...` address and a `namespace` that is not exactly a tenant and a
+namespace.
 
 Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
 
