@@ -562,7 +562,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('for shard in $(seq 1 "${SCENARIO_SHARDS}"); do\n', merge)
         self.assertIn('scenarios+=("coverage-inputs/coverage-scenarios-${shard}")\n', merge)
         self.assertIn(
-            'just coverage-merge coverage-inputs/tests "${scenarios[@]}" coverage-inputs/native-extras\n',
+            'just coverage-merge coverage-inputs/tests "${scenarios[@]}" "${extras[@]}"\n',
             merge,
         )
         self.assertIn('  SCENARIO_SHARDS: "', self.workflow.split("\njobs:\n", 1)[0])

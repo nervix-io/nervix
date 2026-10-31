@@ -446,6 +446,30 @@ just ci-artifact-download <run> --name coverage-full --path retained
 just ci-artifact-download <run> --pattern 'scenario-logs-*' --path logs
 ```
 
+### The extra-tests labels
+
+The `extra-tests` job is one job whose checks a pull request opts into. Each `extra-*` label selects
+its own steps, the job runs only when at least one is present, and a pull request pays for nothing
+else. Without any of them the job is skipped, and `coverage` and `coverage-full` treat that as a
+deliberate selection.
+
+| Label | Steps |
+| --- | --- |
+| `extra-doctests` | Capability doctests |
+| `extra-miri` | Miri over the expiry map |
+| `extra-mutation` | Mutation tests of the expiry map |
+| `extra-runners` | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector and the primitive source validator |
+| `extra-compiler` | Source contracts, compiler diagnostics, paired API doctests and compiler cache qualification |
+| `extra-bench-smoke` | Benchmark smoke tests |
+| `extra-primitives` | Primitive boundary conformance in every mode, and its compile and browser checks. `coverage-full` then requires those collections |
+| `extra-completion-walk` | The Plexus completion walk |
+| `extra-connector-matrix` | The Plexus connector declaration export |
+
+A pull request labels what its change affects: a grammar change `extra-completion-walk`, a
+connector declaration `extra-connector-matrix`, a change to a compiler rule `extra-compiler`, and a
+change to a primitive `extra-primitives`. `just release-evidence` requires all of them, so a
+qualifying revision has run every step.
+
 ### Compiler architecture gate
 
 `just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler

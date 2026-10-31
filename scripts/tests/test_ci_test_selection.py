@@ -458,7 +458,7 @@ class CheckWorkflowSelectionTests(unittest.TestCase):
             with self.subTest(job=name):
                 job = self.job(name)
                 self.assertIn("needs: [test-selection]", job)
-                self.assertIn("if: needs.test-selection.outputs.tests-required == 'true'", job)
+                self.assertIn("needs.test-selection.outputs.tests-required == 'true'", job)
         # The scenario shards run only from a build the selection required.
         self.assertIn("needs: [scenarios-build]", self.job("scenarios"))
         self.assertIn("needs: [tests, scenarios, extra-tests]", self.job("coverage"))

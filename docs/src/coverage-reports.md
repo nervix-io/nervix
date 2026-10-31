@@ -201,7 +201,8 @@ hash, and `llvm-cov` warns that they have mismatched data and reads the function
 executables that ran it.
 
 CI's extra-tests job collects native extras and per-mode primitive conformance, and runs primitive
-compile checks independently. The `shuttle` job, which runs only for a pull request labeled
+compile checks independently, each only for the [`extra-*` label](./developing-nervix.md#the-extra-tests-labels)
+that selects it. The `shuttle` job, which runs only for a pull request labeled
 `shuttle`, collects its complete inventory, including random/PCT exploration and paired
 nondeterminism checking, and runs schedule replay qualification independently. For a pull request
 labeled `turmoil`, the `turmoil` job collects the canonical simulation suite once, including each
@@ -249,17 +250,19 @@ share's profiles, compiling nothing. `just coverage-report-workspace` writes the
 profiles a focused recipe collected. CI uploads the pairs as the `coverage-tests` artifact and one
 `coverage-scenarios-<I>` artifact for each shard, with the Python paced drivers' report of a shard
 that ran them, and the extra-tests job uploads its native collections and Python tooling reports as
-`coverage-native-extras`. The coverage job downloads each shard's artifact into a directory named
-after it and then runs, for three shards:
+`coverage-native-extras` when a label selected a step that collects them. The coverage job downloads
+each artifact into a directory named after it and then runs, for three shards:
 
 ```bash
 just coverage-merge coverage-inputs/tests coverage-inputs/coverage-scenarios-1 \
     coverage-inputs/coverage-scenarios-2 coverage-inputs/coverage-scenarios-3 \
-    coverage-inputs/native-extras
+    coverage-inputs/coverage-native-extras
 ```
 
 It names one input for each shard that `SCENARIO_SHARDS` runs, so a shard whose report is missing
-fails the merge as a missing input. The merge sums the counters of every report that measured a
+fails the merge as a missing input. The native extras are named only when they exist, because the
+coverage job does not require the extra-tests job: it needs that job to have succeeded or been
+skipped. The merge sums the counters of every report that measured a
 file, so the shards' reports add up to the suite's.
 
 An input is a producer's artifact directory or one report, with the producer's
@@ -515,7 +518,7 @@ job's result. It decides which producers the union requires:
 | Producer | Job and artifact | Required |
 | --- | --- | --- |
 | The ordinary workspace report | `coverage`, `coverage-merged` | Whenever the tested diff requires the suites |
-| `test-primitives-shuttle`, `test-primitives-loom`, `test-primitives-turmoil` and `test-primitives-deloxide` | `extra-tests`, `coverage-native-extras` | Whenever the tested diff requires the suites |
+| `test-primitives-shuttle`, `test-primitives-loom`, `test-primitives-turmoil` and `test-primitives-deloxide` | `extra-tests`, `coverage-native-extras` | For a pull request labeled `extra-primitives` |
 | `test-deadlock-evidence-order` and `test-deadlock-report` | `diagnostic-evidence`, `diagnostic-evidence` | Whenever the tested diff requires the suites |
 | `test-shuttle` | `shuttle`, `coverage-shuttle` | For a pull request labeled `shuttle` |
 | `test-loom` | `loom`, `coverage-loom` | For a pull request labeled `loom` |

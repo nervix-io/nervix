@@ -1480,8 +1480,8 @@ build and the existing tests, and nothing in it changes behavior.
   workflows and fails when the inventory lacks one of their jobs.
 - `just plexus-completion-walk` walks the Plexus completion graph and fails on any branch that cannot be
   completed by accepting the suggestions the parser offers. It is deliberately outside `just test`
-  and runs in CI beside the main tests, in the job that carries the workspace-wide checks. Grammar
-  changes that add a label must keep it passing; a new finding is a defect, not something to record
+  and runs in CI for a pull request labeled `extra-completion-walk`. Grammar changes that add a
+  label carry that label and must keep it passing; a new finding is a defect, not something to record
   in its baseline. `just plexus-completion-walk-deep` relaxes deduplication to reach branches the
   gating budget stops short of.
 - A change to a primitive adapter or a synchronization protocol runs the checks of every mode it
@@ -1518,6 +1518,14 @@ build and the existing tests, and nothing in it changes behavior.
   `just cargo-clippy-shuttle`, also part of `just lint`, lints every Shuttle build with warnings
   denied, including each package `just test-shuttle` explores in test mode, so a warning in a check
   fails validation.
+- CI's `extra-tests` job is optional: each `extra-*` label selects its own steps, and the job is
+  skipped without any. A pull request carries the label of what it affects: `extra-compiler` for a
+  compiler rule or fixture, `extra-primitives` for a primitive, `extra-completion-walk` for grammar,
+  `extra-connector-matrix` for a connector declaration, `extra-runners` for a CI reporter, gate or
+  collector, `extra-doctests` for an API with paired doctests, `extra-miri` and `extra-mutation` for
+  the expiry map, and `extra-bench-smoke` for a benchmark. A new step of that job takes a label, and
+  `tests/release-evidence.toml` requires every one. [Developing Nervix](docs/src/developing-nervix.md#the-extra-tests-labels)
+  lists what each selects.
 - `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
   instrumentation: `test-typed-ratchet`, `bench-smoke`, `plexus-completion-walk`,
   `validate-connector-matrix`, the canonical `test-shuttle` and `test-loom` runners, the canonical
@@ -1577,9 +1585,9 @@ build and the existing tests, and nothing in it changes behavior.
   records the run's event and pull request label snapshot, its suite and Bolero selection, its run
   and attempt, the tested revision and each producer job's result. CI's `coverage-full` job runs it
   after every producer job, including a skipped or failed one, from downloaded artifacts only. The
-  selection derives the required producers: the ordinary report, the modeled primitive
-  conformance and diagnostic-evidence collections, and the producers the `shuttle`, `loom`,
-  `turmoil`, `deloxide` and `fuzz` labels enable. A run without `fuzz` requires the Bolero call's
+  selection derives the required producers: the ordinary report, the diagnostic-evidence
+  collections, and the producers the `extra-primitives`, `shuttle`, `loom`, `turmoil`, `deloxide`
+  and `fuzz` labels enable. A run without `fuzz` requires the Bolero call's
   recorded deliberate skip and refuses a fuzz report, and the call's record must show the
   randomized run's success where `bolero-random` requested it and its deliberate skip elsewhere.
   A missing, stale, foreign, corrupt, failed, incomplete or unselected input fails the union,

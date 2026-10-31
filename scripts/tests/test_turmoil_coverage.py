@@ -58,7 +58,7 @@ class TurmoilCoverageTests(unittest.TestCase):
         # The ordinary merge reads only the ordinary producers' artifacts, and leaves out each
         # collection of another mode that the native extras artifact holds.
         self.assertIn(
-            'just coverage-merge coverage-inputs/tests "${scenarios[@]}" coverage-inputs/native-extras',
+            'just coverage-merge coverage-inputs/tests "${scenarios[@]}" "${extras[@]}"',
             ordinary,
         )
         for artifact in ("coverage-shuttle", "coverage-loom", "coverage-turmoil"):

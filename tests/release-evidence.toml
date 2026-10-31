@@ -16,7 +16,6 @@ checks = [
   "scenarios-build",
   "coverage",
   "coverage-full",
-  "extra-tests",
   "diagnostic-evidence",
 ]
 description = "Formatting, lints, validation and ratchets; unit, documentation, scenario and runner tests; ordinary coverage integrity, complete selected-producer union and the deterministic complexity ratchet; advisory coverage percentages and CRAP scores"
@@ -100,3 +99,57 @@ checks = [
 description = "The external soak suite against the release image and the deloxide-order diagnostic image of the revision"
 label = "chaos-soak"
 name = "chaos-soak"
+
+[[method]]
+checks = ["extra-tests"]
+description = "The capability doctests"
+label = "extra-doctests"
+name = "extra-doctests"
+
+[[method]]
+checks = ["extra-tests"]
+description = "Miri over the expiry map"
+label = "extra-miri"
+name = "extra-miri"
+
+[[method]]
+checks = ["extra-tests"]
+description = "Mutation tests of the expiry map"
+label = "extra-mutation"
+name = "extra-mutation"
+
+[[method]]
+checks = ["extra-tests"]
+description = "The Python runners, gates and collectors under coverage"
+label = "extra-runners"
+name = "extra-runners"
+
+[[method]]
+checks = ["extra-tests"]
+description = "Source contracts, compiler diagnostics and compiler cache qualification"
+label = "extra-compiler"
+name = "extra-compiler"
+
+[[method]]
+checks = ["extra-tests"]
+description = "Benchmark smoke tests"
+label = "extra-bench-smoke"
+name = "extra-bench-smoke"
+
+[[method]]
+checks = ["extra-tests"]
+description = "Primitive boundary conformance in every mode, and its compile and browser checks"
+label = "extra-primitives"
+name = "extra-primitives"
+
+[[method]]
+checks = ["extra-tests"]
+description = "The Plexus completion walk"
+label = "extra-completion-walk"
+name = "extra-completion-walk"
+
+[[method]]
+checks = ["extra-tests"]
+description = "The Plexus connector declaration export"
+label = "extra-connector-matrix"
+name = "extra-connector-matrix"

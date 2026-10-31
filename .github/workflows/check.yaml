@@ -1228,6 +1228,10 @@ jobs:
   coverage:
     name: coverage
     needs: [tests, scenarios, extra-tests]
+    # extra-tests is skipped without an `extra-*` label, and its report is then not an input.
+    if: >-
+      !cancelled() && needs.tests.result == 'success' && needs.scenarios.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.extra-tests.result)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -1292,8 +1296,8 @@ jobs:
       - name: Download native extra coverage
         uses: ./.github/actions/ci-artifact-download
         with:
-          name: coverage-native-extras
-          path: coverage-inputs/native-extras
+          pattern: coverage-native-extras
+          path: coverage-inputs
 
       # One repository-relative report of the ordinary producers, which every step below reads. The
       # merge leaves out the collections of other modes the native extras artifact holds, and fails
@@ -1305,7 +1309,12 @@ jobs:
           for shard in $(seq 1 "${SCENARIO_SHARDS}"); do
             scenarios+=("coverage-inputs/coverage-scenarios-${shard}")
           done
-          just coverage-merge coverage-inputs/tests "${scenarios[@]}" coverage-inputs/native-extras
+          # The native extras exist only when an `extra-*` label selected a step that collects them.
+          extras=()
+          if [[ -d coverage-inputs/coverage-native-extras ]]; then
+            extras+=(coverage-inputs/coverage-native-extras)
+          fi
+          just coverage-merge coverage-inputs/tests "${scenarios[@]}" "${extras[@]}"
 
       # The pinned cargo-crap scores the repository's Rust sources against the merged report. No score
       # fails the step: it fails only when the analysis cannot describe the report, and it writes its
@@ -1682,7 +1691,11 @@ jobs:
   extra-tests:
     name: extra-tests
     needs: [test-selection]
-    if: needs.test-selection.outputs.tests-required == 'true'
+    # It runs for a pull request with an `extra-*` label, and each label selects its own steps, so
+    # a pull request pays only for the checks it asks for.
+    if: >-
+      needs.test-selection.outputs.tests-required == 'true' &&
+      contains(join(github.event.pull_request.labels.*.name, ' '), 'extra-')
     # Its builds fill about 95 GiB of disk, which only Boat's largest machine holds with room to
     # spare. Budget cold ordinary instrumentation, compiler checks and modeled primitive builds.
     runs-on: boat-xlarge
@@ -1795,151 +1808,185 @@ jobs:
           phase: start
 
       - name: Runner diagnostics before Capability doctests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-doctests')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: capability-doctests
 
       - name: Capability doctests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-doctests')
         run: |
           just toolchains-install
           just test-capability-docs
 
       - name: Runner diagnostics before Expiry map Miri
+        if: contains(github.event.pull_request.labels.*.name, 'extra-miri')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: expiry-map-miri
 
       - name: Expiry map Miri
+        if: contains(github.event.pull_request.labels.*.name, 'extra-miri')
         run: just test-expiry-map-miri
 
       - name: Runner diagnostics before Expiry map mutation tests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-mutation')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: expiry-map-mutation-tests
 
       - name: Expiry map mutation tests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-mutation')
         run: just test-expiry-map-mutants
 
       - name: Setup uv for runner coverage
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         uses: astral-sh/setup-uv@v6
 
       - name: Patch coverage reporter
-        run: |
-          just coverage-patch-runner
-          pwd > target/coverage-source-root.txt
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
+        run: just coverage-patch-runner
 
       - name: Ordinary coverage merge
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-merge-runner
 
       - name: CRAP report
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-crap-report-runner
 
       - name: Full coverage union
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-full-runner
 
       - name: Paced simulation Python open policy
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-paced-simulation-python
 
       - name: Release evidence gate
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-release-evidence
 
       - name: Kubernetes deployment controller
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-operator-deployment
 
       - name: Kache remote contract
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-kache-ci
 
       - name: Plexus connector matrix renderer
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-connector-matrix
 
       # Every pull request whose diff requires the suites tests the source selection and the console
       # build's tooling here; the Bolero randomized job, which also runs them, needs `bolero-random`.
       - name: CI test selection
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-ci-selection
 
       - name: Web console wasm-bindgen CLI
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-wasm-bindgen
 
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-model-runner
 
       - name: Runner diagnostics before Source contracts, compiler diagnostics and paired API doctests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-compiler')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: source-contracts-compiler-diagnostics-and-paired-api-doctests
 
       - name: Source contracts, compiler diagnostics and paired API doctests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-compiler')
         run: just coverage-native-extras test-typed-ratchet
 
       - name: Runner diagnostics before Compiler cache changes, interruption and runner qualification
+        if: contains(github.event.pull_request.labels.*.name, 'extra-compiler')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: compiler-cache-changes-interruption-and-runner-qualification
 
       - name: Compiler cache changes, interruption and runner qualification
+        if: contains(github.event.pull_request.labels.*.name, 'extra-compiler')
         run: |
           just qualify-typed-ratchet-cache
           just coverage-typed-ratchet-python
 
       - name: Primitive source and thread owner validation coverage
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-primitive-boundary
 
       # The completed doctests no longer need their compiled outputs. Keep their evidence while
       # making room for the separately instrumented benchmark build.
       - name: Reclaim completed documentation builds
+        if: contains(github.event.pull_request.labels.*.name, 'extra-compiler')
         run: just clean-ci-docs
 
       # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
       # without treating noisy shared-runner timings as a performance regression signal. The run is
       # instrumented for source coverage, so its timings are not a measurement either.
       - name: Runner diagnostics before Benchmark smoke tests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-bench-smoke')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: benchmark-smoke-tests
 
       - name: Benchmark smoke tests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-bench-smoke')
         run: just coverage-native-extras bench-smoke
 
       # The collector has exported its report and recorded completion before this runs. Release
       # the benchmark's dev-profile build outputs while retaining every coverage record.
       - name: Reclaim completed benchmark builds
+        if: contains(github.event.pull_request.labels.*.name, 'extra-bench-smoke')
         run: just clean-ci-benchmarks
 
       # The primitive boundary's native conformance collected separately in every execution mode.
       - name: Runner diagnostics before Primitive boundary conformance
+        if: contains(github.event.pull_request.labels.*.name, 'extra-primitives')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: primitive-boundary-conformance
 
       - name: Primitive boundary conformance
+        if: contains(github.event.pull_request.labels.*.name, 'extra-primitives')
         run: just coverage-native-extras test-primitives
 
       - name: Runner diagnostics before Primitive boundary compile and browser checks
+        if: contains(github.event.pull_request.labels.*.name, 'extra-primitives')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: primitive-boundary-compile-and-browser-checks
 
       - name: Primitive boundary compile and browser checks
+        if: contains(github.event.pull_request.labels.*.name, 'extra-primitives')
         run: just test-primitives-compile
 
       # The walk saturates every core, and its failures are about completion reachability rather
       # than about any one test.
       - name: Runner diagnostics before Plexus completion walk
+        if: contains(github.event.pull_request.labels.*.name, 'extra-completion-walk')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: plexus-completion-walk
 
       - name: Plexus completion walk
+        if: contains(github.event.pull_request.labels.*.name, 'extra-completion-walk')
         run: just coverage-native-extras plexus-completion-walk
 
       - name: Runner diagnostics before Plexus connector declaration export
+        if: contains(github.event.pull_request.labels.*.name, 'extra-connector-matrix')
         uses: ./.github/actions/runner-diagnostics
         with:
           label: plexus-connector-declaration-export
 
       - name: Plexus connector declaration export
+        if: contains(github.event.pull_request.labels.*.name, 'extra-connector-matrix')
         run: just coverage-native-extras validate-connector-matrix
 
       # Each collection's report, completion record, executions and export diagnostics, whatever
@@ -1951,6 +1998,13 @@ jobs:
         with:
           phase: finish
           artifact-name: runner-load-extra-tests
+
+      # Every step's report is rooted here, whichever labels selected them.
+      - name: Record the coverage source root
+        if: always()
+        run: |
+          mkdir -p target
+          pwd > target/coverage-source-root.txt
 
       - name: Upload native extra coverage
         if: always()
@@ -1978,7 +2032,7 @@ jobs:
             target/wasm-bindgen-coverage/python.lcov
             target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json
-          if-no-files-found: warn
+          if-no-files-found: ignore
 
       - name: Publish kache cache
         if: always()

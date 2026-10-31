@@ -87,6 +87,11 @@ def lane(selection: str) -> dict[str, object]:
     }
 
 
+def collecting_primitives(labels: Sequence[str]) -> list[str]:
+    """The labels of a run that collects the primitive conformance, as most runs here do."""
+    return sorted({*labels, coverage_full.PRIMITIVES_LABEL})
+
+
 class Run:
     """A checkout at a tested revision and the artifacts one CI run of it downloaded."""
 
@@ -125,7 +130,8 @@ class Run:
     ) -> Selection:
         """Record the selection of a GitHub run with these labels, each required job successful."""
         selection = Selection(
-            event=event, labels=tuple(sorted(labels)), revision=self.revision, provider=Provider.GITHUB,
+            event=event, labels=tuple(collecting_primitives(labels)), revision=self.revision,
+            provider=Provider.GITHUB,
             run=RUN, attempt=attempt, tests_required=tests_required, bolero_required=bolero_required, jobs={},
         )
         results = {}
@@ -220,7 +226,7 @@ class Run:
             "inventory": {"file": "tests/bolero-targets.toml", "sha256": hashlib.sha256(INVENTORY.encode()).hexdigest()},
             "run": {"provider": "github", "run": RUN, "attempt": "1"},
             "revision": {"commit": self.revision, "modified": False}, "toolchain": TOOLCHAIN,
-            "event": "pull_request", "labels": list(labels), "selection": list(selection),
+            "event": "pull_request", "labels": collecting_primitives(labels), "selection": list(selection),
             "counts": {key: len(selection) for key in ("discovered", "selected", "executed", "completed")},
         }
         if scope is not None:
@@ -237,7 +243,7 @@ class Run:
         outcome = "success" if requested else "skipped"
         content: dict[str, object] = {
             "producer": "bolero-selection", "verdict": "complete", "tested_sha": self.revision,
-            "run": RUN, "attempt": "1", "event": "pull_request", "labels": list(labels),
+            "run": RUN, "attempt": "1", "event": "pull_request", "labels": collecting_primitives(labels),
             "randomized": "success" if randomized else "skipped", "randomized_required": randomized,
             "sanitizer": outcome, "sanitizer_combined": outcome, "sanitizer_required": requested,
         }
@@ -298,7 +304,9 @@ def problems(record: Mapping[str, object]) -> str:
 
 
 class UnionTests(unittest.TestCase):
-    def test_an_unlabeled_run_combines_the_ordinary_report_with_modeled_and_diagnostic_collections(self) -> None:
+    def test_a_run_without_mode_labels_combines_the_ordinary_report_with_modeled_and_diagnostic_collections(
+        self,
+    ) -> None:
         run = Run(self)
         run.complete()
         ordinary_before = (run.inputs / "coverage-merged/lcov-workspace.info").read_text()
@@ -420,7 +428,10 @@ class SelectionTests(unittest.TestCase):
                 path = run.inputs / "bolero-selection/selection.json"
                 content = json.loads(path.read_text())
                 # A Bolero run of any other event runs the randomized properties whatever its labels.
-                content.update(event=event, labels=["fuzz"], randomized="success", randomized_required=True)
+                content.update(
+                    event=event, labels=collecting_primitives(["fuzz"]), randomized="success",
+                    randomized_required=True,
+                )
                 path.write_text(json.dumps(content))
                 status, record, _, _ = run.union()
                 self.assertEqual(status, 0, problems(record))
@@ -523,6 +534,22 @@ class SelectionTests(unittest.TestCase):
                 status, record, _, _ = run.union()
                 self.assertEqual(status, 1)
                 self.assertIn(f"the turmoil job ended {result}, so its coverage is not complete evidence of this run", problems(record))
+
+    def test_the_primitive_collections_need_their_label(self) -> None:
+        selection = Selection(
+            event="pull_request", labels=(), revision="a" * 40, provider=Provider.GITHUB, run=RUN,
+            attempt=1, tests_required=True, bolero_required=False, jobs={},
+        )
+        producers = {requirement.producer for requirement in selection.required()}
+        self.assertFalse({name for name in producers if name.startswith("test-primitives")})
+        self.assertNotIn("extra-tests", selection.required_jobs())
+
+    def test_the_shared_job_may_succeed_for_a_label_of_another_step(self) -> None:
+        run = Run(self)
+        run.complete()
+        run.selection((), jobs={"extra-tests": "success"})
+        status, record, _, _ = run.union()
+        self.assertEqual(status, 0, problems(record))
 
     def test_a_job_the_selection_does_not_require_must_have_been_skipped(self) -> None:
         run = Run(self)
@@ -853,12 +880,12 @@ class SelectCommandTests(unittest.TestCase):
         needs["test-selection"] = {"result": "success", "outputs": {"tests-required": "true"}}
         environment = {"GITHUB_ACTIONS": "true", "GITHUB_SHA": run.revision, "GITHUB_RUN_ID": RUN, "GITHUB_RUN_ATTEMPT": "2"}
         status, output = self.select(run, [
-            "--event", "pull_request", "--labels", '["shuttle", "fuzz"]', "--tests-required", "true",
-            "--bolero-required", "true", "--jobs", json.dumps(needs),
+            "--event", "pull_request", "--labels", '["shuttle", "fuzz", "extra-primitives"]',
+            "--tests-required", "true", "--bolero-required", "true", "--jobs", json.dumps(needs),
         ], environment)
         self.assertEqual(status, 0, output)
         recorded = json.loads((run.directory / coverage_full.SELECTION).read_text())
-        self.assertEqual(recorded["labels"], ["fuzz", "shuttle"])
+        self.assertEqual(recorded["labels"], ["extra-primitives", "fuzz", "shuttle"])
         self.assertEqual(recorded["run"], {"provider": "github", "run": RUN, "attempt": 2})
         self.assertEqual(recorded["revision"], run.revision)
         self.assertTrue(recorded["fuzz_requested"])
@@ -905,7 +932,7 @@ class SelectCommandTests(unittest.TestCase):
 
     def test_a_local_selection_combines_local_collections(self) -> None:
         run = Run(self)
-        status, output = self.select(run, ["--labels", '["shuttle"]'], {})
+        status, output = self.select(run, ["--labels", '["shuttle", "extra-primitives"]'], {})
         self.assertEqual(status, 0, output)
         recorded = json.loads((run.directory / coverage_full.SELECTION).read_text())
         self.assertEqual(recorded["run"], {"provider": "local", "run": None, "attempt": None})
@@ -1198,7 +1225,10 @@ class WorkflowTests(unittest.TestCase):
             with self.subTest(producer=requirement.producer):
                 job = job_section(self.workflow, requirement.job)
                 self.assertIn(f"contains(github.event.pull_request.labels.*.name, '{requirement.label}')", job)
-                if requirement.job == "deloxide":
+                if requirement.job == "extra-tests":
+                    self.assertIn("run: just coverage-native-extras test-primitives\n", job)
+                    self.assertIn(f"name: {requirement.artifact}\n", job)
+                elif requirement.job == "deloxide":
                     selection = requirement.producer.removeprefix("test-")
                     self.assertRegex(job, rf"selection: \[[^\]]*\b{re.escape(selection)}\b")
                     self.assertIn('just coverage-native-extras "test-${SELECTION}"', job)
