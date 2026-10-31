@@ -18,6 +18,8 @@ this repository, skill invocation, useful request details, expected output, and 
 For application-owned producers and consumers, [Client Ingestors And Emitters](./client-io-architecture.md)
 connects the native endpoint grammar to a complete graph and its execution contracts.
 
+## Statement catalog
+
 The current top-level surface includes:
 
 - domain lifecycle statements
@@ -211,8 +213,9 @@ ALTER WIRE JSON|CBOR|AVRO SCHEMA <name>
 
 Operations in one `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`, `ALTER REORDERER`,
 `ALTER <CONNECTOR> <ENTITY> EMITTER`, `ALTER <CONNECTOR> <ENTITY> INGESTOR`, `ALTER REINGESTOR`, `ALTER GENERATOR`, or
-`ALTER PLACEMENT` execute in written order. An ingestor's `ALTER` repeats the connector and entity
-the ingestor reads, such as `ALTER KAFKA TOPIC INGESTOR`, and never changes them. See
+`ALTER PLACEMENT` execute in written order. An ingestor or emitter `ALTER` repeats its stored
+connector and entity, such as `ALTER KAFKA TOPIC INGESTOR` or `ALTER OTEL METRICS EMITTER`, and
+preserves that pair. Its replacement body uses the same entity's grammar. See
 [Streams And State](relay.md#altering-relays) for relay operations,
 [Processors](processors.md) for the full processor operation shapes, and
 [Emitters](emitters.md#altering-emitters) and
@@ -242,6 +245,14 @@ The rest of the graph is built with:
 - `CREATE <CONNECTOR> <ENTITY> EMITTER`
 - `CREATE PLACEMENT`
 - `CREATE HASH MAP`
+
+Ingestor and emitter heads always name both the connector and the entity, even when a connector
+serves only one entity. Client heads name the connector. The body writes the selected entity's
+reference, locator and options; for example a `KAFKA TOPIC` body names its client and quoted topic.
+The generated [Connector Capabilities](./connector-capabilities.md) catalog lists the current pairs,
+and the [Ingestors](./ingestors.md) and [Emitters](./emitters.md) manuals give each complete body.
+Completion offers each composed head as one item. Inspection and addressing use the named Model
+kind: `DESCRIBE INGESTOR`, `SHOW CREATE EMITTER` and `DROP CLIENT`.
 
 `CREATE DOMAIN <name>` is the short spelling for `CREATE UNPACED DOMAIN <name>`.
 
