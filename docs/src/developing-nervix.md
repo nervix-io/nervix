@@ -446,29 +446,68 @@ just ci-artifact-download <run> --name coverage-full --path retained
 just ci-artifact-download <run> --pattern 'scenario-logs-*' --path logs
 ```
 
-### The extra-tests labels
+### CI labels
 
-The `extra-tests` job is one job whose checks a pull request opts into. Each `extra-*` label selects
-its own steps, the job runs only when at least one is present, and a pull request pays for nothing
-else. Without any of them the job is skipped, and `coverage` and `coverage-full` treat that as a
-deliberate selection.
+A pull request opts into every method beyond its ordinary jobs through labels, so it pays only for
+what its change affects. This table lists every label that changes what CI runs. A change that adds,
+removes or renames one updates it in the same change, and `scripts/tests/test_labeled_check_jobs.py`
+compares it with the workflows.
 
-| Label | Steps |
-| --- | --- |
-| `extra-doctests` | Capability doctests |
-| `extra-miri` | Miri over the expiry map |
-| `extra-mutation` | Mutation tests of the expiry map |
-| `extra-runners` | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector and the primitive source validator |
-| `extra-compiler` | Source contracts, compiler diagnostics, paired API doctests and compiler cache qualification |
-| `extra-bench-smoke` | Benchmark smoke tests |
-| `extra-primitives` | Primitive boundary conformance in every mode, and its compile and browser checks. `coverage-full` then requires those collections |
-| `extra-completion-walk` | The Plexus completion walk |
-| `extra-connector-matrix` | The Plexus connector declaration export |
+| Label | Workflow | What it runs |
+| --- | --- | --- |
+| `shuttle` | Check | The Shuttle checks and their replay check |
+| `loom` | Check | The Loom models and their weakening qualification |
+| `turmoil` | Check | The Turmoil simulation suite and its replay check |
+| `deloxide` | Check | The four Deloxide lanes |
+| `client-conformance` | Check | The cross-language client probes against one- and three-node clusters |
+| `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
+| `fuzz` | Check, through Bolero | The Bolero sanitizer campaigns and the combined record of their shards |
+| `extra-doctests` | Check | Capability doctests |
+| `extra-miri` | Check | Miri over the expiry map |
+| `extra-mutation` | Check | Mutation tests of the expiry map |
+| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector and the primitive source validator |
+| `extra-compiler` | Check | Source contracts, compiler diagnostics, paired API doctests and compiler cache qualification |
+| `extra-bench-smoke` | Check | Benchmark smoke tests |
+| `extra-primitives` | Check | Primitive boundary conformance in every mode, and its compile and browser checks. `coverage-full` then requires those collections |
+| `extra-completion-walk` | Check | The Plexus completion walk |
+| `extra-connector-matrix` | Check | The Plexus connector declaration export |
+| `chaos` | Docker Build | The chaos smoke suite against the release image and the diagnostic image |
+| `chaos-soak` | Docker Build | The chaos soak suite against both images |
+| `benchmark` | Docker Build | The product comparison against the pull request's image and the ordinary primitive probe, with the comparison commented on the pull request |
+| `book` | Docker Build | A published preview of the book, its PDF and the Plexus agent index, with its links commented on the pull request |
+| `no-docker` | Docker Build | Nothing: it stops the image builds and every job that needs an image, which are `benchmark`, `chaos`, `chaos-soak` and the deployment checks. `book` and every Check job still run |
 
-A pull request labels what its change affects: a grammar change `extra-completion-walk`, a
-connector declaration `extra-connector-matrix`, a change to a compiler rule `extra-compiler`, and a
-change to a primitive `extra-primitives`. `just release-evidence` requires all of them, so a
-qualifying revision has run every step.
+`chaos`, `chaos-soak`, `benchmark` and `book` act only on a pull request from a branch of this
+repository. `just release-evidence` requires the label of every method in its inventory, which is
+all of these except `benchmark`, `book` and `no-docker`, so a qualifying revision has run every
+step. It also refuses a revision built with `no-docker`, whose images and deployment checks never
+ran.
+
+A pull request labels what its change affects, and the chapter that owns a method says when it
+applies. Among the `extra-*` labels, a grammar change carries `extra-completion-walk`, a connector
+declaration `extra-connector-matrix`, a change to a compiler rule `extra-compiler`, and a change to
+a primitive `extra-primitives`. A pull request carries `benchmark` only when its task requires a
+measured comparison, such as a change that claims a performance effect, and `no-docker` only when
+nothing in it needs an image. `no-docker` never authorizes a test exclusion.
+
+The `extra-tests` job stays one job: each `extra-*` label selects its own steps, and the job runs
+only when at least one is present. Without any of them it is skipped, and `coverage` and
+`coverage-full` treat that as a deliberate selection.
+
+A label change acts through the events each workflow runs on, and the two differ:
+
+- **Check** runs on `labeled` and `unlabeled` for every label, whatever its name, and cancels the
+  run in progress on its branch. Adding or removing any label, even one that selects nothing such
+  as `bug`, therefore throws away a Check in progress and starts another from its first job. GitHub
+  sends one event per label, so a request that adds three labels starts three runs and only the
+  last continues. Set a pull request's labels before the run you mean to keep.
+- **Docker Build** runs on `labeled` but not `unlabeled`. Adding `benchmark`, `chaos` or
+  `chaos-soak` builds the images at once, which cancels a build in progress on the branch, and
+  adding `book` builds the book at once. Any other label, `no-docker` included, runs in a
+  concurrency group of its own and cancels nothing, so it does not stop a build already running.
+  Removing a label starts nothing, so a pull request that drops `no-docker` builds its images on
+  its next push.
+- Every push runs both workflows with the labels the pull request carries at that moment.
 
 ### Compiler architecture gate
 

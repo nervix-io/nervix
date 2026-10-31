@@ -1,7 +1,8 @@
-"""Regressions for the Check workflow's jobs that run only when a pull request asks for them."""
+"""Regressions for the CI jobs that run only when a pull request asks for them."""
 
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -17,6 +18,29 @@ LABELS_BY_JOB = {
     "client-conformance": "client-conformance",
     "deloxide": "deloxide",
 }
+# A workflow names a label it acts on in a condition, directly or through the labels Check passes to
+# the Bolero workflow.
+LABEL_CONDITIONS = (
+    re.compile(r"labels\.\*\.name, '([a-z0-9-]+)'\)"),
+    re.compile(r"labels-json \|\| '\[\]'\), '([a-z0-9-]+)'\)"),
+)
+# A row of the developer guide's table of labels.
+DOCUMENTED_LABEL = re.compile(r"^\| `([a-z0-9-]+)` \|", re.MULTILINE)
+
+
+def labels_the_workflows_read() -> set[str]:
+    labels: set[str] = set()
+    for workflow in (ROOT / ".github/workflows").glob("*.yaml"):
+        text = workflow.read_text()
+        for condition in LABEL_CONDITIONS:
+            labels.update(condition.findall(text))
+    return labels
+
+
+def labels_the_guide_lists() -> set[str]:
+    guide = (ROOT / "docs/src/developing-nervix.md").read_text()
+    section = guide.split("### CI labels\n", 1)[1].split("\n### ", 1)[0]
+    return set(DOCUMENTED_LABEL.findall(section))
 
 
 class LabeledJobTests(unittest.TestCase):
@@ -30,6 +54,9 @@ class LabeledJobTests(unittest.TestCase):
             with self.subTest(job=name):
                 job = job_section(workflow, name)
                 self.assertIn(f"if: contains(github.event.pull_request.labels.*.name, '{label}')", job)
+
+    def test_the_developer_guide_lists_every_label_a_workflow_reads(self) -> None:
+        self.assertEqual(labels_the_workflows_read(), labels_the_guide_lists())
 
 
 if __name__ == "__main__":

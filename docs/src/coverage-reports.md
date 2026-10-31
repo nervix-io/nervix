@@ -201,7 +201,7 @@ hash, and `llvm-cov` warns that they have mismatched data and reads the function
 executables that ran it.
 
 CI's extra-tests job collects native extras and per-mode primitive conformance, and runs primitive
-compile checks independently, each only for the [`extra-*` label](./developing-nervix.md#the-extra-tests-labels)
+compile checks independently, each only for the [`extra-*` label](./developing-nervix.md#ci-labels)
 that selects it. The `shuttle` job, which runs only for a pull request labeled
 `shuttle`, collects its complete inventory, including random/PCT exploration and paired
 nondeterminism checking, and runs schedule replay qualification independently. For a pull request

@@ -1524,8 +1524,13 @@ build and the existing tests, and nothing in it changes behavior.
   `extra-connector-matrix` for a connector declaration, `extra-runners` for a CI reporter, gate or
   collector, `extra-doctests` for an API with paired doctests, `extra-miri` and `extra-mutation` for
   the expiry map, and `extra-bench-smoke` for a benchmark. A new step of that job takes a label, and
-  `tests/release-evidence.toml` requires every one. [Developing Nervix](docs/src/developing-nervix.md#the-extra-tests-labels)
-  lists what each selects.
+  `tests/release-evidence.toml` requires every one.
+- [Developing Nervix](docs/src/developing-nervix.md#ci-labels) lists every label that changes what
+  CI runs, and a change that adds, removes or renames one keeps that table current in the same
+  change. A pull request carries `benchmark` only when its task requires a measured comparison, and
+  `no-docker` only when nothing in it needs an image. Adding or removing any label cancels a Check
+  in progress and starts it again, so a pull request sets its labels before the run it means to
+  keep.
 - `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
   instrumentation: `test-typed-ratchet`, `bench-smoke`, `plexus-completion-walk`,
   `validate-connector-matrix`, the canonical `test-shuttle` and `test-loom` runners, the canonical
