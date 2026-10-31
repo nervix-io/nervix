@@ -34,13 +34,14 @@ use nervix_primitives::{
 use super::FaultInjection;
 
 /// Where a backup cut of a domain waits for a scenario to release it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
 pub enum BackupCutBoundary {
     /// Once a quiesced cut holds its domain's lease, before it checks the nodes it must reach and
     /// before it pauses the domain.
     Lease,
     /// Once a quiesced cut paused its domain and every live node applied the pause, before the
-    /// drain's first poll.
+    /// drain's first poll. A hold here spends the cut's budget, as a slow application of the
+    /// pause would.
     Drain,
     /// Before any owner captures state: a quiesced cut after its drain, and a stopped cut once it
     /// holds its lease.

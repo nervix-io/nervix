@@ -2341,7 +2341,8 @@ captures its standard output and error in one log. It removes every `NERVIX_*` v
 the server. The options and environment variables a scenario gives the process are applied after
 that removal, written exactly as the scenario states them, so a scenario can hand the node a value
 it must refuse; such a scenario starts the process without waiting for readiness and asserts how it
-exits. A claim about a
+exits. A scenario about what the node's log records hands it an operator's trace filter as
+`RUST_LOG` and waits for readiness as usual. A claim about a
 node process dying while its peers keep running, such as what a client producer is told when the
 node that executes its ingestor or serves its session is killed or frozen, runs the three-process
 cluster and faults one member, because only a real process death closes, or stops answering on,
