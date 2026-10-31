@@ -1812,6 +1812,12 @@ jobs:
         if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-operator-deployment
 
+      - name: Runner diagnostics before Kache remote contract
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: kache-remote-contract
+
       - name: Kache remote contract
         if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-kache-ci
