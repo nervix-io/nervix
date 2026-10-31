@@ -33,7 +33,8 @@ Compile-time API restrictions use paired Rustdoc examples beside the owning API:
 example for the forbidden call and a compiling example with the current imports and supported
 signature. `just test` invokes `just test-capability-docs` for the capability owners;
 `just test-primitives-compile` exercises primitive doctests in their declared execution modes.
-Both recipes run in CI. An import
+CI runs the first for a pull request labeled `extra-doctests` and the second for one labeled
+`extra-primitives`. An import
 that no longer resolves cannot serve as evidence of the intended restriction. Nervix uses no
 `trybuild` dependency, harness, fixture source or diagnostic snapshot for these checks. Doctests
 prove only the build configuration in which they run; Cargo graph and target probes, compiler
@@ -288,8 +289,8 @@ records their scope without treating a passing qualification as a completed camp
 | `websocket-upgrade-headers` | `nervix-models` Every bounded canonical upgrade-header collection preserves all names, values and order through the production validated representation; malformed and canonicalizing cases have separate owner tests. | bounded canonical header names and values in order, v1 | 256 | 32 bytes |
 | `node-settings-command-line` | `nervix-server` Current valid node settings of every group, with the Raft timings ordered in whole milliseconds, the drain shorter than the shutdown and the memory watermarks paired and ordered, render as the server's options and read back through the same options and validation unchanged; every duration and byte quantity help prints reads back as the same value. | valid settings across groups, ordered Raft timings and paired memory watermarks, v2 | 256 | 512 bytes |
 
-Each target declares its Cargo manifest. Product targets use the root workspace; the synchronization
-properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers declared tooling workspaces
+Each target declares its Cargo manifest. Product targets use the root workspace; the five `typed-*`
+compiler-tooling properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers declared tooling workspaces
 from root metadata and uses the selected manifest in ordinary, sanitizer, replay and qualification
 commands. Compiler executions are fixture checks, not work done in each fuzz iteration.
 
@@ -739,8 +740,10 @@ failure, sanitizer finding or property failure fails the job.
 `fuzz` is the preferred Bolero evidence in CI. Its shards discover the inventory, run a
 coverage-guided sanitizer campaign of every registered target from its checked-in corpus, measure
 the Rust source those campaigns execute and qualify the runner's failure paths. A pull request whose
-diff requires the ordinary suites runs each property there as an ordinary Rust test that replays its
-checked-in corpus, whatever its labels. The randomized job adds the run of each harness with its
+diff requires the ordinary suites runs each product property there as an ordinary Rust test that
+replays its checked-in corpus, whatever its labels; the five `typed-*` properties of the separate
+`tools/nervix-lint` workspace run as ordinary tests in `just test-typed-ratchet`, which CI runs for a
+pull request labeled `extra-compiler`. The randomized job adds the run of each harness with its
 exact declared features and the check that every property ran the inventory's case count and
 replayed its whole corpus. Label a pull request `bolero-random` only when its task requires
 that run, such as a change to the randomized run itself, its runner or its job, or a release
