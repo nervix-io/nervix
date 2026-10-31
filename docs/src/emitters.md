@@ -1109,8 +1109,9 @@ the entity's closed property set, each at most once and in any order. A clause o
 does not declare is refused where it is written, with the entity and the clause or key named, and
 the registry refuses it again in a Model that reaches it another way. The
 [capability matrix](connector-capabilities.md) lists the clauses and properties each entity
-declares, and each entity's section below says what its transport does with them. No entity
-declares one yet, so every emitter refuses every clause today.
+declares, and each entity's section below says what its transport does with them. Only SQS
+QUEUE declares any yet, the `DELAY` and `DEDUPLICATION ID` clauses. No entity declares a
+`PROPERTIES` key, and every other emitter refuses every clause.
 
 | Clause | Written with | Value every record carries |
 | --- | --- | --- |
