@@ -35,7 +35,7 @@ use crate::{
     DeclaredQuiesce, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
     EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
     EmitterReferenceKind, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
     IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
     OptionForm, OptionPresence, PositionClass, RetryPolicy,
 };
@@ -283,7 +283,7 @@ const MQTT_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 impl IngestorDeclaration for MqttTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         headers: None,
-        metadata: IngestorMetadataScope::Headers,
+        metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
         position_class: PositionClass::BrokerRedelivered,

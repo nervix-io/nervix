@@ -19,7 +19,7 @@ use crate::{
     ClientConfigEntry, ClientConfigNamespace, ClientConfigOwner, ClientConfigPresence,
     ClientConfigSchemaError, ClientConfigValue, ClientPooling, CreateClientKafka,
     EmitterEntityKind, EmitterPublishingModeKind, IngestDeliveryKind, IngestQuiesceKind,
-    IngestorEntityKind, ParseAsType,
+    IngestorEntityKind,
 };
 
 /// The keys Nervix sets on every Kafka consumer or producer it runs.
@@ -108,19 +108,12 @@ fn records_carry_ordered_repeated_headers_and_their_log_position() {
 
     assert_eq!(ingest.headers, headers);
     assert_eq!(emit.headers, headers);
-    assert_eq!(ingest.metadata, IngestorMetadataScope::Kafka);
-    let fields: Vec<(String, ParseAsType)> = ingest
-        .metadata
-        .fields()
-        .into_iter()
-        .map(|field| (field.name.as_str().to_string(), field.ty))
-        .collect();
     assert_eq!(
-        fields,
-        vec![
-            ("topic".to_string(), ParseAsType::String),
-            ("partition".to_string(), ParseAsType::I32),
-            ("offset".to_string(), ParseAsType::I64),
+        ingest.metadata.fields(),
+        [
+            IngestorMetadataField::new("topic", IngestorMetadataType::String),
+            IngestorMetadataField::new("partition", IngestorMetadataType::I32),
+            IngestorMetadataField::new("offset", IngestorMetadataType::I64),
         ]
     );
     assert!(emit.options.is_empty());
