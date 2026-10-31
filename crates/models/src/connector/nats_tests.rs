@@ -1,8 +1,8 @@
-//! Tests of the NATS vocabulary's executable Core subject contract.
+//! Tests of the NATS vocabulary's executable Core subject and JetStream stream contracts.
 //!
 //! Layer: test harness.
-//! - **Owns.** NATS declaration, subject, queue-group and client-configuration contract checks
-//!   through the public vocabulary.
+//! - **Owns.** NATS declaration, subject, queue-group, stream, consumer and client-configuration
+//!   contract checks through the public vocabulary.
 //! - **Depends on.** NATS Models, entity kinds and shared declaration types.
 //! - **Must not know.** The NATS driver, parsing, planning or runtime subscriptions.
 
@@ -457,5 +457,193 @@ fn queue_groups_are_bounded_and_refuse_whitespace() {
     assert_eq!(
         NatsQueueGroupName::try_from("workers\n"),
         Err(ExternalNameError::InvalidChar { ch: '\n' })
+    );
+}
+
+#[test]
+fn stream_ingestion_declares_acknowledged_pulls_answered_by_the_server() {
+    let ingest = IngestorEntityKind::Nats(NatsIngestorEntity::Stream).capabilities();
+
+    assert_eq!(
+        ingest.reference,
+        IngestorReferenceKind::Client(ConnectorKind::Nats)
+    );
+    assert!(!ingest.executes_on_every_cluster_node);
+    assert_eq!(
+        ingest.delivery,
+        &[
+            DeclaredDelivery::ACK_SEQUENTIAL,
+            DeclaredDelivery::ACK_PARALLEL
+        ]
+    );
+    assert_eq!(ingest.declared_delivery(IngestDeliveryKind::NoAck), None);
+    assert_eq!(ingest.position_class, PositionClass::BrokerRedelivered);
+    assert_eq!(
+        ingest.acknowledgement_confirmation,
+        AcknowledgementConfirmation::Answered
+    );
+    assert_eq!(
+        ingest.quiesce,
+        &[
+            DeclaredQuiesce::SUSPEND,
+            DeclaredQuiesce::BUFFER,
+            DeclaredQuiesce::DROP,
+        ]
+    );
+    assert_eq!(
+        ingest.headers,
+        Some(HeaderModel::exact(HeaderLayout::RepeatsByName))
+    );
+    assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
+}
+
+#[test]
+fn stream_ingestion_requires_its_consumer_and_names_no_instance_count() {
+    let ingest = IngestorEntityKind::Nats(NatsIngestorEntity::Stream).capabilities();
+
+    assert_eq!(
+        ingest.locator,
+        Some(LocatorDeclaration {
+            keywords: "STREAM",
+            name: LocatorName::External(NatsStreamName::DECLARATION),
+        })
+    );
+    let keywords: Vec<&str> = ingest
+        .options
+        .iter()
+        .map(|option| option.keywords)
+        .collect();
+    assert_eq!(keywords, vec!["CONSUMER"]);
+    let consumer = ingest
+        .option("CONSUMER")
+        .assured("the stream ingestor declares its consumer option");
+    assert!(consumer.is_required());
+    assert_eq!(
+        consumer.form,
+        OptionForm::Value {
+            value: OptionValue::Name(NatsConsumerName::DECLARATION),
+            example: "CONSUMER 'nervix'",
+        }
+    );
+    assert_eq!(ingest.option("INSTANCES"), None);
+}
+
+#[test]
+fn stream_ingestion_bounds_what_a_pull_holds_by_its_acknowledgement_window() {
+    let ingest = IngestorEntityKind::Nats(NatsIngestorEntity::Stream).capabilities();
+
+    assert_eq!(ingest.bounds.buffers.len(), 1);
+    assert_eq!(
+        ingest.bounds.buffers[0].bound,
+        BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("ACK PARALLEL MAX, 1 under ACK SEQUENTIAL"),
+            overflow: BufferOverflow::Backpressure,
+        }
+    );
+    let waits: Vec<WaitBound> = ingest.bounds.waits.iter().map(|wait| wait.bound).collect();
+    assert_eq!(
+        waits,
+        vec![
+            WaitBound::Unbounded,
+            WaitBound::Driver("5 s per address"),
+            WaitBound::Driver("5 s request timeout"),
+            WaitBound::Driver("10 s request timeout"),
+            WaitBound::Driver("a ping every 60 s; the connection ends after 2 go unanswered"),
+        ]
+    );
+    assert!(ingest.bounds.deadline_keys().is_empty());
+    assert_eq!(ingest.bounds.driver_limits.len(), 1);
+}
+
+#[test]
+fn stream_modes_take_their_acknowledgement_windows_from_the_statement() {
+    let retry_policy = RetryPolicy {
+        backoff: "100ms".to_string(),
+        max_backoff: "1s".to_string(),
+    };
+    let sequential = NatsStreamIngestMode::AckSequential {
+        timeout: "10s".to_string(),
+        retry_policy: retry_policy.clone(),
+    };
+    assert_eq!(
+        sequential.acknowledgement(),
+        IngestAcknowledgement::Sequential {
+            timeout: "10s",
+            retry: &retry_policy,
+        }
+    );
+    let max = NonZeroU64::new(4).assured("a fixed window of four is positive");
+    let parallel = NatsStreamIngestMode::AckParallel {
+        max,
+        batch_timeout: "50ms".to_string(),
+        timeout: "10s".to_string(),
+        retry_policy: retry_policy.clone(),
+    };
+    assert_eq!(
+        parallel.acknowledgement(),
+        IngestAcknowledgement::Parallel {
+            max,
+            batch_timeout: "50ms",
+            timeout: "10s",
+            retry: &retry_policy,
+        }
+    );
+}
+
+#[rstest]
+#[case::lower("orders")]
+#[case::mixed_case("Orders-EU")]
+#[case::underscores("orders_2026")]
+#[case::utf8("Événements-東京")]
+#[case::punctuation("orders:v2$")]
+fn stream_and_consumer_names_are_kept_exactly_as_written(#[case] raw: &str) {
+    let stream = NatsStreamName::try_from(raw)
+        .assured("each fixture holds no separator, wildcard, whitespace or control character");
+    assert_eq!(stream.as_str(), raw);
+    let consumer =
+        NatsConsumerName::try_from(raw).assured("a consumer name follows the stream name rule");
+    assert_eq!(consumer.as_str(), raw);
+}
+
+#[rstest]
+#[case::empty("", ExternalNameError::Empty)]
+#[case::subject_separator("orders.eu", ExternalNameError::InvalidChar { ch: '.' })]
+#[case::token_wildcard("orders*", ExternalNameError::InvalidChar { ch: '*' })]
+#[case::tail_wildcard("orders>", ExternalNameError::InvalidChar { ch: '>' })]
+#[case::path_separator("orders/eu", ExternalNameError::InvalidChar { ch: '/' })]
+#[case::windows_path_separator("orders\\eu", ExternalNameError::InvalidChar { ch: '\\' })]
+#[case::space("orders eu", ExternalNameError::InvalidChar { ch: ' ' })]
+#[case::control("orders\u{7}", ExternalNameError::InvalidChar { ch: '\u{7}' })]
+fn stream_and_consumer_names_refuse_what_jetstream_refuses(
+    #[case] raw: &str,
+    #[case] expected: ExternalNameError,
+) {
+    assert_eq!(NatsStreamName::try_from(raw), Err(expected.clone()));
+    assert_eq!(NatsConsumerName::try_from(raw), Err(expected));
+}
+
+#[test]
+fn stream_and_consumer_names_are_bounded_at_the_servers_name_length() {
+    let at_bound = format!("{}{}", "é".repeat(127), "x");
+    assert_eq!(at_bound.len(), 255);
+    let stream = NatsStreamName::try_from(at_bound.as_str())
+        .assured("255 bytes fit the JetStream name bound");
+    assert_eq!(stream.as_str(), at_bound);
+    let consumer = NatsConsumerName::try_from(at_bound.as_str())
+        .assured("255 bytes fit the JetStream name bound");
+    assert_eq!(consumer.as_str(), at_bound);
+
+    let above_bound = format!("{at_bound}x");
+    let too_long = ExternalNameError::TooLong {
+        max: 255,
+        actual: 256,
+    };
+    assert_eq!(
+        NatsStreamName::try_from(above_bound.as_str()),
+        Err(too_long.clone())
+    );
+    assert_eq!(
+        NatsConsumerName::try_from(above_bound.as_str()),
+        Err(too_long)
     );
 }

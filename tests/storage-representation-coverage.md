@@ -15,6 +15,12 @@ Ingestor generators draw every timestamp source, `TIMESTAMP AT metadata.<field>`
 Plexus properties preserve the metadata source distinctly from a payload field of the same name,
 and the same signature and namespace fence that shape.
 
+NATS ingestor generators draw both entities, `NATS SUBJECT` and `NATS STREAM`, the stream source
+with its stream and consumer names, both acknowledged modes and every quiesce mode it declares. The
+Model/archive, registry, consensus, canonical Plexus, presentation and console-draft properties
+preserve the complete stream source, and the advanced archive signature and keyspace namespace
+fence the archived union that holds it.
+
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions
 run in both modes. A target writes through the storage engine its boundary owns when it has one:

@@ -168,6 +168,7 @@ tags = [
   "@forced_failover_delivery",
   "@mqtt_parallel_gather_at_quiesce",
   "@sqs_receive_at_quiesce",
+  "@nats_stream_suspend",
   "@kept_ingestor_offsets",
   "@redis_subscription_backpressure",
   "@redis_idle_subscription",
@@ -3608,6 +3609,26 @@ invariant = "A receive in flight when its SQS ingestor quiesces completes, and i
 invocation = "scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
 selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "An entity hold that quiesces a NATS STREAM ingestor on one and three nodes, through public Plexus commands: the ingestor suspends, lets its durable consumer's pull go and resumes, beside tracked quiesce, schedule and teardown locks. The NATS client, its pull, inbox drain and acknowledgement requests are outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_ingestion.feature"
+id = "scenario.nats-stream-suspend"
+invariant = "A suspended NATS STREAM ingestor sends no pull request, so what is published meanwhile stays pending in its stream, and it delivers and acknowledges all of it once it resumes, on one and three nodes."
+invocation = "scenarios"
+scenario = "A suspended NATS STREAM ingestor leaves what is published in its stream and delivers it once it resumes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an entity hold that quiesces a NATS STREAM ingestor on one and three nodes, through public Plexus commands: the ingestor suspends, lets its durable consumer's pull go and resumes, beside tracked quiesce, schedule and teardown locks. The NATS client, its pull, inbox drain and acknowledgement requests are outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_ingestion.feature"
+id = "stress.nats-stream-suspend"
+invariant = "A suspended NATS STREAM ingestor sends no pull request, so what is published meanwhile stays pending in its stream, and it delivers and acknowledges all of it once it resumes, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "A suspended NATS STREAM ingestor leaves what is published in its stream and delivers it once it resumes"
+selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Under scheduling stress: an entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The held answer, the SQS client and the read's cancellation are outside the detector."

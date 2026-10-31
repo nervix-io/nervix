@@ -224,10 +224,13 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX MODEL TAM` archive signature and consensus's `raft_timestamp_` keyspaces
-identify this current shape, which also holds an ingestor's `TIMESTAMP AT metadata.<field>` source,
-before decoding. An unrecognized signature or namespace fails with
-the owning storage error and requires the stored data to be recreated.
+
+A NATS ingestor Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`, so a stored ingestor
+holds the archived union of both. The registry's `NERVIX MODEL NJS` archive signature and
+consensus's `raft_jetstream_` keyspaces identify this current shape, which also holds the Sentry
+platform field and an ingestor's `TIMESTAMP AT metadata.<field>` source, before decoding. An
+unrecognized signature or namespace fails with the owning storage error and requires the stored
+data to be recreated.
 
 ## Absence And Distinct States
 

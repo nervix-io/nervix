@@ -19,14 +19,14 @@ use nervix_models::{
     IcebergStorageBackend, IngestDeliveryKind, IngestQuiesceKind, IngestorEntityKind,
     KafkaConsumerGroupName, KafkaEmitterEntity, KafkaIngestorEntity, KafkaTopicName,
     LocatorDeclaration, LocatorName, MongoDbEmitterEntity, MqttEmitterEntity, MqttIngestorEntity,
-    MqttTopicFilter, MySqlEmitterEntity, NatsEmitterEntity, NatsIngestorEntity, NatsQueueGroupName,
-    NatsSubjectName, OptionDeclaration, OptionForm, OptionPresence, OtelEmitterEntity,
-    PostgresEmitterEntity, PrometheusIngestorEntity, PulsarEmitterEntity, PulsarIngestorEntity,
-    PulsarSubscriptionName, PulsarTopicName, RabbitMqEmitterEntity, RabbitMqIngestorEntity,
-    RabbitMqQueueName, RedisChannelName, RedisEmitterEntity, RedisIngestorEntity,
-    RuntimeCapability, SentryEmitterEntity, SqsEmitterEntity, SqsIngestorEntity, SqsQueueName,
-    SyslogEmitterEntity, SyslogIngestorEntity, WebsocketsIngestorEntity, ZeroMqEmitterEntity,
-    ZeroMqIngestorEntity,
+    MqttTopicFilter, MySqlEmitterEntity, NatsConsumerName, NatsEmitterEntity, NatsIngestorEntity,
+    NatsQueueGroupName, NatsStreamName, NatsSubjectName, OptionDeclaration, OptionForm,
+    OptionPresence, OtelEmitterEntity, PostgresEmitterEntity, PrometheusIngestorEntity,
+    PulsarEmitterEntity, PulsarIngestorEntity, PulsarSubscriptionName, PulsarTopicName,
+    RabbitMqEmitterEntity, RabbitMqIngestorEntity, RabbitMqQueueName, RedisChannelName,
+    RedisEmitterEntity, RedisIngestorEntity, RuntimeCapability, SentryEmitterEntity,
+    SqsEmitterEntity, SqsIngestorEntity, SqsQueueName, SyslogEmitterEntity, SyslogIngestorEntity,
+    WebsocketsIngestorEntity, ZeroMqEmitterEntity, ZeroMqIngestorEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -132,6 +132,15 @@ fn source_surface(kind: IngestorEntityKind) -> IngestorSurface {
             quiesce: PUSH,
             locator: Some(("SUBJECT", "nats_subject")),
             options: &[("QUEUE GROUP", true), ("INSTANCES", true)],
+        },
+        IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => IngestorSurface {
+            delivery: &[
+                (IngestDeliveryKind::AckSequential, false),
+                (IngestDeliveryKind::AckParallel, false),
+            ],
+            quiesce: FLEXIBLE,
+            locator: Some(("STREAM", "nats_stream")),
+            options: &[("CONSUMER", true)],
         },
         IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => IngestorSurface {
             delivery: &[
@@ -387,6 +396,8 @@ fn every_external_name_declares_its_label_and_an_example_its_rule_admits() {
     assert_declares_an_admitted_example::<RedisChannelName>("redis_channel");
     assert_declares_an_admitted_example::<NatsSubjectName>("nats_subject");
     assert_declares_an_admitted_example::<NatsQueueGroupName>("nats_queue_group");
+    assert_declares_an_admitted_example::<NatsStreamName>("nats_stream");
+    assert_declares_an_admitted_example::<NatsConsumerName>("nats_consumer");
     assert_declares_an_admitted_example::<MqttTopicFilter>("mqtt_topic_filter");
 }
 

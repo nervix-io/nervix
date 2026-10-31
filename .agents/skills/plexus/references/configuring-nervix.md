@@ -397,6 +397,11 @@ current connection, retry and deadline limits.
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
   sections of `Ingestors` and `Emitters`.
+- A `NATS STREAM` ingestor reads a durable pull consumer an operator provisioned:
+  `STREAM '<stream>' CONSUMER '<consumer>'` with `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL`, and
+  `SUSPEND`, `BUFFER` or `DROP` quiesce. Nervix creates neither the stream nor the consumer, and it
+  refuses a push consumer and one whose acknowledgement policy is not explicit. Read `Ingestors` →
+  `NATS` for redelivery, `MaxRequestBatch`, `MaxRequestExpires` and `AckWait`.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
   `OWNED BY INGESTOR` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
