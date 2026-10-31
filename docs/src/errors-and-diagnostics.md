@@ -430,6 +430,11 @@ answers a Model canonical Plexus cannot spell with a fixed diagnostic.
 
 ### Plexus Language And Formatter
 
+MQTT QoS refusals identify the supplied number, its source span, and the levels that the ingestor
+or emitter accepts. A refused `ON QUIESCE SUSPEND` identifies `SUSPEND` and its required
+`SESSION PERSISTENT QOS 1` pairing. Completion offers the quiesce modes the written session can
+use; a clean session or QoS 0 offers `BUFFER` and `DROP`.
+
 The language layer reports rejected source the same way. Lexing and parsing each create the report
 at the stage that failed, and its context names that stage and holds the rejected text with every
 diagnostic's message and byte span into it. A batch of statements is lexed once and each statement
