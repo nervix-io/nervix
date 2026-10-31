@@ -167,3 +167,7 @@ impl TransportState {
             .collect()
     }
 }
+
+#[cfg(test)]
+#[path = "target_order_tests.rs"]
+mod target_order_tests;

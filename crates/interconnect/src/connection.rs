@@ -2995,7 +2995,3 @@ impl StreamLease {
 #[cfg(test)]
 #[path = "connection/retained_slots_tests.rs"]
 mod retained_slots_tests;
-
-#[cfg(test)]
-#[path = "connection/target_order_tests.rs"]
-mod target_order_tests;
