@@ -843,7 +843,7 @@ remain in their owning work records until that delivery.
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
 | Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
-| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership. The declaration explicitly names delegated property namespaces and reserved keys. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
+| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
 composed head and canonical rendering use the vocabulary's connector kind; a console choice uses
@@ -982,6 +982,23 @@ property is librdkafka's, checked offline before commit, except the keys Nervix 
 consumers and producers it runs, which the client refuses. The Kafka-specific declaration tests,
 generated grammar conformance and one-/three-node public declaration scenarios qualify these facts
 together.
+
+`PULSAR TOPIC` shares one topic rule between ingestion and emission: a local name, which the
+connector places in its client's namespace, or a fully qualified
+`persistent://tenant/namespace/topic` or `non-persistent://tenant/namespace/topic`, sent as
+written; at most 1,024 bytes without whitespace, control characters or an empty level. The
+ingestor names a subscription of 1 to 255 bytes with its declared owner, declares `NO ACK`,
+`ACK SEQUENTIAL` and `ACK PARALLEL` in Pulsar's own delivery-mode type, and quiesces only by
+`SUSPEND`, since the durable subscription keeps its backlog. The emitter declares `NO ACK` and
+`ACK` publishing and optional batching under the `maxMessageSize` the broker announces. Message
+properties are headers in both directions, `ordered_repeats` on ingestion and `last_wins` on
+emission. A Pulsar client declares only the keys both directions read. `namespace` holds exactly a
+tenant and a namespace, with the default `public/default` written once in the declaration, and topic
+qualification reads that effective value, so a namespace that cannot qualify a topic is refused at
+`CREATE`. `tls_ca_file`, `tls_allow_insecure_connection` and `tls_hostname_verification_enabled`
+require a `pulsar+ssl` address, since a plaintext connection uses none of them. The
+Pulsar-specific declaration tests, generated grammar conformance and one-/three-node public
+declaration scenarios qualify these facts together.
 
 Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
 endpoint ingestors reference endpoints, while a Syslog listener references a client; all three
@@ -2095,7 +2112,9 @@ limit is classified like any other publish failure.
 
 Syslog sends a completed codec payload as one transport frame. Its UDP writer rejects a frame above
 65,507 bytes, octet-counted TCP and TLS reject a count needing more than ten digits, and
-non-transparent TCP rejects one containing LF. The Sentry writer accepts one
+non-transparent TCP rejects one containing LF. These frame limits are declared once in the Syslog
+vocabulary, which the collector's payload checks, the listener's octet-count decoder and the
+generated SYSLOG COLLECTOR reference all read. The Sentry writer accepts one
 JSON event per envelope and prepares that envelope once, before the host retains it. Preparation
 validates the event, preserves a supplied `event_id` with its exact spelling, generates one UUID
 only when the field is absent, and fills an absent `timestamp` from the batch's execution time.

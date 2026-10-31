@@ -26,8 +26,8 @@ pub mod listener;
 
 pub use collector::{SyslogCollectorEmitter, SyslogCollectorEmitterConfig};
 pub use config::{
-    DEFAULT_MAX_MESSAGE_SIZE, MAX_UDP_PAYLOAD_SIZE, SyslogClientConfig, SyslogConfigError,
-    SyslogDeadlineScope, SyslogDirection, SyslogFraming, SyslogProtocol,
+    DEFAULT_MAX_MESSAGE_SIZE, SyslogClientConfig, SyslogConfigError, SyslogDeadlineScope,
+    SyslogDirection, SyslogFraming, SyslogProtocol,
 };
 #[cfg(feature = "testing")]
 pub use listener::SyslogListenerFault;

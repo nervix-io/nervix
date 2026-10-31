@@ -150,6 +150,12 @@ after a failure resolves again, so an expired answer can be replaced without res
 | `tls_key_file` | Directional | Private key paired with `tls_cert_file` |
 | `tls_ca_file` | No | Ingestor client-certificate CA, or emitter server trust root |
 
+The SYSLOG client declaration states which side reads each key, as the generated
+[SYSLOG client reference](connector-capabilities.md#syslog-client) lists: only a listener reads
+`max_message_size` and `idle_timeout_ms`, and only a collector reads `framing` and `timeout_ms`.
+A listener takes each TCP frame's framing from the frame's first byte. Every other key is read on
+both sides.
+
 TLS file paths use normal client resource mounts. For example:
 
 ```plexus
