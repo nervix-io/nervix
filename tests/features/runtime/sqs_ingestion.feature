@@ -25,7 +25,9 @@ Feature: SQS ingestion
         CREATE SQS CLIENT sqs_main
         CONFIG {
           'endpoint' = '{{sqs_endpoint}}',
-          'region' = 'us-east-1'
+          'region' = 'us-east-1',
+          'access_key_id' = 'scenario-key',
+          'secret_access_key' = 'scenario-secret'
         };
         CREATE SQS QUEUE INGESTOR sqs_notifications
         FROM sqs_main QUEUE 'notifications_{{test_id}}' INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -86,7 +88,9 @@ Feature: SQS ingestion
         CREATE SQS CLIENT sqs_main
         CONFIG {
           'endpoint' = '{{sqs_endpoint}}',
-          'region' = 'us-east-1'
+          'region' = 'us-east-1',
+          'access_key_id' = 'scenario-key',
+          'secret_access_key' = 'scenario-secret'
         };
         CREATE SQS QUEUE INGESTOR sqs_notifications
         FROM sqs_main QUEUE 'notifications_reconnect_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -144,7 +148,9 @@ Feature: SQS ingestion
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_forwarded_endpoint}}',
-        'region' = 'us-east-1'
+        'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret'
       };
       CREATE SQS QUEUE INGESTOR sqs_in
         FROM sqs_main QUEUE 'outage_{{test_id}}' INSTANCES 1
@@ -197,7 +203,9 @@ Feature: SQS ingestion
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
-        'region' = 'us-east-1'
+        'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret'
       };
       CREATE SQS QUEUE INGESTOR sqs_in
         FROM sqs_main QUEUE 'missing_{{test_id}}' INSTANCES 1
@@ -243,7 +251,9 @@ Feature: SQS ingestion
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_held_endpoint}}',
-        'region' = 'us-east-1'
+        'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret'
       };
       CREATE SQS QUEUE INGESTOR sqs_in
         FROM sqs_main QUEUE 'held_{{test_id}}' INSTANCES 1
@@ -313,12 +323,16 @@ Feature: SQS ingestion
         CREATE SQS CLIENT sqs_main
         CONFIG {
           'endpoint' = '{{sqs_held_endpoint}}',
-          'region' = 'us-east-1'
+          'region' = 'us-east-1',
+          'access_key_id' = 'scenario-key',
+          'secret_access_key' = 'scenario-secret'
         };
         CREATE SQS CLIENT sqs_out
         CONFIG {
           'endpoint' = '{{sqs_endpoint}}',
-          'region' = 'us-east-1'
+          'region' = 'us-east-1',
+          'access_key_id' = 'scenario-key',
+          'secret_access_key' = 'scenario-secret'
         };
         CREATE SQS QUEUE INGESTOR sqs_parallel
         FROM sqs_main QUEUE 'parallel_{{test_id}}' MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 1h ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -396,7 +410,9 @@ Feature: SQS ingestion
         CREATE SQS CLIENT sqs_main
         CONFIG {
           'endpoint' = '{{sqs_endpoint}}',
-          'region' = 'us-east-1'
+          'region' = 'us-east-1',
+          'access_key_id' = 'scenario-key',
+          'secret_access_key' = 'scenario-secret'
         };
         CREATE SQS QUEUE INGESTOR sqs_rejecting
         FROM sqs_main QUEUE 'rejected_{{test_id}}' MODE <mode>
