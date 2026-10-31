@@ -18,14 +18,17 @@ pub(super) fn mqtt_qos_level<'src>(
     kw(Identifier::Qos)
         .ignore_then(
             select! { Token::NumberLiteral(raw) => raw }
+                .labelled("mqtt_qos")
                 .try_map(move |raw, span| {
                     if raw == expected {
                         Ok(())
                     } else {
-                        Err(Rich::custom(span, "MQTT emitter QOS must be 0, 1, or 2"))
+                        Err(Rich::custom(
+                            span,
+                            format!("MQTT emitter QOS must be 0, 1, or 2, found {raw}"),
+                        ))
                     }
-                })
-                .labelled("mqtt_qos"),
+                }),
         )
         .boxed()
 }
@@ -78,4 +81,54 @@ pub(super) fn topic_body<'src>(
                 mode,
             }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        conformance_support::{assert_offers_exactly, created_model},
+        parser_support::ParseFromSourceError,
+        statement::parse_statement,
+    };
+
+    fn statement(mode: &str) -> String {
+        format!(
+            "CREATE MQTT TOPIC EMITTER outgoing FROM events TO broker TOPIC 'events' MODE {mode} \
+             RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec FLUSH IMMEDIATE ON MESSAGE \
+             ERROR LOG ON GENERAL ERROR LOG;"
+        )
+    }
+
+    #[rstest::rstest]
+    #[case("3")]
+    #[case("256")]
+    fn qos_refusal_names_the_value_and_its_exact_source_span(#[case] qos: &str) {
+        let source = statement(&format!("QOS {qos}"));
+        let error = parse_statement(&source).expect_err("the emitter accepts only QoS 0, 1 or 2");
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
+            panic!("expected a parse refusal, got {error:?}");
+        };
+        let expected = format!("MQTT emitter QOS must be 0, 1, or 2, found {qos}");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.message == expected && &source[diagnostic.span.clone()] == qos
+            }),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn qos_completion_and_supported_publication_modes_remain_available() {
+        let prefix =
+            "CREATE MQTT TOPIC EMITTER outgoing FROM events TO broker TOPIC 'events' MODE QOS ";
+        assert_offers_exactly(prefix, &["mqtt_qos"]);
+        for mode in [
+            "QOS 0",
+            "QOS 1 ACK SEQUENTIAL ACK TIMEOUT 1s",
+            "QOS 2 ACK PARALLEL MAX 2 ACK TIMEOUT 1s",
+        ] {
+            let source = statement(mode);
+            assert!(created_model(&source).is_some(), "{source}");
+        }
+    }
 }
