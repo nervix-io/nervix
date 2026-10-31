@@ -64,6 +64,8 @@ class CalibrationTests(unittest.TestCase):
                 diagnostics.main()
             record = json.loads((output / "build.json").read_text())
             result = record["calibration"]
+            self.assertEqual(result["tools"]["sysbench"].get("returncode"), 0,
+                             result["tools"]["sysbench"])
             self.assertIn("sysbench", result["tools"]["sysbench"]["stdout"])
             for name in ("cpu", "memory-sequential", "memory-random"):
                 with self.subTest(name=name):

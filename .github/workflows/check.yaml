@@ -1711,7 +1711,9 @@ jobs:
           sudo apt update
           sudo apt install -y \
             libcurl4-openssl-dev \
-            protobuf-compiler
+            protobuf-compiler \
+            sysbench \
+            fio
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
