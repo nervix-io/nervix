@@ -141,8 +141,11 @@ as a bearer token is supplied through a declared `Authorization` header.
 
 Polling declares its method in the ingestor statement; it does not supply or
 override an emitter's required `METHOD` expression. A client used by several nodes must satisfy
-each use's contract. Emission does not maintain cookies, answer authentication challenges with
-additional requests, or follow redirects. Each application-level resend belongs to the declared
+each use's contract. Emission does not maintain cookies or answer authentication challenges with
+additional requests. It follows a redirect only when the client declares `follow_redirects = true`,
+and then only by sending the same request to a `Location` on the client's own origin, at most 10
+times, within the attempt's one timeout; a declared `proxy` carries every request, and the
+environment's proxy variables carry none. Each application-level resend belongs to the declared
 emitter retry policy.
 
 ### Method
@@ -277,10 +280,11 @@ endpoint accepted the request; Nervix does not poll for the endpoint's later pro
 Response bodies and trailers are not graph data, do not select success, and are not parsed or
 buffered in full. Nervix can stop reading them as soon as final headers determine the outcome.
 A body that stalls or fails after complete successful headers does not turn success into a retry.
-Connections are reused only when their HTTP framing permits reuse. Response headers are limited
-to 128 fields and 64 KiB of field-name and field-value bytes; exceeding either bound fails the
-attempt without acknowledging it. These bounds apply separately to each interim or final header
-block. Malformed framing in the final headers fails the attempt even if its status is `2xx`.
+Each request uses a fresh connection, which is never reused. hyper reads the response: over
+HTTP/1.1 a head of more than 100 fields or 417,792 bytes, and over HTTP/2 a header list of
+16,384 bytes or more as HTTP/2 counts it, fails the attempt without acknowledging it. These bounds apply separately to each
+interim or final head. Malformed framing in the final headers fails the attempt even if its status
+is `2xx`, and so does a status above `599`.
 
 The following classification is fixed:
 
@@ -291,9 +295,12 @@ The following classification is fixed:
 | `401`, `403`, or `407` | Report an authentication or authorization infrastructure failure; retain and retry until corrected. |
 | Other final `300`–`499` | Reject this record through `ON MESSAGE ERROR`; do not retry it locally. |
 | `101` | Reject this record through `ON MESSAGE ERROR`; an emitter cannot upgrade the connection. |
-| DNS, connection, TLS, timeout, malformed response, excessive response headers, or connection loss before complete final headers | Report an infrastructure failure; retain and retry the request. |
+| DNS, connection, TLS, timeout, malformed response, excessive response headers, connection loss before complete final headers, or a declared proxy that cannot be reached or refuses its tunnel | Report an infrastructure failure; retain and retry the request. |
 
-No redirect is followed, including a redirect to the same origin. `304` is not delivery success.
+Without `follow_redirects`, no redirect is followed, including a redirect to the same origin. With
+it, a `301`, `302`, `307` or `308`, or a `303` to a `GET` or `HEAD`, whose one `Location` names the
+client's origin sends the same request there; any other redirect is the final response and rejects
+the record. `304` is not delivery success.
 `409` is a rejection; Nervix does not infer that it means an earlier attempt succeeded. A status
 outside the valid final HTTP status range is a malformed response. Missing routes may therefore
 reject records with `404`; unavailable services may hold them with `503`.
@@ -468,7 +475,7 @@ three-node clusters.
    do not. Domain acceleration does not shorten these physical waits.
 10. A terminal `400`, `404`, `409`, `413`, or redirect reaches the configured message-error route
     with safe diagnostics and the original branch. Other records continue after error handling.
-    Redirects cause no request to their `Location`.
+    Redirects a client does not follow cause no request to their `Location`.
 11. HTTPS trust, hostname verification, and mounted client certificates follow the declared
     configuration. An invalid certificate never produces an acknowledged request.
 12. Interleaved branches and multiple eligible source relays retain independent collection and
