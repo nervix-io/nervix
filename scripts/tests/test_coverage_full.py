@@ -1182,9 +1182,13 @@ class WorkflowTests(unittest.TestCase):
             else:
                 expected.add(requirement.artifact)
         self.assertEqual(downloaded, expected)
+        # The download action unpacks a pattern's only match straight into its path, so each
+        # download names its own directory and every artifact reaches the union as one input.
         for step in job.split("\n      - name: "):
-            if "pattern:" in step:
-                self.assertIn("path: coverage-full-inputs\n", step)
+            if "pattern:" not in step:
+                continue
+            pattern = re.search(r"pattern: (\S+)", step)[1]
+            self.assertIn(f"path: coverage-full-inputs/{pattern.removesuffix('-*')}\n", step)
 
     def test_the_union_job_records_the_snapshot_then_combines_through_the_recipes(self) -> None:
         job = job_section(self.workflow, "coverage-full")

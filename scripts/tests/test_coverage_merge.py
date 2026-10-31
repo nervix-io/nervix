@@ -558,6 +558,12 @@ class WorkflowTests(unittest.TestCase):
         # Every scenario shard's report lands in a directory named after its artifact, and the merge
         # names each shard the workflow runs, so a missing report fails it.
         self.assertIn("          path: coverage-inputs\n", step_section(job, "Download scenarios coverage"))
+        # The download action unpacks a pattern's only match straight into its path, so the native
+        # extras name the directory the merge reads.
+        self.assertIn(
+            "          path: coverage-inputs/coverage-native-extras\n",
+            step_section(job, "Download native extra coverage"),
+        )
         merge = step_section(job, "Merge coverage")
         self.assertIn('for shard in $(seq 1 "${SCENARIO_SHARDS}"); do\n', merge)
         self.assertIn('scenarios+=("coverage-inputs/coverage-scenarios-${shard}")\n', merge)

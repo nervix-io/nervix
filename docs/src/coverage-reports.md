@@ -513,6 +513,11 @@ just coverage-full-select --event "$EVENT" --labels "$LABELS" \
 just coverage-full coverage-full-inputs/*
 ```
 
+Each download names its own directory below `coverage-full-inputs`, so every artifact reaches the
+union as one input. The download action unpacks a pattern's only match straight into the path it is
+given, and each of several matches, such as the `deloxide-<selection>` artifacts, into a directory
+named after it.
+
 The selection is the run's event and pull request label snapshot, whether the tested diff required
 the suites and the Bolero call, the run and its attempt, the tested revision, and every producer
 job's result. It decides which producers the union requires:

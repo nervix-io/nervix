@@ -1233,11 +1233,13 @@ jobs:
           pattern: coverage-scenarios-*
           path: coverage-inputs
 
+      # The download action unpacks a pattern's only match straight into its path, so the native
+      # extras name the directory the merge reads.
       - name: Download native extra coverage
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-native-extras
-          path: coverage-inputs
+          path: coverage-inputs/coverage-native-extras
 
       # One repository-relative report of the ordinary producers, which every step below reads. The
       # merge leaves out the collections of other modes the native extras artifact holds, and fails
@@ -1356,23 +1358,26 @@ jobs:
           just coverage-full-select --event "$EVENT" --labels "$LABELS" \
             --tests-required "$TESTS_REQUIRED" --bolero-required "$BOLERO_REQUIRED" --jobs "$JOBS"
 
+      # The download action unpacks a pattern's only match straight into its path, and each of
+      # several matches into a directory named after it. Every download therefore names its own
+      # directory, and the union reads each artifact as one input.
       - name: Download ordinary coverage
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-merged
-          path: coverage-full-inputs
+          path: coverage-full-inputs/coverage-merged
 
       - name: Download native extra coverage
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-native-extras
-          path: coverage-full-inputs
+          path: coverage-full-inputs/coverage-native-extras
 
       - name: Download diagnostic evidence
         uses: actions/download-artifact@v8
         with:
           pattern: diagnostic-evidence
-          path: coverage-full-inputs
+          path: coverage-full-inputs/diagnostic-evidence
 
       # The artifacts of label-enabled producers and of the Bolero call. A pattern that matches no
       # artifact downloads nothing; the union then names what the selection required and lacks.
@@ -1380,37 +1385,39 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-shuttle
-          path: coverage-full-inputs
+          path: coverage-full-inputs/coverage-shuttle
 
       - name: Download Loom coverage
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-loom
-          path: coverage-full-inputs
+          path: coverage-full-inputs/coverage-loom
 
       - name: Download Turmoil coverage
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-turmoil
-          path: coverage-full-inputs
+          path: coverage-full-inputs/coverage-turmoil
 
+      # One lane's artifact unpacks into this directory and several into one directory each below
+      # it; the union reads the completion records beneath it either way.
       - name: Download Deloxide lane coverage
         uses: actions/download-artifact@v8
         with:
           pattern: deloxide-*
-          path: coverage-full-inputs
+          path: coverage-full-inputs/deloxide
 
       - name: Download combined fuzz coverage
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-bolero-fuzz
-          path: coverage-full-inputs
+          path: coverage-full-inputs/coverage-bolero-fuzz
 
       - name: Download Bolero selection
         uses: actions/download-artifact@v8
         with:
           pattern: bolero-selection
-          path: coverage-full-inputs
+          path: coverage-full-inputs/bolero-selection
 
       - name: Combine coverage
         if: ${{ !cancelled() }}
