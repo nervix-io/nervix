@@ -650,6 +650,17 @@ envelope is encoded, before waiting for a connection lease or response headers. 
 for both allocations is a typed encoding admission failure, which releases both allocations
 rather than waiting while retaining the input. The request is not sent after such a refusal.
 
+Receive-side rkyv decoding follows the same admission rule. A charged body never waits for a
+second reservation while keeping its input, and a nested request never waits while its outer
+envelope remains charged. Both refuse immediately when the class has no free room, including
+room assigned to an earlier queued reservation. A nested decoder gives its input an independent
+charge that travels into the CPU job; cancellation of the enclosing request cannot release that
+charge before the job releases its bytes. The decoded value retains its own reservation.
+Memory-budget and execution-queue refusals carry typed remote outcomes with their traffic class
+and requested bytes or queue count. Temporary admission refusals while opening byte and duplex streams
+answer HTTP 503; an operation exceeding the whole memory budget answers 413. Neither means that
+the input was malformed. The relay quota probe retains its distinct `NoRoom` outcome.
+
 Stream slots are isolated per connection, and therefore per peer. Admission quotas, memory budgets,
 and CPU wait queues are isolated per class and shared by every peer of the node. A slow or stalled
 peer therefore holds at most the stream slots of its own connections. Once it holds the 32 shared

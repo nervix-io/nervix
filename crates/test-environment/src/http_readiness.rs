@@ -21,6 +21,7 @@ impl HttpReadiness {
         reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(5))
             .build()
             .map_err(io::Error::other)
     }

@@ -317,9 +317,7 @@ impl SessionServiceImpl {
             .runtime
             .take_relocation_commit_refusal(inputs.domain())
         {
-            return Err(Report::new(ConsensusError::LeadershipLost {
-                leader_id: None,
-            }));
+            return Err(Report::new(self.inner.consensus.lapsed_lease_refusal()));
         }
         self.inner
             .consensus
@@ -977,6 +975,8 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_commit_refused_by_a_leader_that_cannot_confirm_it_leads_answers_as_a_non_leader() {
+        use nervix_consensus::LeadershipObservation;
+
         use crate::application::{
             command_result::{CommandDisposition, LeaderRedirect, NodeLocation},
             test_fixtures::{TestService, build_test_service},
@@ -991,30 +991,30 @@ mod tests {
         let destination = node_name("node-2");
         let observed_leader = node_name("node-3");
 
-        let lapsed_lease = Report::new(ConsensusError::LeadershipLost { leader_id: None });
+        let lapsed_lease = Report::new(ConsensusError::LeadershipLost {
+            observed: LeadershipObservation::UnconfirmedLease { term: 2 },
+        });
         let answer = service
             .refused_relocation_commit(&destination, &domain, &lapsed_lease)
             .await;
         assert_eq!(
             answer.disposition,
-            CommandDisposition::NotLeader(LeaderRedirect { leader: None })
+            CommandDisposition::NotLeader(LeaderRedirect::UnconfirmedLease { term: 2 })
         );
 
         let moved_leadership = Report::new(ConsensusError::LeadershipLost {
-            leader_id: Some(observed_leader.clone()),
+            observed: LeadershipObservation::Leader(observed_leader.clone()),
         });
         let answer = service
             .refused_relocation_commit(&destination, &domain, &moved_leadership)
             .await;
         assert_eq!(
             answer.disposition,
-            CommandDisposition::NotLeader(LeaderRedirect {
-                leader: Some(NodeLocation {
-                    node: observed_leader,
-                    grpc_url: None,
-                    web_console_url: None,
-                }),
-            })
+            CommandDisposition::NotLeader(LeaderRedirect::Leader(NodeLocation {
+                node: observed_leader,
+                grpc_url: None,
+                web_console_url: None,
+            }))
         );
 
         drop(service);

@@ -102,6 +102,8 @@ pub use cluster_parameters::ClusterParameterPlanningInputs;
 mod connectivity_fault;
 mod domain_mutation;
 mod durable_batch;
+mod leadership;
+mod lease_refusal;
 mod raft_record;
 mod records;
 mod replication;
@@ -119,6 +121,10 @@ pub use command_execution::{
     CommandExecutionTransactionTarget, DiagnosticSpan, RecordedBackupArchive,
 };
 pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
+pub use leadership::LeadershipObservation;
+#[cfg(any(test, feature = "testing"))]
+pub use lease_refusal::CommandWrite;
+use lease_refusal::LeaseRefusal;
 pub use restore::{
     RestoreExecution, RestoreStateInstallationError, RestoreStateRetention, RestoreStepEffect,
     RestoredResource,
@@ -1813,8 +1819,11 @@ pub enum ConsensusError {
     Conflict(ConsensusConflict),
     #[error("raft returned an unexpected response to a state mutation")]
     UnexpectedResponse,
-    #[error("raft proposal lost leadership")]
-    LeadershipLost { leader_id: Option<ClusterNodeName> },
+    /// This node cannot propose as the writable leader. `observed` says what it knew when it was
+    /// refused: another node leads, no leader is known, or it leads but could not confirm its
+    /// lease and may still lead.
+    #[error("this node cannot propose as the leader: {observed}")]
+    LeadershipLost { observed: LeadershipObservation },
     #[error("node '{0}' is not a raft member")]
     NodeNotFound(String),
     #[error("cannot identify the current incarnation of raft member '{0}'")]
@@ -1904,13 +1913,24 @@ impl ConsensusError {
         }
     }
 
+    /// The report of a write Raft did not accept on `local`. A write Raft forwarded is a leadership
+    /// refusal, observed from the leader it names and the tenure `local` observed when it proposed
+    /// the write and after the refusal.
     fn raft_write_report(
         error: RaftError<TypeConfig, ClientWriteError<TypeConfig>>,
+        local: &ClusterNodeName,
+        proposed_under: Option<&LeaderTenure>,
+        refused_under: Option<&LeaderTenure>,
     ) -> Report<Self> {
         let context = match &error {
             RaftError::APIError(ClientWriteError::ForwardToLeader(forward)) => {
                 Self::LeadershipLost {
-                    leader_id: forward.leader_id.clone(),
+                    observed: LeadershipObservation::of_refused_write(
+                        forward.leader_id.clone(),
+                        local,
+                        proposed_under,
+                        refused_under,
+                    ),
                 }
             }
             RaftError::Fatal(openraft::error::Fatal::StorageError(_)) => Self::RaftStorage,
@@ -2015,9 +2035,9 @@ impl RaftTopologyWatcher {
 /// Proposes replicated commands and includes read-only observation.
 ///
 /// This capability authorizes proposal attempts. Leadership may change after an earlier
-/// check, so Raft acceptance determines whether each proposal succeeds. A proposal rejected
-/// after leadership is lost returns [`ConsensusError::LeadershipLost`] with the leader ID
-/// when Raft knows it.
+/// check, so Raft acceptance determines whether each proposal succeeds. A proposal Raft refuses
+/// because this node cannot write as the leader returns [`ConsensusError::LeadershipLost`] with
+/// what this node observed: the leader Raft names, no leader, or its own unconfirmed lease.
 ///
 /// A proposer cannot change Raft membership:
 /// ```compile_fail
@@ -2092,6 +2112,8 @@ struct ConsensusState {
     interconnect_advertise_addr: NodeEndpoint,
     interconnect: Transport,
     connectivity: ConnectivityFault,
+    /// A test harness's refusal of one command execution's proposal; inert outside test builds.
+    lease_refusal: LeaseRefusal,
     raft_retention: RaftRetentionPolicy,
     /// Serializes membership changes, and holds the admission refusals the leader has reported.
     membership_mutation: AsyncMutex<ReportedAdmissionRefusals>,
@@ -2119,6 +2141,7 @@ struct ConsensusTestProbeState {
     storage_fault: StorageFault,
     append_stream_counts: Mutex<BTreeMap<ClusterNodeName, AppendStreamCounts>>,
     connectivity: ConnectivityFault,
+    lease_refusal: LeaseRefusal,
 }
 
 #[cfg(feature = "testing")]
@@ -2163,6 +2186,25 @@ impl ConsensusTestProbe {
         self.inner.connectivity.restore();
     }
 
+    /// Makes this node refuse `reference`'s next `write` the way a leader whose lease lapsed
+    /// refuses a write: before appending it, naming no leader, while it keeps leading its term.
+    pub async fn refuse_command_write_as_lapsed_lease(
+        &self,
+        reference: nervix_models::CommandExecutionReference,
+        write: CommandWrite,
+    ) {
+        self.inner.lease_refusal.arm(reference, write).await;
+    }
+
+    /// Whether this node refused `reference`'s `write` as the refusal armed for it.
+    pub async fn command_write_refused_as_lapsed_lease(
+        &self,
+        reference: &nervix_models::CommandExecutionReference,
+        write: CommandWrite,
+    ) -> bool {
+        self.inner.lease_refusal.delivered(reference, write).await
+    }
+
     fn record_append_stream_open(&self, target: &ClusterNodeName) {
         let mut counts = self.inner.append_stream_counts.lock();
         let count = counts.entry(target.clone()).or_default();
@@ -2186,6 +2228,7 @@ trait AppendStreamOpenRecorder: Clone + Send + Sync + 'static {
     fn record_append_stream_open(&self, target: &ClusterNodeName);
     fn record_append_stream_attempt(&self, target: &ClusterNodeName);
     fn connectivity_fault(&self) -> ConnectivityFault;
+    fn lease_refusal(&self) -> LeaseRefusal;
 }
 
 impl AppendStreamOpenRecorder for () {
@@ -2194,6 +2237,10 @@ impl AppendStreamOpenRecorder for () {
 
     fn connectivity_fault(&self) -> ConnectivityFault {
         ConnectivityFault::default()
+    }
+
+    fn lease_refusal(&self) -> LeaseRefusal {
+        LeaseRefusal::default()
     }
 }
 
@@ -2209,6 +2256,10 @@ impl AppendStreamOpenRecorder for ConsensusTestProbe {
 
     fn connectivity_fault(&self) -> ConnectivityFault {
         self.inner.connectivity.clone()
+    }
+
+    fn lease_refusal(&self) -> LeaseRefusal {
+        self.inner.lease_refusal.clone()
     }
 }
 
@@ -2382,6 +2433,7 @@ impl Consensus {
         );
 
         let connectivity = append_stream_open_recorder.connectivity_fault();
+        let lease_refusal = append_stream_open_recorder.lease_refusal();
         let network = NetworkFactory {
             local_node_id: settings.node_id.clone(),
             interconnect: settings.interconnect.clone(),
@@ -2449,6 +2501,7 @@ impl Consensus {
                 interconnect_advertise_addr: settings.interconnect_advertise_addr,
                 interconnect: settings.interconnect,
                 connectivity,
+                lease_refusal,
                 raft_retention: retention,
                 membership_mutation: AsyncMutex::new(ReportedAdmissionRefusals::default()),
                 admission_verdicts: watch::channel(None).0,
@@ -3097,11 +3150,23 @@ impl Observer {
     /// fence for a leader's availability view; an observation from another term cannot complete a
     /// command on this node.
     pub fn current_leader_tenure(&self) -> Option<LeaderTenure> {
-        let metrics = self.inner.raft.metrics().borrow_watched().clone();
-        Some(LeaderTenure {
-            leader_id: metrics.current_leader?,
-            term: metrics.current_term,
-        })
+        self.inner.leader_tenure()
+    }
+
+    /// The refusal a write would meet if this node's lease lapsed now: Raft forwards it to no one,
+    /// and the refusal is observed against this node's current tenure. A test harness refuses a
+    /// write with it instead of proposing the write.
+    #[cfg(feature = "testing")]
+    pub fn lapsed_lease_refusal(&self) -> ConsensusError {
+        let tenure = self.inner.leader_tenure();
+        ConsensusError::LeadershipLost {
+            observed: LeadershipObservation::of_refused_write(
+                None,
+                &self.inner.local_node_id,
+                tenure.as_ref(),
+                tenure.as_ref(),
+            ),
+        }
     }
 
     pub async fn status_lines(&self) -> Vec<String> {
@@ -3430,7 +3495,7 @@ impl Proposer {
         let before = self.inner.raft.metrics().borrow_watched().clone();
         if before.current_leader.as_ref() != Some(&self.inner.local_node_id) {
             return Err(Report::new(ConsensusError::LeadershipLost {
-                leader_id: before.current_leader,
+                observed: before.current_leader.into(),
             }));
         }
 
@@ -3440,7 +3505,7 @@ impl Proposer {
             || after.current_term != before.current_term
         {
             return Err(Report::new(ConsensusError::LeadershipLost {
-                leader_id: after.current_leader,
+                observed: after.current_leader.into(),
             }));
         }
 
@@ -3513,11 +3578,12 @@ impl Proposer {
     ) -> Result<(), Report<ConsensusError>> {
         if fence.leader_tenure.leader_id != self.inner.local_node_id {
             return Err(Report::new(ConsensusError::LeadershipLost {
-                leader_id: self.inner.raft.current_leader().await,
+                observed: self.inner.raft.current_leader().await.into(),
             }));
         }
 
-        let response = self
+        let proposed_under = self.inner.leader_tenure();
+        let written = self
             .inner
             .raft
             .client_write(ConsensusCommand::ApplyAutomaticDomainSchedule {
@@ -3525,8 +3591,11 @@ impl Proposer {
                 inputs: Box::new(inputs),
                 schedule: schedule.map(Box::new),
             })
-            .await
-            .map_err(ConsensusError::raft_write_report)?;
+            .await;
+        let response = match written {
+            Ok(response) => response,
+            Err(error) => return Err(self.inner.write_failure(error, proposed_under)),
+        };
         Self::applied_response(response.data)
     }
 
@@ -3734,12 +3803,14 @@ impl Proposer {
         reference: nervix_models::CommandExecutionReference,
         domain: DomainName,
     ) -> error_stack::Result<nervix_models::RestoreStateAuthority, ConsensusError> {
-        let tenure = self
-            .current_leader_tenure()
-            .ok_or_else(|| Report::new(ConsensusError::LeadershipLost { leader_id: None }))?;
+        let tenure = self.current_leader_tenure().ok_or_else(|| {
+            Report::new(ConsensusError::LeadershipLost {
+                observed: LeadershipObservation::NoLeader,
+            })
+        })?;
         if tenure.leader_id() != self.local_node_id() {
             return Err(Report::new(ConsensusError::LeadershipLost {
-                leader_id: Some(tenure.leader_id().clone()),
+                observed: LeadershipObservation::Leader(tenure.leader_id().clone()),
             }));
         }
         let response = self
@@ -3765,10 +3836,11 @@ impl Proposer {
             || authority.term != tenure.term()
             || self.current_leader_tenure().as_ref() != Some(&tenure)
         {
+            let leader = self
+                .current_leader_tenure()
+                .map(|tenure| tenure.leader_id().clone());
             return Err(Report::new(ConsensusError::LeadershipLost {
-                leader_id: self
-                    .current_leader_tenure()
-                    .map(|tenure| tenure.leader_id().clone()),
+                observed: leader.into(),
             }));
         }
         Ok(authority.clone())
@@ -4148,6 +4220,7 @@ impl Administrator {
                 MembershipMutation::UpdateAddress { node_id, endpoint } => {
                     let operation = format!("update address of '{node_id}' to {endpoint}");
                     self.inner.events.report(format!("raft {operation}"));
+                    let proposed_under = self.inner.leader_tenure();
                     let update = timeout(
                         MEMBERSHIP_MUTATION_TIMEOUT,
                         self.inner.raft.change_membership(
@@ -4166,7 +4239,9 @@ impl Administrator {
                             return Err(Report::new(self.membership_timeout(operation, &observed)));
                         }
                     };
-                    result.map_err(ConsensusError::raft_write_report)?;
+                    if let Err(error) = result {
+                        return Err(self.inner.write_failure(error, proposed_under));
+                    }
                 }
                 MembershipMutation::AddLearner { node_id, endpoint } => {
                     let operation = if before.nodes.contains_key(&node_id) {
@@ -4175,6 +4250,7 @@ impl Administrator {
                         format!("add learner '{node_id}' at {endpoint}")
                     };
                     self.inner.events.report(format!("raft {operation}"));
+                    let proposed_under = self.inner.leader_tenure();
                     let admission = timeout(
                         MEMBERSHIP_MUTATION_TIMEOUT,
                         self.inner.raft.add_learner(
@@ -4191,10 +4267,13 @@ impl Administrator {
                             return Err(Report::new(self.membership_timeout(operation, &observed)));
                         }
                     };
-                    result.map_err(ConsensusError::raft_write_report)?;
+                    if let Err(error) = result {
+                        return Err(self.inner.write_failure(error, proposed_under));
+                    }
                 }
                 MembershipMutation::ChangeVoters { voters } => {
                     let operation = format!("promote voters {voters:?}");
+                    let proposed_under = self.inner.leader_tenure();
                     let membership = timeout(
                         MEMBERSHIP_MUTATION_TIMEOUT,
                         self.inner.raft.change_membership(voters.clone(), true),
@@ -4210,7 +4289,9 @@ impl Administrator {
                             return Err(Report::new(self.membership_timeout(operation, &observed)));
                         }
                     };
-                    result.map_err(ConsensusError::raft_write_report)?;
+                    if let Err(error) = result {
+                        return Err(self.inner.write_failure(error, proposed_under));
+                    }
                 }
             }
         }
@@ -4286,6 +4367,7 @@ impl Administrator {
         }
 
         let operation = format!("remove node '{node_id}'");
+        let proposed_under = self.inner.leader_tenure();
         let membership = timeout(
             MEMBERSHIP_MUTATION_TIMEOUT,
             self.inner
@@ -4306,7 +4388,9 @@ impl Administrator {
                 return Err(Report::new(self.membership_timeout(operation, &observed)));
             }
         };
-        result.map_err(ConsensusError::raft_write_report)?;
+        if let Err(error) = result {
+            return Err(self.inner.write_failure(error, proposed_under));
+        }
 
         self.inner
             .events
@@ -4385,10 +4469,44 @@ impl ConsensusState {
                 }));
             }
         }
-        self.raft
-            .client_write(command)
-            .await
-            .map_err(ConsensusError::raft_write_report)
+        let proposed_under = self.leader_tenure();
+        if self.lease_refusal.take(&command).await {
+            let refusal = RaftError::APIError(ClientWriteError::ForwardToLeader(
+                openraft::error::ForwardToLeader::empty(),
+            ));
+            return Err(self.write_failure(refusal, proposed_under));
+        }
+        match self.raft.client_write(command).await {
+            Ok(response) => Ok(response),
+            Err(error) => Err(self.write_failure(error, proposed_under)),
+        }
+    }
+
+    /// The leader and term this node observes in its latest Raft metrics.
+    fn leader_tenure(&self) -> Option<LeaderTenure> {
+        let metrics = self.raft.metrics();
+        let metrics = metrics.borrow_watched();
+        let leader_id = metrics.current_leader.clone()?;
+        Some(LeaderTenure {
+            leader_id,
+            term: metrics.current_term,
+        })
+    }
+
+    /// The report of a write Raft did not accept, given the tenure this node observed when it
+    /// proposed the write.
+    fn write_failure(
+        &self,
+        error: RaftError<TypeConfig, ClientWriteError<TypeConfig>>,
+        proposed_under: Option<LeaderTenure>,
+    ) -> Report<ConsensusError> {
+        let refused_under = self.leader_tenure();
+        ConsensusError::raft_write_report(
+            error,
+            &self.local_node_id,
+            proposed_under.as_ref(),
+            refused_under.as_ref(),
+        )
     }
 }
 
@@ -6904,8 +7022,8 @@ mod tests {
         validate_protocol_origin,
     };
     use crate::{
-        ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionActivity,
-        TransactionQueueLimits, TransactionState, UserName, VoteOf,
+        ClusterNodeName, ConsensusError, LeadershipObservation, LogIdOf, ReplicatedTransaction,
+        TransactionActivity, TransactionQueueLimits, TransactionState, UserName, VoteOf,
     };
 
     fn domain(raw: &str) -> DomainName {
@@ -7031,36 +7149,64 @@ mod tests {
     }
 
     #[test]
-    fn proposal_leadership_loss_retains_known_and_unknown_leaders()
+    fn a_forwarded_proposal_reports_what_its_node_observed_about_leadership()
     -> Result<(), Box<dyn std::error::Error>> {
-        let node = ClusterNodeName::parse("node-2")?;
-        for leader_id in [Some(node), None] {
+        let local = ClusterNodeName::parse("node-1")?;
+        let other = ClusterNodeName::parse("node-2")?;
+        let led = LeaderTenure {
+            leader_id: local.clone(),
+            term: 4,
+        };
+        let succeeded = LeaderTenure {
+            leader_id: other.clone(),
+            term: 5,
+        };
+        let cases = [
+            (
+                Some(other.clone()),
+                Some(&led),
+                LeadershipObservation::Leader(other.clone()),
+                "this node cannot propose as the leader: node 'node-2' leads",
+            ),
+            (
+                None,
+                Some(&led),
+                LeadershipObservation::UnconfirmedLease { term: 4 },
+                "this node cannot propose as the leader: this node leads term 4 but could not \
+                 confirm its lease",
+            ),
+            (
+                None,
+                Some(&succeeded),
+                LeadershipObservation::NoLeader,
+                "this node cannot propose as the leader: no leader is known",
+            ),
+        ];
+        for (named, refused_under, expected, message) in cases {
             let error =
                 super::RaftError::APIError(openraft::error::ClientWriteError::ForwardToLeader(
                     openraft::error::ForwardToLeader::<TypeConfig> {
-                        leader_id: leader_id.clone(),
+                        leader_id: named,
                         leader_node: None,
                     },
                 ));
-            let report = ConsensusError::raft_write_report(error);
-            let ConsensusError::LeadershipLost { leader_id: actual } = report.current_context()
-            else {
-                panic!("a proposal rejected by a non-leader must preserve leadership loss");
+            let report =
+                ConsensusError::raft_write_report(error, &local, Some(&led), refused_under);
+            let ConsensusError::LeadershipLost { observed } = report.current_context() else {
+                panic!("a forwarded proposal must be a leadership refusal");
             };
-            assert_eq!(actual, &leader_id);
+            assert_eq!(observed, &expected);
             assert!(report.downcast_ref::<super::RaftError<TypeConfig, openraft::error::ClientWriteError<TypeConfig>>>().is_some());
-            assert_eq!(
-                ConsensusError::report_message(&report),
-                report.current_context().to_string()
-            );
+            assert_eq!(ConsensusError::report_message(&report), message);
         }
         Ok(())
     }
 
     #[test]
-    fn proposal_runtime_failure_retains_raft_source() {
+    fn proposal_runtime_failure_retains_raft_source() -> Result<(), Box<dyn std::error::Error>> {
+        let local = ClusterNodeName::parse("node-1")?;
         let error = super::RaftError::Fatal(openraft::error::Fatal::<TypeConfig>::Stopped);
-        let report = ConsensusError::raft_write_report(error);
+        let report = ConsensusError::raft_write_report(error, &local, None, None);
         assert!(matches!(
             report.current_context(),
             ConsensusError::RaftWrite
@@ -7070,6 +7216,7 @@ mod tests {
             ConsensusError::report_message(&report),
             "raft write failed: raft stopped"
         );
+        Ok(())
     }
 
     #[test]
@@ -7098,22 +7245,28 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_storage_failure_retains_raft_source_and_storage_classification() {
+    fn snapshot_storage_failure_retains_raft_source_and_storage_classification()
+    -> Result<(), Box<dyn std::error::Error>> {
         let storage_error = openraft::StorageError::<TypeConfig>::from_io_error(
             openraft::ErrorSubject::Snapshot(None),
             openraft::ErrorVerb::Write,
             std::io::Error::other("snapshot unavailable"),
         );
         let expected = format!("consensus storage failed: {storage_error}");
-        let report = ConsensusError::raft_write_report(super::RaftError::Fatal(
-            openraft::error::Fatal::StorageError(storage_error),
-        ));
+        let local = ClusterNodeName::parse("node-1")?;
+        let report = ConsensusError::raft_write_report(
+            super::RaftError::Fatal(openraft::error::Fatal::StorageError(storage_error)),
+            &local,
+            None,
+            None,
+        );
         assert!(matches!(
             report.current_context(),
             ConsensusError::RaftStorage
         ));
         assert!(report.downcast_ref::<super::RaftError<TypeConfig, openraft::error::ClientWriteError<TypeConfig>>>().is_some());
         assert_eq!(ConsensusError::report_message(&report), expected);
+        Ok(())
     }
 
     #[test]
@@ -7121,13 +7274,13 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let leader = ClusterNodeName::parse("node-2")?;
         let consensus = Report::new(ConsensusError::LeadershipLost {
-            leader_id: Some(leader.clone()),
+            observed: LeadershipObservation::Leader(leader.clone()),
         })
         .change_context(super::ConsensusTransactionError::Consensus);
         assert!(matches!(
             consensus.downcast_ref::<ConsensusError>(),
             Some(ConsensusError::LeadershipLost {
-                leader_id: Some(actual),
+                observed: LeadershipObservation::Leader(actual),
             }) if actual == &leader
         ));
 

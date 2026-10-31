@@ -26,7 +26,8 @@ use crate::{
 /// Why a command's authoritative outcome is not known yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnknownOutcomeCause {
-    /// Leadership moved after the command was durably admitted.
+    /// After the command was durably admitted, or while its admission was being decided,
+    /// leadership moved or the leader could not confirm its lease and may still lead.
     LeadershipLost,
     /// The command is durably admitted and still applying.
     StillApplying,

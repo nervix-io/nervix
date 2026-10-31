@@ -115,7 +115,7 @@ impl SessionServiceImpl {
     {
         let leader = self.inner.consensus.current_leader().await;
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-            let redirect = self.not_leader_response("", leader).await;
+            let redirect = self.not_leader_response("", leader.into()).await;
             return Ok(RestoreAnswer::outcome(CommandResponse::executed(redirect)));
         }
         match request.restore.mode {

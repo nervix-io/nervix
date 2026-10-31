@@ -131,7 +131,7 @@ impl SessionServiceImpl {
         }
         let leader = self.inner.consensus.current_leader().await;
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-            let redirect = self.redirect_to_leader(leader).await;
+            let redirect = self.redirect_to_leader(leader.into()).await;
             return Ok(UploadReply {
                 request_id: Some(request_id),
                 disposition: UploadDisposition::NotLeader(leader_redirect(redirect)),

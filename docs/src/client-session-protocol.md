@@ -536,7 +536,10 @@ or I/O reason. Report carriage does not change request correlation, the durable 
 boundary, or the stored transaction response. A leader whose lease lapsed, because no quorum
 acknowledged it within the lease, refuses a proposal before appending it and names no leader. The
 session answers that refusal as leadership loss, never as a failure of the command, even though the
-same node may still lead when it answers.
+same node may still lead when it answers. Its message says the leader could not confirm its lease in
+its term and may still lead, while a refusal after leadership moved says that leadership moved and
+names the new leader when the node knows it. The disposition and its cause are the same for both,
+because a client recovers from both the same way.
 
 | Disposition | Phase | What it establishes | What a client does |
 | --- | --- | --- | --- |

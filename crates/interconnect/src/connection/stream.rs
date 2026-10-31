@@ -29,7 +29,7 @@ use nervix_primitives::time::{Instant, timeout};
 
 use super::{
     BODY_CHUNK_BYTES, RawRequest, STREAM_PATH, StreamLease, TransportState, read_body,
-    send_static_error,
+    send_decode_refusal, send_static_error,
 };
 use crate::{
     PoolClass, RequestError, RequestSubquota, TransportError,
@@ -225,7 +225,15 @@ impl TransportState {
             class.cpu_class(),
             bytes,
         )
-        .await?;
+        .await;
+        let decoded = match decoded {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                send_decode_refusal(&mut respond, class, error, self.options.progress_timeout)
+                    .await?;
+                return Ok(());
+            }
+        };
         let (request, _reservation) = decoded.into_parts();
         if request.class != class {
             send_static_error(
@@ -255,7 +263,7 @@ impl TransportState {
             Err(error) => {
                 send_static_error(
                     &mut respond,
-                    StatusCode::BAD_REQUEST,
+                    error.status(),
                     &error.to_string(),
                     self.options.progress_timeout,
                 )

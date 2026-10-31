@@ -895,7 +895,7 @@ impl SessionServiceImpl {
     ) -> TransactionAttachment {
         let leader = self.inner.consensus.current_leader().await;
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-            let refusal = self.not_leader_response("", leader).await;
+            let refusal = self.not_leader_response("", leader.into()).await;
             return TransactionAttachment::Refused(Box::new(refusal));
         }
         let Some(transaction) = self
@@ -1672,8 +1672,8 @@ impl SessionServiceImpl {
             Err(error) => {
                 let proposal_error = error.downcast_ref::<ConsensusError>();
                 let mut result =
-                    if let Some(ConsensusError::LeadershipLost { leader_id }) = proposal_error {
-                        self.not_leader_response("", leader_id.clone()).await
+                    if let Some(ConsensusError::LeadershipLost { observed }) = proposal_error {
+                        self.not_leader_response("", observed.clone()).await
                     } else {
                         let message = transaction_commit_error_message(&error);
                         command_error(format!(
@@ -1746,9 +1746,11 @@ impl SessionServiceImpl {
             nervix_primitives::task::consume_budget().await;
             let leader_id = Box::pin(self.inner.consensus.current_leader()).await;
             if leader_id.as_ref() != Some(self.inner.consensus.local_node_id()) {
-                return Err(Report::new(ConsensusError::LeadershipLost { leader_id })
-                    .change_context(ConsensusTransactionError::Consensus)
-                    .change_context(TransactionCommitError::Proposal));
+                return Err(Report::new(ConsensusError::LeadershipLost {
+                    observed: leader_id.into(),
+                })
+                .change_context(ConsensusTransactionError::Consensus)
+                .change_context(TransactionCommitError::Proposal));
             }
             let transaction = Box::pin(self.inner.consensus.current_transaction(id))
                 .await
@@ -1916,8 +1918,9 @@ impl SessionServiceImpl {
                         }
                     }
                     None if result.is_not_leader() => {
+                        let leader = Box::pin(self.inner.consensus.current_leader()).await;
                         return Err(Report::new(ConsensusError::LeadershipLost {
-                            leader_id: Box::pin(self.inner.consensus.current_leader()).await,
+                            observed: leader.into(),
                         })
                         .change_context(ConsensusTransactionError::Consensus)
                         .change_context(TransactionCommitError::Proposal));

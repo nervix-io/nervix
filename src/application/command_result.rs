@@ -41,7 +41,8 @@ pub(in crate::application) enum CommandDisposition {
     },
     /// The command failed definitively; the message and diagnostics say why.
     Failed,
-    /// The command needs the cluster leader, and this node is not the leader. Nothing was
+    /// The command needs the writable cluster leader, and this node cannot act as it: another
+    /// node leads, no leader is known, or this node could not confirm its lease. Nothing was
     /// admitted.
     NotLeader(LeaderRedirect),
     /// The session names a transaction this leader holds no binding for.
@@ -67,8 +68,8 @@ pub(in crate::application) enum CommandDisposition {
 /// Why a command's authoritative outcome is not known yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::application) enum OutcomeUnknownCause {
-    /// Leadership moved after the command was durably admitted, or while its admission was being
-    /// decided.
+    /// After the command was durably admitted, or while its admission was being decided,
+    /// leadership moved or the leader could not confirm its lease and may still lead.
     LeadershipLost,
     /// The command is durably admitted and still applying.
     StillApplying,
@@ -77,11 +78,30 @@ pub(in crate::application) enum OutcomeUnknownCause {
     NotYetAuthoritative,
 }
 
-/// Where a request that needs the leader should go instead.
+/// Where a request that needs the leader should go instead, as far as the refusing node knows.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::application) struct LeaderRedirect {
-    /// The current leader, or `None` while no leader is known, for example during an election.
-    pub(in crate::application) leader: Option<NodeLocation>,
+pub(in crate::application) enum LeaderRedirect {
+    /// Another node leads. Repeat the request there.
+    Leader(NodeLocation),
+    /// No leader is known, for example during an election.
+    NoLeader,
+    /// This node leads `term` but could not confirm its lease, so it refused the write before
+    /// appending it. It may still lead.
+    UnconfirmedLease { term: u64 },
+}
+
+impl LeaderRedirect {
+    /// What became of this node's leadership, for a message saying why a command it served has no
+    /// outcome yet. A lease this node could not confirm is never reported as a move.
+    pub(in crate::application) fn leadership_change(&self) -> String {
+        match self {
+            Self::Leader(location) => format!("leadership moved to node '{}'", location.node),
+            Self::NoLeader => "leadership moved, and no leader is known yet".to_string(),
+            Self::UnconfirmedLease { term } => {
+                format!("the leader could not confirm its lease in term {term} and may still lead")
+            }
+        }
+    }
 }
 
 /// A cluster node and the endpoints it advertises to clients.

@@ -43,7 +43,7 @@ Feature: Pulsar receipt bounds and finishing accepted records
         ON GENERAL ERROR LOG;
       START;
       """
-    When the stallable endpoint "pulsar" is paused
+    When the Pulsar endpoint pauses after its producer is ready within "30s"
     And <message_count> sequenced HTTP payloads are posted to the Pulsar emitter
     Then within "30s" DESCRIBE EMITTER "delivery_output" on the leader node contains
       """
@@ -108,7 +108,7 @@ Feature: Pulsar receipt bounds and finishing accepted records
         ON GENERAL ERROR LOG;
       START;
       """
-    When the stallable endpoint "pulsar" is paused
+    When the Pulsar endpoint pauses after its producer is ready within "30s"
     And this HTTP payload is posted while the Pulsar endpoint resumes after "35s"
       """
       {"sequence":1}

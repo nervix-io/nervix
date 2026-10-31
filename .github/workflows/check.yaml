@@ -623,7 +623,7 @@ jobs:
   tests:
     name: tests
     needs: [scenarios-build]
-    runs-on: boat-xlarge
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 30
     permissions:
       contents: read
@@ -748,9 +748,9 @@ jobs:
     name: scenarios-build
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
-    runs-on: boat-xlarge
-    # Setup took up to 13 minutes on Boat, a warm scenario build 10 to 26 and a warm unit test build
-    # 16; the limit also funds a cold build, cache publication, packing and the uploads.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    # The build and its readers use the same runner provider so the archives restore at their
+    # compiled checkout path. The limit funds a cold build, cache publication, packing and uploads.
     timeout-minutes: 120
     permissions:
       contents: read
@@ -850,11 +850,11 @@ jobs:
       - name: Start kache remote
         env:
           KACHE_MANIFEST_KEY: scenarios-${{ runner.os }}-${{ runner.arch }}
-          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
       - name: Start runner load recorder
@@ -1014,7 +1014,7 @@ jobs:
   scenarios:
     name: scenarios (${{ matrix.shard }} of ${{ strategy.job-total }})
     needs: [scenarios-build]
-    runs-on: boat-xlarge
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     # The harness derives each shard's 85-minute suite budget from this limit, with 15 minutes for
     # setup and the archive's restore before it and 15 for cleanup, export and uploads after it.
     # Keep tests/common/suite_watchdog.rs in step.

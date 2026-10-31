@@ -289,7 +289,7 @@ impl SessionServiceImpl {
     ) -> DownloadAnswer {
         let leader = self.inner.consensus.current_leader().await;
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-            let redirect = self.redirect_to_leader(leader).await;
+            let redirect = self.redirect_to_leader(leader.into()).await;
             return DownloadAnswer::Redirect(leader_redirect(redirect));
         }
         unrecorded.refusal(reference)

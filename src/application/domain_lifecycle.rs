@@ -132,17 +132,21 @@ const REFUSED_WRITE_RETAINED_LOG_BYTES: u64 = REFUSED_WRITE_LOG_CAP_BYTES + 1;
 #[cfg(feature = "testing")]
 const REFUSED_WRITE_RECLAMATION_WAIT: Duration = Duration::from_secs(5);
 
-/// The error a leader's consensus refuses a write with, before appending it, when a test build
-/// armed a model publication refusal of this kind.
-#[cfg(feature = "testing")]
-impl From<crate::fault_injection::ModelPublicationRefusalKind> for ConsensusError {
-    fn from(refusal: crate::fault_injection::ModelPublicationRefusalKind) -> Self {
+impl SessionServiceImpl {
+    /// The error this leader's consensus refuses a write with, before appending it, when a test
+    /// build armed a model publication refusal of this kind. A lapsed lease is observed against the
+    /// node's current tenure, as a refusal Raft returned would be.
+    #[cfg(feature = "testing")]
+    pub(in crate::application) fn refused_write(
+        &self,
+        refusal: crate::fault_injection::ModelPublicationRefusalKind,
+    ) -> ConsensusError {
         match refusal {
             crate::fault_injection::ModelPublicationRefusalKind::LapsedLease => {
-                Self::LeadershipLost { leader_id: None }
+                self.inner.consensus.lapsed_lease_refusal()
             }
             crate::fault_injection::ModelPublicationRefusalKind::SaturatedLog => {
-                Self::LogRetentionSaturated {
+                ConsensusError::LogRetentionSaturated {
                     retained: REFUSED_WRITE_RETAINED_LOG_BYTES,
                     cap: REFUSED_WRITE_LOG_CAP_BYTES,
                     waited: REFUSED_WRITE_RECLAMATION_WAIT,
@@ -150,9 +154,7 @@ impl From<crate::fault_injection::ModelPublicationRefusalKind> for ConsensusErro
             }
         }
     }
-}
 
-impl SessionServiceImpl {
     pub(in crate::application) async fn apply_persistent_domain_creation(
         &self,
         if_not_exists: bool,
@@ -631,7 +633,7 @@ impl SessionServiceImpl {
         // publication, the same way it refused that publication: before appending it.
         #[cfg(feature = "testing")]
         if let Some(refusal) = self.inner.runtime.take_model_pause_release_refusal(domain) {
-            return Err(Report::new(ConsensusError::from(refusal)).change_context(
+            return Err(Report::new(self.refused_write(refusal)).change_context(
                 DomainAlterError::ResumeDomain {
                     domain: domain.clone(),
                 },
