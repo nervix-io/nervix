@@ -189,7 +189,10 @@ const PROMETHEUS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             omitted: OmittedDeadline::Required,
         },
     }],
-    driver_limits: &["Response heads above 100 headers or 417,792 bytes are refused."],
+    driver_limits: &[
+        "HTTP/1.1 response heads above 100 fields or 417,792 bytes, and HTTP/2 header lists of \
+         16,384 bytes or more as HTTP/2 counts them, are refused.",
+    ],
 };
 
 /// A query answer carries each sample's labels, which its payload holds, and no transport headers

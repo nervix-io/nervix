@@ -2,14 +2,17 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** One bounded physical HTTP/1.1 exchange at a time, exact prepared request bytes and
-//!   the length they declare, TLS and DNS transport, how one attempt's timeout is divided between
-//!   its lookup, its address attempts and its request, response header validation, one outcome
-//!   for each request, the retry delay a retryable response asks for, and the description of a
-//!   failed attempt, which names its cause and never an evaluated target, header value or body.
-//! - **Depends on.** The connector contract and its actual-UTC read, shared client TLS settings,
-//!   node DNS resolver and its operation budget, vocabulary request fields, Tokio I/O, rustls and
-//!   the HTTP/1.1 response parser.
+//! - **Owns.** One bounded physical HTTP exchange at a time; the connection each request travels:
+//!   DNS and address attempts within its budget, TLS with the HTTP versions it offers, and the
+//!   declared proxy's tunnel; the exact prepared request it hands hyper, which speaks HTTP/1.1, or
+//!   HTTP/2 where TLS negotiates it, over that connection; how one attempt's timeout is divided
+//!   between its requests and, within each, between its lookup, its address attempts and its
+//!   exchange; the redirects its client follows; one outcome for each request; the retry delay a
+//!   retryable response asks for; and the description of a failed attempt, which names its cause
+//!   and never an evaluated target, header value, body or proxy credential.
+//! - **Depends on.** The connector contract and its actual-UTC read, shared client TLS and proxy
+//!   settings, the client transport both entities share, node DNS resolver and its operation
+//!   budget, vocabulary request fields, Tokio I/O, rustls, and hyper, which alone speaks HTTP.
 //! - **Must not know.** How request fields or bodies were prepared, runtime batches, relays,
 //!   branches, acknowledgements, registry state or when the host retries.
 
@@ -26,39 +29,53 @@
 )]
 
 #[cfg(test)]
-mod request_head_tests;
+mod request_tests;
 mod response;
 
-use std::time::Duration;
+use std::{borrow::Cow, future::Future, time::Duration};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use error_stack::{Report, ResultExt as _};
+use http::{
+    HeaderName, HeaderValue, Method, Request, Response, Uri,
+    header::{ACCEPT, CONNECTION, CONTENT_LENGTH, HOST, PROXY_AUTHORIZATION},
+};
+use http_body_util::Full;
+use hyper::client::conn::{http1, http2};
+use hyper_util::rt::TokioIo;
 use meticulous::OptionExt as _;
 #[cfg(test)]
 use nervix_connector::HttpRequestEmitter as _;
 use nervix_connector::{
-    ClientConfigError, ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost,
-    EmitterHttpRequest, EmitterLifecycle, EmitterOpenError, EmitterRecordId, EmitterRetryDelay,
-    EmitterStartResult, EmitterWriteError, PerRecordOutcome, RustlsClientConfigProvider,
+    DeclaredProxy, EmitterFinish, EmitterFinishResult, EmitterHost, EmitterHttpRequest,
+    EmitterLifecycle, EmitterOpenError, EmitterRecordId, EmitterRetryDelay, EmitterStartResult,
+    EmitterWriteError, HttpClientConfig, PerRecordOutcome, RustlsClientConfigProvider,
     physical_time::actual_utc_now,
 };
 use nervix_dns::{AddressAttempt, DnsResolver, LookupShare, OperationBudget};
-use nervix_models::{ClientConfigEntry, CreateClientHttp};
-use nervix_primitives::{net::TcpStream, sync::StdArc, time::Instant};
+use nervix_models::ClientConfigEntry;
+use nervix_primitives::{
+    net::TcpStream,
+    sync::{CancellationToken, StdArc},
+    time::Instant,
+};
+use nervix_recovery::Discarded as _;
 use rustls::ClientConfig as RustlsClientConfig;
 use rustls_pki_types::ServerName;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsConnector;
 use url::{Host, Position, Url};
 
-use self::response::{Disposition, FinalResponse, read_final_headers};
+use self::response::{Disposition, FinalResponse};
+use super::transport::{ClientTransport, RedirectAnswer, Redirects};
 
 const HTTP_EMITTER: &str = "HTTP";
 
-/// How many times its name lookup's share goes into a request's `timeout_ms`. A policy input:
-/// whatever the name servers do, the address attempts, TLS and the request keep the rest of every
-/// attempt's timeout.
+/// How many times its name lookup's share goes into what a request has of its attempt's
+/// `timeout_ms`. A policy input: whatever the name servers do, the address attempts, TLS and the
+/// request keep the rest of it.
 const LOOKUP_SHARE_DIVISOR: u32 = 2;
 
 const _: () = assert!(
@@ -66,22 +83,79 @@ const _: () = assert!(
     "the lookup must leave part of the timeout to the connection and the request"
 );
 
+/// The ALPN identifier of HTTP/2, which an endpoint's TLS may choose.
+const HTTP2_PROTOCOL: &[u8] = b"h2";
+/// The ALPN identifier of HTTP/1.1.
+const HTTP1_PROTOCOL: &[u8] = b"http/1.1";
+
 /// The emitter's resolved client settings and its node-owned resolver.
 pub struct HttpRequestEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub dns: DnsResolver,
 }
 
-/// Each publish call sends its prepared requests sequentially. A fresh HTTP/1.1 connection serves
-/// one request; dropping it after final headers means no incomplete response body can be reused.
+/// Each publish call sends its prepared requests sequentially. A fresh connection serves one
+/// request; dropping it after final headers means no incomplete response body can be reused.
 pub struct HttpRequestEmitter {
     dns: DnsResolver,
-    tls: StdArc<RustlsClientConfig>,
+    /// TLS to an endpoint, offering HTTP/2 and HTTP/1.1.
+    endpoint_tls: StdArc<RustlsClientConfig>,
+    /// TLS to an `https` proxy, which carries tunnels and forwarded requests over HTTP/1.1.
+    proxy_tls: StdArc<RustlsClientConfig>,
+    /// The one deadline of an attempt: a request and every redirect it follows.
     timeout: Duration,
+    redirects: Redirects,
+    proxy: Option<DeclaredProxy>,
 }
 
 trait HttpStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> HttpStream for T {}
+
+/// The HTTP version a connection speaks: HTTP/2 where its TLS negotiated it, HTTP/1.1 otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpVersion {
+    Http1,
+    Http2,
+}
+
+/// A connection ready for hyper: its stream and the version it speaks.
+struct Established {
+    stream: Box<dyn HttpStream>,
+    version: HttpVersion,
+}
+
+/// How a request names its target, which the route it travels decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestForm<'a> {
+    /// Straight to the endpoint, or inside a proxy's tunnel to it.
+    Direct,
+    /// To a proxy that forwards it, with the credentials the proxy asks for.
+    Forwarded { authorization: Option<&'a str> },
+}
+
+/// Runs, as tasks of the node's runtime, what hyper's HTTP/2 client starts for an exchange: the
+/// connection itself, which owns its stream, the request's body and the wait for its response.
+///
+/// Dropping hyper's handles only asks such a connection to close, which an endpoint that keeps a
+/// stream open, or never grants the window the rest of a body needs, can put off indefinitely. So
+/// each task ends when its exchange ends, by its final head, its failure or its timeout, and the
+/// connection ends with it.
+#[derive(Debug, Clone, Default)]
+struct ConnectionTasks {
+    /// Cancelled when the exchange that started these tasks ends.
+    exchange: CancellationToken,
+}
+
+impl<F> hyper::rt::Executor<F> for ConnectionTasks
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    fn execute(&self, future: F) {
+        // Nothing waits for the task's outcome; it ends with its exchange at the latest.
+        nervix_primitives::task::spawn(self.exchange.clone().run_until_cancelled_owned(future));
+    }
+}
 
 #[derive(Debug, Error)]
 enum HttpAttemptError {
@@ -99,10 +173,22 @@ enum HttpAttemptError {
     Response,
     #[error("HTTP request has an invalid destination")]
     Destination,
+    /// A prepared field HTTP's own types refuse, which the vocabulary's rules already exclude.
+    #[error("HTTP request field could not be sent")]
+    Field,
     #[error("HTTP endpoint answered with authentication or authorization status {status}")]
     Authentication { status: u16 },
     #[error("HTTP endpoint answered with retryable status {status}")]
     RetryableStatus { status: u16 },
+    /// The client's declared proxy was not reached: its lookup, its connection or its TLS failed,
+    /// as the cause beneath states.
+    #[error("HTTP proxy could not be reached")]
+    Proxy,
+    /// The proxy did not answer the request for a tunnel, or did not hand the tunnel over.
+    #[error("HTTP proxy tunnel request failed")]
+    Tunnel,
+    #[error("HTTP proxy refused the tunnel with status {status}")]
+    TunnelRefused { status: u16 },
 }
 
 type HttpAttemptResult<T> = Result<T, Report<HttpAttemptError>>;
@@ -114,95 +200,301 @@ struct AddressShareElapsed;
 
 impl HttpRequestEmitter {
     pub fn new(config: HttpRequestEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
-        let configured = ConfiguredDeadline::timeout(&config.config).change_context(
+        Self::open(config)
+    }
+
+    /// The emitter `config` declares: its client transport, its proxy and its TLS settings, read
+    /// locally without contacting the endpoint.
+    fn open(config: HttpRequestEmitterConfig) -> EmitterStartResult<Self> {
+        let transport = ClientTransport::declared(&config.config, HTTP_EMITTER).change_context(
             EmitterOpenError::InvalidConfiguration {
                 connector: HTTP_EMITTER,
             },
         )?;
-        let Some(timeout) = configured else {
-            return Err(Report::new(ClientConfigError::MissingRequired {
-                connector: HTTP_EMITTER,
-                key: CreateClientHttp::TRANSPORT.timeout.key().to_string(),
-            })
+        let proxy = HttpClientConfig::new(&config.config, HTTP_EMITTER, &config.dns)
+            .proxy()
             .change_context(EmitterOpenError::InvalidConfiguration {
                 connector: HTTP_EMITTER,
-            }));
-        };
-        let timeout = timeout.bound();
+            })?;
         let tls = RustlsClientConfigProvider::new(&config.config)
             .build_with_default_roots()
             .change_context(EmitterOpenError::InvalidConfiguration {
                 connector: HTTP_EMITTER,
             })?;
-        // rustls requires a standard Arc. The client speaks HTTP/1.1 so every interim block can
-        // be inspected, including those that higher-level clients discard before the final reply.
-        let mut tls = (*tls).clone();
-        tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+        // rustls requires a standard Arc. An endpoint's TLS chooses the HTTP version among those
+        // offered; a proxy's carries HTTP/1.1, which tunnels and forwarded requests speak.
+        let mut endpoint_tls = (*tls).clone();
+        endpoint_tls.alpn_protocols = vec![HTTP2_PROTOCOL.to_vec(), HTTP1_PROTOCOL.to_vec()];
+        let mut proxy_tls = (*tls).clone();
+        proxy_tls.alpn_protocols = vec![HTTP1_PROTOCOL.to_vec()];
         Ok(Self {
             dns: config.dns,
-            tls: StdArc::new(tls),
-            timeout,
+            endpoint_tls: StdArc::new(endpoint_tls),
+            proxy_tls: StdArc::new(proxy_tls),
+            timeout: transport.timeout,
+            redirects: transport.redirects,
+            proxy,
         })
     }
 
-    /// The most of a request's `timeout_ms` its name lookup may take.
-    fn lookup_share(&self) -> LookupShare {
-        let share = self
-            .timeout
+    /// The most of `available` a request's name lookup may take.
+    fn lookup_share(available: Duration) -> LookupShare {
+        let share = available
             .checked_div(LOOKUP_SHARE_DIVISOR)
             .assured("LOOKUP_SHARE_DIVISOR is a nonzero constant");
         LookupShare::AtMost(share)
     }
 
-    /// One attempt, whose DNS, connection, TLS, request send and complete final headers share one
-    /// physical timeout. One budget divides it: the lookup takes at most its share, each resolved
-    /// address an equal share of what is left when its attempt starts, and TLS, the send and the
-    /// final headers whatever remains once an address accepts.
+    /// One attempt: the request, and every redirect its client follows, which sends the same
+    /// prepared request again to the redirect's `Location`. They share the attempt's one physical
+    /// `timeout_ms`, so each request has what is left of it when it starts.
+    async fn send(&self, request: &EmitterHttpRequest) -> HttpAttemptResult<FinalResponse> {
+        let attempt = OperationBudget::start(self.timeout, LookupShare::Whole);
+        let mut url = Cow::Borrowed(request.target.url());
+        let mut followed = 0_usize;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let response = self.send_once(&url, request, attempt.remaining()).await?;
+            let answer = RedirectAnswer {
+                url: &url,
+                method: request.method.as_str(),
+                followed,
+                status: response.status().code(),
+                location: response.location(),
+            };
+            let Some(next) = self.redirects.next(&answer) else {
+                return Ok(response);
+            };
+            url = Cow::Owned(next);
+            followed = followed
+                .checked_add(1)
+                .verified("a followed redirect is below the declared limit");
+        }
+    }
+
+    /// One request of an attempt, to `url`, within `available`: its DNS, connection, the proxy's TLS
+    /// and tunnel, TLS, the exchange and its complete final headers. One budget divides
+    /// `available`: the lookup of the endpoint's host, or the declared proxy's, takes at most its
+    /// share, each resolved address an equal share of what is left when its attempt starts, and
+    /// the rest whatever remains once an address accepts.
     ///
     /// Each failure keeps its cause beneath the attempt's own: the resolver's lookup failure, the
-    /// socket or TLS error, or the share an address ran out of. They describe the connection, never
+    /// socket or TLS error, the share an address ran out of, or hyper's error, beneath the proxy's
+    /// own failure when it is the proxy that was not reached. They describe the connection, never
     /// the request.
-    async fn send(&self, request: &EmitterHttpRequest) -> HttpAttemptResult<FinalResponse> {
-        let budget = OperationBudget::start(self.timeout, self.lookup_share());
-        let url = request.target.url();
-        let connection = self.connect(url, &budget).await?;
-        let exchanged = nervix_primitives::time::timeout(
-            budget.remaining(),
-            self.exchange(connection, url, request),
-        )
-        .await;
+    async fn send_once(
+        &self,
+        url: &Url,
+        request: &EmitterHttpRequest,
+        available: Duration,
+    ) -> HttpAttemptResult<FinalResponse> {
+        let budget = OperationBudget::start(available, Self::lookup_share(available));
+        let exchanged = match &self.proxy {
+            None => {
+                let connection = self.connect(url, &budget).await?;
+                nervix_primitives::time::timeout(
+                    budget.remaining(),
+                    self.exchange_directly(connection, url, request),
+                )
+                .await
+            }
+            Some(proxy) => {
+                let connection = self
+                    .connect(proxy.address(), &budget)
+                    .await
+                    .change_context(HttpAttemptError::Proxy)?;
+                nervix_primitives::time::timeout(
+                    budget.remaining(),
+                    self.exchange_through(proxy, connection, url, request),
+                )
+                .await
+            }
+        };
         match exchanged {
             Ok(result) => result,
             Err(_) => Err(Report::new(HttpAttemptError::Timeout)),
         }
     }
 
-    /// TLS for an `https` target, then the request and its complete final headers.
-    async fn exchange(
+    /// TLS for an `https` target, then the request in the version its TLS negotiated.
+    async fn exchange_directly(
         &self,
         connection: TcpStream,
         url: &Url,
         request: &EmitterHttpRequest,
     ) -> HttpAttemptResult<FinalResponse> {
-        let mut stream = self.secure(connection, url).await?;
-        let head = Self::request_head(request);
-        stream
-            .write_all(&head)
+        let established = Self::secure(Box::new(connection), url, &self.endpoint_tls).await?;
+        let prepared = Self::http_request(request, url, established.version, RequestForm::Direct)?;
+        Self::exchange(established, prepared).await
+    }
+
+    /// TLS for an `https` proxy; then, for an `https` target, a tunnel through the proxy, TLS for
+    /// the target inside it and the request in the version that TLS negotiated; for an `http`
+    /// target, the request in absolute form, which the proxy forwards with its credentials.
+    async fn exchange_through(
+        &self,
+        proxy: &DeclaredProxy,
+        connection: TcpStream,
+        url: &Url,
+        request: &EmitterHttpRequest,
+    ) -> HttpAttemptResult<FinalResponse> {
+        let to_proxy = Self::secure(Box::new(connection), proxy.address(), &self.proxy_tls)
             .await
-            .map_err(|error| Report::new(error).change_context(HttpAttemptError::Send))?;
-        if let Some(body) = &request.body {
-            stream
-                .write_all(body)
-                .await
-                .map_err(|error| Report::new(error).change_context(HttpAttemptError::Send))?;
+            .change_context(HttpAttemptError::Proxy)?;
+        if url.scheme() == "https" {
+            let tunnel = Self::tunnel(to_proxy, url, proxy.authorization()).await?;
+            let established = Self::secure(tunnel, url, &self.endpoint_tls).await?;
+            let prepared =
+                Self::http_request(request, url, established.version, RequestForm::Direct)?;
+            return Self::exchange(established, prepared).await;
         }
-        stream
-            .flush()
+        let form = RequestForm::Forwarded {
+            authorization: proxy.authorization(),
+        };
+        let prepared = Self::http_request(request, url, to_proxy.version, form)?;
+        Self::exchange(to_proxy, prepared).await
+    }
+
+    /// Sends `request` over `connection` with hyper and returns its complete final head. hyper
+    /// drives the connection only until that head arrives; the connection is then dropped with the
+    /// response, so its body is neither awaited nor read and the connection is never reused. Over
+    /// HTTP/2 the tasks hyper started for the exchange end with it, whether it returns or its
+    /// timeout drops it.
+    async fn exchange(
+        connection: Established,
+        request: Request<Full<Bytes>>,
+    ) -> HttpAttemptResult<FinalResponse> {
+        let io = TokioIo::new(connection.stream);
+        match connection.version {
+            HttpVersion::Http1 => {
+                let (mut sender, driver) = http1::handshake(io)
+                    .await
+                    .map_err(|error| Report::new(error).change_context(HttpAttemptError::Send))?;
+                Self::final_head(sender.send_request(request), driver).await
+            }
+            HttpVersion::Http2 => {
+                let tasks = ConnectionTasks::default();
+                let _ends_tasks_with_exchange = tasks.exchange.clone().drop_guard();
+                let (mut sender, driver) = http2::Builder::new(tasks)
+                    .handshake(io)
+                    .await
+                    .map_err(|error| Report::new(error).change_context(HttpAttemptError::Send))?;
+                Self::final_head(sender.send_request(request), driver).await
+            }
+        }
+    }
+
+    /// The final head `sent` resolves with, while `driver` performs the connection's I/O.
+    async fn final_head<B>(
+        sent: impl Future<Output = hyper::Result<Response<B>>>,
+        driver: impl Future<Output = hyper::Result<()>>,
+    ) -> HttpAttemptResult<FinalResponse> {
+        let answered = Self::answered(sent, driver).await;
+        let response = answered
+            .map_err(|error| Report::new(error).change_context(HttpAttemptError::Response))?;
+        FinalResponse::read(&response).change_context(HttpAttemptError::Response)
+    }
+
+    /// What `sent` resolves with, while `driver` performs the connection's I/O. A connection can
+    /// end in the same step that delivers its response's head, which then waits in hyper's channel,
+    /// and one that ended without it has already settled the request with the reason; either way
+    /// the request's own outcome is the answer, and it is ready once the driver has ended.
+    async fn answered<T>(
+        sent: impl Future<Output = hyper::Result<T>>,
+        driver: impl Future<Output = hyper::Result<()>>,
+    ) -> hyper::Result<T> {
+        let mut sent = std::pin::pin!(sent);
+        let driver = std::pin::pin!(driver);
+        nervix_primitives::select! {
+            biased;
+            answered = &mut sent => answered,
+            ended = driver => {
+                ended.discarded("hyper settles the request with the reason its connection ended");
+                (&mut sent).await
+            }
+        }
+    }
+
+    /// Asks the proxy on `connection` for a tunnel to `url`'s host and port with a `CONNECT`
+    /// request hyper sends, carrying the credentials the proxy asks for, and returns the tunnel
+    /// hyper hands over once the proxy answers with a `2xx`.
+    async fn tunnel(
+        connection: Established,
+        url: &Url,
+        authorization: Option<&str>,
+    ) -> HttpAttemptResult<Box<dyn HttpStream>> {
+        let request = Self::tunnel_request(url, authorization)?;
+        let (mut sender, driver) = http1::handshake(TokioIo::new(connection.stream))
             .await
-            .map_err(|error| Report::new(error).change_context(HttpAttemptError::Send))?;
-        read_final_headers(&mut *stream)
+            .map_err(|error| Report::new(error).change_context(HttpAttemptError::Tunnel))?;
+        let mut driver = std::pin::pin!(driver.with_upgrades());
+        let mut sent = std::pin::pin!(sender.send_request(request));
+        // The driver ends once it has handed the tunnel over, which can happen in the same step
+        // that delivers the proxy's answer, as can its ending when the proxy refuses and closes.
+        let mut ended = None;
+        let answered = nervix_primitives::select! {
+            biased;
+            answered = &mut sent => answered,
+            driven = &mut driver => {
+                ended = Some(driven);
+                (&mut sent).await
+            }
+        };
+        let response = answered
+            .map_err(|error| Report::new(error).change_context(HttpAttemptError::Tunnel))?;
+        if !response.status().is_success() {
+            return Err(Report::new(HttpAttemptError::TunnelRefused {
+                status: response.status().as_u16(),
+            }));
+        }
+        let upgrade = hyper::upgrade::on(response);
+        let handed_over = match ended {
+            Some(driven) => driven,
+            None => driver.await,
+        };
+        handed_over.map_err(|error| Report::new(error).change_context(HttpAttemptError::Tunnel))?;
+        let tunnel = upgrade
             .await
-            .change_context(HttpAttemptError::Response)
+            .map_err(|error| Report::new(error).change_context(HttpAttemptError::Tunnel))?;
+        Ok(Box::new(TokioIo::new(tunnel)))
+    }
+
+    /// The request for a tunnel to `url`'s host and port: its authority with the port written out,
+    /// as `CONNECT` requires, which it also names as its `Host`, and the proxy's credentials.
+    fn tunnel_request(
+        url: &Url,
+        authorization: Option<&str>,
+    ) -> HttpAttemptResult<Request<Full<Bytes>>> {
+        let host = url
+            .host_str()
+            .ok_or_else(|| Report::new(HttpAttemptError::Destination))?;
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| Report::new(HttpAttemptError::Destination))?;
+        let authority = format!("{host}:{port}");
+        let uri = Uri::try_from(authority.as_str())
+            .map_err(|error| Report::new(error).change_context(HttpAttemptError::Destination))?;
+        let host = HeaderValue::try_from(authority)
+            .map_err(|error| Report::new(error).change_context(HttpAttemptError::Destination))?;
+        let mut request = Request::new(Full::new(Bytes::new()));
+        *request.method_mut() = Method::CONNECT;
+        *request.uri_mut() = uri;
+        request.headers_mut().append(HOST, host);
+        if let Some(authorization) = authorization {
+            let authorization = Self::credentials(authorization)?;
+            request
+                .headers_mut()
+                .append(PROXY_AUTHORIZATION, authorization);
+        }
+        Ok(request)
+    }
+
+    /// The proxy's credentials as a field value hyper never prints.
+    fn credentials(authorization: &str) -> HttpAttemptResult<HeaderValue> {
+        let mut value = HeaderValue::try_from(authorization)
+            .map_err(|error| Report::new(error).change_context(HttpAttemptError::Field))?;
+        value.set_sensitive(true);
+        Ok(value)
     }
 
     /// The connection of the first resolved address that accepts one within its share of `budget`,
@@ -248,22 +540,36 @@ impl HttpRequestEmitter {
         }
     }
 
-    /// The stream an attempt writes to: `connection` itself, or TLS over it for an `https` target.
+    /// The connection an exchange continues on: `stream` itself, which speaks HTTP/1.1, or TLS over
+    /// it to `url`'s host for an `https` URL, whether `url` names the endpoint or the proxy, which
+    /// speaks the version its negotiation chose among those `tls` offers.
     async fn secure(
-        &self,
-        connection: TcpStream,
+        stream: Box<dyn HttpStream>,
         url: &Url,
-    ) -> HttpAttemptResult<Box<dyn HttpStream>> {
+        tls: &StdArc<RustlsClientConfig>,
+    ) -> HttpAttemptResult<Established> {
         if url.scheme() != "https" {
-            return Ok(Box::new(connection));
+            return Ok(Established {
+                stream,
+                version: HttpVersion::Http1,
+            });
         }
         let server_name = Self::server_name(url)?;
-        let connector = TlsConnector::from(self.tls.clone());
-        let tls = connector
-            .connect(server_name, connection)
+        let connector = TlsConnector::from(tls.clone());
+        let secured = connector
+            .connect(server_name, stream)
             .await
             .map_err(|error| Report::new(error).change_context(HttpAttemptError::Tls))?;
-        Ok(Box::new(tls))
+        let negotiated = secured.get_ref().1.alpn_protocol();
+        let version = if negotiated == Some(HTTP2_PROTOCOL) {
+            HttpVersion::Http2
+        } else {
+            HttpVersion::Http1
+        };
+        Ok(Established {
+            stream: Box::new(secured),
+            version,
+        })
     }
 
     fn server_name(url: &Url) -> HttpAttemptResult<ServerName<'static>> {
@@ -276,50 +582,80 @@ impl HttpRequestEmitter {
         }
     }
 
-    /// The transport generates Host, Connection and Content-Length: a body's length, or zero for a
-    /// bodyless request whose method defines request content, as RFC 9110 section 8.6 asks of a
-    /// client, so a server that requires a declared length accepts it. Any other bodyless request
-    /// declares no length. It defaults Accept to */* only when no application Accept header was
-    /// prepared. It generates neither Accept-Encoding nor Content-Type, cookies or credentials.
+    /// The request hyper sends for `request` to `url` over a connection speaking `version`, along
+    /// the route `form` names: exactly the prepared method, target, headers and body, and the
+    /// fields the transport owns.
+    ///
+    /// The target is the path and query for HTTP/1.1 straight to the endpoint, and the absolute URL
+    /// for HTTP/2, whose `:authority` hyper takes from it, and for a request a proxy forwards. Over
+    /// HTTP/1.1 the request names its `Host` and asks for its connection to close, and through a
+    /// forwarding proxy it carries the proxy's credentials. `Accept: */*` is added only when the
+    /// application wrote no `Accept`. A body's length is declared by hyper from the body, and a
+    /// bodyless request declares a zero length only when its method defines request content, as
+    /// RFC 9110 section 8.6 asks of a client. No `Accept-Encoding`, `Content-Type`, cookie or
+    /// credential is added.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "compares prepared header names through the external \
                                    iterator; its local predicate is analyzed; no internal \
                                    runtime ownership is inferred")
     )]
-    fn request_head(request: &EmitterHttpRequest) -> Vec<u8> {
-        let url = request.target.url();
-        let authority = &url[Position::BeforeHost..Position::AfterPort];
-        let mut head = format!(
-            "{} {} HTTP/1.1\r\nhost: {authority}\r\nconnection: close\r\n",
-            request.method.as_str(),
-            request.target.as_str(),
-        )
-        .into_bytes();
+    fn http_request(
+        request: &EmitterHttpRequest,
+        url: &Url,
+        version: HttpVersion,
+        form: RequestForm<'_>,
+    ) -> HttpAttemptResult<Request<Full<Bytes>>> {
+        let method = Method::from_bytes(request.method.as_str().as_bytes())
+            .map_err(|error| Report::new(error).change_context(HttpAttemptError::Field))?;
+        let absolute = version == HttpVersion::Http2 || form != RequestForm::Direct;
+        let target = if absolute {
+            &url[..Position::AfterQuery]
+        } else {
+            &url[Position::BeforePath..Position::AfterQuery]
+        };
+        let uri = Uri::try_from(target)
+            .map_err(|error| Report::new(error).change_context(HttpAttemptError::Destination))?;
+        let body = match &request.body {
+            Some(body) => Bytes::copy_from_slice(body),
+            None => Bytes::new(),
+        };
+        let mut prepared = Request::new(Full::new(body));
+        *prepared.method_mut() = method;
+        *prepared.uri_mut() = uri;
+        let headers = prepared.headers_mut();
+        if version == HttpVersion::Http1 {
+            let authority = HeaderValue::try_from(&url[Position::BeforeHost..Position::AfterPort])
+                .map_err(|error| {
+                    Report::new(error).change_context(HttpAttemptError::Destination)
+                })?;
+            headers.append(HOST, authority);
+            headers.append(CONNECTION, HeaderValue::from_static("close"));
+        }
+        if let RequestForm::Forwarded {
+            authorization: Some(authorization),
+        } = form
+        {
+            headers.append(PROXY_AUTHORIZATION, Self::credentials(authorization)?);
+        }
         if !request
             .headers
             .iter()
             .any(|(name, _)| name.as_str().eq_ignore_ascii_case("accept"))
         {
-            head.extend_from_slice(b"accept: */*\r\n");
+            headers.append(ACCEPT, HeaderValue::from_static("*/*"));
         }
         for (name, value) in request.headers.iter() {
-            head.extend_from_slice(name.as_str().as_bytes());
-            head.extend_from_slice(b": ");
-            head.extend_from_slice(value.as_str().as_bytes());
-            head.extend_from_slice(b"\r\n");
+            let name = HeaderName::from_bytes(name.as_str().as_bytes())
+                .map_err(|error| Report::new(error).change_context(HttpAttemptError::Field))?;
+            let value = HeaderValue::from_bytes(value.as_str().as_bytes())
+                .map_err(|error| Report::new(error).change_context(HttpAttemptError::Field))?;
+            headers.append(name, value);
         }
-        match &request.body {
-            Some(body) => {
-                head.extend_from_slice(format!("content-length: {}\r\n", body.len()).as_bytes());
-            }
-            None if request.method.defines_content() => {
-                head.extend_from_slice(b"content-length: 0\r\n");
-            }
-            None => {}
+        if request.body.is_none() && request.method.defines_content() {
+            headers.append(CONTENT_LENGTH, HeaderValue::from_static("0"));
         }
-        head.extend_from_slice(b"\r\n");
-        head
+        Ok(prepared)
     }
 
     /// The failure of an attempt, described by the attempt's own error and every cause beneath
@@ -328,7 +664,7 @@ impl HttpRequestEmitter {
     ///
     /// The emitter reports the description as its transient error while the request stays
     /// pending. Neither the attempt's errors nor their causes carry the evaluated target, a header
-    /// value or a body, so the description names none of them.
+    /// value, a body or the proxy's credentials, so the description names none of them.
     fn publish_error(error: Report<HttpAttemptError>) -> Report<EmitterWriteError> {
         let description = format!("{error:#}");
         error
@@ -344,7 +680,7 @@ impl HttpRequestEmitter {
     /// than its own backoff.
     fn retryable_status_error(
         error: HttpAttemptError,
-        response: FinalResponse,
+        response: &FinalResponse,
     ) -> Report<EmitterWriteError> {
         let failure = Self::publish_error(Report::new(error));
         match response.retry_delay(actual_utc_now()) {
@@ -408,7 +744,7 @@ impl nervix_connector::HttpRequestEmitter for HttpRequestEmitter {
                         HttpAttemptError::Authentication {
                             status: status.code(),
                         },
-                        response,
+                        &response,
                     ));
                     return outcome;
                 }
@@ -417,7 +753,7 @@ impl nervix_connector::HttpRequestEmitter for HttpRequestEmitter {
                         HttpAttemptError::RetryableStatus {
                             status: status.code(),
                         },
-                        response,
+                        &response,
                     ));
                     return outcome;
                 }
@@ -428,501 +764,5 @@ impl nervix_connector::HttpRequestEmitter for HttpRequestEmitter {
 }
 
 #[cfg(test)]
-#[cfg_attr(
-    nervix_lint,
-    nervix::layer(harness, reason = "test module remains outside product execution")
-)]
-mod tests {
-    use std::net::SocketAddr;
-
-    use error_stack::{AttachmentKind, FrameKind};
-    use meticulous::ResultExt as _;
-    use nervix_models::{
-        HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod,
-        HttpOrigin, Timestamp,
-    };
-
-    use super::{response::ResponseHeadError, *};
-
-    fn prepared(method: &str, body: Option<Vec<u8>>) -> EmitterHttpRequest {
-        let origin = HttpOrigin::parse("https://api.example.com:8443")
-            .assured("the test origin has a valid HTTPS scheme, host and port");
-        let target = origin
-            .target("/v1/a/../events?q=a+b")
-            .assured("the test target is origin-relative");
-        let mut headers = HttpApplicationHeaders::default();
-        headers
-            .insert(
-                HttpHeaderName::parse("X-Tenant")
-                    .assured("X-Tenant is a valid application header name"),
-                HttpHeaderValue::parse("north")
-                    .assured("north is a valid application header value"),
-            )
-            .assured("one short header fits the application envelope");
-        EmitterHttpRequest {
-            id: EmitterRecordId::new(3),
-            method: HttpMethod::parse(method, HttpBodyMode::WithoutBody)
-                .assured("the test method is a valid HTTP token"),
-            target,
-            headers,
-            body,
-            occurred_at: Timestamp::from_unix_nanos(1),
-        }
-    }
-
-    #[test]
-    fn encoded_request_uses_exact_fields_and_explicit_transport_headers() {
-        let request = prepared("PATCH", Some(br#"{"id":1}"#.to_vec()));
-        let head = String::from_utf8(HttpRequestEmitter::request_head(&request))
-            .assured("the prepared test fields are all UTF-8");
-        assert_eq!(
-            head,
-            "PATCH /v1/events?q=a+b HTTP/1.1\r\nhost: api.example.com:8443\r\nconnection: \
-             close\r\naccept: */*\r\nx-tenant: north\r\ncontent-length: 8\r\n\r\n"
-        );
-    }
-
-    #[test]
-    fn absent_body_adds_no_framing_or_content_type() {
-        let request = prepared("purge", None);
-        let head = String::from_utf8(HttpRequestEmitter::request_head(&request))
-            .assured("the prepared test fields are all UTF-8");
-        assert!(head.starts_with("purge /v1/events?q=a+b HTTP/1.1\r\n"));
-        assert!(!head.contains("content-length"));
-        assert!(!head.contains("content-type"));
-        assert!(!head.contains("accept-encoding"));
-        assert_eq!(
-            request.body, None,
-            "the emitter has not constructed an empty body"
-        );
-    }
-
-    #[test]
-    fn a_bodyless_request_declares_an_empty_length_only_when_its_method_defines_content() {
-        for method in ["POST", "PUT", "PATCH", "post", "Patch"] {
-            let head = String::from_utf8(HttpRequestEmitter::request_head(&prepared(method, None)))
-                .assured("the prepared test fields are all UTF-8");
-            assert!(
-                head.ends_with("\r\ncontent-length: 0\r\n\r\n"),
-                "{method} defines its request content, so its absence is declared: {head}"
-            );
-        }
-        for method in ["DELETE", "OPTIONS", "GET", "purge"] {
-            let head = String::from_utf8(HttpRequestEmitter::request_head(&prepared(method, None)))
-                .assured("the prepared test fields are all UTF-8");
-            assert!(
-                !head.contains("content-length"),
-                "{method} defines no request content, so no length is declared: {head}"
-            );
-        }
-    }
-
-    #[test]
-    fn prepared_accept_replaces_the_default() {
-        let mut request = prepared("GET", None);
-        request
-            .headers
-            .insert(
-                HttpHeaderName::parse("Accept")
-                    .assured("Accept is a valid application header name"),
-                HttpHeaderValue::parse("application/json")
-                    .assured("application/json is a valid header value"),
-            )
-            .assured("two short headers fit the application envelope");
-        let head = String::from_utf8(HttpRequestEmitter::request_head(&request))
-            .assured("the prepared test fields are all UTF-8");
-        assert!(head.contains("accept: application/json\r\n"));
-        assert!(!head.contains("accept: */*"));
-    }
-
-    async fn final_response(head: &'static [u8]) -> FinalResponse {
-        let (mut client, mut server) = tokio::io::duplex(1024);
-        nervix_primitives::task::spawn(async move {
-            use tokio::io::AsyncWriteExt as _;
-            server
-                .write_all(head)
-                .await
-                .assured("the in-memory server writes its whole response head");
-        });
-        read_final_headers(&mut client)
-            .await
-            .assured("the fixture response head is complete and valid")
-    }
-
-    #[nervix_primitives::test]
-    async fn a_retryable_status_carries_only_the_delay_its_retry_after_asks_for() {
-        let limited = final_response(
-            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\n\r\n",
-        )
-        .await;
-        let error = HttpRequestEmitter::retryable_status_error(
-            HttpAttemptError::RetryableStatus { status: 429 },
-            limited,
-        );
-        assert_eq!(
-            error.downcast_ref::<EmitterRetryDelay>(),
-            Some(&EmitterRetryDelay(Duration::from_secs(30)))
-        );
-        assert_eq!(
-            *error.current_context(),
-            EmitterWriteError::Publish {
-                connector: HTTP_EMITTER
-            }
-        );
-
-        let unstated =
-            final_response(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n").await;
-        let error = HttpRequestEmitter::retryable_status_error(
-            HttpAttemptError::Authentication { status: 401 },
-            unstated,
-        );
-        assert!(error.downcast_ref::<EmitterRetryDelay>().is_none());
-    }
-
-    #[test]
-    fn tls_server_name_uses_the_origin_host() {
-        let origin = HttpOrigin::parse("https://127.0.0.1:8443")
-            .assured("the test origin has a valid IP address");
-        let target = origin
-            .target("/")
-            .assured("the root path is a valid target");
-        let name = HttpRequestEmitter::server_name(target.url())
-            .assured("a parsed HTTP target has a TLS server name");
-        assert_eq!(name, ServerName::from(std::net::Ipv4Addr::LOCALHOST));
-    }
-
-    /// The description a failed attempt carries, which the emitter reports as its transient error.
-    fn description(error: &Report<EmitterWriteError>) -> Option<String> {
-        for frame in error.frames() {
-            if let FrameKind::Attachment(AttachmentKind::Printable(attachment)) = frame.kind() {
-                return Some(attachment.to_string());
-            }
-        }
-        None
-    }
-
-    #[test]
-    fn a_failed_attempt_describes_its_status_or_every_cause_beneath_it() {
-        let status =
-            HttpRequestEmitter::publish_error(Report::new(HttpAttemptError::RetryableStatus {
-                status: 503,
-            }));
-        assert_eq!(
-            *status.current_context(),
-            EmitterWriteError::Publish {
-                connector: HTTP_EMITTER
-            }
-        );
-        assert_eq!(
-            description(&status).as_deref(),
-            Some("HTTP endpoint answered with retryable status 503")
-        );
-
-        let handshake = HttpRequestEmitter::publish_error(
-            Report::new(std::io::Error::other(
-                "invalid peer certificate: UnknownIssuer",
-            ))
-            .change_context(HttpAttemptError::Tls),
-        );
-        assert_eq!(
-            description(&handshake).as_deref(),
-            Some("HTTP TLS handshake failed: invalid peer certificate: UnknownIssuer")
-        );
-
-        let headers = HttpRequestEmitter::publish_error(
-            Report::new(ResponseHeadError::Excessive).change_context(HttpAttemptError::Response),
-        );
-        assert_eq!(
-            description(&headers).as_deref(),
-            Some(
-                "HTTP response header exchange failed: HTTP response headers exceed 128 fields or \
-                 64 KiB"
-            )
-        );
-    }
-
-    #[nervix_primitives::test]
-    async fn a_refused_connection_keeps_its_cause_and_the_emitter_keeps_its_client() {
-        let unused = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .assured("the test host has a free loopback port");
-        let port = unused
-            .local_addr()
-            .assured("a bound listener has a local address")
-            .port();
-        drop(unused);
-        let origin = HttpOrigin::parse(&format!("http://127.0.0.1:{port}"))
-            .assured("a loopback address and port form an HTTP origin");
-        let mut headers = HttpApplicationHeaders::default();
-        headers
-            .insert(
-                HttpHeaderName::parse("Authorization")
-                    .assured("Authorization is a valid application header name"),
-                HttpHeaderValue::parse("Bearer s3cr3t")
-                    .assured("a bearer token is a valid header value"),
-            )
-            .assured("one short header fits the application envelope");
-        let request = EmitterHttpRequest {
-            id: EmitterRecordId::new(0),
-            method: HttpMethod::parse("POST", HttpBodyMode::WithoutBody)
-                .assured("POST is a valid HTTP token"),
-            target: origin
-                .target("/events/secret-7")
-                .assured("the test target is origin-relative"),
-            headers,
-            body: None,
-            occurred_at: Timestamp::from_unix_nanos(1),
-        };
-        let mut connector = HttpRequestEmitter {
-            dns: DnsResolver::load(nervix_dns::DnsConfiguration::system())
-                .await
-                .assured("the host resolver configuration loads in tests"),
-            tls: RustlsClientConfigProvider::new(&[])
-                .build_with_default_roots()
-                .assured("the platform's default roots load in tests"),
-            timeout: Duration::from_secs(5),
-        };
-        assert!(
-            connector.keeps_client_on_publish_failure(),
-            "a retry sends the pending request through the same emitter"
-        );
-
-        let outcome = connector.publish(vec![request]).await.into_parts();
-
-        assert!(outcome.delivered.is_empty());
-        assert!(outcome.rejected.is_empty());
-        let failure = outcome
-            .infrastructure_error
-            .assured("a refused connection leaves its request unresolved");
-        let described = description(&failure).assured("a failed attempt is always described");
-        assert!(
-            described.starts_with("HTTP connection failed: ") && !described.contains("secret"),
-            "the refusal's own cause follows, and neither the target nor a header value: \
-             {described}"
-        );
-    }
-
-    /// A bodyless `POST` to `origin`, the request every budget test below sends.
-    fn bodyless_post(origin: &str) -> EmitterHttpRequest {
-        let origin = HttpOrigin::parse(origin).assured("the test origin is an HTTP origin");
-        EmitterHttpRequest {
-            id: EmitterRecordId::new(0),
-            method: HttpMethod::parse("POST", HttpBodyMode::WithoutBody)
-                .assured("POST is a valid HTTP token"),
-            target: origin
-                .target("/events")
-                .assured("the test target is origin-relative"),
-            headers: HttpApplicationHeaders::default(),
-            body: None,
-            occurred_at: Timestamp::from_unix_nanos(1),
-        }
-    }
-
-    /// A emitter whose requests resolve through a resolver that reads `hosts` and asks only `server`.
-    ///
-    /// Each try of the resolver outlasts every budget below, so a lookup against a server that never
-    /// answers ends exactly when the emitter's budget for it does. The returned directory holds the
-    /// resolver's files for as long as the emitter lives.
-    async fn emitter_resolving_through(
-        server: SocketAddr,
-        hosts: &str,
-        timeout: Duration,
-    ) -> (HttpRequestEmitter, tempfile::TempDir) {
-        let files = tempfile::tempdir().assured("the test host has a temporary directory");
-        let resolver_configuration = files.path().join("resolv.conf");
-        let hosts_file = files.path().join("hosts");
-        std::fs::write(
-            &resolver_configuration,
-            "search --\noptions timeout:30 attempts:1\n",
-        )
-        .assured("the temporary directory is writable");
-        std::fs::write(&hosts_file, hosts).assured("the temporary directory is writable");
-        let dns = DnsResolver::load(nervix_dns::DnsConfiguration {
-            resolver_configuration,
-            hosts_file,
-            name_servers: nervix_dns::NameServers::Explicit(vec![server]),
-        })
-        .await
-        .assured("the test's resolver configuration is valid");
-        let connector = HttpRequestEmitter {
-            dns,
-            tls: RustlsClientConfigProvider::new(&[])
-                .build_with_default_roots()
-                .assured("the platform's default roots load in tests"),
-            timeout,
-        };
-        (connector, files)
-    }
-
-    /// A name server that never answers holds the lookup for the lookup's share of `timeout_ms`,
-    /// and no longer: the attempt fails as a lookup, and the rest of the timeout, which the address
-    /// attempts and the request would have used, is never spent on it.
-    #[nervix_primitives::test(start_paused = true)]
-    async fn a_silent_name_server_holds_the_lookup_for_its_share_of_the_timeout() {
-        let silent = nervix_primitives::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .assured("the test host has a free loopback UDP port");
-        let server = silent
-            .local_addr()
-            .assured("a bound socket has a local address");
-        let timeout = Duration::from_secs(8);
-        let (mut connector, _files) = emitter_resolving_through(server, "", timeout).await;
-        let share = timeout
-            .checked_div(2)
-            .assured("dividing by a nonzero constant cannot fail");
-
-        let started = Instant::now();
-        let outcome = connector
-            .publish(vec![bodyless_post("http://silent.nervix.test:8080")])
-            .await
-            .into_parts();
-        let elapsed = started.elapsed();
-
-        assert!(
-            elapsed >= share && elapsed < timeout,
-            "the lookup ended {elapsed:?} into a {timeout:?} timeout, not at its {share:?} share"
-        );
-        let failure = outcome
-            .infrastructure_error
-            .assured("a name that never resolves leaves its request unresolved");
-        assert_eq!(
-            description(&failure).as_deref(),
-            Some(
-                "HTTP DNS resolution failed: resolving 'silent.nervix.test' failed: no answer \
-                 arrived in time"
-            )
-        );
-    }
-
-    /// Answers the request of the first connection `listener` accepts with `204 No Content`.
-    async fn answer_one_request(listener: nervix_primitives::net::TcpListener) {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-        let (mut stream, _) = listener
-            .accept()
-            .await
-            .assured("the emitter connects to the answering address");
-        let mut head = Vec::new();
-        let mut byte = [0_u8; 1];
-        while !head.ends_with(b"\r\n\r\n") {
-            nervix_primitives::task::consume_budget().await;
-            stream
-                .read_exact(&mut byte)
-                .await
-                .assured("the emitter writes its whole request head");
-            head.push(byte[0]);
-        }
-        stream
-            .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
-            .await
-            .assured("the emitter reads the final head it waits for");
-    }
-
-    /// A listener at `address` whose accept queue one connection holds full, so the kernel drops
-    /// every later handshake. The returned listener and connection keep the queue full while held.
-    async fn held_address(
-        address: SocketAddr,
-    ) -> (
-        nervix_primitives::net::TcpListener,
-        nervix_primitives::net::TcpStream,
-    ) {
-        let socket =
-            nervix_primitives::net::TcpSocket::new_v4().assured("the test host has TCP sockets");
-        socket
-            .bind(address)
-            .assured("every 127.0.0.0/8 address is local, so another one can take the same port");
-        let listener = socket.listen(0).assured("a bound socket can listen");
-        let queued = TcpStream::connect(address)
-            .await
-            .assured("an empty accept queue admits one connection");
-        (listener, queued)
-    }
-
-    /// When the only answer never completes its handshake, its attempt ends with its share, the
-    /// whole of what the lookup left, and the attempt's description names that share rather than a
-    /// request timeout, because no request was ever sent.
-    #[nervix_primitives::test(start_paused = true)]
-    async fn an_answer_that_never_connects_ends_its_attempt_with_its_share() {
-        let held = SocketAddr::from((std::net::Ipv4Addr::new(127, 0, 7, 2), 8080));
-        let (_listener, _queued) = held_address(held).await;
-        let silent = nervix_primitives::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .assured("the test host has a free loopback UDP port");
-        let timeout = Duration::from_secs(6);
-        let (mut connector, _files) = emitter_resolving_through(
-            silent
-                .local_addr()
-                .assured("a bound socket has a local address"),
-            &format!("{} one.nervix.test\n", held.ip()),
-            timeout,
-        )
-        .await;
-
-        let started = Instant::now();
-        let outcome = connector
-            .publish(vec![bodyless_post("http://one.nervix.test:8080")])
-            .await
-            .into_parts();
-        let elapsed = started.elapsed();
-
-        assert!(
-            elapsed >= timeout,
-            "the only answer's share is the whole timeout, but the attempt ended after {elapsed:?}"
-        );
-        let failure = outcome
-            .infrastructure_error
-            .assured("an answer that never connects leaves its request unresolved");
-        assert_eq!(
-            description(&failure).as_deref(),
-            Some(
-                "HTTP connection failed: no connection was accepted within the address's share of \
-                 timeout_ms"
-            )
-        );
-    }
-
-    /// An answer whose handshake never completes holds its attempt for its share of what the lookup
-    /// left, and no longer, so the next answer still connects and the request is delivered within
-    /// the same `timeout_ms`.
-    #[nervix_primitives::test]
-    async fn an_answer_that_never_connects_leaves_the_next_answer_its_share() {
-        let serving = nervix_primitives::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .assured("the test host has a free loopback port");
-        let port = serving
-            .local_addr()
-            .assured("a bound listener has a local address")
-            .port();
-        let held = SocketAddr::from((std::net::Ipv4Addr::new(127, 0, 7, 1), port));
-        let (_held_listener, _queued) = held_address(held).await;
-        let answering = nervix_primitives::task::spawn(answer_one_request(serving));
-        let silent = nervix_primitives::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .assured("the test host has a free loopback UDP port");
-        let hosts = format!("{} two.nervix.test\n127.0.0.1 two.nervix.test\n", held.ip());
-        let (mut connector, _files) = emitter_resolving_through(
-            silent
-                .local_addr()
-                .assured("a bound socket has a local address"),
-            &hosts,
-            Duration::from_secs(4),
-        )
-        .await;
-
-        let outcome = connector
-            .publish(vec![bodyless_post(&format!(
-                "http://two.nervix.test:{port}"
-            ))])
-            .await
-            .into_parts();
-
-        assert!(
-            outcome.infrastructure_error.is_none(),
-            "the held answer consumed the whole timeout: {:?}",
-            outcome.infrastructure_error
-        );
-        assert_eq!(outcome.delivered, vec![EmitterRecordId::new(0)]);
-        answering
-            .await
-            .assured("the answering task completes once it has answered");
-    }
-}
+#[path = "emitter_tests.rs"]
+mod tests;

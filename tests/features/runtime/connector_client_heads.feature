@@ -21,8 +21,8 @@ Feature: Connector names head client definitions
 
     Examples:
       | cluster_size | connector    | pool                  | config                                                                                                                                  |
-      | 1            | KAFKA        |                       |                                                                                                                                         |
-      | 3            | KAFKA        |                       |                                                                                                                                         |
+      | 1            | KAFKA        |                       | 'bootstrap.servers' = '127.0.0.1:9092'                                                                                                  |
+      | 3            | KAFKA        |                       | 'bootstrap.servers' = '127.0.0.1:9092'                                                                                                  |
       | 1            | PULSAR       |                       | 'addr' = 'pulsar://127.0.0.1:6650'                                                                                                      |
       | 3            | PULSAR       |                       | 'addr' = 'pulsar://127.0.0.1:6650'                                                                                                      |
       | 1            | HTTP         |                       | 'endpoint' = 'http://127.0.0.1:19080', 'timeout_ms' = 5000                                                                              |
@@ -106,7 +106,7 @@ Feature: Connector names head client definitions
       """
     When these Plexus statements are executed on the leader node
       """
-      CREATE KAFKA CLIENT wrong_client CONFIG {};
+      CREATE KAFKA CLIENT wrong_client CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       """
     And these Plexus statements fail with "HTTP REQUEST emitter requires a HTTP client, found KAFKA client 'wrong_client'"
       """
