@@ -41,7 +41,7 @@ use nervix_connector_kafka::testing_rdkafka::{
     config::ClientConfig,
     consumer::{BaseConsumer, Consumer, StreamConsumer},
     error::RDKafkaErrorCode,
-    message::{Header as KafkaHeader, Headers, Message, OwnedHeaders},
+    message::{Header as KafkaHeader, Headers, Message, OwnedHeaders, Timestamp as KafkaTimestamp},
     producer::{FutureProducer, FutureRecord},
     topic_partition_list::{Offset, TopicPartitionList},
 };
@@ -151,7 +151,7 @@ use super::{
     suite_watchdog::{LiveClusterRegistration, NodeStop, SUITE_BUDGET},
 };
 pub(crate) use super::{
-    broker_observer::{BrokerMessage, BrokerObserver},
+    broker_observer::{BrokerMessage, BrokerObserver, BrokerRecordTime},
     raw_session::{TestSession, open_raw_session},
 };
 
@@ -6614,9 +6614,19 @@ pub(crate) async fn observe_kafka_through(
                     let key = message
                         .key()
                         .map(|key| String::from_utf8_lossy(key).to_string());
-                    let _ = payload_tx
-                        .send(BrokerMessage::from_bytes(bytes, headers).with_key(key))
-                        .await;
+                    let time = match message.timestamp() {
+                        KafkaTimestamp::CreateTime(unix_millis) => {
+                            Some(BrokerRecordTime::Created { unix_millis })
+                        }
+                        KafkaTimestamp::LogAppendTime(unix_millis) => {
+                            Some(BrokerRecordTime::Appended { unix_millis })
+                        }
+                        KafkaTimestamp::NotAvailable => None,
+                    };
+                    let observed = BrokerMessage::from_bytes(bytes, headers)
+                        .with_key(key)
+                        .with_time(time);
+                    let _ = payload_tx.send(observed).await;
                 }
                 Err(_) => continue,
             }

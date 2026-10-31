@@ -229,6 +229,14 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "TIMESTAMP"
+entity = "KAFKA TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_emission.feature", scenario = "A Kafka emitter writes each record's TIMESTAMP as the time its record was created" },
+  { feature = "tests/features/runtime/kafka_emission.feature", scenario = "A Kafka record its broker refused keeps its TIMESTAMP when the emitter sends it again" },
+]
+
+[[capability]]
 capability = "INSTANCES"
 entity = "KAFKA TOPIC INGESTOR"
 scenarios = [

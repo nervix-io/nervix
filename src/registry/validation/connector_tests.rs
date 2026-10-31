@@ -2427,7 +2427,8 @@ fn sqs_publication(
     &mut destination.mode
 }
 
-/// The Kafka fixture emitter, which declares no envelope clause and constructs its output.
+/// The Kafka fixture emitter, whose entity declares only the TIMESTAMP envelope clause, and which
+/// constructs its output.
 fn kafka_emitter() -> CreateEmitter {
     let Model::Emitter(emitter) = emitter("enveloped", "events", "events_codec", "kafka_main")
     else {
@@ -2455,10 +2456,26 @@ fn envelope_schema() -> CreateSchema {
 }
 
 #[test]
-fn an_envelope_clause_its_entity_does_not_declare_is_refused_naming_both() {
+fn an_envelope_clause_its_entity_declares_passes_the_publishing_contract() {
     let domain: DomainName = named("validation");
     let mut emitter = kafka_emitter();
     emitter.envelope.timestamp = Some(nervix_plexus::parse_expression("input.at").expect("parses"));
+
+    validate_emitter_publishing_contract(
+        &domain,
+        &ModelName::from(&emitter.name),
+        &ModelIndex::new(),
+        &emitter,
+    )
+    .expect("KAFKA TOPIC declares the TIMESTAMP clause");
+}
+
+#[test]
+fn an_envelope_clause_its_entity_does_not_declare_is_refused_naming_both() {
+    let domain: DomainName = named("validation");
+    let mut emitter = kafka_emitter();
+    emitter.envelope.message_id =
+        Some(nervix_plexus::parse_expression("input.tenant").expect("parses"));
 
     let refused = validate_emitter_publishing_contract(
         &domain,
@@ -2466,7 +2483,7 @@ fn an_envelope_clause_its_entity_does_not_declare_is_refused_naming_both() {
         &ModelIndex::new(),
         &emitter,
     )
-    .expect_err("KAFKA TOPIC declares no TIMESTAMP clause yet");
+    .expect_err("KAFKA TOPIC declares no MESSAGE ID clause");
 
     let RegistryError::InvalidConnectorDeclaration { node, issue, .. } = refused.current_context()
     else {
@@ -2475,13 +2492,13 @@ fn an_envelope_clause_its_entity_does_not_declare_is_refused_naming_both() {
     assert_eq!(node.identifier.as_str(), "enveloped");
     let undeclared = nervix_models::EnvelopeDeclarationError::UndeclaredClause {
         entity: EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic),
-        clause: nervix_models::EnvelopeClauseKind::Timestamp,
+        clause: nervix_models::EnvelopeClauseKind::MessageId,
     };
     assert_eq!(issue, &ConnectorDeclarationIssue::Envelope(undeclared));
     assert_eq!(
         refused.current_context().to_string(),
         "emitter 'enveloped' in domain 'validation' is invalid: KAFKA TOPIC emitters declare no \
-         TIMESTAMP clause"
+         MESSAGE ID clause"
     );
 }
 

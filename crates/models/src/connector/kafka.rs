@@ -33,11 +33,11 @@ use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
-    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration,
-    IngestorMetadataField, IngestorMetadataType, IngestorReference, IngestorReferenceKind,
-    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
-    OptionValue, PositionClass, RetryPolicy,
+    EnvelopeClauseKind, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
+    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, PositionClass, RetryPolicy,
 };
 
 configured_client!(Kafka: unpooled, config CLIENT_CONFIG, CreateClientKafka => KafkaConfigEntry);
@@ -426,7 +426,11 @@ impl EmitterDeclaration for KafkaTopicEmitter {
             name: LocatorName::External(KafkaTopicName::DECLARATION),
         }),
         options: &[],
-        envelope: &[],
+        // A Kafka record carries its create time beside its key, headers and payload. It has no
+        // persistence, routing or retention flag, no delayed delivery, no reply target and no
+        // per-record message or deduplication identity, and its headers carry what properties
+        // would.
+        envelope: &[EnvelopeClauseKind::Timestamp],
         properties: &[],
         bounds: KAFKA_EMITTER_BOUNDS,
     };
