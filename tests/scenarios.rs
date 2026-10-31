@@ -15933,6 +15933,7 @@ async fn then_background_command_request_reports_leadership_lost(world: &mut Sce
         "background command request did not report that leadership moved: {}",
         result.message
     );
+    session_protocol::assert_reports_moved_leadership(&result.message);
 }
 
 #[then("the last command request reports an execution reference content conflict")]

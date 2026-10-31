@@ -143,8 +143,14 @@ fn reference_conflict(conflict: CommandExecutionRequestConflict) -> ExecutionRef
     }
 }
 
+/// The redirect a client receives. It names a leader only when one is known; a node that could
+/// not confirm its lease names none, as during an election, because the client's next step is the
+/// same: repeat the request under the same reference on whichever node leads.
 pub(super) fn leader_redirect(redirect: LeaderRedirect) -> WireLeaderRedirect {
-    let leader = redirect.leader.map(node_endpoints);
+    let leader = match redirect {
+        LeaderRedirect::Leader(location) => Some(node_endpoints(location)),
+        LeaderRedirect::NoLeader | LeaderRedirect::UnconfirmedLease { .. } => None,
+    };
     WireLeaderRedirect { leader }
 }
 

@@ -391,6 +391,40 @@ fn a_key_conditioned_on_an_owned_choice_requires_its_address_to_set_it() {
 }
 
 #[test]
+fn a_key_is_read_by_every_entity_of_its_client_unless_declared_for_one_side() {
+    let shared = ClientConfigKey::optional("addr", ClientConfigValue::String);
+    assert_eq!(shared.readers, ClientConfigReaders::Every);
+    assert!(shared.readers.include_ingestors());
+    assert!(shared.readers.include_emitters());
+
+    let intake = ClientConfigKey::IDLE_TIMEOUT.read_by_ingestors();
+    assert_eq!(intake.readers, ClientConfigReaders::Ingestors);
+    assert!(intake.readers.include_ingestors());
+    assert!(!intake.readers.include_emitters());
+
+    let publication = ClientConfigKey::TIMEOUT.read_by_emitters();
+    assert_eq!(publication.readers, ClientConfigReaders::Emitters);
+    assert!(!publication.readers.include_ingestors());
+    assert!(publication.readers.include_emitters());
+
+    // The side that reads a key changes nothing else the key declares.
+    assert_eq!(
+        ClientConfigKey {
+            readers: ClientConfigReaders::Every,
+            ..intake
+        },
+        ClientConfigKey::IDLE_TIMEOUT
+    );
+    assert_eq!(
+        ClientConfigKey {
+            readers: ClientConfigReaders::Every,
+            ..publication
+        },
+        ClientConfigKey::TIMEOUT
+    );
+}
+
+#[test]
 fn a_tls_address_requires_its_declared_trust_file() {
     let address = entry("addr", "mqtts://broker.example.com:8883");
     for validate in [

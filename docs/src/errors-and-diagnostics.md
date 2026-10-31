@@ -230,6 +230,16 @@ retain encoded input from that pool. The report preserves `AdmissionError` benea
 context, and refusal releases the input. A generator reports the failed read and tries a complete
 read again on its next occurrence; memory pressure never becomes absent or corrupt state.
 
+Interconnect rkyv decoders also refuse overlapping admission without waiting while retaining
+encoded input. Their local reports preserve `AdmissionError` beneath `TransportError`; a nested
+decoder owns its input charge through CPU completion even if the enclosing request is cancelled.
+At request dispatch, memory exhaustion, a request above the whole memory budget, a closed memory
+budget, a full execution queue and a closed execution pool are distinct `RemoteRequestFailure`
+variants. They preserve the traffic class and applicable byte or queue bounds. Temporary memory
+or queue exhaustion is recognized by `RequestError::is_capacity_exhaustion`; a stream opening answers
+503 for temporary refusal and 413 for a request above its budget. Malformed archive validation
+retains `InvalidPayload` with its complete rendered cause chain.
+
 ### Outcomes That Are Not Reports
 
 An ordinary outcome is a typed value, never an error report. Waiting for or skipping a message
@@ -2001,21 +2011,32 @@ replicas, and the existing replica-confirmation failure when its deadline expire
 ### Consensus
 
 A proposal, a linearizable read or a membership change returns a `ConsensusError` report, and its
-variants are the classes a caller routes on. `LeadershipLost` carries the leader this node
-observes, when it knows one. `RaftStorage` is a fatal storage error Raft reported for a write, and
+variants are the classes a caller routes on. `LeadershipLost` carries what this node observed
+about leadership when it could not propose as the leader: another node that leads, no known leader,
+or its own lease it could not confirm in its term. `RaftStorage` is a fatal storage error Raft
+reported for a write, and
 `Storage` a failure of the node's own consensus store. `RaftWrite` is any other failed write,
 `Conflict` a change the replicated state machine refused, and startup, transport, linearizable-read
 and membership failures have variants of their own. The class of a failed write is decided once,
 from the type of the Raft error: an answer that forwards to a leader is `LeadershipLost`, a fatal
-storage error is `RaftStorage`, and everything else is `RaftWrite`. A leader whose lease lapsed
-refuses a write before appending it with an answer that forwards to no leader, so that refusal is
-`LeadershipLost` without a leader, although the node may still lead. The Raft or I/O error stays
-beneath the context as the report's cause.
+storage error is `RaftStorage`, and everything else is `RaftWrite`. An answer that names the
+leader it forwards to observes that leader. A leader whose lease lapsed refuses a write before
+appending it with an answer that forwards to no one, and so does a node that knows no leader, such
+as during an election. The two are told apart by the leader and term the node observes when it
+proposes the write and again after the refusal. When the node led the same term both times, the
+refusal is an unconfirmed lease in that term, because a node that stops leading can lead again only
+in a later term; otherwise no leader is known. An unconfirmed lease is never reported as a move,
+and a move never as an unconfirmed lease: the context's text says which, so an operator reading a
+rendered report or log line tells lease trouble from an election without a separate counter. The
+Raft or I/O error stays beneath the context as the report's cause.
 
 The session edge reads the current context of a proposal's report. `LeadershipLost` becomes a
 `NotLeader` disposition with a redirect to the observed leader when nothing of the command was
-admitted, and `OutcomeUnknown` with leadership loss as its cause when leadership moved while the
-command's admission was being decided or after it. Any other class fails the command with the
+admitted, and `OutcomeUnknown` with leadership loss as its cause when leadership moved, or the
+leader could not confirm its lease, while the command's admission was being decided or after it.
+The redirect names a leader only when another node is known to lead. The message and diagnostic say
+which happened: a move names the leader when the node knows it, and an unconfirmed lease names its
+term and says the node may still lead. Any other class fails the command with the
 operation and the consensus owner's message: the context's text, followed by the storage or Raft
 error beneath it for a storage or write failure.
 

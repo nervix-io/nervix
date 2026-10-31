@@ -140,6 +140,14 @@ An opaque bootstrap proxy alone does not establish a Pulsar broker fault because
 otherwise connect directly to the broker. The exact payload oracle checks each sequence once after
 recovery, including a producer with all 100 receipt slots occupied.
 
+The Pulsar delivery outlines wait for the fault forwarder to flush a ready producer-creation
+reply to the client before pausing it. `START` only establishes the graph's running state; it
+does not establish that an asynchronous connector has finished creating its producer. A broker
+registration alone also leaves that reply in flight. The forwarder records the completed reply
+on its accepted connection, and an ended connection cannot satisfy the readiness observation.
+A queued producer's `producer_ready=false` reply does not satisfy it either. The thirty-second
+setup wait precedes the fault; it sends no extra record and changes no receipt or drain bound.
+
 The Pulsar producer-finish outline posts through an acknowledged HTTP endpoint, `MODE ACK MAX
 100 ACK TIMEOUT 60s` with `ON QUIESCE REJECT RETRY AFTER 1s`. Its window holds the fixture's maximum
 of one hundred concurrent posts. One client posts them concurrently and requires HTTP 200 with a
@@ -225,6 +233,7 @@ resubmitting an outcome that might already have produced output.
 | Broker observers | One task on the binary's runtime per observer, which reads the broker's client and hands each message to the step over a bounded channel and is aborted when the scenario drops the observer. A core NATS observer has no task of its own, because its client already buffers what the server delivers | The cluster fixture, `tests/common/cluster.rs`, the delivery owner, `tests/common/broker_observer.rs`, and the NATS observer, `tests/common/nats_observer.rs` |
 | Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. A stallable or silent endpoint listens on a port drawn from the port pool, so it is never handed a port another scenario's peers may still dial, and records each connection it accepts with the client's address, when it accepted it and when it stopped forwarding or holding it, which a step counting its connections reports when it fails. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards, and gives a stallable or silent endpoint's port back | The stallable and silent endpoints, `tests/common/stallable_tcp_proxy.rs`, the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes, and the Iceberg catalog gate, `tests/common/iceberg_catalog_gate.rs`, which serves HTTP/1.1 and holds each commit to one table until the scenario refuses or passes it |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
+| Snapshot receive probe | One authenticated interconnect transport, using placements from a validated public backup archive. Its listener port comes from the shared scenario pool. An owner-ending channel wakes its cleanup task on normal completion, panic or cancellation; that task shuts down the transport before releasing its temporary credentials and port reservation. A failed bind also returns its reservation. Normal completion awaits cleanup. A scoped Bulk-memory hold releases on every exit. Requests retain the snapshot protocol's own deadline, and complete checkpoint bytes and digest are compared before and after a capacity refusal | `tests/common/cluster/snapshot_receive.rs`, driven by `tests/backup/snapshot_receive.rs` |
 
 The Syslog mixed-framing sender assembles its octet-counted and non-transparent frames before
 connecting and writes them together on its runtime task. A stalled scenario runner cannot leave
@@ -576,9 +585,14 @@ scenario waits for is the one thread that polls all of their steps, described un
 that thread ran on a CPU for 86 percent of the run, every scenario took about 1.45 times its
 median across the factor `3` runs, and the run needed 279,439 slot-seconds where 48 slots had
 needed at most 215,000. More slots added no throughput, so the job keeps factor `3`. Memory was no
-limit on those runs' runner, which used at most 28 GiB of its 62. The job now runs on Boat's
-`boat-xlarge` machine, whose 32 GB and 4 GB of swap stay above that peak with less to spare; its
-runner load record shows how close a run comes.
+limit on those runs' runner, which used at most 28 GiB of its 62. The archive build and its
+unit-test and scenario readers run on `blacksmith-16vcpu-ubuntu-2404`, keeping the compiled
+checkout path identical across archive publication and restoration. Each scenario shard retains
+16 CPUs, 48 slots and every product and harness deadline. A Boat shard in Check run 41176344914
+recorded 15.2% mean CPU steal and 46.7% peak steal alongside deadline failures, while the
+contemporaneous Blacksmith sanitizer runner recorded near-zero steal. The runner records retain
+the measurements and failed attempts; changing the environment does not explain every individual
+retry observation.
 
 Admission grants feature capacity and the attempt's share of the run slots in one decision, after
 both are available. A scenario holds both through the end of teardown. A first run holds one slot.
@@ -2300,6 +2314,7 @@ ports and admits no replacement.
 | HTTP proxy | 1 per proxy, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
 | gRPC receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
 | DNS authority | 1 UDP port per cluster addressed by names | When the cluster is dropped at the end of cleanup, after its nodes have stopped |
+| Snapshot receive probe | 1 interconnect port from the shared pool | After its transport has shut down; setup failure returns the reservation as well |
 | TCP forwarders | 1 port, shared by every forwarder a scenario stands in front of a dependency | At the end of cleanup, after the cluster has stopped |
 | Stallable and silent endpoints | 1 per endpoint a scenario stands | When cleanup drops the endpoint, after the cluster has stopped |
 | Server process | 6, and 1 more for each port a relaunch after a lost bind moved it off | When the process is dropped, the ports it gave up included |
@@ -2570,6 +2585,9 @@ or restarted reusable container whose namespace already exists, checks the same 
 within the existing 30-second readiness-probe budget. A pending connection or response cannot
 extend that probe, and its failure names the namespace URL and last completed response or request
 failure. The probe follows no redirects and uses no environment proxy.
+Each HTTP request is limited to five seconds within those same overall budgets, both in fresh
+container startup and in the attachment probe. An accepted connection that sends no response
+therefore leaves time for another request to observe a dependency that has since become ready.
 Its admin API serves the topic-level `maxMessageSize` policy a scenario sets on its own topic; the
 step waits up to 60 seconds for the broker to read the policy back, which shows that the policy
 applies to the next message.
