@@ -302,14 +302,6 @@ impl SessionServiceImpl {
                     .await
             }
             DomainDrainMode::Backup { deadline } => {
-                #[cfg(feature = "testing")]
-                self.inner
-                    .runtime
-                    .pause_backup_cut_if_armed(
-                        domain,
-                        crate::fault_injection::BackupCutBoundary::Drain,
-                    )
-                    .await;
                 self.wait_for_backup_domain_drain(domain, deadline).await
             }
         };
@@ -397,6 +389,11 @@ impl SessionServiceImpl {
         domain: &DomainName,
         deadline: Instant,
     ) -> Result<(), Report<DomainAlterError>> {
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_backup_cut_if_armed(domain, crate::fault_injection::BackupCutBoundary::Drain)
+            .await;
         let coordination = self
             .inner
             .interconnect

@@ -341,6 +341,59 @@ Feature: Configuration backup into a public archive
       | 1            |
       | 3            |
 
+  # Every live node applied the pause before the drain's first poll, so each poll reads the work
+  # its node holds and installs nothing: a node whose installation is held still answers it.
+  Scenario Outline: A quiesced cut drains while no node can install runtime state
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA held_event ( id I64, source STRING );
+      CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( id integer, source string );
+      CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE RELAY held_input SCHEMA held_event UNBRANCHED;
+      CREATE RELAY held_output SCHEMA held_event UNBRANCHED;
+      CREATE VHOST edge backup-held-installation-{{test_id}}.example.com;
+      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR held_source
+        FROM held_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
+        TO held_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION held_forward FROM held_input UNBRANCHED
+        TO held_output INHERIT ALL
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION held_output_seen TO held_output;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the backup cut for domain "{{domain}}" will pause before its drain
+    And the backup cut for domain "{{domain}}" will pause before its capture
+    When the CLI begins backing up "domain {{domain}} --timeout 60s --backup-wait-timeout 3m" from node "{{leader}}" into "held-installation.nvxb" in the background
+    Then the backup cut for domain "{{domain}}" has reached its drain pause
+    When runtime installation on every node is paused
+    And the backup drain pause for domain "{{domain}}" is released
+    Then the backup cut for domain "{{domain}}" has reached its pause
+    When runtime installation on every node is released
+    And the backup cut pause for domain "{{domain}}" is released
+    Then the background CLI backup finishes
+    And the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When http payload is posted to node "{{leader}}" with host "backup-held-installation-{{test_id}}.example.com" path "/events"
+      """
+      {"id":1,"source":"after"}
+      """
+    Then within "60s" the relay subscription receives a payload
+      """
+      {"id":1,"source":"after"}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: An unavailable emitter times out a backup drain with outstanding work
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers with
