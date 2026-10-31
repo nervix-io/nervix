@@ -5,7 +5,7 @@
 //! - **Owns.** Registration of the focused node-liveness, readiness-history, node-startup,
 //!   node-stop, phase-deadline, status-request, port-pool, node-bound address, process-cluster
 //!   convergence, cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
-//!   Iceberg-catalog-gate, backup phase, materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag,
+//!   Iceberg-catalog-gate, backup phase, snapshot receive memory, materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag,
 //!   runner-offload, Syslog TLS sender, server-executable, stallable-TCP-proxy, unaccepted-address,
 //!   process-observation, process-program, process-report, WebSocket close-reply, console-connection and WebSocket peer regressions
 //!   with Rust's test runner, and the stand-in nodes, clients, images and processes those regressions
@@ -14,7 +14,7 @@
 //!   subscription payload observations and the per-node execution readings of timed probes.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, node-bound address, process-cluster convergence, cluster-teardown, scenario-phase,
-//!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, backup phase, gRPC-receiver,
+//!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, backup phase, snapshot receive memory, gRPC-receiver,
 //!   NATS-observer, runner-lag, runner-offload, Syslog TLS sender, server-executable, stallable-TCP-proxy,
 //!   unaccepted-address, process-observation, process-program, process-report, WebSocket close-reply,
 //!   console-connection, WebSocket peer and materialized-state diagnostic harness modules, the product's shutdown
@@ -34,6 +34,11 @@
 )]
 
 use websocket_close::reply_to_close;
+
+#[path = "common/snapshot_receive_memory.rs"]
+mod snapshot_receive_memory;
+#[path = "common/snapshot_receive_memory_tests.rs"]
+mod snapshot_receive_memory_tests;
 
 #[path = "common/cluster/byte_pace.rs"]
 mod byte_pace;

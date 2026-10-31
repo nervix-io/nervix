@@ -343,7 +343,12 @@ uncharged. Its private charged-input trait exposes a byte borrow with an explici
 execution contract; both concrete carriers return their retained slice without synchronization.
 Deloxide does not observe the asynchronous semaphore waits. The worker FIFO uses a
 tracked lock, so `scenario.snapshot-receive-admission` and its stressed restore twin cover actual
-decode admission and completion in the diagnostic selections. Queued callback cancellation uses
+decode admission and completion in the diagnostic selections. The probe owns a fixed reservation
+of the node's Bulk capacity except its 4096-byte receive allowance. A prior reservation's release
+therefore cannot enlarge that allowance. Nonblocking attempts take the whole hold or none of it,
+so the probe never queues a partial grant that could stop earlier work from releasing its bytes.
+The fixture's quota acquisition is untracked; its focused owner regressions check prior-charge
+release, the unchanged allowance and complete release of its hold. Queued callback cancellation uses
 that existing FIFO owner without acquiring a new lock; the explicit cancellation interleaving
 is covered by Shuttle. Explicit-poll owner regressions and public snapshot receive scenarios
 cover refusal, release and complete-checkpoint recovery. The registered Shuttle check
