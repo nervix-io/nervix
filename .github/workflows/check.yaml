@@ -1648,12 +1648,14 @@ jobs:
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
     steps:
+      # Each collection reads its profiles with the toolchain's own LLVM tools. The toolchain file's
+      # components and target are installed here, so no collection finds them missing.
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
           targets: wasm32-unknown-unknown
-          components: llvm-tools
+          components: clippy, llvm-tools
 
       - name: Setup Rust nightly
         uses: dtolnay/rust-toolchain@nightly
