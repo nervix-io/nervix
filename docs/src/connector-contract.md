@@ -13,6 +13,103 @@ ingestor and emitter plans to the host.
 [HTTP Emitter Architecture](./http-emitter-architecture.md) follows this boundary for one
 outbound request, from Arrow preparation to response and recovery.
 
+## Connector and entity kinds
+
+The vocabulary owns two related identities. `ConnectorKind` names the integration or Nervix-served
+boundary, such as Kafka, HTTP or application sessions. `IngestorEntityKind` and `EmitterEntityKind`
+name a connector together with one entity it reads or writes. HTTP request and HTTP endpoint
+ingestors therefore have distinct kinds, as do OTEL logs, traces and metrics emitters. A connector
+that serves one entity still names that entity explicitly.
+
+### Statement heads and references
+
+Plexus selects these identities in the statement head:
+
+| Statement family | Head examples |
+| --- | --- |
+| Client | `CREATE KAFKA CLIENT`, `CREATE HTTP CLIENT` |
+| Ingestor | `CREATE KAFKA TOPIC INGESTOR`, `CREATE HTTP ENDPOINT INGESTOR`, `CREATE CLIENT PRODUCER INGESTOR` |
+| Emitter | `CREATE KAFKA TOPIC EMITTER`, `CREATE OTEL METRICS EMITTER`, `CREATE CLIENT CONSUMER EMITTER` |
+| Boundary alteration | `ALTER KAFKA TOPIC INGESTOR`, `ALTER OTEL METRICS EMITTER` |
+
+Each connector/entity pair owns its grammar body. Shared combinators compose its keyword head and
+the patterns its body shares with other entities; completion offers the composed head as one item.
+The selected entity's declaration supplies the reference kind, locator, options, modes and
+capabilities. A `TOPIC`, `TABLE` or other locator in the body names the external object; it does not
+select another connector or entity. Nervix references remain typed identifiers, while external
+locators preserve the text admitted by their entity's name rule.
+
+An ingestor or emitter alteration repeats its stored connector and entity. `SET FROM` or `SET TO`
+is parsed as that entity's complete replacement body, and applying the alteration validates the
+stored kind before publishing any operation. Changing the connector/entity pair requires dropping
+and creating the boundary node. Addressing uses the node's ordinary identity instead:
+`DESCRIBE INGESTOR`, `DROP EMITTER`, `SHOW CREATE CLIENT`, and placement selections name the Model
+kind and name without repeating a connector/entity head.
+
+The referenced client need not have the same connector kind as the entity: the entity declaration
+owns that relationship. An Iceberg table emitter names an object-store client and a catalog client;
+an endpoint ingestor names an endpoint; native client producers and consumers name a schema and
+use the session transport without a client Model. The registry validates these reference contracts
+before a graph becomes active.
+
+### Identity through Models and plans
+
+The semantic shape carries the selected kind through each boundary:
+
+| Stage | Owner and representation |
+| --- | --- |
+| Vocabulary | Each connector module declares its client Model, per-entity Models and modes, entity enums, external-name rules and capabilities. `IngestorEntity` and `EmitterEntity` nest connector then entity; the entity Model carries only that entity's fields. |
+| Language | The chosen head selects that entity's body parser and produces its structured Model once. Alterations retain the selected pair and its typed replacement operations. |
+| Decisions | Validation resolves the declared references and capabilities. `IngestorConnectorPlan` and `EmitterConnectorPlan` nest connector then entity, with a typed leaf for each implementation. |
+| Data plane | A per-connector composition module consumes the leaf plan and opens the matching concrete entity implementation. The host executes the plan without reading a Model. |
+
+The vocabulary's shared declaration macros derive kind accessors, metadata and conversions from
+the per-connector entity declarations. Their outer unions list connectors, so a second entity
+extends its connector's own enum. A kind is derived from the Model's variant rather than stored
+beside it as another selector. [Entity declarations](#entity-declarations) owns the complete
+capability contract, and [Typed States](./typed-states.md#validation-and-failure-boundaries) explains the
+validation boundary.
+
+### Implementation declarations and composition
+
+Each connector crate exposes one concrete implementation and configuration per entity in an entity
+module: for example `kafka::topic::KafkaTopicIngestor` and `KafkaTopicEmitter`, Redis `pubsub`,
+Syslog `listener` and `collector`, and ZeroMQ `pull` and `push`. An implementation does not select
+its entity with a mode flag. OTEL exposes `OtelLogsEmitter`, `OtelTracesEmitter` and
+`OtelMetricsEmitter` with distinct configurations; only their private OTLP encoder shares
+signal-dependent encoding and transport.
+
+`IngestorConnector::KIND` is the concrete ingestor's compile-time vocabulary declaration.
+`EmitterLifecycle::kind()` returns the emitter's declaration through the object-safe lifecycle
+contract; concrete emitters expose the same declaration as `KIND`. The server's external-connector
+composition arms contain constant assertions matching each concrete `KIND` to the entity its plan
+arm constructs.
+A mismatched declaration fails compilation. Exhaustive plan matches select the constructor; the
+assertion checks its declared identity, while owner tests and public scenarios verify its behavior.
+
+HTTP request and WebSockets connection ingestors live in their connector crates. Their endpoint
+entities are concrete host-owned ingestors over a shared private intake binding mechanism. The
+binding ends its exact intake lifetime before withdrawal, including when an ingestor drops. Native
+client producer and consumer entities also remain host-owned. Shared implementation mechanisms
+preserve these distinct entity types and declarations.
+
+### Public names and adding an entity
+
+Canonical Plexus, completion and console previews render the selected connector/entity head from
+the vocabulary. `Model::connector_kind()` identifies a configured connector, and entity-kind
+metadata supplies each boundary's composed name. Inspection, diagnostics, logs and metric labels
+derive the connector or entity identity they report from those same declarations. A running task
+resolves its label once outside batch publication. There is no separate server spelling or case
+table.
+
+Adding a second entity keeps this ownership: extend the connector's vocabulary declaration and
+typed union, add its own grammar body, plan leaf, implementation and composition assertion, and
+extend the entity-based generators, conformance tests and runtime capability inventory. Console
+choices and previews consume the declared pair. Shared encoders stay private, and neither a body
+selector nor an implementation mode substitutes for the new entity. The
+[integration checklist](#adding-an-integration) applies to an additional entity as well as a new
+connector crate.
+
 ## Ownership and dependency direction
 
 | Layer | Responsibility |
@@ -112,31 +209,6 @@ before file inspection. Its declared header-pair decoder validates configuration
 the decoded values to both OTLP transports; each export uses the same once-decoded values.
 An invalid alteration leaves the accepted graph intact. Driver configuration checks and external
 availability retain their own boundaries; these declaration checks perform no transport I/O.
-
-### Entity implementations and composition
-
-The vocabulary owns `IngestorEntityKind` and `EmitterEntityKind`. Each connector crate exposes one
-concrete implementation and configuration per entity in an entity module: for example
-`kafka::topic::KafkaTopicIngestor` and `KafkaTopicEmitter`, Redis `pubsub`, Syslog `listener` and
-`collector`, and ZeroMQ `pull` and `push`. An implementation does not select its entity with a mode
-flag. OTEL exposes `OtelLogsEmitter`, `OtelTracesEmitter` and `OtelMetricsEmitter` with distinct
-configurations; only their private OTLP encoder shares signal-dependent encoding and transport.
-
-`IngestorConnector::KIND` is the concrete ingestor's compile-time vocabulary declaration.
-`EmitterLifecycle::kind()` returns the emitter's declaration through the object-safe lifecycle
-contract; concrete emitters expose the same declaration as `KIND`. The server composition modules
-assert each concrete declaration against the entity their plan arm constructs. Plans nest connector
-then entity, such as `IngestorConnectorPlan::Redis(RedisIngestorStartPlan::PubSub(...))` and
-`EmitterConnectorPlan::Otel(OtelEmitterPlan::Logs(...))`. Matching is exhaustive at each boundary.
-Per-connector modules compose these plans; they preserve constructor parameters and transport,
-acknowledgement, retry and finish behavior.
-
-HTTP request and WebSockets connection ingestors live in their connector crates. Their endpoint
-entities are concrete host-owned ingestors over the shared private intake binding mechanism. The
-binding still ends its exact intake lifetime before withdrawal, including when an ingestor drops.
-Native client producer and consumer entities also remain host-owned. Connector labels derive from
-the vocabulary declaration and are resolved once for the running task, outside batch publication.
-No server table defines another spelling or case for a connector.
 
 ### Connector hygiene standard
 
@@ -2845,16 +2917,24 @@ drain boundary. This chapter does not redefine those output formats.
    confirmation as its transport gives them, and every other fact a statement can say about it,
    and a typed name, checked by the entity's own rule, for each external name its statement
    writes. The connector and entity together name the statement's head, such as
-   `KAFKA TOPIC INGESTOR`. Then add the connector's grammar module, which owns each entity's body,
-   and its completion; the generated conformance tests hold both to the declaration. Keep external
-   driver configuration raw only where pass-through is its intentional contract.
+   `KAFKA TOPIC INGESTOR`, including when it is the connector's only entity. Add its typed entity
+   variant inside that connector's union; add a `ConnectorKind` and outer union arm only for a new
+   connector. Declare a client's connector and CONFIG schema in the same vocabulary. Then add the
+   entity's grammar body in its connector module and compose its CREATE and ALTER heads from the
+   shared tokens and declared kind. The generated conformance tests hold parsing and completion
+   to the declaration. Keep external driver configuration raw only where pass-through is its
+   intentional contract.
 2. Validate schema, reference, branch, header, quiesce, delivery, and external contract rules in
    the registry. Convert the validated Model into one typed start-plan variant before execution;
    an ingestor's variant belongs to the registry's ingestor planner and nests connector then entity.
-3. Add one crate under `crates/connectors/` with its ownership header, driver dependencies, and
-   ingestor or emitter contract implementation, with one entity module, concrete type and named
-   configuration per entity. Declare `IngestorConnector::KIND` or `EmitterLifecycle::kind()`, and
-   add the plan-to-implementation compile-time witness in its server composition module. A brokered emitter that awaits its broker's answers in
+3. For a new integration, add one crate under `crates/connectors/` with its ownership header,
+   driver dependencies, and ingestor or emitter contract implementation, with one entity module,
+   concrete type and named
+   configuration per entity. An additional entity extends that crate; host-owned endpoint and
+   native-client entities retain their declared host boundary. Declare `IngestorConnector::KIND`
+   or the emitter's `KIND` and `EmitterLifecycle::kind()`, and add the plan-to-implementation
+   compile-time assertion in its server composition module. Derive labels from the vocabulary
+   declaration. A brokered emitter that awaits its broker's answers in
    `MODE ACK` does so through the contract's `ConfirmationWindow`, never a window of its own. An
    emitter answers `finish` for what its client can still hold once a publish returns, as
    [Finishing an emitter](#finishing-an-emitter) describes, and adds its row to that table. A broker
@@ -2863,11 +2943,16 @@ drain boundary. This chapter does not redefine those output formats.
    `acknowledge` returns at the confirmation its entity declares. The
    [connector delivery standard](#connector-delivery-standard) lists the remaining rules. Add its
    composition mapping in the server; do not teach the contract or registry about the driver.
-4. Add unit coverage for transport behavior and feature scenarios through Plexus, including
+4. Extend entity-based Model, statement and plan generators and their registered Bolero
+   properties, preserving every field and the selected pair. Update domain versions and corpora
+   when their generated shapes change. Add unit coverage for transport behavior and feature
+   scenarios through Plexus, including
    three-node execution and failure paths, and register the scenarios that observe each declared
    capability in the [capability inventory](#capability-inventory). Confirm the crate boundary and
    run the repository's validation and connector tests.
-5. Update the [Ingestors](./ingestors.md) or [Emitters](./emitters.md) manual, relevant client and
+5. Extend the console's declared entity choices and canonical previews, and verify kind-qualified
+   completion, inspection and diagnostics. Update the [Ingestors](./ingestors.md) or
+   [Emitters](./emitters.md) manual, relevant client and
    metric documentation, and the [Plexus skill](https://github.com/nervix-io/nervix/blob/main/.agents/skills/plexus/SKILL.md) routing when its
    user-facing guidance changes. Regenerate the book.
 
