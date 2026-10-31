@@ -7,8 +7,9 @@
 //!   fresh ports of a launch another socket kept from binding a drawn port, and the description of
 //!   a startup that fails, the sockets a scenario has hold its ports, the signals delivered to it,
 //!   the clients a scenario holds open against it, and the status it exits with.
-//! - **Depends on.** The executable Cargo builds beside this test target and the read of it before
-//!   each launch, the shared test port reservations, the test interconnect certificate authority,
+//! - **Depends on.** This test executable, which a launch runs again under the server's name, and
+//!   the read of it before each launch, the shared test port reservations, the test interconnect
+//!   certificate authority,
 //!   the session client, the readiness history, the observation of a running process, the report a
 //!   process writes when its startup fails, and the node-startup classification and launch limit.
 //! - **Must not know.** Server internals. Everything it observes crosses the process boundary: the
@@ -64,6 +65,7 @@ use super::{
     phase_deadline::PhaseDeadline,
     port_pool::{next_port, next_ports, release_test_ports},
     process_observation::ProcessObservation,
+    process_program::{SERVER_PROGRAM, scenario_executable, server_command},
     process_report::reported_context,
     server_executable::{PreparedExecutable, ServerExecutable},
     status_request::{
@@ -105,9 +107,11 @@ const UNCOMPRESSED_GRPC_MESSAGE: u8 = 0;
 /// How a scenario executes the server binary.
 #[derive(Clone, Debug)]
 pub(crate) enum ServerProcessLaunch {
-    /// Execute the binary directly, the way the container image's exec-form command does.
+    /// Execute this test executable as the server, directly, the way the container image's
+    /// exec-form command executes the server.
     Direct,
-    /// Execute a separately built server binary, such as the release subject of a benchmark.
+    /// Execute a server binary a recipe built and named, such as the release subject of a
+    /// benchmark.
     Executable(PathBuf),
     /// Lower the soft and hard open-file limits before executing the binary. A shell applies the
     /// limit and then replaces itself with the server, so the server keeps the shell's process.
@@ -115,31 +119,31 @@ pub(crate) enum ServerProcessLaunch {
 }
 
 impl ServerProcessLaunch {
-    /// The server executable the launch runs. A launch that lowers the open-file limit starts a
-    /// shell that replaces itself with the default executable, so that is the one it runs.
+    /// The file the launch runs. A launch that lowers the open-file limit starts a shell that
+    /// replaces itself with this test executable, so that is the one it runs.
     fn executable_path(&self) -> PathBuf {
         match self {
-            Self::Direct | Self::OpenFileLimit(_) => {
-                PathBuf::from(env!("CARGO_BIN_EXE_nervix-server"))
-            }
+            Self::Direct | Self::OpenFileLimit(_) => scenario_executable(),
             Self::Executable(executable) => executable.clone(),
         }
     }
 
     fn command(&self) -> Command {
-        let executable = self.executable_path();
         match self {
-            Self::Direct | Self::Executable(_) => Command::new(executable),
+            Self::Direct => server_command(),
+            Self::Executable(executable) => Command::new(executable),
             Self::OpenFileLimit(limit) => {
                 let mut command = Command::new("bash");
                 command
                     .arg("-c")
                     // The soft limit goes first: a hard limit below the current soft limit is
-                    // rejected, and bash would exit on its own without running the server.
-                    .arg(r#"ulimit -Sn "$1" && ulimit -Hn "$1" && shift && exec "$@""#)
+                    // rejected, and bash would exit on its own without running the server. The
+                    // shell gives the process the server's name, as `server_command` does.
+                    .arg(r#"ulimit -Sn "$1" && ulimit -Hn "$1" && exec -a "$2" "${@:3}""#)
                     .arg("bash")
                     .arg(limit.to_string())
-                    .arg(executable);
+                    .arg(SERVER_PROGRAM)
+                    .arg(scenario_executable());
                 command
             }
         }

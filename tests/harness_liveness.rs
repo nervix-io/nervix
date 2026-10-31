@@ -7,7 +7,7 @@
 //!   convergence, cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
 //!   Iceberg-catalog-gate, backup phase, materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag,
 //!   runner-offload, Syslog TLS sender, server-executable, stallable-TCP-proxy, unaccepted-address,
-//!   process-observation, process-report, WebSocket close-reply, console-connection and WebSocket peer regressions
+//!   process-observation, process-program, process-report, WebSocket close-reply, console-connection and WebSocket peer regressions
 //!   with Rust's test runner, and the stand-in nodes, clients, images and processes those regressions
 //!   talk to.
 //!   It also owns registration of generator cadence, paced-interconnect cadence, bounded
@@ -16,7 +16,7 @@
 //!   port-pool, node-bound address, process-cluster convergence, cluster-teardown, scenario-phase,
 //!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, backup phase, gRPC-receiver,
 //!   NATS-observer, runner-lag, runner-offload, Syslog TLS sender, server-executable, stallable-TCP-proxy,
-//!   unaccepted-address, process-observation, process-report, WebSocket close-reply,
+//!   unaccepted-address, process-observation, process-program, process-report, WebSocket close-reply,
 //!   console-connection, WebSocket peer and materialized-state diagnostic harness modules, the product's shutdown
 //!   coordinator a stopping
 //!   node is read through, and the client wire session protocol the stand-in nodes answer status
@@ -24,6 +24,14 @@
 //!   It also depends on the focused generator cadence, paced-interconnect cadence, subscription
 //!   payload observation and node execution reading owners.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "harness regressions drive every layer from outside the order"
+    )
+)]
 
 use websocket_close::reply_to_close;
 
@@ -90,6 +98,10 @@ mod process_cluster_convergence;
 mod process_observation;
 #[path = "common/process_observation_tests.rs"]
 mod process_observation_tests;
+#[path = "common/process_program.rs"]
+mod process_program;
+#[path = "common/process_program_tests.rs"]
+mod process_program_tests;
 #[path = "common/process_report.rs"]
 mod process_report;
 #[path = "common/process_report_tests.rs"]
@@ -122,6 +134,10 @@ mod scenario_phase;
     reason = "the scenario binary uses the admission APIs shared by this harness test"
 )]
 mod scenario_schedule;
+#[path = "common/scenario_shard.rs"]
+mod scenario_shard;
+#[path = "common/scenario_shard_tests.rs"]
+mod scenario_shard_tests;
 #[path = "common/server_executable.rs"]
 mod server_executable;
 #[path = "common/server_executable_tests.rs"]

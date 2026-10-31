@@ -58,6 +58,7 @@ use nervix_primitives::{
     },
     time::Instant,
 };
+use nervix_test_environment::workspace_root;
 use paced_interconnect::PacedInterconnect;
 
 /// Cucumber node ids are fixed strings from the feature files, so they always parse.
@@ -443,7 +444,7 @@ fn ensure_dev_tls_assets() -> io::Result<()> {
         .get_or_init(|| {
             let status = std::process::Command::new("bash")
                 .arg("scripts/generate_dev_tls.sh")
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .current_dir(workspace_root())
                 .status();
             let status = match status {
                 Ok(status) => status,
@@ -476,9 +477,7 @@ fn dev_tls_ca_path() -> io::Result<PathBuf> {
 /// Where the dev TLS certificate authority is written. A node serving HTTPS has already generated
 /// it, because starting such a node runs `ensure_dev_tls_assets` first.
 fn dev_tls_ca_file() -> PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tls/dev")
-        .join("ca.pem")
+    workspace_root().join("tls/dev").join("ca.pem")
 }
 
 fn kafka_client_config(dependencies: &DependencyEndpoints) -> io::Result<ClientConfig> {
@@ -879,7 +878,6 @@ impl LeaderWitness {
 #[derive(Debug, Clone)]
 pub(crate) struct TestClusterConfig {
     pub replica_count: usize,
-    #[cfg(feature = "testing")]
     pub scheduler_mode: Option<SchedulerMode>,
     pub state_snapshot_interval: Duration,
     /// The restore staging quota a scenario gives every node; without one each node derives it
@@ -915,7 +913,6 @@ impl Default for TestClusterConfig {
     fn default() -> Self {
         Self {
             replica_count: TEST_REPLICA_COUNT,
-            #[cfg(feature = "testing")]
             scheduler_mode: None,
             state_snapshot_interval: TEST_STATE_SNAPSHOT_INTERVAL,
             restore_staging_max_bytes: None,
@@ -1014,7 +1011,6 @@ impl Cluster {
         scenario: ScenarioIdentity,
     ) -> io::Result<Self> {
         assert!(node_count >= 1, "cluster must contain at least one node");
-        #[cfg(feature = "testing")]
         let config = {
             let mut config = config;
             let scheduler_mode = *config.scheduler_mode.get_or_insert(if node_count == 3 {
