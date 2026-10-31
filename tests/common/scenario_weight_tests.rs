@@ -305,6 +305,10 @@ async fn scenario_weight_still_gives_retries_priority_and_respects_feature_limit
         panic!("the weighted limited attempt must take all four free slots");
     };
     assert_eq!(first.slots(), 4);
+    // Leave enough slots free so only the feature permit can keep the next attempt queued.
+    for _ in 0..4 {
+        drop(running.pop());
+    }
     let mut same_feature = Box::pin(slots.admit_with(
         FeatureLimit::WasmStateReset,
         ScenarioLength::Ordinary,
