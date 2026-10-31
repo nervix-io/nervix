@@ -4,9 +4,11 @@
 //!
 //! - **Owns.** The syslog client Model, the listener source Model with its delivery mode, the
 //!   collector emitter Model, and what each entity declares.
-//!   Client declarations also own public configuration keys, types and confidentiality.
+//!   Client declarations also own public configuration keys, types, confidentiality and the side
+//!   that reads each key, and the frame limits both sides of the wire share.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
-//! - **Must not know.** Syslog framing or how a listener is bound or a collector is written to.
+//! - **Must not know.** How Syslog frames are decoded or encoded, how a listener is bound or how
+//!   a collector is written to.
 
 #![cfg_attr(
     nervix_lint,
@@ -36,17 +38,24 @@ use crate::{
 configured_client!(Syslog: unpooled, config CLIENT_CONFIG, CreateClientSyslog => SyslogConfigEntry);
 
 /// The current keys this connector reads, shared by validation, completion and inspection.
+///
+/// A listener binds `addr` and a collector sends to it. Only a listener bounds what it admits with
+/// `max_message_size` and its idle connections with `idle_timeout_ms`; a listener reads each
+/// frame's framing from its first byte, so only a collector writes the `framing` it names and
+/// bounds its writes with `timeout_ms`. Both sides present the TLS identity in `tls_cert_file` and
+/// `tls_key_file`, and verify their peer's certificate against `tls_ca_file`.
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
     use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
     ClientConfigSchema::new(
         &[
             K::required("addr", V::String),
             K::CONNECT_TIMEOUT,
-            K::optional("framing", V::Choice(&["octet-counting", "non-transparent"])),
-            K::IDLE_TIMEOUT,
-            K::optional("max_message_size", V::PositiveInteger),
+            K::optional("framing", V::Choice(&["octet-counting", "non-transparent"]))
+                .read_by_emitters(),
+            K::IDLE_TIMEOUT.read_by_ingestors(),
+            K::optional("max_message_size", V::PositiveInteger).read_by_ingestors(),
             K::required("protocol", V::Choice(&["udp", "tcp", "tls"])),
-            K::TIMEOUT,
+            K::TIMEOUT.read_by_emitters(),
             K::TLS_CA,
             K::TLS_CERT,
             K::TLS_KEY,
@@ -55,6 +64,116 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
         &[],
     )
 };
+
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "RFC 791 bounds an IPv4 datagram's total length at 65,535 bytes"
+    )
+)]
+const IPV4_DATAGRAM_BYTES: u64 = 65_535;
+
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "RFC 791 fixes an IPv4 header without options at 20 bytes"
+    )
+)]
+const IPV4_HEADER_BYTES: u64 = 20;
+
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "RFC 768 fixes the UDP header at 8 bytes")
+)]
+const UDP_HEADER_BYTES: u64 = 8;
+
+/// The most decimal digits in an RFC 6587 octet count that either side reads or writes.
+const OCTET_COUNT_DIGITS: usize = 10;
+
+/// The frames both sides of a syslog transport carry: a collector writes only a payload that fits
+/// one, and a listener decodes no frame larger than its octet count admits.
+pub const SYSLOG_FRAME_LIMITS: SyslogFrameLimits = SyslogFrameLimits::new(
+    IPV4_DATAGRAM_BYTES - IPV4_HEADER_BYTES - UDP_HEADER_BYTES,
+    OCTET_COUNT_DIGITS,
+    b'\n',
+);
+
+/// The largest syslog frames, declared once for both sides of the wire.
+///
+/// A UDP datagram carries one message (RFC 5426). A TCP or TLS frame begins with its payload's
+/// octet count (RFC 6587, RFC 5425), or under non-transparent framing ends at a trailer byte its
+/// payload therefore cannot carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyslogFrameLimits {
+    datagram_payload: u64,
+    octet_count_digits: usize,
+    octet_count_prefix: usize,
+    largest_octet_count: u64,
+    non_transparent_trailer: u8,
+}
+
+impl SyslogFrameLimits {
+    /// Fails constant evaluation when `octet_count_digits` decimal digits outgrow a 64-bit count.
+    const fn new(
+        datagram_payload: u64,
+        octet_count_digits: usize,
+        non_transparent_trailer: u8,
+    ) -> Self {
+        let mut largest_octet_count: u64 = 0;
+        let mut digits = 0;
+        while digits < octet_count_digits {
+            largest_octet_count = match largest_octet_count.checked_mul(10) {
+                Some(shifted) => match shifted.checked_add(9) {
+                    Some(count) => count,
+                    None => panic!("an octet count's digits must fit a 64-bit count"),
+                },
+                None => panic!("an octet count's digits must fit a 64-bit count"),
+            };
+            digits += 1;
+        }
+        // The space that ends an octet count follows its digits.
+        let octet_count_prefix = match octet_count_digits.checked_add(1) {
+            Some(prefix) => prefix,
+            None => panic!("an octet count and its space must fit a usize"),
+        };
+        Self {
+            datagram_payload,
+            octet_count_digits,
+            octet_count_prefix,
+            largest_octet_count,
+            non_transparent_trailer,
+        }
+    }
+
+    /// The most payload bytes one UDP datagram carries: an IPv4 datagram less its IPv4 and UDP
+    /// headers, which a collector applies whichever address family its target resolves to.
+    pub const fn datagram_payload(self) -> u64 {
+        self.datagram_payload
+    }
+
+    /// The most decimal digits an octet count has.
+    pub const fn octet_count_digits(self) -> usize {
+        self.octet_count_digits
+    }
+
+    /// The most bytes an octet count and the space after it occupy before a frame's payload.
+    pub const fn octet_count_prefix(self) -> usize {
+        self.octet_count_prefix
+    }
+
+    /// The largest octet count those digits write, which is the most payload bytes one
+    /// octet-counted frame carries.
+    pub const fn largest_octet_count(self) -> u64 {
+        self.largest_octet_count
+    }
+
+    /// The byte that ends a non-transparent frame.
+    pub const fn non_transparent_trailer(self) -> u8 {
+        self.non_transparent_trailer
+    }
+}
 
 /// The listener a syslog client's configuration binds, which every node of the cluster serves.
 #[derive(
@@ -269,16 +388,98 @@ connector_emitters! {
     nervix_lint,
     nervix::layer(
         harness,
-        reason = "qualifies the Syslog listener's declared transport bounds"
+        reason = "qualifies the Syslog declarations' transport bounds, key readers and frame \
+                  limits"
     )
 )]
 mod tests {
     //! Layer: test harness.
-    //! - **Owns.** The listener declaration's admission, retention and overflow contract.
+    //! - **Owns.** The listener declaration's admission, retention and overflow contract, the side
+    //!   that reads each client key and the declared frame limits.
     //! - **Depends on.** The Syslog vocabulary and shared buffer declarations.
     //! - **Must not know.** Socket I/O, frame decoding or host execution.
 
+    use meticulous::OptionExt as _;
+    use rstest::rstest;
+
     use super::*;
+    use crate::{ClientConfigReaders, CreateClientSyslog};
+
+    #[test]
+    fn client_declares_which_side_reads_each_key() {
+        let readers: Vec<(&str, ClientConfigReaders)> = CreateClientSyslog::<u64>::DECLARATION
+            .config
+            .keys()
+            .iter()
+            .map(|key| (key.name, key.readers))
+            .collect();
+        assert_eq!(
+            readers,
+            vec![
+                ("addr", ClientConfigReaders::Every),
+                ("connect_timeout_ms", ClientConfigReaders::Every),
+                ("framing", ClientConfigReaders::Emitters),
+                ("idle_timeout_ms", ClientConfigReaders::Ingestors),
+                ("max_message_size", ClientConfigReaders::Ingestors),
+                ("protocol", ClientConfigReaders::Every),
+                ("timeout_ms", ClientConfigReaders::Emitters),
+                ("tls_ca_file", ClientConfigReaders::Every),
+                ("tls_cert_file", ClientConfigReaders::Every),
+                ("tls_key_file", ClientConfigReaders::Every),
+            ]
+        );
+    }
+
+    #[test]
+    fn frame_limits_bound_datagrams_octet_counts_and_non_transparent_payloads() {
+        assert_eq!(SYSLOG_FRAME_LIMITS.datagram_payload(), 65_507);
+        assert_eq!(SYSLOG_FRAME_LIMITS.octet_count_digits(), 10);
+        assert_eq!(SYSLOG_FRAME_LIMITS.octet_count_prefix(), 11);
+        assert_eq!(SYSLOG_FRAME_LIMITS.largest_octet_count(), 9_999_999_999);
+        assert_eq!(SYSLOG_FRAME_LIMITS.non_transparent_trailer(), b'\n');
+
+        // The largest count is the largest the declared digits write: one more needs a digit more.
+        let largest = SYSLOG_FRAME_LIMITS.largest_octet_count();
+        let beyond = largest
+            .checked_add(1)
+            .assured("ten digits are far below a 64-bit count");
+        assert_eq!(
+            largest.to_string().len(),
+            SYSLOG_FRAME_LIMITS.octet_count_digits()
+        );
+        assert_eq!(
+            beyond.to_string().len(),
+            SYSLOG_FRAME_LIMITS
+                .octet_count_digits()
+                .checked_add(1)
+                .assured("ten digits and one more fit a usize")
+        );
+    }
+
+    #[rstest]
+    #[case(1, 9)]
+    #[case(3, 999)]
+    #[case(10, 9_999_999_999)]
+    #[case(19, 9_999_999_999_999_999_999)]
+    fn frame_limits_derive_the_largest_count_and_its_prefix_from_the_digits(
+        #[case] digits: usize,
+        #[case] largest: u64,
+    ) {
+        let limits = SyslogFrameLimits::new(65_507, digits, b'\n');
+        assert_eq!(limits.largest_octet_count(), largest);
+        assert_eq!(
+            limits.octet_count_prefix(),
+            digits
+                .checked_add(1)
+                .assured("a case's digits are far below usize::MAX")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "an octet count's digits must fit a 64-bit count")]
+    fn frame_limits_refuse_more_digits_than_a_64_bit_count_holds() {
+        SyslogFrameLimits::new(65_507, 20, b'\n');
+    }
 
     #[test]
     fn listener_declares_datagram_admission_and_all_stream_buffers_in_transport_order() {

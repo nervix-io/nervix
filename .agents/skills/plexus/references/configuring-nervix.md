@@ -203,8 +203,10 @@ current connection, retry and deadline limits.
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
 - Every codec using the SYSLOG wire schema uses `FROM SYSLOG` and only the exact fixed fields
   documented in `Common` → `Syslog`; keep the format separate from the `SYSLOG CLIENT` transport,
-  use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter, and
-  configure TLS identity and framing for the client direction that consumes it.
+  use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter,
+  configure TLS identity for the client direction that consumes it, and set a key only one side
+  reads, such as `framing` or `idle_timeout_ms`, only on a client that side uses; the SYSLOG
+  client reference in `Connector Capabilities` names those keys.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
   owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
   nodes each have one additional fixed dispatch slot.

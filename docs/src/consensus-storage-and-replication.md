@@ -76,7 +76,9 @@ its Raft cause while classifying a known redirect as leadership loss, a fatal st
 storage, and other Raft write failures separately. A leader whose lease lapsed, because no quorum
 acknowledged a heartbeat or append it sent within the maximum election timeout, refuses a proposal
 before appending it with a redirect that names no leader. That refusal is leadership loss as well,
-although the node can still lead, and nothing of the refused proposal reached the log. A
+although the node can still lead, and nothing of the refused proposal reached the log. It is
+observed as an unconfirmed lease when the node led the same term when it proposed and after the
+refusal, and otherwise as no known leader. A
 state-machine refusal remains a typed conflict, distinct from a storage or leadership failure.
 These classifications determine whether the control plane redirects, retries, or reports an
 uncertain failure; it does not parse the error message to decide.

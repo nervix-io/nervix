@@ -45,7 +45,7 @@ use super::{
     SessionTransport, outbound, producers::SessionProducers,
 };
 use crate::application::{
-    command_result::CommandDisposition,
+    command_result::{CommandDisposition, LeaderRedirect},
     session_service::SessionServiceImpl,
     subscription::{SessionDelivery, SessionSubscriptions},
     test_fixtures::{TestService, build_test_service, named, test_command_request},
@@ -437,13 +437,16 @@ async fn a_redirect_while_no_leader_is_known_names_none() {
     } = build_test_service(true).await;
 
     let refused = service
-        .not_leader_response("CREATE SCHEMA orphan ( id I64 );", None)
+        .not_leader_response(
+            "CREATE SCHEMA orphan ( id I64 );",
+            nervix_consensus::LeadershipObservation::NoLeader,
+        )
         .await;
 
     let CommandDisposition::NotLeader(redirect) = &refused.disposition else {
         panic!("a command that needs the leader is redirected, found {refused:?}");
     };
-    assert_eq!(redirect.leader, None);
+    assert_eq!(redirect, &LeaderRedirect::NoLeader);
     assert_eq!(
         super::outcome::leader_redirect(redirect.clone()),
         WireLeaderRedirect { leader: None }
@@ -461,6 +464,53 @@ async fn a_redirect_while_no_leader_is_known_names_none() {
     assert_eq!(
         diagnostic.span,
         Some(0.."CREATE SCHEMA orphan ( id I64 );".len())
+    );
+
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+#[nervix_primitives::test]
+async fn a_leader_that_could_not_confirm_its_lease_says_so_and_names_no_leader() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(true).await;
+
+    let refused = service
+        .not_leader_response(
+            "CREATE SCHEMA orphan ( id I64 );",
+            nervix_consensus::LeadershipObservation::UnconfirmedLease { term: 3 },
+        )
+        .await;
+
+    let CommandDisposition::NotLeader(redirect) = &refused.disposition else {
+        panic!("a command the leader could not write is redirected, found {refused:?}");
+    };
+    assert_eq!(redirect, &LeaderRedirect::UnconfirmedLease { term: 3 });
+    assert_eq!(
+        redirect.leadership_change(),
+        "the leader could not confirm its lease in term 3 and may still lead"
+    );
+    assert_eq!(
+        super::outcome::leader_redirect(redirect.clone()),
+        WireLeaderRedirect { leader: None }
+    );
+    let [diagnostic] = refused.diagnostics.as_slice() else {
+        panic!(
+            "a redirect carries one diagnostic, found {:?}",
+            refused.diagnostics
+        );
+    };
+    assert_eq!(
+        diagnostic.message,
+        "the leader could not confirm its lease in term 3 and may still lead; retry this command \
+         on the current leader"
+    );
+    assert!(
+        !diagnostic.message.contains("moved"),
+        "a lease the leader could not confirm is not a move: {}",
+        diagnostic.message
     );
 
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");

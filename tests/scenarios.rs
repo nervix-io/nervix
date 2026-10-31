@@ -133,8 +133,8 @@ use crate::common::{
         InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
         TEST_AUTH_USERNAME, TestClusterConfig, TestSession, TypedBrokerHeader,
         WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
-        client_connect_options, client_domain, command_connect_options, observe_kafka_through,
-        publish_kafka_record_through,
+        client_connect_options, client_domain, command_connect_options, delete_rabbitmq_queue,
+        ensure_rabbitmq_queue, observe_kafka_through, publish_kafka_record_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
@@ -3842,6 +3842,20 @@ async fn given_nervix_server_process_is_started_with_state_snapshot_interval(
     .await;
 }
 
+/// The trace filter is the operator's `RUST_LOG`, which the fixture otherwise removes from the
+/// child's environment.
+#[given(expr = "a nervix-server process is started with trace filter {string}")]
+async fn given_nervix_server_process_is_started_with_trace_filter(
+    world: &mut ScenarioWorld,
+    filter: String,
+) {
+    let option = ServerProcessOption::Environment {
+        variable: "RUST_LOG".to_string(),
+        value: filter,
+    };
+    start_ready_server_process(world, &[option]).await;
+}
+
 #[given(
     expr = "a nervix-server process is started with transaction idle timeout {string} and \
             tombstone retention {string}"
@@ -4035,6 +4049,48 @@ async fn when_plexus_commands_are_executed_on_server_process(
                 process.log_tail()
             )
         }));
+    }
+}
+
+#[then(expr = "within {string} DESCRIBE EMITTER {string} on the server process contains")]
+async fn then_within_duration_describe_emitter_on_server_process_contains(
+    world: &mut ScenarioWorld,
+    duration: String,
+    emitter: String,
+    #[step] step: &Step,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let emitter = expand_placeholders(world, &emitter);
+    let expected = expand_placeholders(world, docstring(step));
+    let deadline = Instant::now() + duration;
+    let process = world
+        .server_process
+        .as_ref()
+        .verified("the preceding step started a nervix-server process");
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let output = process
+            .run_commands(&world.domain, &format!("DESCRIBE EMITTER {emitter};"))
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "DESCRIBE EMITTER {emitter} failed on the server process: {error}\n{}",
+                    process.log_tail()
+                )
+            });
+        if output.contains(expected.trim()) {
+            world.last_command_output = Some(output);
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE EMITTER {emitter} to contain {}. last output: \
+             {output}\n{}",
+            expected.trim(),
+            process.log_tail()
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -14713,10 +14769,11 @@ async fn then_rabbitmq_queue_has_unacknowledged_deliveries(
     expected: usize,
 ) {
     let queue = expand_placeholders(world, &queue);
-    let probe = world
-        .cluster()
-        .rabbitmq_queue_probe(&queue)
-        .expect("the management endpoint is provisioned");
+    let probe = crate::common::rabbitmq_queue::RabbitMqQueueProbe::new(
+        world.dependencies.endpoints(),
+        &queue,
+    )
+    .expect("the management endpoint is provisioned");
     probe
         .wait_for(crate::common::rabbitmq_queue::QueueExpectation::Unacknowledged(expected))
         .await
@@ -14730,10 +14787,11 @@ async fn then_rabbitmq_queue_has_outstanding_deliveries(
     expected: usize,
 ) {
     let queue = expand_placeholders(world, &queue);
-    let probe = world
-        .cluster()
-        .rabbitmq_queue_probe(&queue)
-        .expect("the management endpoint is provisioned");
+    let probe = crate::common::rabbitmq_queue::RabbitMqQueueProbe::new(
+        world.dependencies.endpoints(),
+        &queue,
+    )
+    .expect("the management endpoint is provisioned");
     probe
         .wait_for(crate::common::rabbitmq_queue::QueueExpectation::Outstanding(expected))
         .await
@@ -14753,10 +14811,11 @@ async fn then_rabbitmq_queue_has_consumer_contract(
         "automatic" => false,
         _ => panic!("the consumer's acknowledgement is manual or automatic"),
     };
-    let probe = world
-        .cluster()
-        .rabbitmq_queue_probe(&queue)
-        .expect("the management endpoint is provisioned");
+    let probe = crate::common::rabbitmq_queue::RabbitMqQueueProbe::new(
+        world.dependencies.endpoints(),
+        &queue,
+    )
+    .expect("the management endpoint is provisioned");
     probe
         .wait_for(crate::common::rabbitmq_queue::QueueExpectation::Consumer {
             ack_required,
@@ -15839,6 +15898,7 @@ async fn then_background_command_request_reports_leadership_lost(world: &mut Sce
         "background command request did not report that leadership moved: {}",
         result.message
     );
+    session_protocol::assert_reports_moved_leadership(&result.message);
 }
 
 #[then("the last command request reports an execution reference content conflict")]
@@ -25081,11 +25141,17 @@ async fn then_within_duration_node_eventually_reports_materialized_state_contain
 #[given(expr = "RabbitMQ queue {string} exists")]
 async fn given_rabbitmq_queue_exists(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
-    world
-        .cluster()
-        .ensure_rabbitmq_queue(&queue)
+    ensure_rabbitmq_queue(world.dependencies.endpoints(), &queue)
         .await
         .expect("failed to declare rabbitmq queue");
+}
+
+#[when(expr = "RabbitMQ queue {string} is deleted")]
+async fn when_rabbitmq_queue_is_deleted(world: &mut ScenarioWorld, queue: String) {
+    let queue = expand_placeholders(world, &queue);
+    delete_rabbitmq_queue(world.dependencies.endpoints(), &queue)
+        .await
+        .unwrap_or_else(|error| panic!("failed to delete RabbitMQ queue '{queue}': {error}"));
 }
 
 #[given(expr = "Kafka topic {string} exists with {int} partitions")]

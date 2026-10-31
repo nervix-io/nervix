@@ -914,6 +914,49 @@ impl FaultInjection {
         state.test_probe.restore_connectivity();
     }
 
+    /// Makes whichever node proposes `reference`'s next `write` refuse it the way a leader whose
+    /// lease lapsed refuses a write: before appending it, naming no leader, while it keeps leading
+    /// its term. Only the leader proposes a command execution's writes, so every node is armed.
+    pub async fn refuse_command_write_as_lapsed_lease(
+        &self,
+        reference: nervix_models::CommandExecutionReference,
+        write: nervix_consensus::CommandWrite,
+    ) {
+        let probes = self.consensus_test_probes();
+        for probe in probes {
+            probe
+                .refuse_command_write_as_lapsed_lease(reference.clone(), write)
+                .await;
+        }
+    }
+
+    /// Whether a node refused `reference`'s `write` as the refusal armed for it.
+    pub async fn command_write_refused_as_lapsed_lease(
+        &self,
+        reference: &nervix_models::CommandExecutionReference,
+        write: nervix_consensus::CommandWrite,
+    ) -> bool {
+        let probes = self.consensus_test_probes();
+        for probe in probes {
+            if probe
+                .command_write_refused_as_lapsed_lease(reference, write)
+                .await
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Every node's consensus test probe, taken out of the registry so none is held across a wait.
+    fn consensus_test_probes(&self) -> Vec<nervix_consensus::ConsensusTestProbe> {
+        self.inner
+            .consensus_probes
+            .iter()
+            .map(|state| state.test_probe.clone())
+            .collect()
+    }
+
     pub fn consensus_observer(&self, node: &ClusterNodeName) -> nervix_consensus::Observer {
         use meticulous::OptionExt as _;
         let state = self

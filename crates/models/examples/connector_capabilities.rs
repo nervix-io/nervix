@@ -16,11 +16,12 @@
 use nervix_models::{
     BufferBound, BufferCapacity, BufferOverflow, ChoiceRequirement, ClientConfigFile,
     ClientConfigKey, ClientConfigNamespace, ClientConfigOwner, ClientConfigPresence,
-    ClientConfigValue, ClientDeclaration, ClientPooling, ConnectorKind, DeclaredBounds,
-    EmitterBatchLegality, EmitterBodyForm, EmitterEntityCapabilities, EmitterEntityKind,
-    EmitterReferenceKind, HeaderModel, IngestorEntityCapabilities, IngestorEntityKind,
-    IngestorReferenceKind, LocatorDeclaration, LocatorName, OmittedDeadline, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, OtelEmitterEntity, OtelValueField, WaitBound,
+    ClientConfigReaders, ClientConfigValue, ClientDeclaration, ClientPooling, ConnectorKind,
+    DeclaredBounds, EmitterBatchLegality, EmitterBodyForm, EmitterEntityCapabilities,
+    EmitterEntityKind, EmitterReferenceKind, HeaderModel, IngestorEntityCapabilities,
+    IngestorEntityKind, IngestorReferenceKind, LocatorDeclaration, LocatorName, OmittedDeadline,
+    OptionDeclaration, OptionForm, OptionPresence, OptionValue, OtelEmitterEntity, OtelValueField,
+    SYSLOG_FRAME_LIMITS, SyslogEmitterEntity, WaitBound,
 };
 use serde_json::{Value, json};
 use strum::IntoEnumIterator as _;
@@ -331,8 +332,33 @@ fn emitter(kind: EmitterEntityKind) -> Value {
         "batch_transformation": requires_batch_transformation,
         "envelope": envelope, "properties": properties,
         "bounds": bounds(declared_bounds), "template": emitter_template(kind, body),
-        "value_contract": otel_value_contract(kind),
+        "value_contract": otel_value_contract(kind), "frame_limits": frame_limits(kind),
     })
+}
+
+/// The frames an entity's transport carries, for an entity whose declaration states them.
+fn frame_limits(kind: EmitterEntityKind) -> Option<Vec<String>> {
+    let EmitterEntityKind::Syslog(SyslogEmitterEntity::Collector) = kind else {
+        return None;
+    };
+    let limits = SYSLOG_FRAME_LIMITS;
+    let trailer = char::from(limits.non_transparent_trailer()).escape_default();
+    Some(vec![
+        format!(
+            "udp: one datagram carries at most {} payload bytes",
+            limits.datagram_payload()
+        ),
+        format!(
+            "tcp and tls with octet-counting framing: an octet count has at most {} digits, so a \
+             frame carries at most {} payload bytes",
+            limits.octet_count_digits(),
+            limits.largest_octet_count()
+        ),
+        format!(
+            "tcp with non-transparent framing: a payload cannot contain `{trailer}`, which ends \
+             each frame"
+        ),
+    ])
 }
 
 /// Each OTEL shape projects its one public table, without a second catalog in the renderer.
@@ -456,7 +482,15 @@ fn client(kind: ConnectorKind) -> Option<Value> {
 }
 
 fn client_key(key: &ClientConfigKey) -> Value {
-    let presence = match key.presence {
+    let ClientConfigKey {
+        name,
+        presence,
+        value: declared_value,
+        owner,
+        confidential,
+        readers,
+    } = *key;
+    let presence = match presence {
         ClientConfigPresence::Required => "required".to_owned(),
         ClientConfigPresence::Optional => "optional".to_owned(),
         ClientConfigPresence::Defaulted(value) => format!("optional; default `{value}`"),
@@ -472,11 +506,11 @@ fn client_key(key: &ClientConfigKey) -> Value {
             value,
         } => format!("optional; requires `{address}` to set `{option}={value}`"),
     };
-    let owner = match key.owner {
+    let owner = match owner {
         ClientConfigOwner::Nervix => "Nervix; strict",
         ClientConfigOwner::Driver => "driver; best effort",
     };
-    let value = match key.value {
+    let value = match declared_value {
         ClientConfigValue::Url(schemes) => format!("URL ({})", schemes.join(" or ")),
         ClientConfigValue::DriverUrl(url) => {
             let mut owned_options = Vec::with_capacity(url.owned.len());
@@ -496,7 +530,12 @@ fn client_key(key: &ClientConfigKey) -> Value {
         ClientConfigValue::Choice(choices) => choices.join(" or "),
         value => value.label().to_owned(),
     };
-    let file = match key.value {
+    let readers = match readers {
+        ClientConfigReaders::Every => "every",
+        ClientConfigReaders::Ingestors => "ingestors",
+        ClientConfigReaders::Emitters => "emitters",
+    };
+    let file = match declared_value {
         ClientConfigValue::File(ClientConfigFile::CertificateAuthority) => {
             "TLS trust; follows the connector's documented root policy"
         }
@@ -509,6 +548,6 @@ fn client_key(key: &ClientConfigKey) -> Value {
         ClientConfigValue::File(ClientConfigFile::MountedFile) => "driver file",
         _ => "none",
     };
-    json!({ "name": key.name, "presence": presence, "type": value, "owner": owner,
-        "confidential": key.confidential, "file": file })
+    json!({ "name": name, "presence": presence, "type": value, "owner": owner,
+        "confidential": confidential, "file": file, "readers": readers })
 }

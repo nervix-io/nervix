@@ -140,6 +140,14 @@ An opaque bootstrap proxy alone does not establish a Pulsar broker fault because
 otherwise connect directly to the broker. The exact payload oracle checks each sequence once after
 recovery, including a producer with all 100 receipt slots occupied.
 
+The Pulsar delivery outlines wait for the fault forwarder to flush a ready producer-creation
+reply to the client before pausing it. `START` only establishes the graph's running state; it
+does not establish that an asynchronous connector has finished creating its producer. A broker
+registration alone also leaves that reply in flight. The forwarder records the completed reply
+on its accepted connection, and an ended connection cannot satisfy the readiness observation.
+A queued producer's `producer_ready=false` reply does not satisfy it either. The thirty-second
+setup wait precedes the fault; it sends no extra record and changes no receipt or drain bound.
+
 The Pulsar producer-finish outline posts through an acknowledged HTTP endpoint, `MODE ACK MAX
 100 ACK TIMEOUT 60s` with `ON QUIESCE REJECT RETRY AFTER 1s`. Its window holds the fixture's maximum
 of one hundred concurrent posts. One client posts them concurrently and requires HTTP 200 with a
@@ -225,6 +233,7 @@ resubmitting an outcome that might already have produced output.
 | Broker observers | One task on the binary's runtime per observer, which reads the broker's client and hands each message to the step over a bounded channel and is aborted when the scenario drops the observer. A core NATS observer has no task of its own, because its client already buffers what the server delivers | The cluster fixture, `tests/common/cluster.rs`, the delivery owner, `tests/common/broker_observer.rs`, and the NATS observer, `tests/common/nats_observer.rs` |
 | Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. A stallable or silent endpoint listens on a port drawn from the port pool, so it is never handed a port another scenario's peers may still dial, and records each connection it accepts with the client's address, when it accepted it and when it stopped forwarding or holding it, which a step counting its connections reports when it fails. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards, and gives a stallable or silent endpoint's port back | The stallable and silent endpoints, `tests/common/stallable_tcp_proxy.rs`, the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes, and the Iceberg catalog gate, `tests/common/iceberg_catalog_gate.rs`, which serves HTTP/1.1 and holds each commit to one table until the scenario refuses or passes it |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
+| Snapshot receive probe | One authenticated interconnect transport, using placements from a validated public backup archive. Its listener port comes from the shared scenario pool. An owner-ending channel wakes its cleanup task on normal completion, panic or cancellation; that task shuts down the transport before releasing its temporary credentials and port reservation. A failed bind also returns its reservation. Normal completion awaits cleanup. A scoped Bulk-memory hold releases on every exit. Requests retain the snapshot protocol's own deadline, and complete checkpoint bytes and digest are compared before and after a capacity refusal | `tests/common/cluster/snapshot_receive.rs`, driven by `tests/backup/snapshot_receive.rs` |
 
 The Syslog mixed-framing sender assembles its octet-counted and non-transparent frames before
 connecting and writes them together on its runtime task. A stalled scenario runner cannot leave
@@ -576,9 +585,14 @@ scenario waits for is the one thread that polls all of their steps, described un
 that thread ran on a CPU for 86 percent of the run, every scenario took about 1.45 times its
 median across the factor `3` runs, and the run needed 279,439 slot-seconds where 48 slots had
 needed at most 215,000. More slots added no throughput, so the job keeps factor `3`. Memory was no
-limit on those runs' runner, which used at most 28 GiB of its 62. The job now runs on Boat's
-`boat-xlarge` machine, whose 32 GB and 4 GB of swap stay above that peak with less to spare; its
-runner load record shows how close a run comes.
+limit on those runs' runner, which used at most 28 GiB of its 62. The archive build and its
+unit-test and scenario readers run on `blacksmith-16vcpu-ubuntu-2404`, keeping the compiled
+checkout path identical across archive publication and restoration. Each scenario shard retains
+16 CPUs, 48 slots and every product and harness deadline. A Boat shard in Check run 41176344914
+recorded 15.2% mean CPU steal and 46.7% peak steal alongside deadline failures, while the
+contemporaneous Blacksmith sanitizer runner recorded near-zero steal. The runner records retain
+the measurements and failed attempts; changing the environment does not explain every individual
+retry observation.
 
 Admission grants feature capacity and the attempt's share of the run slots in one decision, after
 both are available. A scenario holds both through the end of teardown. A first run holds one slot.
@@ -978,11 +992,11 @@ archive must retain both quiesced cuts and the measured first hold.
 The paced branch-buffering outline runs its domain at rate 1200 with one-minute logical input
 flush and collection, a six-second period and skew, and a five-hour branch TTL. Each of these is
 sixty times the physical time it takes, so the flush and the collection each still close 50 ms
-after they open, while a physical clock would hold each for a minute. The receive budget is five
-seconds: twelve times shorter than the wrong clock's first window, and many times longer than
-relay delivery takes on a loaded runner. With one-second windows at rate 20, the budget had to
-stay below a one-second physical cadence, and its 800 ms then measured relay delivery as much as
-the clock. A relay owner fans out one batch at a time, across every branch of the relay, and waits
+after they open, while a physical clock would hold each for a minute. The receive budget is ten
+seconds: six times shorter than the wrong clock's first window, and longer than relay delivery
+takes on a loaded runner. With one-second windows at rate 20, the budget had to stay below a
+one-second physical cadence, and its 800 ms then measured relay delivery as much as the clock. A
+relay owner fans out one batch at a time, across every branch of the relay, and waits
 for each remote receiver to admit the batch before it takes the next one. On three nodes the
 placement puts other nodes between a row's ingestor, both relay owners, the reingestor and the
 session, so each owner fan-out and each delivery to a remote owner waits for an admission between
@@ -990,32 +1004,49 @@ nodes; on one node every hop is local. In a loaded parallel run the first rows o
 arrived 269 ms apart and both second rows missed the 800 ms deadline. A relay owner that spends
 that long on each batch produces exactly that pattern. A companion outline makes every relay owner
 wait 250 ms before each batch: at the 800 ms budget that wait failed the same way on one and three
-nodes, while the outline requires every row within the five-second budget.
+nodes, while the outline requires every row within the ten-second budget. A five-second budget
+held at 48 run slots on 16 runtime workers, with last receipts up to 3.4 seconds, but not in a
+full CI shard, where the first row took 3.6 seconds and the other three missed the deadline.
 
 Each outline's bounded payload sample owns the raw session on a runtime task and records every
 receipt instant, while Cucumber only awaits the completed sample. Checking the deadline between
 rows on the runner task could fail after the first tenant rows even when both second rows were
 already queued within the budget. A paused-clock regression supplies those rows at 100 ms and
-delays the caller past five seconds; another requires a missing second row to expire at exactly
-five seconds despite a duplicate first row. A transport disconnect instead fails immediately with
+delays the caller past ten seconds; another requires a missing second row to expire at exactly
+ten seconds despite a duplicate first row. A transport disconnect instead fails immediately with
 its cause. The public outlines check each concrete tenant key and both exact payloads while
-deliberately delaying collection of the result for six seconds, beyond the unchanged receive
+deliberately delaying collection of the result for eleven seconds, beyond the unchanged receive
 budget. That delay yields to the runtime and other scenarios; it does not block the shared runner.
-A scripted one-minute physical cadence still expires the same five-second sample. Every returned
+A scripted one-minute physical cadence still expires the same ten-second sample. Every returned
 row must also have a receipt instant strictly before the original deadline: a paused-clock reader
-that resumes at or beyond either the 500 ms or five-second bound must fail even when its final row
-is ready. Offloading removes runner polling gaps; it neither extends the budget nor proves that
-runtime workers cannot be delayed.
+that resumes at or beyond the ten-second bound must fail even when its final row is ready.
+Offloading removes runner polling gaps; it neither extends the budget nor proves that runtime
+workers cannot be delayed.
 
-The slow historical-domain Immediate-flush outline keeps its 500 ms receipt budget, physical
-batching minimum, both exact tenant keys and payloads, and one- and three-node topology. It
-delays only collection of the observation result for one second. The reader must start and
-capture its deadline before the caller first polls the result. Its paused-clock control
-supplies both rows at 100 ms and requires receipt signals inside the original 500 ms window
-before the caller resumes after one second. A missing or late row still fails, and the
-wrong-clock control expires this 500 ms budget with a one-second cadence, as it expires the paced
-outlines' five-second budget with a one-minute cadence. The public receive bound qualifies the
-physical clock choice without changing domain time or the batching minimum.
+The slow historical-domain Immediate-flush outline runs its domain at rate 0.000001, where its
+100-microsecond batching minimum would hold each route for a hundred physical seconds if it were
+scaled as logical time. The receive budget is ten seconds: ten times shorter than the wrong
+clock's window, and longer than relay delivery takes on a loaded runner. At rate 0.0001 the wrong
+clock took one second, so the budget had to stay below it, and its 500 ms then measured relay
+delivery instead of the clock. On three nodes a row can cross four admissions between nodes, and
+each one exchanges a grant, a body and an outcome through the shared runtime, about five
+milliseconds on an idle machine. With 48 run slots on 16 runtime workers, 88% busy, 11 of 48
+samples failed that 500 ms budget with neither row, or with either tenant's row alone. Given a
+longer budget under the same load, every sample received both rows, the last up to 1.4 seconds
+after it began and the two tenants' rows up to half a second apart.
+
+The outline keeps its physical batching minimum, both exact tenant keys and payloads, and one- and
+three-node topology. It delays collection of the observation result for eleven seconds, beyond
+its receive budget. The reader must start and capture its deadline before the caller first polls
+the result. Its paused-clock control supplies both rows at 100 ms and requires receipt signals
+inside the budget before the caller resumes after eleven seconds. A missing or late row still
+fails, and the wrong-clock control expires the same ten-second budget with a hundred-second
+cadence, as it does with the paced outlines' one-minute cadence. The public receive bound
+qualifies the physical clock choice without changing domain time or the batching minimum.
+
+The slow-branch collection outline holds each branch for one physical second at rate 0.0001, and
+its lower bound measures that hold. Its ten-second upper bound only has to outlast the hold and
+the same relay delivery, because a row left to the outline's one-hour flush would never arrive.
 
 The duration window outline establishes its observation boundary through a public subscription:
 it first waits for a probe branch's window to emit, then submits all four interleaved tenant rows
@@ -1114,7 +1145,28 @@ The harness keeps these boundaries explicit.
   as it records the outcome; a single-node leader is its own quorum, and its lease never lapses. A
   raw probe therefore stays only where the answer is the subject: a repetition joining an applying
   restore or returning its recorded outcome, a reference conflict, a redirect, a controlled
-  leadership loss, or an interrupted upload sent again. The room and idle-lifetime scenarios hold
+  leadership loss, or an interrupted upload sent again. When a raw background probe must reach an
+  armed restore step or finalization pause, a redirect may repeat the raw request before its first
+  observed pause. A `LeadershipLost` reply stays the raw answer, including its actual origin and
+  execution reference. A separate completion observer may drive only setup to the armed execution
+  pause under the same reference, statement and immutable archive; its recovered answer never
+  replaces the retained raw reply. This matters after an applying loss: the admitted execution can
+  resume through reconciliation, and a repetition can answer `StillApplying` or `Recovered` rather
+  than execute a new command. The complete pause observation, including all setup attempts, keeps
+  its original 120-second bound. Upload refusals, terminal failures, raw `StillApplying` and other
+  unknown causes fail that observation. Reaching the first pause disables further raw redirects;
+  observing a later armed pause can still advance the execution after retaining a raw leadership
+  loss. The stale-route, held-admission and applying-loss regressions exercise these boundaries and
+  require the exact raw `LeadershipLost`/`Executed` answer followed by `Completed`/`Recovered` under
+  the same reference. The applying-loss case explicitly retains the reply received before the
+  later finalization hold; it does not attribute that earlier reply to the second transfer.
+  The interrupted-upload and repeated-reference outlines hold finalization too. Their one-node
+  raw streams answer `Completed`/`Executed`. Their three-node executions transfer leadership before
+  release; the raw `LeadershipLost`/`Executed` reply either already arrived during admission or
+  application, or arrives after that release. Both topologies then require
+  `Completed`/`Recovered`; the applying repetition and reference-conflict replies remain raw and
+  exact. The durable-failure outline retains its raw leadership-loss reply and recovered failure.
+  The room and idle-lifetime scenarios hold
   the restore's outcome before its coordinator records it and transfer leadership on three nodes
   before releasing it, so their three-node examples always learn the outcome under the same
   reference as recovered, and their one-node examples report it as executed. The staging scenario
@@ -2242,6 +2294,7 @@ ports and admits no replacement.
 | HTTP proxy | 1 per proxy, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
 | gRPC receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
 | DNS authority | 1 UDP port per cluster addressed by names | When the cluster is dropped at the end of cleanup, after its nodes have stopped |
+| Snapshot receive probe | 1 interconnect port from the shared pool | After its transport has shut down; setup failure returns the reservation as well |
 | TCP forwarders | 1 port, shared by every forwarder a scenario stands in front of a dependency | At the end of cleanup, after the cluster has stopped |
 | Stallable and silent endpoints | 1 per endpoint a scenario stands | When cleanup drops the endpoint, after the cluster has stopped |
 | Server process | 6, and 1 more for each port a relaunch after a lost bind moved it off | When the process is dropped, the ports it gave up included |
@@ -2303,7 +2356,8 @@ captures its standard output and error in one log. It removes every `NERVIX_*` v
 the server. The options and environment variables a scenario gives the process are applied after
 that removal, written exactly as the scenario states them, so a scenario can hand the node a value
 it must refuse; such a scenario starts the process without waiting for readiness and asserts how it
-exits. A claim about a
+exits. A scenario about what the node's log records hands it an operator's trace filter as
+`RUST_LOG` and waits for readiness as usual. A claim about a
 node process dying while its peers keep running, such as what a client producer is told when the
 node that executes its ingestor or serves its session is killed or frozen, runs the three-process
 cluster and faults one member, because only a real process death closes, or stops answering on,
@@ -2511,6 +2565,9 @@ or restarted reusable container whose namespace already exists, checks the same 
 within the existing 30-second readiness-probe budget. A pending connection or response cannot
 extend that probe, and its failure names the namespace URL and last completed response or request
 failure. The probe follows no redirects and uses no environment proxy.
+Each HTTP request is limited to five seconds within those same overall budgets, both in fresh
+container startup and in the attachment probe. An accepted connection that sends no response
+therefore leaves time for another request to observe a dependency that has since become ready.
 Its admin API serves the topic-level `maxMessageSize` policy a scenario sets on its own topic; the
 step waits up to 60 seconds for the broker to read the policy back, which shows that the policy
 applies to the next message.

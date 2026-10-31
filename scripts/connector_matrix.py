@@ -176,9 +176,17 @@ def entity_rows(row, side, notes):
         ])
         rows.extend(bounds_rows(row["bounds"]))
     else:
+        frame_limits = row["frame_limits"]
+        if row["batch_maximum"]:
+            maximum = row["batch_maximum"]
+        elif frame_limits:
+            maximum = "A batch is written as one frame within the frame limits below; general BATCH limits still apply."
+        else:
+            maximum = "No additional protocol maximum is declared; general BATCH limits still apply."
+        rows.extend([("Body", row["body"]), ("BATCH", row["batch"]), ("Protocol batch maximum", maximum)])
+        if frame_limits:
+            rows.append(("Frame limits", "\n".join(frame_limits)))
         rows.extend([
-            ("Body", row["body"]), ("BATCH", row["batch"]),
-            ("Protocol batch maximum", row["batch_maximum"] or "No additional protocol maximum is declared; general BATCH limits still apply."),
             ("Batch transformation required", "yes" if row["batch_transformation"] else "no"),
             ("Envelope", "\n".join(row["envelope"]) or absent(notes, row, "envelope")),
             ("PROPERTIES keys and exact types", "\n".join(row["properties"]) or absent(notes, row, "properties")),
@@ -193,6 +201,39 @@ def entity_rows(row, side, notes):
                 ("Unsupported OTLP features and reasons", "\n".join(contract["unsupported"])),
             ])
     return rows
+
+
+def series(items):
+    """Items as prose lists them: `a`, `a and b`, or `a, b and c`."""
+    if len(items) < 2:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def readers_text(surface, client):
+    """The keys only one side of a client reads, each side naming its entities; none when all read all."""
+    sides = {"ingestors": "ingest", "emitters": "emit"}
+    restricted = {"ingestors": [], "emitters": []}
+    for key in client["keys"]:
+        readers = key["readers"]
+        if readers == "every":
+            continue
+        if readers not in restricted:
+            raise ValueError(f"{client['kind']} client: `{key['name']}` declares unknown readers '{readers}'")
+        restricted[readers].append(f"`{key['name']}`")
+    sentences = []
+    for readers, names in restricted.items():
+        if not names:
+            continue
+        entities = [f"`{row['entity']}`" for row in surface[sides[readers]] if row["connector"] == client["kind"]]
+        if not entities:
+            raise ValueError(f"{client['kind']} client: {names[0]} is read only by {readers}, "
+                             f"but no {client['kind']} {readers[:-1]} references the client")
+        sentences.append(f"Only its {series(entities)} {readers} read {series(names)}.")
+    if not sentences:
+        return ""
+    sentences.append("Every entity that references the client reads its other keys.")
+    return " ".join(sentences) + "\n"
 
 
 def render_matrix(surface, notes):
@@ -223,6 +264,9 @@ def render_matrix(surface, notes):
         namespaces = ", ".join(client["namespaces"]) or "none; only declared keys are accepted"
         reserved = ", ".join(f"`{key}`" for key in client["reserved"]) or "none"
         lines.append(f"Delegated property namespaces: {namespaces}. Reserved keys: {reserved}.\n")
+        readers = readers_text(surface, client)
+        if readers:
+            lines.append(readers)
         if client["constraints"]:
             lines.append(table([("Additional declared constraints", "\n".join(client["constraints"]))]))
     return "\n".join(lines)

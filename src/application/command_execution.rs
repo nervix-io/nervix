@@ -759,14 +759,17 @@ impl SessionServiceImpl {
         {
             Ok(execution) => Ok(CommandAdmission::Admitted(execution)),
             Err(error) => {
-                if let ConsensusError::LeadershipLost { .. } = error.current_context() {
+                if let ConsensusError::LeadershipLost { observed } = error.current_context() {
                     // The admission proposal may have reached the log before leadership moved,
-                    // so whether the command was admitted is not known here.
+                    // so whether the command was admitted is not known here. A leader that could
+                    // not confirm its lease is answered the same way, and the message says which.
+                    let redirect = self.redirect_to_leader(observed.clone()).await;
                     return Err(Box::new(outcome_unknown(
                         OutcomeUnknownCause::LeadershipLost,
                         format!(
-                            "leadership moved while command execution reference '{reference}' was \
-                             being admitted; retry it with the same reference to learn its outcome"
+                            "{} while command execution reference '{reference}' was being \
+                             admitted; retry it with the same reference to learn its outcome",
+                            redirect.leadership_change()
                         ),
                     )));
                 }
@@ -946,15 +949,17 @@ impl SessionServiceImpl {
         {
             Ok(execution) => execution,
             Err(error) => {
-                if let ConsensusError::LeadershipLost { .. } = error.current_context() {
+                if let ConsensusError::LeadershipLost { observed } = error.current_context() {
                     // The effects applied, but recording their outcome may not have reached the
-                    // log before leadership moved. The next leader finishes the command.
+                    // log before leadership moved, or the leader could not confirm its lease. The
+                    // node that leads next finishes the command.
+                    let redirect = self.redirect_to_leader(observed.clone()).await;
                     return Err(Box::new(outcome_unknown(
                         OutcomeUnknownCause::LeadershipLost,
                         format!(
-                            "leadership moved while command execution reference '{reference}' was \
-                             being finalized; retry it with the same reference to learn its \
-                             outcome"
+                            "{} while command execution reference '{reference}' was being \
+                             finalized; retry it with the same reference to learn its outcome",
+                            redirect.leadership_change()
                         ),
                     )));
                 }
@@ -1021,19 +1026,23 @@ impl SessionServiceImpl {
                 let result = self
                     .command_with_transaction_status(result, subscriptions)
                     .await;
-                if result.is_not_leader() {
-                    // The command was admitted before leadership moved, so it is not refused: the
-                    // next leader resumes it, and its outcome is not known yet.
+                if let CommandDisposition::NotLeader(redirect) = &result.disposition {
+                    // The command was admitted before this node stopped acting as the leader, so
+                    // it is not refused: the node that leads next resumes it, and its outcome is
+                    // not known yet. The redirect says whether leadership moved or the lease went
+                    // unconfirmed.
+                    let message = format!(
+                        "{} while command execution reference '{}' was applying; retry it with \
+                         the same reference to learn its outcome",
+                        redirect.leadership_change(),
+                        execution.reference
+                    );
                     CommandResult {
                         diagnostics: result.diagnostics,
                         transaction: result.transaction,
                         ..CommandResult::new(
                             CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::LeadershipLost),
-                            format!(
-                                "leadership moved while command execution reference '{}' was \
-                                 applying; retry it with the same reference to learn its outcome",
-                                execution.reference
-                            ),
+                            message,
                         )
                     }
                 } else {
@@ -1612,9 +1621,12 @@ mod tests {
     #[test]
     fn routing_results_leave_the_admitted_command_applying() {
         for disposition in [
-            CommandDisposition::NotLeader(crate::application::command_result::LeaderRedirect {
-                leader: None,
-            }),
+            CommandDisposition::NotLeader(
+                crate::application::command_result::LeaderRedirect::NoLeader,
+            ),
+            CommandDisposition::NotLeader(
+                crate::application::command_result::LeaderRedirect::UnconfirmedLease { term: 2 },
+            ),
             CommandDisposition::TransactionDetached {
                 transaction_id: "transaction-1".to_string(),
             },
