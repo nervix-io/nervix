@@ -105,7 +105,7 @@ A reader verifies an archive as a stream, without seeking:
 
 1. The first header must be the regular `manifest.rkyv` entry within the 64 MiB record limit;
    anything else is refused before the manifest is read.
-2. The manifest must hold archive format major version `1`, valid domain names, no duplicate path,
+2. The manifest must hold archive format major version `2`, valid domain names, no duplicate path,
    and a known record kind for every record section.
 3. Every following entry must be the next section the manifest names, with that exact length,
    within its content kind's bound, and with that digest once its bytes are drained. A missing,
@@ -312,9 +312,9 @@ quota. A section that cannot be staged because the node's staging quota is full 
 than waited for. A staged section stays registered under the capture's coordination identity until
 the coordinator fetches it or 600 seconds pass.
 
-Only the node the committed schedule names as a placement's primary captures it. An owner runs the
-capture steps above for the placements it is the primary of and for no others, so the archive holds
-each placement once. A replica's copy is never sealed, listed, read or charged, so a replica's
+Only the node the committed schedule names as a unit's primary captures its placements. An owner
+runs the capture steps above for the placements it is the primary of and for no others, so the
+archive holds each placement once. A replica's copy is never sealed, listed, read or charged, so a replica's
 admission refusal cannot fail a cut. Owners agree on the primary because the cut's mutation lease
 keeps the domain's schedule from changing, automatic placement included, while the cut is held; a
 replica owns a placement only once failover promotes it, after a cut has released the lease. An
@@ -821,15 +821,18 @@ effect.
 ## State Placement Identities
 
 Restored state is addressed by what the restored domain computes, never by where the source cluster
-kept it. A placement names the target domain, the state kind, the entity's kind and name and, for
-branch-local state, the branch key; the source domain's name and the nodes that owned the state are
-not carried. Every placement except Kafka domain offsets and branch-aggregated metrics includes the
+kept it. A placement names the target domain, the state kind, the entity's kind and name, the
+scheduled unit and, for branch-local state, the branch key; the source domain's name and the nodes
+that owned the state are not carried. Every placement except Kafka domain offsets and
+branch-aggregated metrics includes the
 entity's schema fingerprint, the BLAKE3 digest of the schema Models it depends on, so identical
 Models restored elsewhere address the same state, and a restore installs a section only under the
 fingerprint the archive recorded; the archive records a Kafka ingestor's schema fingerprint beside
 its offsets, and the restore checks it before installing them. A materialized placement's
 fingerprint also mixes in the domain's start generation, and a WASM placement names the guest-state
-generation its schedule assigns.
+generation its schedule assigns. The archive descriptors and section paths retain the unit, so
+two units of one entity stage and install separate checkpoints. Restore accepts a state section
+only when its unit exists in the restored schedule and sends it to that unit's assigned nodes.
 
 Kafka offset checkpoints and their archive records also retain the exact optional generation of an
 already applied explicit start. Restore installs it beside the next offsets, so resuming an archived

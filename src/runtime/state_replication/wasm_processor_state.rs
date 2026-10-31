@@ -409,11 +409,7 @@ impl Runtime {
             None => self.stored_runtime_state_snapshot(&placement)?,
         };
         let catalog = self.branch_checkpoint_catalog(&placement);
-        let assignment = self.state_assignment(&DomainNodeRef::node_in(
-            placement.domain.clone(),
-            placement.kind,
-            placement.identifier.clone(),
-        ));
+        let assignment = self.state_assignment_for_unit(&placement.unit_ref());
         let state = Arc::new(
             ReplicatedWasmProcessorState::new(placement.clone(), initial, assignment)
                 .cataloged(&catalog),

@@ -118,6 +118,7 @@ impl TaskHandleBenchmark {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor),
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         };
         runtime
@@ -153,6 +154,7 @@ impl TaskHandleBenchmark {
                 domain: domain.clone(),
                 kind: ModelKind::WasmProcessor,
                 identifier: wasm_node,
+                unit: nervix_models::Unit::Single,
                 branch_key: None,
                 state: RuntimeState::WasmProcessor {
                     schema,

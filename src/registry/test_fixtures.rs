@@ -235,6 +235,7 @@ pub(in crate::registry) fn branch(name: &str, schema: &str) -> Model {
         name: named(name),
         schema: named(schema),
         ttl: "5m".to_string(),
+        partitions: nervix_models::BranchPartitions::ONE,
         eviction: None,
     })
 }
@@ -244,6 +245,7 @@ pub(in crate::registry) fn branch_for_relay(relay: &str, schema: &str) -> Model 
         name: branch_name_for_relay(relay),
         schema: named(schema),
         ttl: "5m".to_string(),
+        partitions: nervix_models::BranchPartitions::ONE,
         eviction: None,
     })
 }

@@ -535,7 +535,9 @@ impl SessionServiceImpl {
                     let Some(node) = schedule.nodes.get(&reference) else {
                         continue;
                     };
-                    if node.schema_fingerprint != descriptor.schema {
+                    if node.schema_fingerprint != descriptor.schema
+                        || !node.units.contains_key(&descriptor.unit)
+                    {
                         continue;
                     }
                     let Some(schema) = domain.materialized_schemas.get(&descriptor.entity) else {
@@ -601,7 +603,9 @@ impl SessionServiceImpl {
                     else {
                         continue;
                     };
-                    if node.schema_fingerprint != descriptor.schema {
+                    if node.schema_fingerprint != descriptor.schema
+                        || !node.units.contains_key(&descriptor.unit)
+                    {
                         continue;
                     }
                     let Some(key_schema) =
