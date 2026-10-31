@@ -139,8 +139,15 @@ impl TestParallelism {
     }
 }
 
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+/// The root of the workspace this crate was built in, which holds the fixtures, tools and scripts
+/// a test reads.
+pub fn workspace_root() -> PathBuf {
+    let crate_directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = crate_directory
+        .ancestors()
+        .nth(2)
+        .assured("this crate lies in `crates/` of the workspace");
+    root.to_path_buf()
 }
 
 pub const KAFKA_ADDR: &str = "kafka_addr";

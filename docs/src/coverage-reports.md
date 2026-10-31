@@ -37,8 +37,8 @@ counters.
 
 | Producer | Execution and exported evidence |
 | --- | --- |
-| `just test-coverage` (`tests`) | Ordinary workspace unit, binary, benchmark test-mode and harness-liveness tests. Packages that own execution modes run separately with ordinary features, so an all-features invocation never combines modes. Exports `lcov-workspace.info` and `coverage-source-root.txt` as `coverage-tests`. |
-| `just test-scenarios-coverage` (`scenarios`) | The public Cucumber suite, including its instrumented server, CLI, report tool, paced Rust driver and shared binding. Exports the same report/root pair and the paced Python drivers' `python.lcov` as `coverage-scenarios`. |
+| `just test-coverage` (`scenarios-build` and `tests`) | Ordinary workspace unit, binary, benchmark test-mode and harness-liveness tests. Packages that own execution modes run separately with ordinary features, so an all-features invocation never combines modes. Exports `lcov-workspace.info` and `coverage-source-root.txt` as `coverage-tests`. |
+| `just test-scenarios-coverage` (`scenarios-build` and the `scenarios` shards) | The public Cucumber suite, including the server it links and its instrumented CLI, report tool, paced Rust driver and shared binding. Each shard exports the same report/root pair for its share of the suite, and the paced Python drivers' `python.lcov` when it ran them, as `coverage-scenarios-<I>`. |
 | `coverage-native-extras test-typed-ratchet` (`extra-tests`) | Source-contract compiler fixtures, including their paired fixture doctests and loaded procedural macro objects, using the analysis compiler's matching LLVM tools. Product API doctests and modeled fixture checks finish separately without instrumentation. |
 | `coverage-native-extras bench-smoke` (`extra-tests`) | The smoke recipe's benchmark bodies in test mode. Other Cargo benchmark test targets run in `test-coverage`. Instrumented timings are not performance evidence. |
 | `coverage-native-extras test-primitives-ordinary` (`extra-tests`) | The primitive boundary's native ordinary conformance checks. Other conformance modes remain separate. |
@@ -140,6 +140,17 @@ separate build lock through export. The parts that only compile or target the br
 commands run without the collector's profile environment, so altered source cannot contribute to
 the current-source report.
 
+`just coverage-native-extras-build <producer> ...` compiles a producer's instrumented executables
+without running its check, for the producers that declare a build recipe: `test-shuttle`,
+`test-loom`, `test-turmoil` and the four Deloxide lane selections. It runs the producer's prepare
+recipes, then its build recipe in the same instrumented environment and target and under the same
+build lock, so a later `just coverage-native-extras <producer>` compiles nothing. Only the attempt
+and evidence paths differ, and nothing reads them while compiling. A build collects nothing and
+writes no completion record: Cargo's runner records into a temporary attempt that the build removes,
+and an execution there fails the build, because a build recipe only compiles. A lane's build recipe
+runs the lane's `build` command, whose record has the `built` verdict; the lane's run still measures
+its initial and warm passes, which then find everything built.
+
 Every run collects into a directory of its own,
 `target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. The attempt is the GitHub
 Actions run and attempt in CI, and the time and process locally. No run reuses, reads or cleans
@@ -190,28 +201,28 @@ hash, and `llvm-cov` warns that they have mismatched data and reads the function
 executables that ran it.
 
 CI's extra-tests job collects native extras and per-mode primitive conformance, and runs primitive
-compile checks independently. The `shuttle` job, which runs only for a pull request labeled
+compile checks independently, each only for the [`extra-*` label](./developing-nervix.md#ci-labels)
+that selects it. The `shuttle` job, which runs only for a pull request labeled
 `shuttle`, collects its complete inventory, including random/PCT exploration and paired
-nondeterminism checking, and runs schedule replay qualification independently. For a pull
-request labeled `turmoil`, the `turmoil` job collects the canonical simulation suite once,
-including each fresh-process attempt, and runs failure replay qualification independently.
-For a request labeled `loom`, the `loom` job collects the complete Loom inventory, and two
-loom-qualification jobs split weakening qualification into shards, because it rebuilds the server
-once for each weakening of a server owner. The jobs upload `lcov.info`, `completion.json`,
-`executions.jsonl`, `export.log` and model evidence as `coverage-native-extras`,
-`coverage-shuttle`, `coverage-loom` and `coverage-turmoil`, whatever the verdict. The
-[ordinary workspace report](#the-ordinary-workspace-report) merges ordinary collections only; mode
-reports describe modeled or diagnostic execution and retain separate attribution, which the
-[full workspace union](#the-full-workspace-union) keeps when it combines them.
-`just coverage-shuttle <output> [filter]`,
-`just coverage-loom <output> [filter]` and `just coverage-turmoil <output>` copy a successfully
-completed canonical report to the
-requested path while retaining its attempt evidence. Replay uses the unchanged exact-check
-commands and the failure directory under the matching mode build directory.
-The benchmark bodies run instrumented, so
-their Criterion test mode shows that each body executes and measures nothing. The collector itself,
-including real instrumented runs of a fixture crate and its refusal of every incomplete collection,
-is tested with:
+nondeterminism checking, and runs schedule replay qualification independently. For a pull request
+labeled `turmoil`, the `turmoil` job collects the canonical simulation suite once, including each
+fresh-process attempt, and runs failure replay qualification independently. For a request labeled
+`loom`, the `loom` job collects the complete Loom inventory, and two loom-qualification jobs split
+weakening qualification into shards, because it rebuilds the server once for each weakening of a
+server owner. The `shuttle`, `loom` and `turmoil` jobs first build their producer with `just
+coverage-native-extras-build` and publish their kache cache, so a check that fails or reaches the
+job's time limit keeps what its build stored. The jobs upload `lcov.info`, `completion.json`,
+`executions.jsonl`, `export.log` and model evidence as `coverage-native-extras`, `coverage-shuttle`,
+`coverage-loom` and `coverage-turmoil`, whatever the verdict. The [ordinary workspace
+report](#the-ordinary-workspace-report) merges ordinary collections only; mode reports describe
+modeled or diagnostic execution and retain separate attribution, which the [full workspace
+union](#the-full-workspace-union) keeps when it combines them. `just coverage-shuttle <output>
+[filter]`, `just coverage-loom <output> [filter]` and `just coverage-turmoil <output>` copy a
+successfully completed canonical report to the requested path while retaining its attempt evidence.
+Replay uses the unchanged exact-check commands and the failure directory under the matching mode
+build directory. The benchmark bodies run instrumented, so their Criterion test mode shows that each
+body executes and measures nothing. The collector itself, including real instrumented runs of a
+fixture crate and its refusal of every incomplete collection, is tested with:
 
 ```bash
 just test-native-coverage
@@ -226,15 +237,35 @@ ordinary producers' reports, and fails, writing no report, rather than publish a
 `just test-coverage` and `just test-scenarios-coverage` export `lcov-workspace.info` from every
 profile they collected with `--no-default-ignore-filename-regex`, which keeps every workspace crate
 and the test sources the run executed. Each writes the absolute checkout path it ran in to
-`coverage-source-root.txt` beside the report. `just coverage-report-workspace` writes the same pair
-from the profiles a focused recipe collected. CI uploads the pair as the `coverage-tests` and
-`coverage-scenarios` artifacts, the second with the Python paced drivers' report, and the
-extra-tests job uploads its native collections and Python tooling reports as
-`coverage-native-extras`. The coverage job then runs:
+`coverage-source-root.txt` beside the report. Each is a build recipe followed by a run recipe:
+`test-coverage-build` and `test-scenarios-coverage-build` compile every binary under the
+instrumentation and leave it in the target directory of `cargo llvm-cov`, the scenario build's helper
+binaries after building beside the suite in directories of their own, and `test-coverage-run` and
+`test-scenarios-coverage-run` run them and export the report, compiling nothing. CI builds both in
+the `scenarios-build` job, in one target directory, publishes its cache and packs one archive for
+each. The `tests` job restores
+[its archive](./integration-test-lifecycle.md#unit-test-archive) and runs `test-coverage-run`, which
+starts each test executable directly. The scenario suite runs in
+[shards](./integration-test-lifecycle.md#scenario-shards): each shard restores its archive and runs
+`test-scenarios-coverage-shard`, which runs its share of the suite and exports the pair from that
+share's profiles, compiling nothing. `just coverage-report-workspace` writes the same pair from the
+profiles a focused recipe collected. CI uploads the pairs as the `coverage-tests` artifact and one
+`coverage-scenarios-<I>` artifact for each shard, with the Python paced drivers' report of a shard
+that ran them, and the extra-tests job uploads its native collections and Python tooling reports as
+`coverage-native-extras` when a label selected a step that collects them. The coverage job downloads
+each artifact into a directory named after it and then runs, for three shards:
 
 ```bash
-just coverage-merge coverage-inputs/tests coverage-inputs/scenarios coverage-inputs/native-extras
+just coverage-merge coverage-inputs/tests coverage-inputs/coverage-scenarios-1 \
+    coverage-inputs/coverage-scenarios-2 coverage-inputs/coverage-scenarios-3 \
+    coverage-inputs/coverage-native-extras
 ```
+
+It names one input for each shard that `SCENARIO_SHARDS` runs, so a shard whose report is missing
+fails the merge as a missing input. The native extras are named only when they exist, because the
+coverage job does not require the extra-tests job: it needs that job to have succeeded or been
+skipped. The merge sums the counters of every report that measured a
+file, so the shards' reports add up to the suite's.
 
 An input is a producer's artifact directory or one report, with the producer's
 `coverage-source-root.txt` in the directory or beside the report. The merge reads the workspace
@@ -489,7 +520,7 @@ job's result. It decides which producers the union requires:
 | Producer | Job and artifact | Required |
 | --- | --- | --- |
 | The ordinary workspace report | `coverage`, `coverage-merged` | Whenever the tested diff requires the suites |
-| `test-primitives-shuttle`, `test-primitives-loom`, `test-primitives-turmoil` and `test-primitives-deloxide` | `extra-tests`, `coverage-native-extras` | Whenever the tested diff requires the suites |
+| `test-primitives-shuttle`, `test-primitives-loom`, `test-primitives-turmoil` and `test-primitives-deloxide` | `extra-tests`, `coverage-native-extras` | For a pull request labeled `extra-primitives` |
 | `test-deadlock-evidence-order` and `test-deadlock-report` | `diagnostic-evidence`, `diagnostic-evidence` | Whenever the tested diff requires the suites |
 | `test-shuttle` | `shuttle`, `coverage-shuttle` | For a pull request labeled `shuttle` |
 | `test-loom` | `loom`, `coverage-loom` | For a pull request labeled `loom` |
@@ -512,7 +543,7 @@ The event and tested source decide eligibility together:
 | Code or test PR | Required with `bolero-random`; deliberately skipped otherwise | Required for the complete tested inventory with `fuzz`; deliberately skipped otherwise, with no fuzz report | Required, with the label-selected producers |
 | Verified prose-only PR carrying `bolero-random` or `fuzz` | Required with `bolero-random`; deliberately skipped otherwise | Required for the complete tested inventory with `fuzz`; deliberately skipped otherwise | Skipped; each requested run keeps its own report and verdict |
 | Verified prose-only PR carrying neither label | Entire Bolero call excluded | No campaign or report | Skipped; no union evidence |
-| Scheduled or manual Bolero workflow | Required | Deliberately skipped | No Check union is launched by this standalone workflow |
+| Manual Bolero workflow | Required | Deliberately skipped | No Check union is launched by this standalone workflow |
 
 Check runs on PR open, reopen, push and label changes. Each event records its own label snapshot;
 adding or removing a label changes the required producers for that event. `no-docker` never

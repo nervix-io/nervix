@@ -6,9 +6,12 @@ import io
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shlex
+import shutil
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -19,10 +22,11 @@ import tomllib
 import unittest
 from unittest import mock
 
-from scripts import kache_remote
+from scripts import kache_remote, publish_kache_report
 from scripts.kache_remote import (
     ConfigurationError,
     DaemonState,
+    LocalStore,
     Outcome,
     Publication,
     StartError,
@@ -40,8 +44,7 @@ KACHE_JOBS = {
         "checks",
         "diagnostic-evidence",
         "deloxide",
-        "tests",
-        "scenarios",
+        "scenarios-build",
         "coverage",
         "client-conformance",
         "extra-tests",
@@ -52,6 +55,31 @@ KACHE_JOBS = {
     },
     "docker-build.yaml": {"benchmark", "build-book"},
     "bolero.yaml": {"bolero-random", "bolero-fuzz"},
+}
+# The jobs that build before they run, with the cache published and reported between the two, so the
+# run's outcome cannot lose what the build filled and each phase's time is visible on its own.
+BUILD_PHASE_JOBS = {
+    "check.yaml": {"scenarios-build", "client-conformance", "shuttle", "loom", "turmoil", "deloxide"},
+    "docker-build.yaml": set(),
+    "bolero.yaml": {"bolero-random", "bolero-fuzz"},
+}
+BUILD_PUBLISH_COMMAND = 'python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-build-report"'
+BUILD_REPORT_COMMAND = 'python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"'
+# A kache-backed job reads the bucket in its runner's region: Boat's machines run in Europe, and
+# GitHub's hosted runners and Blacksmith's runners in the US.
+EU_REMOTE = {
+    "KACHE_S3_BUCKET": "${{ secrets.KACHE_EU_BUCKET }}",
+    "KACHE_S3_REGION": "${{ vars.KACHE_BUCKET_REGION }}",
+    "KACHE_S3_ENDPOINT": "${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}",
+    "KACHE_S3_ACCESS_KEY": "${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}",
+    "KACHE_S3_SECRET_KEY": "${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}",
+}
+US_REMOTE = {
+    "KACHE_S3_BUCKET": "${{ vars.KACHE_BUCKET }}",
+    "KACHE_S3_REGION": "${{ vars.KACHE_BUCKET_REGION }}",
+    "KACHE_S3_ENDPOINT": "${{ vars.KACHE_BUCKET_ENDPOINT }}",
+    "KACHE_S3_ACCESS_KEY": "${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}",
+    "KACHE_S3_SECRET_KEY": "${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}",
 }
 REMOTE_ENVIRONMENT = {
     "KACHE_S3_BUCKET": "kache-ci",
@@ -123,12 +151,25 @@ def workflow_env(workflow: str) -> str:
     return workflow.split("\njobs:\n", maxsplit=1)[0]
 
 
+def regional_remote(job: str) -> dict[str, str]:
+    """The settings of the cache bucket in the region of the job's runner."""
+    runner = re.search(r"^    runs-on: (\S+)$", job, re.MULTILINE)
+    if runner is None:
+        raise AssertionError("a kache-backed job names its runner")
+    label = runner.group(1)
+    if label.startswith("boat-"):
+        return EU_REMOTE
+    if label.startswith(("ubuntu-", "blacksmith-")):
+        return US_REMOTE
+    raise AssertionError(f"no cache bucket serves the region of runner {label}")
+
+
 class KacheWorkflowTests(unittest.TestCase):
     def test_every_kache_job_starts_its_remote_and_publishes_within_the_contract(self) -> None:
         manifest_keys = []
         for path in WORKFLOWS:
             workflow = path.read_text()
-            self.assertIn('KACHE_VERSION: "1.2.1"', workflow_env(workflow))
+            self.assertIn('KACHE_VERSION: "1.2.2"', workflow_env(workflow))
             self.assertIn('KACHE_REMOTE_KEY_LISTING: "false"', workflow_env(workflow))
             self.assertIn(
                 f'KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "{CACHE_RECOVERY_BYTES}"', workflow_env(workflow)
@@ -164,18 +205,14 @@ class KacheWorkflowTests(unittest.TestCase):
                     manifest_key = environment.pop("KACHE_MANIFEST_KEY")
                     self.assertTrue(manifest_key.endswith("-${{ runner.os }}-${{ runner.arch }}"), manifest_key)
                     manifest_keys.append(manifest_key.replace("${{ github.job }}", name))
-                    self.assertEqual(
-                        environment,
-                        {
-                            "KACHE_S3_BUCKET": "${{ vars.KACHE_BUCKET }}",
-                            "KACHE_S3_REGION": "${{ vars.KACHE_BUCKET_REGION }}",
-                            "KACHE_S3_ENDPOINT": "${{ vars.KACHE_BUCKET_ENDPOINT }}",
-                            "KACHE_S3_ACCESS_KEY": "${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}",
-                            "KACHE_S3_SECRET_KEY": "${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}",
-                        },
-                    )
+                    self.assertEqual(environment, regional_remote(jobs[name]))
                     for earlier in steps[:setup]:
                         self.assertNotIn("KACHE_", earlier.text, earlier.name)
+
+                    # The report's window holds the whole job, its build included.
+                    limit = re.search(r"^    timeout-minutes: (\d+)$", jobs[name], re.MULTILINE)
+                    self.assertIsNotNone(limit)
+                    self.assertLessEqual(int(limit.group(1)), publish_kache_report.REPORT_WINDOW_HOURS * 60)
 
                     self.assertEqual(names.count("Publish kache cache"), 1)
                     publish_index = names.index("Publish kache cache")
@@ -184,16 +221,44 @@ class KacheWorkflowTests(unittest.TestCase):
                     self.assertEqual(publish.field("timeout-minutes"), "4")
                     self.assertEqual(publish.mapping("env"), {"JOB_STATUS": "${{ job.status }}"})
                     self.assertEqual(publish.block("run"), PUBLISH_SCRIPT)
-                    if "Publish kache report" in names:
-                        # The report and its artifact carry the publication record.
-                        self.assertEqual(names[publish_index + 1], "Publish kache report")
-                        self.assertEqual(names[publish_index + 2], "Upload kache report")
-                    else:
-                        self.assertEqual(publish_index, len(steps) - 1)
+                    # Every kache-backed job reports, whatever its outcome: the report and its
+                    # artifact carry the publication record and where the compile time went.
+                    self.assertEqual(names[publish_index + 1], "Publish kache report")
+                    self.assertEqual(names[publish_index + 2], "Upload kache report")
+                    for reporting in (steps[publish_index + 1], steps[publish_index + 2]):
+                        self.assertEqual(reporting.field("if"), "always()", reporting.name)
+
+                    after_build = [index for index, step in enumerate(names) if step == "Publish kache cache after the build"]
+                    if name not in BUILD_PHASE_JOBS[path.name]:
+                        self.assertEqual(after_build, [])
+                        continue
+                    self.assertEqual(len(after_build), 1)
+                    build_publish = steps[after_build[0]]
+                    # Between the build and the run: after the remote starts, before the job's end.
+                    self.assertLess(setup + 1, after_build[0])
+                    self.assertLess(after_build[0], publish_index)
+                    # Only a build that succeeded publishes; a failed one leaves the end's record.
+                    self.assertIsNone(build_publish.field("if"))
+                    self.assertEqual(build_publish.field("timeout-minutes"), "4")
+                    self.assertEqual(build_publish.mapping("env"), {"JOB_STATUS": "${{ job.status }}"})
+                    self.assertEqual(build_publish.field("run"), BUILD_PUBLISH_COMMAND)
+                    build_report = steps[after_build[0] + 1]
+                    self.assertEqual(build_report.name, "Publish kache report after the build")
+                    self.assertEqual(build_report.field("run"), BUILD_REPORT_COMMAND)
+                    self.assertIn("            ${{ runner.temp }}/kache-build-report\n", steps[publish_index + 2].text)
         self.assertEqual(len(manifest_keys), len(set(manifest_keys)), manifest_keys)
 
+    def test_a_job_takes_the_bucket_of_its_runners_region(self) -> None:
+        self.assertEqual(regional_remote("  tests:\n    runs-on: boat-xlarge\n"), EU_REMOTE)
+        self.assertEqual(regional_remote("  book:\n    runs-on: ubuntu-24.04\n"), US_REMOTE)
+        self.assertEqual(regional_remote("  tests:\n    runs-on: blacksmith-16vcpu-ubuntu-2404\n"), US_REMOTE)
+        with self.assertRaisesRegex(AssertionError, "no cache bucket serves the region of runner self-hosted"):
+            regional_remote("  tests:\n    runs-on: self-hosted\n")
+        with self.assertRaisesRegex(AssertionError, "names its runner"):
+            regional_remote("  tests:\n    runs-on: ${{ matrix.runner }}\n")
+
     def test_the_publication_step_records_a_failed_job_and_tolerates_a_missing_checkout(self) -> None:
-        scenarios = job_steps(workflow_jobs(Path(".github/workflows/check.yaml").read_text())["scenarios"])
+        scenarios = job_steps(workflow_jobs(Path(".github/workflows/check.yaml").read_text())["scenarios-build"])
         script = next(step for step in scenarios if step.name == "Publish kache cache").block("run")
         self.assertEqual(script, PUBLISH_SCRIPT)
         with tempfile.TemporaryDirectory() as directory:
@@ -221,8 +286,144 @@ class KacheWorkflowTests(unittest.TestCase):
     def test_the_report_records_health_and_the_costliest_misses(self) -> None:
         report_script = Path("scripts/publish_kache_report.py").read_text()
         self.assertIn('run("kache", "doctor")', report_script)
-        self.assertIn('run("kache", "why-miss", crate)', report_script)
-        self.assertIn('run("kache", "report", "--format", "json"', report_script)
+        self.assertIn('run("kache", "explain", crate)', report_script)
+        self.assertIn('"kache", "report", "--format", "json", "--since", f"{REPORT_WINDOW_HOURS}h"', report_script)
+        # Kache leaves the remote transfers out of a report filtered by a build tree.
+        self.assertNotIn('"--root"', report_script)
+
+    def test_the_report_splits_compile_time_into_compilation_hits_and_kache_work(self) -> None:
+        report = {
+            "timeline": {
+                "event_count": 10,
+                "duration_ms": 120_000,
+                # 2026-10-29T21:43:35.902Z and 2026-10-29T21:45:35.100Z.
+                "start_unix_ms": 1_793_310_215_902,
+                "end_unix_ms": 1_793_310_335_100,
+            },
+            "summary": {
+                "total_crates": 9,
+                "misses": 2,
+                "dups": 1,
+                "local_hits": 3,
+                "prefetch_hits": 1,
+                "remote_hits": 2,
+                "time_saved_ms": 90_000,
+            },
+            # Kache's phases split its tracked time, hits plus misses, without overlap.
+            "timing": {
+                "hit_time_ms": 60_000,
+                "avg_hit_ms": 10_000,
+                "miss_time_ms": 60_000,
+                "avg_miss_ms": 20_000,
+                "miss_compile_time_ms": 42_000,
+                "total_key_ms": 48_000,
+                "total_dep_info_ms": 6_000,
+                "dep_info_runs": 4,
+                "total_wait_ms": 18_000,
+                "total_flight_wait_ms": 6_000,
+                "total_permit_wait_ms": 12_000,
+                "total_restore_ms": 6_000,
+                "total_store_ms": 3_000,
+                "total_lookup_ms": 600,
+                "total_startup_ms": 1_200,
+                "total_unattributed_ms": 1_200,
+            },
+            "suggestions": ["Average cache hit overhead is 1000ms — check disk I/O or consider faster storage"],
+        }
+        lines = publish_kache_report.report_lines(report)
+        self.assertIn("Hit rate: 0%; compile time the hits saved, by kache's estimate: 1.5 min.", lines)
+        self.assertIn(
+            "Kache saw 9 cacheable crates in a 2.0 min window from 21:43 to 21:45 UTC. It tracked "
+            "2.0 min on them, adding up every parallel rustc, so it can exceed the window.",
+            lines,
+        )
+        self.assertIn("| Served from the cache: 3 local, 1 prefetched, 2 remote | 6 | 1.0 min | 10.0 s |", lines)
+        self.assertIn("| Compiled after a cache miss | 3 | 1.0 min | 20.0 s |", lines)
+        self.assertIn("| Compiling the misses | 0.7 min | 35.0% |", lines)
+        self.assertIn("| Computing cache keys | 0.8 min | 40.0% |", lines)
+        self.assertIn("| of which the dep-info pre-pass, 4 runs | 0.1 min | 5.0% |", lines)
+        self.assertIn(
+            "| Waiting: 0.2 min for a cache permit, 0.1 min for the same crate compiling in another "
+            "process | 0.3 min | 15.0% |",
+            lines,
+        )
+        self.assertIn("| Restoring cached outputs | 0.1 min | 5.0% |", lines)
+        self.assertIn("| Storing compiled outputs | 0.1 min | 2.5% |", lines)
+        self.assertIn("| Looking up the cache | 0.0 min | 0.5% |", lines)
+        self.assertIn("| Starting the wrapper | 0.0 min | 1.0% |", lines)
+        self.assertIn("| Attributed to no phase | 0.0 min | 1.0% |", lines)
+        self.assertIn("- Average cache hit overhead is 1000ms — check disk I/O or consider faster storage", lines)
+
+    def test_the_report_names_what_moved_to_and_from_the_remote(self) -> None:
+        network = {
+            "downloads_ok": 1537,
+            "downloads_failed": 2,
+            "bytes_down": 3 * 1024**3,
+            "avg_download_ms": 2_950,
+            "p95_download_ms": 7_100,
+            "max_download_ms": 20_300,
+            "total_semaphore_wait_ms": 90_000,
+            "max_concurrent_downloads": 16,
+            "dominant_download_phase": "body",
+            "dominant_download_phase_pct": 71.25,
+            "uploads_ok": 911,
+            "uploads_failed": 0,
+            "bytes_up": 2 * 1024**3,
+        }
+        lines = publish_kache_report.report_lines({"network": network})
+        self.assertIn("### Remote transfer", lines)
+        self.assertIn(
+            "| Downloaded | 1537 | 2 | 3.0 GiB | 3.0 s on average, 7.1 s at the 95th percentile, 20.3 s at most |",
+            lines,
+        )
+        self.assertIn("| Uploaded | 911 | 0 | 2.0 GiB | |", lines)
+        self.assertIn(
+            "Downloads waited 1.5 min in all for a transfer slot, with at most 16 at once. Most of "
+            "their time went to body: 71.2%.",
+            lines,
+        )
+        self.assertNotIn("### Remote transfer", publish_kache_report.report_lines({"network": None}))
+
+    def test_a_report_without_compilation_says_so_instead_of_a_breakdown(self) -> None:
+        lines = publish_kache_report.report_lines({"summary": {}, "timeline": {"event_count": 0}})
+        self.assertIn("Kache recorded no compilation in this report's window.", lines)
+        self.assertNotIn("### Where the compile time went", lines)
+        self.assertIn("Kache recorded no compilation in this report's window.", publish_kache_report.report_lines({}))
+
+    def test_the_report_redacts_the_remote_the_workflow_keeps_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            configuration = Path(directory) / "kache-remote.toml"
+            remote = kache_remote.Remote.from_environment(REMOTE_ENVIRONMENT)
+            kache_remote.Configuration(store=LocalStore(max_size_gib=70), remote=remote).write(configuration)
+            redaction = publish_kache_report.Redaction.from_environment({"KACHE_CONFIG": str(configuration)})
+        doctor = (
+            "Remote           ✓   s3://kache-ci/artifacts\n"
+            "Remote access    ✓   https://account-id.r2.cloudflarestorage.com reachable\n"
+            "Host             account-id.r2.cloudflarestorage.com\n"
+        )
+        self.assertEqual(
+            redaction.apply(doctor),
+            "Remote           ✓   s3://***/artifacts\nRemote access    ✓   *** reachable\nHost             ***\n",
+        )
+        # Without a configuration kache reads none either, so no remote is named.
+        self.assertEqual(publish_kache_report.Redaction.from_environment({}).apply(doctor), doctor)
+
+    def test_the_report_says_where_the_index_lives(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "cache"
+            cache.mkdir()
+            (cache / "index.db").write_text("")
+            on_disk = publish_kache_report.index_location({"KACHE_CACHE_DIR": str(cache)})
+            (cache / "index.db").unlink()
+            (cache / "index.db").symlink_to("/dev/shm/kache-index/index.db")
+            in_memory = publish_kache_report.index_location({"KACHE_CACHE_DIR": str(cache)})
+        self.assertEqual(on_disk, "Index: on disk, in the cache directory.")
+        self.assertEqual(in_memory, "Index: in memory, at /dev/shm/kache-index/index.db.")
+        self.assertIsNone(publish_kache_report.index_location({}))
+
+    def test_a_build_report_names_its_phase(self) -> None:
+        self.assertEqual(publish_kache_report.heading("tests", "build"), "## Kache: tests, after the build")
+        self.assertEqual(publish_kache_report.heading("tests", "job"), "## Kache: tests")
 
     def test_image_builds_configure_and_publish_through_the_same_contract(self) -> None:
         workflow = Path(".github/workflows/docker-build.yaml").read_text()
@@ -230,20 +431,18 @@ class KacheWorkflowTests(unittest.TestCase):
         justfile = Path("justfile").read_text()
 
         self.assertIn("uses: docker/setup-buildx-action@v3", workflow)
-        for name, value in (
-            ("KACHE_S3_BUCKET", "${{ vars.KACHE_BUCKET }}"),
-            ("KACHE_S3_REGION", "${{ vars.KACHE_BUCKET_REGION }}"),
-            ("KACHE_S3_ENDPOINT", "${{ vars.KACHE_BUCKET_ENDPOINT }}"),
-            ("KACHE_S3_ACCESS_KEY", "${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}"),
-            ("KACHE_S3_SECRET_KEY", "${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}"),
-        ):
-            self.assertIn(f"{name}: {value}", workflow)
+        jobs = workflow_jobs(workflow)
+        for build in ("build-arch", "build-diagnostic"):
+            for name, value in regional_remote(jobs[build]).items():
+                with self.subTest(job=build, setting=name):
+                    self.assertIn(f"{name}: {value}", jobs[build])
+        for name in EU_REMOTE:
             self.assertIn(f'--build-arg "{name}=${{{name}}}"', justfile)
             self.assertIn(f'"${{{name}:?{name} is required}}"', justfile)
             self.assertIn(f"ARG {name}\n", dockerfile)
-        self.assertIn('--build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.1}"', justfile)
+        self.assertIn('--build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.2}"', justfile)
 
-        self.assertIn("ARG KACHE_VERSION=1.2.1", dockerfile)
+        self.assertIn("ARG KACHE_VERSION=1.2.2", dockerfile)
         self.assertIn("COPY scripts/kache_remote.py ./scripts/kache_remote.py", dockerfile)
         self.assertIn("COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py", dockerfile)
         self.assertIn("ENV RUSTC_WRAPPER=kache", dockerfile)
@@ -253,6 +452,25 @@ class KacheWorkflowTests(unittest.TestCase):
         configure = dockerfile.index('python3 scripts/kache_remote.py configure "${KACHE_CONFIG}"')
         daemon = dockerfile.index("kache daemon start")
         self.assertLess(configure, daemon)
+        # The store's index lives in the build step's tmpfs while the daemon runs, and returns to the
+        # cache mount, which outlives the step, once the daemon stops.
+        self.assertIn("--mount=type=tmpfs,target=/kache-index", dockerfile)
+        prepare = dockerfile.index("python3 scripts/kache_remote.py prepare-index --memory /kache-index")
+        self.assertLess(configure, prepare)
+        self.assertLess(prepare, daemon)
+        trap = re.search(r"trap '([^']*)' EXIT", dockerfile)
+        assert trap is not None
+        self.assertLess(
+            trap.group(1).index("kache daemon stop"),
+            trap.group(1).index("python3 scripts/kache_remote.py restore-index"),
+        )
+        jobs = workflow_jobs(workflow)
+        for build in ("build-arch", "build-diagnostic"):
+            with self.subTest(job=build):
+                names = [step.name for step in job_steps(jobs[build])]
+                lighten = names.index("Lighten the build volume")
+                self.assertLess(names.index("Wait for Docker"), lighten)
+                self.assertLess(lighten, next(index for index, name in enumerate(names) if name.startswith("Build and push")))
         # The build stage ends with the publication, after every artifact it built.
         build_stage = dockerfile.split("\nFROM ", maxsplit=2)[1]
         self.assertTrue(
@@ -363,19 +581,30 @@ def run_cli(arguments: list[str], environment: dict[str, str]) -> subprocess.Com
     )
 
 
+def quarter_of_volume_gib(path: Path) -> int:
+    """A quarter of the volume holding `path`, in whole GiB rounded half up, and at least 5."""
+    volume = shutil.disk_usage(path).total
+    quarter_mib = volume // 4 // 1024**2
+    return max((quarter_mib + 512) // 1024, 5)
+
+
 class RemoteConfigurationTests(unittest.TestCase):
-    def test_configure_writes_the_remote_for_the_daemon_without_credentials(self) -> None:
+    def test_configure_writes_the_remote_and_the_store_budget_without_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "nested" / "kache.toml"
-            result = run_cli(["configure", str(config)], REMOTE_ENVIRONMENT)
+            # The cache directory does not exist yet: its budget comes from the volume it will be on.
+            cache = Path(directory) / "home" / ".cache" / "kache"
+            result = run_cli(["configure", str(config)], REMOTE_ENVIRONMENT | {"KACHE_CACHE_DIR": str(cache)})
             self.assertEqual(result.returncode, 0, result.stderr)
             parsed = tomllib.loads(config.read_text())
             mode = stat.S_IMODE(config.stat().st_mode)
+            budget = quarter_of_volume_gib(Path(directory))
 
         self.assertEqual(
             parsed,
             {
                 "cache": {
+                    "local_max_size": f"{budget}GiB",
                     "remote": {
                         "type": "s3",
                         "bucket": "kache-ci",
@@ -389,12 +618,38 @@ class RemoteConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(mode, 0o600)
 
+    def test_the_store_may_hold_a_quarter_of_its_volume_and_at_least_kaches_floor(self) -> None:
+        gib = 1024**3
+        self.assertEqual(LocalStore.for_volume(300 * 10**9), LocalStore(max_size_gib=70))
+        self.assertEqual(LocalStore.for_volume(4 * 42 * gib + 4 * gib // 2), LocalStore(max_size_gib=43))
+        self.assertEqual(LocalStore.for_volume(4 * 42 * gib + 4 * gib // 2 - 4), LocalStore(max_size_gib=42))
+        self.assertEqual(LocalStore.for_volume(16 * gib), LocalStore(max_size_gib=5))
+        self.assertEqual(LocalStore(max_size_gib=70).configuration(), '[cache]\nlocal_max_size = "70GiB"\n')
+
+    def test_the_store_is_measured_where_kache_keeps_it(self) -> None:
+        self.assertEqual(
+            kache_remote.cache_directory({"KACHE_CACHE_DIR": "/cache/kache", "XDG_CACHE_HOME": "/xdg", "HOME": "/home/user"}),
+            Path("/cache/kache"),
+        )
+        self.assertEqual(
+            kache_remote.cache_directory({"XDG_CACHE_HOME": "/xdg", "HOME": "/home/user"}), Path("/xdg/kache")
+        )
+        # As in kache, a relative XDG_CACHE_HOME names no cache directory.
+        self.assertEqual(
+            kache_remote.cache_directory({"XDG_CACHE_HOME": "xdg", "HOME": "/home/user"}),
+            Path("/home/user/.cache/kache"),
+        )
+        # Without HOME, kache takes the home directory from the user's passwd entry.
+        self.assertEqual(
+            kache_remote.cache_directory({}), Path(pwd.getpwuid(os.getuid()).pw_dir) / ".cache" / "kache"
+        )
+
     def test_every_remote_setting_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "kache.toml"
             for missing in REMOTE_ENVIRONMENT:
                 with self.subTest(missing=missing):
-                    environment = dict(REMOTE_ENVIRONMENT)
+                    environment = dict(REMOTE_ENVIRONMENT) | {"KACHE_CACHE_DIR": directory}
                     environment.pop(missing)
                     result = run_cli(["configure", str(config)], environment)
                     self.assertEqual(result.returncode, 2)
@@ -530,15 +785,55 @@ sys.exit(f"unexpected kache arguments: {arguments}")
 '''
 
 
+# The system commands the store preparation runs, faked so that no test reads the host's mounts or
+# remounts its volume. `findmnt` answers from FAKE_MOUNTS, a list of [path prefix, mount] pairs whose
+# mount may give the options it shows once `sudo` has remounted it; without FAKE_MOUNTS every path
+# is on an overlay filesystem, which the preparation leaves alone. `sudo` records its arguments in
+# FAKE_SUDO_LOG and exits with FAKE_SUDO_STATUS, refusing by default.
+FAKE_FINDMNT = r'''
+import json, os, sys
+target = sys.argv[sys.argv.index("--target") + 1]
+mounts = json.loads(os.environ.get("FAKE_MOUNTS", '[["/", {"target": "/", "fstype": "overlay", "options": "rw"}]]'))
+remounted = os.path.exists(os.environ.get("FAKE_REMOUNTED", "/nonexistent"))
+for prefix, mount in mounts:
+    if target.startswith(prefix):
+        options = mount.get("remounted", mount["options"]) if remounted else mount["options"]
+        print(mount["target"], mount["fstype"], options)
+        sys.exit(0)
+sys.exit(1)
+'''
+FAKE_SUDO = r'''
+import json, os, sys
+log = os.environ.get("FAKE_SUDO_LOG")
+if log:
+    with open(log, "a") as output:
+        output.write(json.dumps(sys.argv[1:]) + "\n")
+status = int(os.environ.get("FAKE_SUDO_STATUS", "1"))
+if status:
+    print("mount: only root can do that", file=sys.stderr)
+    sys.exit(status)
+remounted = os.environ.get("FAKE_REMOUNTED")
+if remounted:
+    open(remounted, "w").close()
+'''
+
+
+def install_fake(directory: Path, name: str, body: str) -> None:
+    executable = directory / name
+    executable.write_text(f"#!{sys.executable}\n{body}")
+    executable.chmod(0o755)
+
+
 class FakeKache:
-    """A `kache` executable whose answers a test sets, recording every invocation."""
+    """A `kache` executable whose answers a test sets, recording every invocation, beside harmless
+    `findmnt` and `sudo` commands for the store preparation."""
 
     def __init__(self, directory: Path, behavior: dict) -> None:
         self.bin = directory / "bin"
         self.bin.mkdir()
-        executable = self.bin / "kache"
-        executable.write_text(f"#!{sys.executable}\n{FAKE_KACHE}")
-        executable.chmod(0o755)
+        install_fake(self.bin, "kache", FAKE_KACHE)
+        install_fake(self.bin, "findmnt", FAKE_FINDMNT)
+        install_fake(self.bin, "sudo", FAKE_SUDO)
         self.behavior = directory / "behavior.json"
         self.behavior.write_text(json.dumps(behavior))
         self.log = directory / "kache.log"
@@ -668,10 +963,15 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(publication.manifest.output_tail, ["remote refused"])
 
     def test_a_job_whose_work_failed_or_was_cancelled_waits_for_nothing(self) -> None:
-        for status in ("failure", "cancelled"):
+        reasons = {
+            "failure": "The job's work ended with status `failure`; uploads still queued are left to the daemon's shutdown drain.",
+            "cancelled": "The job's work ended with status `cancelled`. The kache action's post step does not run for a cancelled job, so uploads still queued end with the machine.",
+        }
+        for status, reason in reasons.items():
             with self.subTest(status=status):
                 publication, kache, output = self.publish({}, job_status=status)
                 self.assertEqual(publication.outcome, Outcome.NOT_RUN)
+                self.assertEqual(publication.reasons, [reason])
                 self.assertEqual(kache.calls(), [])
                 self.assertEqual(self.clock.sleeps, [])
                 self.assertNotIn("::warning", output)
@@ -970,6 +1270,149 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(self.recorded()["outcome"], "not-run")
 
 
+class StorePreparationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.cache = self.root / "home" / ".cache" / "kache"
+        self.memory = self.root / "shm"
+        self.memory.mkdir()
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        install_fake(self.bin, "findmnt", FAKE_FINDMNT)
+        install_fake(self.bin, "sudo", FAKE_SUDO)
+        self.sudo_log = self.root / "sudo.log"
+        self.remounted = self.root / "remounted"
+
+    def environment(self, mounts: list, sudo_status: int = 0) -> dict[str, str]:
+        return {
+            "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            "KACHE_CACHE_DIR": str(self.cache),
+            "FAKE_MOUNTS": json.dumps(mounts),
+            "FAKE_SUDO_LOG": str(self.sudo_log),
+            "FAKE_SUDO_STATUS": str(sudo_status),
+            "FAKE_REMOUNTED": str(self.remounted),
+        }
+
+    def sudo_calls(self) -> list[list[str]]:
+        if not self.sudo_log.exists():
+            return []
+        return [json.loads(line) for line in self.sudo_log.read_text().splitlines()]
+
+    def test_the_index_moves_into_memory_with_the_files_sqlite_keeps_beside_it(self) -> None:
+        self.cache.mkdir(parents=True)
+        for name, content in (("index.db", "pages"), ("index.db-wal", "log"), ("index.db-shm", "shared")):
+            (self.cache / name).write_text(content)
+        line = kache_remote.keep_index_in_memory(self.cache, self.memory)
+        directory = self.memory / "kache-index"
+        self.assertEqual(line, f"kache's index and its write-ahead log live in memory, in {directory}.")
+        self.assertTrue((self.cache / "index.db").is_symlink())
+        self.assertEqual(os.readlink(self.cache / "index.db"), str(directory / "index.db"))
+        self.assertEqual(sorted(path.name for path in self.cache.iterdir()), ["index.db"])
+        self.assertEqual((directory / "index.db-wal").read_text(), "log")
+        self.assertEqual((directory / "index.db-shm").read_text(), "shared")
+        self.assertEqual((self.cache / "index.db").read_text(), "pages")
+        self.assertEqual(
+            kache_remote.keep_index_in_memory(self.cache, self.memory),
+            f"kache's index already lives at {directory / 'index.db'}.",
+        )
+
+    def test_sqlite_keeps_a_symlinked_index_and_its_log_in_memory(self) -> None:
+        kache_remote.keep_index_in_memory(self.cache, self.memory)
+        database = sqlite3.connect(self.cache / "index.db")
+        self.addCleanup(database.close)
+        database.execute("PRAGMA journal_mode=WAL")
+        database.execute("CREATE TABLE entries (cache_key TEXT PRIMARY KEY)")
+        database.execute("INSERT INTO entries VALUES ('key')")
+        database.commit()
+        directory = self.memory / "kache-index"
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), ["index.db", "index.db-shm", "index.db-wal"])
+        self.assertEqual(sorted(path.name for path in self.cache.iterdir()), ["index.db"])
+
+    def test_the_store_moves_its_index_into_a_tmpfs_and_remounts_an_ext4_volume(self) -> None:
+        mounts = [
+            [str(self.memory), {"target": "/dev/shm", "fstype": "tmpfs", "options": "rw,nosuid,nodev"}],
+            ["/", {"target": "/", "fstype": "ext4", "options": "rw,relatime", "remounted": "rw,noatime,nobarrier"}],
+        ]
+        lines = kache_remote.prepare_store(self.environment(mounts), memory=self.memory)
+        self.assertEqual(
+            lines,
+            [
+                f"kache's index and its write-ahead log live in memory, in {self.memory / 'kache-index'}.",
+                f"The volume holding {self.cache}, /, is remounted with rw,noatime,nobarrier.",
+            ],
+        )
+        self.assertEqual(self.sudo_calls(), [["--non-interactive", "mount", "-o", "remount,noatime,barrier=0", "/"]])
+
+    def test_a_store_without_a_tmpfs_or_an_ext4_volume_keeps_kaches_defaults(self) -> None:
+        mounts = [["/", {"target": "/", "fstype": "xfs", "options": "rw,relatime"}]]
+        lines = kache_remote.prepare_store(self.environment(mounts), memory=self.memory)
+        self.assertEqual(
+            lines,
+            [
+                f"kache's index stays on disk: {self.memory} is not a tmpfs.",
+                f"The volume holding {self.cache}, /, is xfs, so it was not remounted.",
+            ],
+        )
+        self.assertFalse((self.cache / "index.db").exists())
+        self.assertEqual(self.sudo_calls(), [])
+
+    def test_a_refused_remount_keeps_the_volume_as_it_was(self) -> None:
+        mounts = [["/", {"target": "/", "fstype": "ext4", "options": "rw,relatime"}]]
+        line = kache_remote.lighten_volume(self.cache, self.environment(mounts, sudo_status=1))
+        self.assertEqual(
+            line,
+            f"Remounting the volume holding {self.cache}, /, exited with status 1: mount: only root can do that; it "
+            "keeps its options.",
+        )
+
+    def test_the_index_returns_to_the_cache_directory_once_no_daemon_has_it_open(self) -> None:
+        self.cache.mkdir(parents=True)
+        (self.cache / "index.db").write_text("pages")
+        (self.cache / "index.db-wal").write_text("log")
+        kache_remote.keep_index_in_memory(self.cache, self.memory)
+        self.assertEqual(kache_remote.restore_index(self.cache), f"kache's index is back in {self.cache}.")
+        self.assertFalse((self.cache / "index.db").is_symlink())
+        self.assertEqual((self.cache / "index.db").read_text(), "pages")
+        self.assertEqual((self.cache / "index.db-wal").read_text(), "log")
+        self.assertEqual(list((self.memory / "kache-index").iterdir()), [])
+        self.assertEqual(kache_remote.restore_index(self.cache), "kache's index is already in the cache directory.")
+
+    def test_an_index_whose_memory_is_gone_leaves_kache_to_start_a_new_one(self) -> None:
+        self.cache.mkdir(parents=True)
+        (self.cache / "index.db").symlink_to(self.memory / "gone" / "index.db")
+        line = kache_remote.restore_index(self.cache)
+        self.assertEqual(
+            line, f"kache's index in memory, {self.memory / 'gone' / 'index.db'}, is gone; kache starts a new one in {self.cache}."
+        )
+        self.assertFalse((self.cache / "index.db").exists() or (self.cache / "index.db").is_symlink())
+
+    def test_the_command_line_prepares_restores_and_lightens(self) -> None:
+        mounts = [
+            [str(self.memory), {"target": "/kache-index", "fstype": "tmpfs", "options": "rw"}],
+            ["/", {"target": "/", "fstype": "ext4", "options": "rw,relatime", "remounted": "rw,noatime,nobarrier"}],
+        ]
+        environment = self.environment(mounts)
+        prepared = run_cli(["prepare-index", "--memory", str(self.memory)], environment)
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        self.assertIn("live in memory", prepared.stdout)
+        self.assertTrue((self.cache / "index.db").is_symlink())
+        # The daemon creates the index where the symlink points.
+        (self.memory / "kache-index" / "index.db").write_text("pages")
+        restored = run_cli(["restore-index"], environment)
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertEqual(restored.stdout.strip(), f"kache's index is back in {self.cache}.")
+        lightened = run_cli(["lighten-volume", str(self.root)], environment)
+        self.assertEqual(lightened.returncode, 0, lightened.stderr)
+        self.assertEqual(lightened.stdout.strip(), f"The volume holding {self.root}, /, is remounted with rw,noatime,nobarrier.")
+
+    def test_a_volume_findmnt_cannot_describe_is_left_alone(self) -> None:
+        line = kache_remote.lighten_volume(self.cache, self.environment([]))
+        self.assertEqual(line, f"The volume holding {self.cache} was not remounted: findmnt could not describe it.")
+        self.assertEqual(self.sudo_calls(), [])
+
+
 class StartTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = Path(tempfile.mkdtemp())
@@ -985,14 +1428,22 @@ class StartTests(unittest.TestCase):
             GITHUB_ENV=str(self.github_env),
             KACHE_MANIFEST_KEY="deloxide-deloxide-order-Linux-X64",
             KACHE_S3_PREFIX="ambient-prefix",
+            KACHE_CACHE_DIR=str(self.directory / "kache-cache"),
         ) | REMOTE_ENVIRONMENT | extra
 
     def start(self, behavior: dict, **extra: str) -> tuple[DaemonState, FakeKache, SteppingClock]:
         kache = FakeKache(self.directory, behavior)
         clock = SteppingClock()
+        # Four seconds of polling, three polls, keep the tests of a daemon that never answers quick.
         with contextlib.redirect_stdout(io.StringIO()):
-            daemon = kache_remote.start(self.environment(kache, **extra), clock)
+            daemon = kache_remote.start(self.environment(kache, **extra), clock, verify_seconds=4.0)
         return daemon, kache, clock
+
+    def runtime_with_log(self, text: str) -> Path:
+        runtime = self.directory / "kache-runtime"
+        runtime.mkdir(exist_ok=True)
+        (runtime / "daemon-pr-ff050e90.log").write_text(text)
+        return runtime
 
     def test_the_daemon_starts_with_the_configured_remote_and_later_steps_inherit_it(self) -> None:
         daemon, kache, clock = self.start({})
@@ -1010,7 +1461,9 @@ class StartTests(unittest.TestCase):
                 "KACHE_NAMESPACE=deloxide-deloxide-order-Linux-X64",
             ],
         )
-        self.assertEqual(tomllib.loads(configuration.read_text())["cache"]["remote"]["bucket"], "kache-ci")
+        written = tomllib.loads(configuration.read_text())["cache"]
+        self.assertEqual(written["remote"]["bucket"], "kache-ci")
+        self.assertEqual(written["local_max_size"], f"{quarter_of_volume_gib(self.directory)}GiB")
         started = kache.calls()[0]
         self.assertEqual(started["argv"], ["daemon", "start"])
         self.assertEqual(
@@ -1025,7 +1478,8 @@ class StartTests(unittest.TestCase):
             },
         )
 
-    def test_a_daemon_without_the_remote_fails_the_job_after_three_polls(self) -> None:
+    def test_a_daemon_without_the_remote_fails_the_job_after_two_starts_with_its_log(self) -> None:
+        runtime = self.runtime_with_log("starting\nerror: the store index is locked\n")
         for behavior, refusal in (
             ({"config_path": "/elsewhere/kache.toml"}, "the daemon reads configuration /elsewhere/kache.toml"),
             ({"remote": "s3://other/artifacts"}, "the configuration names remote s3://other/artifacts"),
@@ -1034,11 +1488,62 @@ class StartTests(unittest.TestCase):
         ):
             with self.subTest(refusal=refusal):
                 subprocess.run(["rm", "-rf", str(self.directory / "bin")], check=True)
+                (self.directory / "kache.log").unlink(missing_ok=True)
                 self.github_env.write_text("")
                 with self.assertRaises(StartError) as raised:
-                    self.start(behavior)
+                    self.start(behavior, KACHE_RUNTIME_DIR=str(runtime))
                 self.assertIn(refusal, str(raised.exception))
                 self.assertIn("s3://kache-ci/artifacts", str(raised.exception))
+                self.assertIn(f"The end of {runtime}/daemon-pr-ff050e90.log:\nstarting\nerror: the store index is locked", str(raised.exception))
+                started = [
+                    call["argv"] for call in map(json.loads, (self.directory / "kache.log").read_text().splitlines())
+                    if call["argv"] == ["daemon", "start"]
+                ]
+                self.assertEqual(len(started), kache_remote.DAEMON_STARTS)
+
+    def test_a_daemon_that_answers_only_after_its_second_start_is_accepted_with_a_warning(self) -> None:
+        runtime = self.runtime_with_log("error: socket bind timed out\n")
+        kache = FakeKache(self.directory, {"running": [False, False, False, True]})
+        clock = SteppingClock()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            daemon = kache_remote.start(
+                self.environment(kache, KACHE_RUNTIME_DIR=str(runtime)), clock, verify_seconds=4.0
+            )
+        self.assertTrue(daemon.running)
+        self.assertEqual(kache.commands().count(["daemon", "start"]), 2)
+        self.assertIn(
+            "::warning title=kache daemon start 1 of 2::the kache daemon is not running with "
+            "s3://kache-ci/artifacts: the daemon is not running",
+            output.getvalue(),
+        )
+        self.assertIn("error: socket bind timed out", output.getvalue())
+
+    def test_the_store_is_prepared_before_any_daemon_opens_its_index(self) -> None:
+        kache = FakeKache(self.directory, {})
+        seen: list[list[list[str]]] = []
+
+        def prepare(environment: Mapping[str, str]) -> list[str]:
+            seen.append(kache.commands())
+            return ["kache's index and its write-ahead log live in memory."]
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            kache_remote.start(self.environment(kache), SteppingClock(), verify_seconds=4.0, prepare=prepare)
+        self.assertEqual(seen, [[]])
+        self.assertIn("kache's index and its write-ahead log live in memory.", output.getvalue())
+
+    def test_daemon_logs_show_the_end_of_each_log_or_say_there_is_none(self) -> None:
+        runtime = self.runtime_with_log("".join(f"line {number}\n" for number in range(100)))
+        shown = kache_remote.daemon_logs({"KACHE_RUNTIME_DIR": str(runtime)})
+        self.assertTrue(shown.startswith(f"The end of {runtime}/daemon-pr-ff050e90.log:\nline 60\n"), shown[:120])
+        self.assertTrue(shown.endswith("line 99"))
+        empty = self.directory / "empty-runtime"
+        empty.mkdir()
+        self.assertEqual(kache_remote.daemon_logs({"KACHE_RUNTIME_DIR": str(empty)}), f"{empty} holds no kache daemon log.")
+        self.assertEqual(
+            kache_remote.daemon_logs({}), "KACHE_RUNTIME_DIR is not set, so no kache daemon log can be shown."
+        )
 
     def test_a_daemon_that_answers_on_the_second_poll_is_accepted(self) -> None:
         _daemon, kache, clock = self.start({"running": [False, True]})
@@ -1064,10 +1569,12 @@ class StartTests(unittest.TestCase):
     def test_main_maps_each_command_to_its_exit_status(self) -> None:
         kache = FakeKache(self.directory, {"daemon_start_status": 1})
         configuration = self.directory / "image-build.toml"
-        missing_bucket = dict(REMOTE_ENVIRONMENT)
+        # An image build keeps kache's default cache directory below its HOME.
+        image_build = REMOTE_ENVIRONMENT | {"HOME": str(self.directory / "root")}
+        missing_bucket = dict(image_build)
         missing_bucket.pop("KACHE_S3_BUCKET")
         for environment, arguments, status, message in (
-            (REMOTE_ENVIRONMENT, ["configure", str(configuration)], 0, ""),
+            (image_build, ["configure", str(configuration)], 0, ""),
             (missing_bucket, ["configure", str(configuration)], 2, "configure: KACHE_S3_BUCKET is required"),
             (self.environment(kache), ["start"], 1, "`kache daemon start` exited with status 1"),
         ):
@@ -1080,7 +1587,9 @@ class StartTests(unittest.TestCase):
                 ):
                     self.assertEqual(kache_remote.main(arguments), status)
                 self.assertIn(message, errors.getvalue())
-        self.assertEqual(tomllib.loads(configuration.read_text())["cache"]["remote"]["prefix"], "artifacts")
+        written = tomllib.loads(configuration.read_text())["cache"]
+        self.assertEqual(written["remote"]["prefix"], "artifacts")
+        self.assertEqual(written["local_max_size"], f"{quarter_of_volume_gib(self.directory)}GiB")
 
     def test_the_command_line_reports_configuration_and_start_failures(self) -> None:
         kache = FakeKache(self.directory, {"daemon_start_status": 1})

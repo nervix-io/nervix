@@ -591,6 +591,34 @@ class CommandTests(unittest.TestCase):
             with mock.patch.object(os, "cpu_count", lambda: None):
                 self.assertEqual(available_cpus(), 1)
 
+    def test_a_build_compiles_every_inventory_package_as_a_run_lists_it_and_runs_nothing(self) -> None:
+        root = repository(self)
+        self.registered(root)
+        commands = ScriptedCommands(root, lambda arguments, environment: Outcome(0, ""))
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(out):
+            status = main(["--root", str(root), "build"], lambda root: commands)
+        self.assertEqual(status, 0, out.getvalue())
+        built = [arguments for arguments, _ in commands.commands]
+        self.assertEqual(
+            built,
+            [
+                ["cargo", "test", "--package", package, "--features", "shuttle", "--lib", "--no-run"]
+                for package in (REPLAY_CHECK_PACKAGE, "nervix-server")
+            ],
+        )
+
+    def test_a_failed_build_names_its_package(self) -> None:
+        root = repository(self)
+        self.registered(root)
+        commands = ScriptedCommands(root, lambda arguments, environment: Outcome(101, "error"))
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(out):
+            status = main(["--root", str(root), "build"], lambda root: commands)
+        self.assertEqual(status, 1)
+        self.assertIn(f"cannot build the Shuttle build of {REPLAY_CHECK_PACKAGE}", out.getvalue())
+        self.assertEqual(len(commands.commands), 1)
+
     def test_a_run_needs_a_target_directory(self) -> None:
         root = repository(self)
         self.registered(root)
