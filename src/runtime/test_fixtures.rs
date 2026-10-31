@@ -340,6 +340,7 @@ pub(super) fn branch_model(schema: &str, relay: &str, _fields: &[&str]) -> Plann
             name: branch,
             schema: named(schema),
             ttl: "5m".to_string(),
+            partitions: nervix_models::BranchPartitions::ONE,
             eviction: None,
         }),
     }
@@ -1053,6 +1054,7 @@ impl EntrypointTestDomain<'_> {
                         name: branch.clone(),
                         schema: named("entrypoint_branch"),
                         ttl: "5m".to_string(),
+                        partitions: nervix_models::BranchPartitions::ONE,
                         eviction: None,
                     }),
                     fingerprint,

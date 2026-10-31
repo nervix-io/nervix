@@ -72,6 +72,7 @@ struct NativeSection {
     record: NativeRecord,
     domain: DomainName,
     entity: ModelName,
+    unit: nervix_models::Unit,
 }
 
 /// The record a native section streams, with the schema it records.
@@ -97,10 +98,10 @@ impl NativeSection {
     fn path(&self) -> SectionPath {
         match &self.record {
             NativeRecord::KafkaOffsets { .. } => {
-                SectionPath::kafka_offsets(&self.domain, &self.entity)
+                SectionPath::kafka_offsets(&self.domain, &self.entity, self.unit)
             }
             NativeRecord::BranchLifecycle { owner_kind, .. } => {
-                SectionPath::branch_lifecycle(&self.domain, *owner_kind, &self.entity)
+                SectionPath::branch_lifecycle(&self.domain, *owner_kind, &self.entity, self.unit)
             }
         }
     }
@@ -147,6 +148,7 @@ impl SessionServiceImpl {
             let section = NativeSection {
                 domain: placement.domain.clone(),
                 entity: placement.identifier.clone(),
+                unit: placement.unit,
                 captured,
                 record,
             };
@@ -251,6 +253,7 @@ impl NativeSection {
                     let record = StreamedKafkaOffsets {
                         domain: self.domain.clone(),
                         entity: entity(),
+                        unit: self.unit,
                         schema: *schema,
                         revision: offsets.revision,
                         applied_start_generation: offsets.applied_start_generation(),
@@ -285,6 +288,7 @@ impl NativeSection {
                         domain: self.domain.clone(),
                         owner_kind: *owner_kind,
                         entity: entity(),
+                        unit: self.unit,
                         schema: *schema,
                         revision: lifecycle.revision,
                         branches: branches.map(BranchLifecycleEntry::from),

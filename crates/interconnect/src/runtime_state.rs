@@ -19,7 +19,8 @@
 use std::time::Duration;
 
 use nervix_models::{
-    DomainName, ModelKind, ModelName, RemoteRuntimeField, SchemaFingerprint, WasmStateGeneration,
+    DomainName, ModelKind, ModelName, RemoteRuntimeField, SchemaFingerprint, Unit,
+    WasmStateGeneration,
 };
 use rkyv::{Archive, Deserialize, Serialize};
 use strum::{FromRepr, IntoStaticStr};
@@ -158,6 +159,7 @@ pub struct StatePlacementEnvelope {
     pub state: RuntimeState,
     pub kind: ModelKind,
     pub identifier: ModelName,
+    pub unit: Unit,
     pub branch_key: Option<Vec<RemoteRuntimeField>>,
 }
 

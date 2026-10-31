@@ -174,9 +174,13 @@ prepared request retention, source membership, ACK leases, backpressure, retry s
 metrics, and drain. It projects existing Arrow columns into the codec and request-field programs;
 it does not create a row-map payload. The HTTP connector receives a typed, already prepared
 request containing the validated method, normalized target, application headers, and either exact
-codec bytes or no body. It owns HTTP connection and TLS handling, transport-generated fields,
-response parsing, `Retry-After` interpretation, and per-request outcomes. It sees neither graph
-branches nor upstream ACKs. The [connector chapter's HTTP emitter boundary](./connector-contract.md#emitter-boundary)
+codec bytes or no body. It owns HTTP connection and TLS handling, the declared proxy and its
+tunnel, the redirects its client follows, transport-generated fields, response parsing,
+`Retry-After` interpretation, and per-request outcomes. The redirect rule and the required
+`timeout_ms` come from the client transport the HTTP connector's polling ingestor reads too, and
+the declared proxy from the shared `HttpClientConfig`, so one `HTTP CLIENT` means the same
+transport on both sides, as [HTTP client transport](./connector-contract.md#http-client-transport)
+describes. It sees neither graph branches nor upstream ACKs. The [connector chapter's HTTP emitter boundary](./connector-contract.md#emitter-boundary)
 defines the shared contract and host loop in detail.
 
 One HTTP request is prepared for each eligible source record, even when `COLLECT FOR` or `FLUSH`
@@ -190,23 +194,35 @@ The connector sends prepared requests sequentially, with at most one awaiting fi
 headers per active emitter execution across its served relays and branches. Requests released by
 one flush preserve their publication order, and unresolved work stays ahead of later work. There
 is no total order across independent executions, relays, or branches, nor an ordering promise for
-effects an endpoint applies after a connection is lost. Each attempt uses a fresh HTTP/1.1
-connection, closed after final headers, so an unread response body cannot become the next
-response. The client's physical `timeout_ms` covers DNS, connect, TLS, send, interim heads, and
-the complete final head; queue time and backoff do not consume the next attempt's timeout.
+effects an endpoint applies after a connection is lost. Each request uses a fresh connection, over
+which hyper speaks HTTP/2 when the endpoint's TLS negotiates it and HTTP/1.1 otherwise, closed after
+final headers, so an unread response body cannot become the next response. hyper's HTTP/2 client
+runs the connection itself, the request's body and the wait for its response as tasks of their
+own; each ends when the exchange that started it ends, by its final head, its failure or its
+timeout, so an endpoint that keeps a stream open, or never grants the window the rest of a body
+needs, holds no connection beyond its exchange. The client's physical `timeout_ms` covers DNS, connect, the declared proxy's TLS and
+tunnel, TLS, send, interim heads, and the complete final head, of the request and of every redirect
+its client follows within one attempt; queue time and backoff do not consume the next attempt's
+timeout.
 
-One operation budget divides each attempt's `timeout_ms`, counted from the attempt's start. Its
-steps run in this order:
+One operation budget divides each request's share of the attempt's `timeout_ms`: what is left of
+it when the request starts, which for the attempt's first request is all of it. Its steps run in
+this order:
 
-1. The connector resolves the endpoint's host through the node resolver. The lookup takes at most
-   half of `timeout_ms`, whatever the name servers do, so a lookup that answers leaves at least
-   half of the timeout for the steps after it.
+1. The connector resolves the endpoint's host, or the declared proxy's host, through the node
+   resolver. The lookup takes at most half of what the request has, whatever the name servers do,
+   so a lookup that answers leaves at least half of it for the steps after it.
 2. It dials the resolved addresses one at a time, in resolution order. An address receives what is
    left of the budget when its attempt starts, divided equally among the addresses not yet tried,
    itself included. An address that refuses at once leaves its unused share to the addresses after
    it, and one whose handshake never completes ends its attempt with its own share, leaving theirs.
-3. Once an address accepts, TLS for an `https` endpoint, the request send, interim heads, and the
-   complete final head share what remains of the budget.
+3. Once an address accepts, TLS to an `https` proxy, the proxy's `CONNECT` tunnel to an `https`
+   endpoint, TLS for an `https` endpoint, the request send, interim heads, and the complete final
+   head share what remains of the budget.
+4. When the final head is a redirect the client follows, as
+   [HTTP client transport](./emitters.md#http-client-transport) describes, the same prepared
+   request is sent again to its `Location` on the client's origin, with a new budget started from
+   what is left of the attempt.
 
 A step that runs out of its time fails the attempt as an infrastructure failure. The request stays
 pending, and `DESCRIBE EMITTER` names the step that ran out:
@@ -218,14 +234,23 @@ pending, and `DESCRIBE EMITTER` names the step that ran out:
 | What remained after an address accepted | `HTTP request timed out before complete final response headers` |
 
 When no address accepts a connection, the failure of the last address tried describes the attempt.
-[Name Resolution](./name-resolution.md#dialling-the-answers) owns the resolver, its lookup bounds,
-and the dialling order this connector shares with the other callers that dial for themselves.
+A failure to reach the declared proxy is described beneath `HTTP proxy could not be reached`, and a
+tunnel the proxy refuses as `HTTP proxy refused the tunnel with status <status>`; neither names the
+proxy's credentials. [Name Resolution](./name-resolution.md#dialling-the-answers) owns the
+resolver, its lookup bounds, and the dialling order this connector shares with the other callers
+that dial for themselves.
 
-The transport generates `Host`, `Connection: close`, and `Content-Length`. The length is that of a
-present body, or `0` for a bodyless `POST`, `PUT` or `PATCH`; any other bodyless request carries
-no `Content-Length`. It adds `Accept: */*` only if the application did not write `Accept`. It adds
+Through a declared proxy, a request to an `http` endpoint names its absolute URL on its request
+line and carries the proxy's `Proxy-Authorization` when the proxy URL has user information, and a
+request to an `https` endpoint travels inside a `CONNECT` tunnel that carries those credentials to
+the proxy alone, so the endpoint never receives them.
+
+Over HTTP/1.1 the request carries `Host` and `Connection: close`; over HTTP/2 hyper sends the
+authority as `:authority` instead. A request declares the length of a present body, or `0` for a
+bodyless `POST`, `PUT` or `PATCH`; any other bodyless request carries no `Content-Length`. It adds `Accept: */*` only if the application did not write `Accept`. It adds
 no `Accept-Encoding` or `Content-Type`. It does not store response cookies, issue a second request
-for an authentication challenge, follow a redirect, or retry independently of the host. The codec's
+for an authentication challenge, follow a redirect its client does not opt into, or retry
+independently of the host. The codec's
 bytes are the entire body: there is no added wrapper, newline, form encoding, or compression.
 Writing `Content-Encoding` describes bytes the codec already produced and does not transform them.
 
@@ -243,7 +268,7 @@ cannot contain CR, LF, NUL, DEL, or other disallowed ASCII controls.
 | Method | Nonempty ASCII HTTP token, at most 64 bytes; `CONNECT` and `TRACE` excluded; `GET` and `HEAD` bodyless only | Literal: candidate rejected; dynamic: message error before send |
 | Target | Origin-relative, exactly one leading `/`; normalized path and query at most 8 KiB encoded | Literal: candidate rejected; dynamic: message error before send |
 | Application headers | At most 128 after replacement and 32 KiB of UTF-8 name and value bytes in total; each invocation also has the 32 KiB bound | Invalid literal: candidate rejected; dynamic violation: message error before send |
-| Response headers | At most 128 fields and 64 KiB of field-name and value bytes in **each** interim or final block | Attempt remains unresolved and retries |
+| Response headers | What hyper reads: over HTTP/1.1 at most 100 fields and a 417,792-byte head in **each** interim or final block, and over HTTP/2 a header list under 16,384 bytes as HTTP/2 counts it, 32 bytes for each field beside its name and value; a status above `599` | Attempt remains unresolved and retries |
 | Attempt | One request awaiting final headers per execution; positive, schedulable client `timeout_ms`, of which the lookup takes at most half | Attempt failure retains work; timeout is physical |
 | Body | No extra HTTP-specific fixed encoded-body size bound | Encoded bytes remain under node memory pressure until resolved; endpoint `413` rejects the record |
 
@@ -404,8 +429,8 @@ the ledger gives the exact scenario names, example counts, and receiver controls
 | 7. Response-head success | `http_emitter_responses.feature` | `200`, `202` and `204` deliver; stalled and 32 MiB bodies are abandoned; malformed or excessive interim and final heads retry. |
 | 8. Stable retry membership | `http_emitter_retries.feature`, `http_emitter.feature` | The delivered first record is not resent; the failed second request repeats byte for byte, including a generated header and body. |
 | 9. Infrastructure retry and timing | `http_emitter_responses.feature`, `http_emitter_transport.feature`, `http_emitter_retries.feature`, `http_emitter_inspection.feature` | Every retryable status and connection cause remains inspectable while pending; measured physical backoff and `Retry-After` survive domain acceleration. |
-| 10. Terminal rejection | `http_emitter_responses.feature`, `http_emitter_retries.feature` | `101`, redirects, `400`, `404`, `409` and `413` route safe status errors with original input, state and branch; `Location` receives no request. |
-| 11. TLS and mTLS | `http_emitter_transport.feature` | Mounted client identity succeeds; untrusted, wrong-host and missing-certificate handshakes acknowledge nothing. |
+| 10. Terminal rejection | `http_emitter_responses.feature`, `http_emitter_retries.feature`, `http_client_transport.feature` | `101`, redirects a client without `follow_redirects` receives, `400`, `404`, `409` and `413` route safe status errors with original input, state and branch; `Location` receives no request. With `follow_redirects`, a same-origin redirect repeats the request byte for byte, while a `Location` on another origin, a `303` to a `POST` and the eleventh redirect are rejected. |
+| 11. TLS and mTLS | `http_emitter_transport.feature`, `http_client_transport.feature` | Mounted client identity succeeds; untrusted, wrong-host and missing-certificate handshakes acknowledge nothing; a declared proxy forwards plain requests and tunnels HTTPS with its credentials to a host only it resolves, and proxy environment variables carry nothing; an endpoint whose TLS offers HTTP/2 receives the request over HTTP/2, directly and inside the proxy's tunnel. |
 | 12. Relay and branch isolation | `http_emitter.feature`, `http_emitter_transport.feature` | Two relays and two branches retain their own request values and error branches behind collection. |
 | 13. Inspection and replacement | `http_emitter_lifecycle.feature`, `http_emitter.feature`, `tools/plexus_format.feature` | Both body modes round-trip; failed ALTER and COMMIT preserve the active emitter; admitted requests drain to their original destination. |
 | 14. Drain and replay | `http_emitter_lifecycle.feature`, `http_emitter_retries.feature` | Graceful shutdown force-flushes; forced ending leaves a Kafka offset for replay; a lost response permits the same effect twice. |
@@ -440,5 +465,10 @@ Paused-clock unit tests of the HTTP emitter end a silent name server's lookup af
 `timeout_ms` and before the whole of it, and end the attempt of an only address that never
 connects with its share; each checks the transient error listed above. A third unit test delivers
 the request through the second address within one attempt when the first never connects. The
-`http-request-heads` Bolero property checks that the request head the emitter writes carries every
-prepared field and declares the length the transport rules above require.
+`http-emitter-requests` Bolero property checks that the request the emitter hands hyper carries
+every prepared field, names its target as its route requires and declares the length the transport
+rules above require, and that the tunnel request names its target's authority. Owner tests deliver
+over HTTP/2 to an endpoint whose TLS offers it, end an HTTP/2 connection with its exchange even
+while an endpoint that stopped reading holds its writes, send a request byte for byte through hyper,
+repeat it at a followed redirect, forward it through a proxy with its credentials, and keep it
+pending when a proxy refuses its tunnel or cannot be reached.

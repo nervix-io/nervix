@@ -2489,6 +2489,7 @@ mod catch_all_kind_tests {
             name: named("by_tenant"),
             schema: named("tenant_branch"),
             ttl: "5m".to_string(),
+            partitions: crate::BranchPartitions::ONE,
             eviction: None,
         };
         let mut retimed = base_branch.clone();

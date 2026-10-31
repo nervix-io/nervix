@@ -1280,6 +1280,7 @@ impl Arbitrary<'_> {
             None
         };
         PlacementGroupSchedule {
+            unit: nervix_models::Unit::Single,
             members,
             primary_node,
         }
@@ -2251,7 +2252,11 @@ mod tests {
             for (identity, node) in &schedule.nodes {
                 assert_eq!(identity, &node.identity());
                 assert!(EXECUTION_KINDS.contains(&node.kind()), "{identity:?}");
-                assert!(node.assigned_nodes.is_sorted_by(|left, right| left < right));
+                assert!(
+                    node.single_unit()
+                        .assigned_nodes
+                        .is_sorted_by(|left, right| left < right)
+                );
                 if let Some(primary) = node.primary_node() {
                     assert!(node.is_assigned_to(primary), "{identity:?}");
                 }

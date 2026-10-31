@@ -1,12 +1,13 @@
-//! An HTTP/1.1 receiver that stands in for an endpoint an operator provisioned, so a scenario can
-//! see exactly what Nervix sent it and decide exactly how it answers.
+//! An HTTP receiver that stands in for an endpoint an operator provisioned, so a scenario can see
+//! exactly what Nervix sent it and decide exactly how it answers.
 //!
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** One loopback listener, the connections it accepts, the scripted responses they
 //!   answer with, the requests they captured, the faults they observed, its own TLS identity and the
 //!   client identity it issues, and the bounded stop that ends all of them.
-//! - **Depends on.** Tokio, Rustls and rcgen, and the HTTP/1.1 request grammar through `httparse`.
+//! - **Depends on.** Tokio, Rustls and rcgen, the HTTP/1.1 request grammar through `httparse`, and
+//!   hyper's HTTP/2 server.
 //! - **Must not know.** Scenario state, nodes, Plexus, or what the requests it captures mean.
 //!
 //! # Scripted responses
@@ -25,6 +26,16 @@
 //! value bytes can be set independently for the interim and final block, and a `Retry-After` date is
 //! computed when its response is written. Capture times precede the scripted response, so timing
 //! assertions need no silence window.
+//!
+//! # HTTP versions
+//!
+//! A receiver reads and answers HTTP/1.1 itself, byte for byte, which is what lets its script write
+//! framing no valid endpoint would. A TLS receiver can also offer HTTP/2 in its handshake; a client
+//! that negotiates it is served by hyper's HTTP/2 server, which captures each request whole, as an
+//! HTTP/1.1 request is captured, and answers it with the response its target takes. Over HTTP/2
+//! only a complete response has a form: a status, its fields and exactly its body, after its delay.
+//! A request that takes any other is recorded as the connection's fault and its stream is reset.
+//! Every capture records the version its client spoke.
 //!
 //! A receiver can also be strict about framing, as some origin servers are: it then answers a
 //! `POST`, `PUT` or `PATCH` that declares neither a `Content-Length` nor a chunked body with
@@ -53,7 +64,9 @@
 
 use std::{
     collections::{BTreeMap, VecDeque},
-    fmt, io,
+    fmt,
+    future::Future,
+    io,
     net::SocketAddr,
     num::ParseIntError,
     path::Path,
@@ -61,6 +74,10 @@ use std::{
     time::Duration,
 };
 
+use bytes::Bytes;
+use http_body_util::{BodyExt as _, Full, LengthLimitError, Limited};
+use hyper::body::Incoming;
+use hyper_util::rt::TokioIo;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
     net::{TcpListener, TcpStream},
@@ -112,8 +129,8 @@ pub(crate) const MAX_CAPTURED_REQUESTS: usize = 4096;
 /// The most faults one receiver keeps. Faults beyond it are counted but not kept. A policy input.
 pub(crate) const MAX_RECORDED_FAULTS: usize = 256;
 /// The largest generated response header value the script permits. It reaches beyond the
-/// emitter's 64 KiB response limit without letting one scenario allocate without a bound.
-const MAX_SCRIPTED_HEADER_VALUE_BYTES: usize = 128 * 1024;
+/// 417,792-byte response head hyper reads without letting one scenario allocate without a bound.
+const MAX_SCRIPTED_HEADER_VALUE_BYTES: usize = 1024 * 1024;
 /// The largest generated response body the script permits. A policy input: many times the socket
 /// buffers of a loopback connection, so a client that reads only the head cannot absorb the body
 /// in its kernel buffers, and written in chunks, so the receiver never holds it in memory.
@@ -149,14 +166,40 @@ pub(crate) enum ReceiverTransport {
     Tls(ReceiverTlsOptions),
 }
 
-/// The certificate a TLS receiver presents and whether it demands one back.
+/// The certificate a TLS receiver presents, whether it demands one back, and the HTTP versions it
+/// offers.
 #[derive(Clone, Debug)]
 pub(crate) struct ReceiverTlsOptions {
     /// The DNS names and IP addresses the receiver's certificate is valid for. A client that dials
     /// any other name fails hostname verification.
     pub(crate) certificate_hosts: Vec<String>,
     pub(crate) client_certificate: ClientCertificatePolicy,
+    pub(crate) protocols: ReceiverProtocols,
 }
+
+/// The HTTP versions a TLS receiver offers in its handshake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReceiverProtocols {
+    /// HTTP/1.1 alone, so a client that offers HTTP/2 falls back to it.
+    Http1,
+    /// HTTP/2 ahead of HTTP/1.1, so a client that offers HTTP/2 speaks it.
+    Http2AndHttp1,
+}
+
+impl ReceiverProtocols {
+    /// The ALPN identifiers the receiver offers, most preferred first.
+    fn alpn(self) -> Vec<Vec<u8>> {
+        match self {
+            Self::Http1 => vec![HTTP1_ALPN.to_vec()],
+            Self::Http2AndHttp1 => vec![HTTP2_ALPN.to_vec(), HTTP1_ALPN.to_vec()],
+        }
+    }
+}
+
+/// The ALPN identifier of HTTP/2.
+const HTTP2_ALPN: &[u8] = b"h2";
+/// The ALPN identifier of HTTP/1.1.
+const HTTP1_ALPN: &[u8] = b"http/1.1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ClientCertificatePolicy {
@@ -211,7 +254,7 @@ pub(crate) enum ReceiverResponse {
     Raw(Vec<u8>),
 }
 
-/// A response written as HTTP/1.1 framing.
+/// A response written as HTTP/1.1 framing, or sent by hyper's HTTP/2 server where it has that form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ScriptedResponse {
     status: u16,
@@ -307,6 +350,29 @@ impl ScriptedResponse {
         }
         head.extend_from_slice(b"\r\n");
         head
+    }
+
+    /// This response as hyper's HTTP/2 server sends it: its status, its fields and exactly its
+    /// body. Only a complete response has that form; one with an interim head, generated fields
+    /// or body, a computed `Retry-After` or a stalled body has none, and neither has a status or
+    /// field HTTP's types refuse.
+    fn http2(&self) -> Option<http::Response<Full<Bytes>>> {
+        if self.interim.is_some()
+            || self.extra_headers != 0
+            || self.header_value_bytes.is_some()
+            || self.retry_after_date_in.is_some()
+            || self.body_delivery != BodyDelivery::Complete
+        {
+            return None;
+        }
+        let ResponseBody::Bytes(body) = &self.body else {
+            return None;
+        };
+        let mut response = http::Response::builder().status(self.status);
+        for header in &self.headers {
+            response = response.header(header.name.as_str(), header.value.as_str());
+        }
+        response.body(Full::new(Bytes::from(body.clone()))).ok()
     }
 
     fn interim_head(&self) -> Option<Vec<u8>> {
@@ -580,11 +646,14 @@ fn unescape_raw(text: &str) -> Result<Vec<u8>, ReceiverScriptError> {
 }
 
 /// One request exactly as the receiver read it. Two captures are equal when their request lines,
-/// their header fields in the order they arrived, and their bodies are byte for byte the same.
+/// the HTTP versions their clients spoke, their header fields in the order they arrived, and their
+/// bodies are byte for byte the same.
 #[derive(Clone, Debug)]
 pub(crate) struct CapturedRequest {
     pub(crate) method: String,
     pub(crate) target: String,
+    /// The HTTP version the client spoke.
+    pub(crate) version: http::Version,
     headers: Vec<CapturedHeader>,
     pub(crate) body: Vec<u8>,
     /// When the receiver finished reading the request, before its scripted response began.
@@ -603,6 +672,7 @@ impl PartialEq for CapturedRequest {
     fn eq(&self, other: &Self) -> bool {
         self.method == other.method
             && self.target == other.target
+            && self.version == other.version
             && self.headers == other.headers
             && self.body == other.body
     }
@@ -629,7 +699,11 @@ impl CapturedRequest {
 impl fmt::Display for CapturedRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(formatter, "received at {:?}", self.received_at)?;
-        writeln!(formatter, "{} {}", self.method, self.target)?;
+        writeln!(
+            formatter,
+            "{} {} {:?}",
+            self.method, self.target, self.version
+        )?;
         for header in &self.headers {
             writeln!(
                 formatter,
@@ -687,6 +761,12 @@ pub(crate) enum ReceiverFault {
         "connection {connection} sent a request after the receiver captured its limit of {limit}"
     )]
     CaptureLimit { connection: u64, limit: usize },
+    #[error("connection {connection} sent an HTTP/2 request that names no path")]
+    PathlessRequest { connection: u64 },
+    #[error(
+        "connection {connection} sent an HTTP/2 request whose scripted response HTTP/2 cannot send"
+    )]
+    UnsendableOverHttp2 { connection: u64 },
 }
 
 impl ReceiverFault {
@@ -855,8 +935,7 @@ impl ReceiverTlsIdentity {
         let mut config = builder
             .with_single_cert(vec![server_certificate.der().clone()], server_key)
             .map_err(ReceiverStartError::TlsConfiguration)?;
-        // The receiver speaks HTTP/1.1 only, so a client that offers HTTP/2 falls back to it.
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        config.alpn_protocols = options.protocols.alpn();
         Ok(Self {
             acceptor: TlsAcceptor::from(StdArc::new(config)),
             files: ReceiverTlsFiles { directory },
@@ -1460,6 +1539,130 @@ impl AcceptLoop {
     }
 }
 
+/// What the requests of one HTTP/2 connection share: the receiver that captures and answers them,
+/// and the connection they arrived on.
+#[derive(Clone)]
+struct Http2Exchange {
+    connection: u64,
+    state: Arc<ReceiverState>,
+    cancellation: CancellationToken,
+}
+
+/// Why a request over HTTP/2 went unanswered; hyper resets its stream.
+#[derive(Debug, Error)]
+enum Unanswered {
+    #[error("the receiver stopped before it answered")]
+    Stopped,
+    #[error("the receiver recorded the request's fault")]
+    Faulted,
+}
+
+impl Http2Exchange {
+    /// Captures `request` whole, as an HTTP/1.1 request is captured, and answers it with the
+    /// response its target takes, after that response's delay. A body beyond the receiver's limit,
+    /// a body the client did not finish, a request beyond the capture limit, and a response HTTP/2
+    /// cannot send are recorded as faults, and the request is not answered.
+    async fn answer(
+        self,
+        request: http::Request<Incoming>,
+    ) -> Result<http::Response<Full<Bytes>>, Unanswered> {
+        let (parts, body) = request.into_parts();
+        let target = match parts.uri.path_and_query() {
+            Some(target) => target.as_str().to_string(),
+            None => {
+                return Err(self.fault(ReceiverFault::PathlessRequest {
+                    connection: self.connection,
+                }));
+            }
+        };
+        let read = nervix_primitives::select! {
+            () = self.cancellation.cancelled() => return Err(Unanswered::Stopped),
+            read = Limited::new(body, MAX_REQUEST_BODY_BYTES).collect() => read,
+        };
+        let body = match read {
+            Ok(read) => read.to_bytes().to_vec(),
+            Err(error) if error.is::<LengthLimitError>() => {
+                return Err(self.fault(ReceiverFault::RequestBodyTooLarge {
+                    connection: self.connection,
+                    limit: MAX_REQUEST_BODY_BYTES,
+                }));
+            }
+            Err(_) => {
+                return Err(self.fault(ReceiverFault::IncompleteRequest {
+                    connection: self.connection,
+                }));
+            }
+        };
+        let mut headers = Vec::with_capacity(parts.headers.len());
+        for (name, value) in &parts.headers {
+            headers.push(CapturedHeader {
+                name: name.as_str().to_string(),
+                value: value.as_bytes().to_vec(),
+            });
+        }
+        let captured = CapturedRequest {
+            method: parts.method.as_str().to_string(),
+            target: target.clone(),
+            version: parts.version,
+            headers,
+            body,
+            received_at: Instant::now(),
+        };
+        match self.state.capture(captured) {
+            Capture::Kept => {}
+            Capture::AtLimit => {
+                return Err(self.fault(ReceiverFault::CaptureLimit {
+                    connection: self.connection,
+                    limit: MAX_CAPTURED_REQUESTS,
+                }));
+            }
+        }
+        // The request awaits its response from its capture until hyper is handed its final head.
+        let mut awaiting = AwaitingResponse::begin(&self.state);
+        let ReceiverResponse::Respond(scripted) = self.state.next_response(&target) else {
+            return Err(self.fault(ReceiverFault::UnsendableOverHttp2 {
+                connection: self.connection,
+            }));
+        };
+        let Some(response) = scripted.http2() else {
+            return Err(self.fault(ReceiverFault::UnsendableOverHttp2 {
+                connection: self.connection,
+            }));
+        };
+        if let Some(delay) = scripted.delay {
+            nervix_primitives::select! {
+                () = self.cancellation.cancelled() => return Err(Unanswered::Stopped),
+                () = nervix_primitives::time::sleep(delay) => {}
+            }
+        }
+        awaiting.release();
+        Ok(response)
+    }
+
+    /// Records `fault` and leaves its request unanswered.
+    fn fault(&self, fault: ReceiverFault) -> Unanswered {
+        self.state.record(fault);
+        Unanswered::Faulted
+    }
+}
+
+/// Runs what hyper's HTTP/2 server starts for a connection's streams as tasks that end when the
+/// receiver stops, so its bounded stop waits on none of them.
+#[derive(Clone)]
+struct ReceiverTasks {
+    cancellation: CancellationToken,
+}
+
+impl<F> hyper::rt::Executor<F> for ReceiverTasks
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    fn execute(&self, future: F) {
+        nervix_primitives::task::spawn(self.cancellation.clone().run_until_cancelled_owned(future));
+    }
+}
+
 /// Why one connection stopped serving requests.
 enum ConnectionEnd {
     /// The client closed between requests, the receiver stopped, or the client abandoned a
@@ -1485,6 +1688,9 @@ impl Connection {
                     accepted = acceptor.accept(stream) => accepted,
                 };
                 match accepted {
+                    Ok(stream) if stream.get_ref().1.alpn_protocol() == Some(HTTP2_ALPN) => {
+                        self.serve_http2(stream).await
+                    }
                     Ok(stream) => self.serve_requests(stream).await,
                     Err(source) => ConnectionEnd::Faulted(ReceiverFault::TlsHandshake {
                         connection: self.id,
@@ -1496,6 +1702,33 @@ impl Connection {
         match ending {
             ConnectionEnd::Closed => {}
             ConnectionEnd::Faulted(fault) => self.state.record(fault),
+        }
+    }
+
+    /// Serves a connection whose TLS negotiated HTTP/2 with hyper's HTTP/2 server, which hands each
+    /// request to [`Http2Exchange::answer`]. However the client leaves the connection, it ends with
+    /// nothing to record: a fault belongs to a request, and its exchange records it.
+    async fn serve_http2<S>(&self, stream: S) -> ConnectionEnd
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let exchange = Http2Exchange {
+            connection: self.id,
+            state: self.state.clone(),
+            cancellation: self.cancellation.clone(),
+        };
+        let service = hyper::service::service_fn(move |request| exchange.clone().answer(request));
+        let tasks = ReceiverTasks {
+            cancellation: self.cancellation.clone(),
+        };
+        let serving = hyper::server::conn::http2::Builder::new(tasks)
+            .serve_connection(TokioIo::new(stream), service);
+        nervix_primitives::select! {
+            () = self.cancellation.cancelled() => ConnectionEnd::Closed,
+            served = serving => {
+                served.discarded("a client ends its HTTP/2 connection however it leaves it");
+                ConnectionEnd::Closed
+            }
         }
     }
 
@@ -1780,6 +2013,7 @@ impl Connection {
             captured: CapturedRequest {
                 method: head.method,
                 target: head.target,
+                version: head.version,
                 headers: head.headers,
                 body,
                 received_at: Instant::now(),
@@ -1804,7 +2038,11 @@ impl Connection {
         let target = request.path.unwrap_or_default().to_string();
         let mut captured = Vec::with_capacity(request.headers.len());
         let mut framing = BodyFraming::Empty;
-        let mut closes = request.version == Some(0);
+        let version = match request.version {
+            Some(0) => http::Version::HTTP_10,
+            _ => http::Version::HTTP_11,
+        };
+        let mut closes = version == http::Version::HTTP_10;
         for header in request.headers.iter() {
             let name = header.name.to_string();
             if name.eq_ignore_ascii_case("content-length") {
@@ -1825,6 +2063,7 @@ impl Connection {
             length,
             method,
             target,
+            version,
             headers: captured,
             framing,
             closes,
@@ -2023,6 +2262,7 @@ struct RequestHead {
     length: usize,
     method: String,
     target: String,
+    version: http::Version,
     headers: Vec<CapturedHeader>,
     framing: BodyFraming,
     closes: bool,
