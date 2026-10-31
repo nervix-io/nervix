@@ -3281,11 +3281,26 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/http/src/request/emitter/__fuzz__/request__emitter__request_tests__bolero_requests_carry_every_prepared_field_on_every_route/corpus"
+corpus = "crates/connectors/http/src/request/__fuzz__/request__tests__bolero_response_headers_preserve_utf8_and_count_invalid_values/corpus"
 domain_version = 1
 features = []
+id = "http-poll-response-headers"
+invariant = "A polled HTTP response retains every valid UTF-8 header value as the same string bytes in repeat order, including non-ASCII characters; it omits each invalid UTF-8 value alone and counts that omission without losing the other values."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-connector-http"
+random_iterations = 256
+source = "crates/connectors/http/src/request/mod.rs"
+test = "request::tests::bolero_response_headers_preserve_utf8_and_count_invalid_values"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/http/src/request/emitter/__fuzz__/request__emitter__request_tests__bolero_requests_carry_every_prepared_field_on_every_route/corpus"
+domain_version = 2
+features = []
 id = "http-emitter-requests"
-invariant = "For valid prepared requests over content-defining, contentless and extension methods in their case variants, named, IPv4 and IPv6 origins with and without default ports, plain targets, application headers with and without Accept, bounded bodies, and a route over HTTP/1.1, over HTTP/2 or forwarded by a proxy with or without its credentials, the request the emitter hands hyper carries exactly the prepared method, the target in origin form over HTTP/1.1 and in absolute form over HTTP/2 or through a forwarding proxy, Host and Connection over HTTP/1.1 only, the proxy's Proxy-Authorization when a forwarded request carries credentials, the Accept default, every application field in order, a zero Content-Length only for a bodyless POST, PUT or PATCH in any ASCII case, and exactly the prepared body; and the tunnel request for the target is a CONNECT naming its host and port, as its Host, with the proxy's credentials."
+invariant = "For valid prepared requests over content-defining, contentless and extension methods in their case variants, named, IPv4 and IPv6 origins with and without default ports, plain targets, application headers with and without Accept, bounded bodies, and a route over HTTP/1.1, over HTTP/2 or forwarded by a proxy with or without its credentials, the request the emitter hands hyper carries exactly the prepared method, the target in origin form over HTTP/1.1 and in absolute form over HTTP/2 or through a forwarding proxy, Host and Connection over HTTP/1.1 only, the proxy's Proxy-Authorization when a forwarded request carries credentials, the Accept default, every application field as its exact UTF-8 bytes in order, a zero Content-Length only for a bodyless POST, PUT or PATCH in any ASCII case, and exactly the prepared body; and the tunnel request for the target is a CONNECT naming its host and port, as its Host, with the proxy's credentials."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-http"
@@ -3447,7 +3462,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 19
+domain_version = 20
 features = []
 id = "client-config-schema"
 invariant = "Bounded entries drawn from every current client key schema preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."
