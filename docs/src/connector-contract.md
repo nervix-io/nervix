@@ -2233,8 +2233,9 @@ rows and every later request's unresolved for the host to retry, so a retry pack
 the same requests again.
 
 The database emitters divide the whole run. ClickHouse measures the `JSONEachRow` body of an insert,
-each row's line encoded once and sent as a slice of one buffer. Postgres measures the one `unnest`
-statement every insert of the write executes and the text arrays it binds, exactly as the driver
+each row's line encoded once and sent as a slice of one buffer, before its driver compresses the body
+with LZ4. Postgres measures the one `unnest` statement every insert of the write executes and the
+text arrays it binds, exactly as the driver
 encodes them; its declared batch maximum, which `CREATE` holds `MAX SIZE` to, is the largest
 protocol message the server reads, so the measure also bounds the Bind message that carries the
 arrays. MySQL measures each multi-row statement and every
