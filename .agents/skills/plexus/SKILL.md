@@ -433,7 +433,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
 - Request/response emitters do not take `ACK TIMEOUT`. ClickHouse, OTEL and Sentry clients require a
   positive `timeout_ms`; SQS or Iceberg object-store clients use it when a request
-  needs an explicit bound. A ClickHouse HTTPS address also requires `tls_ca_file` from a mounted
+  needs an explicit bound, which for SQS bounds every request of both directions. A ClickHouse HTTPS address also requires `tls_ca_file` from a mounted
   resource, while HTTP refuses TLS file keys. Its table locator has one or two case-preserving
   dot-separated parts, each quoted by the connector when sent. The emitter's declared retry
   policy owns pacing after that request fails. A ZeroMQ client's `timeout_ms` bounds each send,
