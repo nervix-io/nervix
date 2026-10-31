@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """The shared kache remote of a CI job: its configuration, its daemon and its publication.
 
-`configure PATH` writes the file that names the remote for a kache daemon.
+`configure PATH` writes the file every kache process reads: the remote, and the budget of the local
+store, a quarter of the volume that holds the cache directory.
 
-`start` configures that remote for the current GitHub Actions job, exports the environment later
-steps need, starts the job's daemon and fails unless the daemon runs with that remote.
+`start` configures that remote and store for the current GitHub Actions job, prepares the store's
+disk, exports the environment later steps need, starts the job's daemon and fails unless the daemon
+runs with that remote.
+
+`prepare-index --memory DIR` and `restore-index` move kache's index into a tmpfs before any kache
+process opens it, and back once none has it open, for a builder whose store outlives the tmpfs.
+`lighten-volume PATH` remounts the ext4 volume holding PATH without access times and write
+barriers, for a volume no job step prepares through `start`, such as the image builder's.
 
 `publish --job-status STATUS REPORT_DIR` publishes what the job built within a bounded time and
 records the outcome beside the job's kache report.
@@ -17,13 +24,14 @@ Publication" section of docs/src/integration-test-lifecycle.md owns the contract
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 import contextlib
 from dataclasses import asdict, dataclass, field
 import enum
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shutil
 import signal
@@ -46,10 +54,17 @@ PULL_REQUEST_PREFIX = "artifacts-pr"
 PUBLICATION_BUDGET_SECONDS = 120.0
 UPLOAD_POLL_SECONDS = 2.0
 
-# A daemon that has just started may not answer at once; it gets three polls, two seconds apart.
-VERIFY_ATTEMPTS = 3
+# A daemon that has just started may not answer at once, and on a loaded runner it can take a while:
+# it gets a minute to answer, polled every two seconds. A daemon that never answers is started once
+# more, after its log is shown, before the job fails: on 2026-10-30 one Boat runner, slow enough that
+# `kache doctor` took 47 seconds, never reached a daemon its first start reported as started.
+VERIFY_SECONDS = 60.0
 VERIFY_RETRY_SECONDS = 2.0
+DAEMON_STARTS = 2
 DAEMON_COMMAND_SECONDS = 30.0
+# How much of each daemon log a failed start shows.
+DAEMON_LOG_LINES = 40
+DAEMON_LOG_BYTES = 64 * 1024
 
 KACHE_DOCUMENT_SCHEMA_VERSION = 1
 TELEMETRY_SCHEMA_VERSION = "1"
@@ -69,6 +84,15 @@ AMBIENT_REMOTE_SETTINGS = ("KACHE_S3_BUCKET", "KACHE_S3_REGION", "KACHE_S3_ENDPO
 BUCKET_NAME = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
 REGION_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 JOB_STATUSES = ("success", "failure", "cancelled")
+
+# The share of its volume a job's local store may hold, and the least it may hold. Kache's own
+# default is 5% of the volume, capped at 100 GiB: 15 GiB on a Boat runner, below the 33 GiB the
+# `checks` job's store reached, so the store ran over its budget, where kache's sweeps evict from it
+# while the job still builds. A quarter of the volume holds that with room to spare, and still
+# scales with a runner's disk. The floor is kache's own.
+STORE_SHARE_PERCENT = 25
+STORE_FLOOR_GIB = 5
+GIB = 1024**3
 
 
 class ConfigurationError(Exception):
@@ -159,6 +183,7 @@ class Remote:
         return f"s3://{self.bucket}/{BASE_PREFIX}"
 
     def configuration(self) -> str:
+        """The remote's table of the configuration file."""
         lines = [
             "[cache.remote]",
             'type = "s3"',
@@ -170,11 +195,211 @@ class Remote:
         ]
         return "\n".join(lines) + "\n"
 
-    def write_configuration(self, path: Path) -> None:
+
+
+def cache_directory(environment: Mapping[str, str]) -> Path:
+    """Where kache keeps its store: KACHE_CACHE_DIR, else kache's default below the user's cache
+    directory, which an absolute XDG_CACHE_HOME names, else `.cache` in the home directory: HOME,
+    or the user's passwd entry when HOME is unset."""
+    configured = environment.get("KACHE_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    cache_home = environment.get("XDG_CACHE_HOME")
+    if cache_home and Path(cache_home).is_absolute():
+        return Path(cache_home) / "kache"
+    home = environment.get("HOME")
+    if not home:
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    return Path(home) / ".cache" / "kache"
+
+
+@dataclass(frozen=True)
+class LocalStore:
+    """The budget of a job's local kache store: a share of the volume that holds it."""
+
+    max_size_gib: int
+
+    @classmethod
+    def for_volume(cls, volume_bytes: int) -> LocalStore:
+        """The volume's share, rounded to the nearest GiB as kache rounds its own, and at least the
+        floor."""
+        share = volume_bytes * STORE_SHARE_PERCENT // 100
+        rounded = (share + GIB // 2) // GIB
+        return cls(max_size_gib=max(rounded, STORE_FLOOR_GIB))
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str]) -> LocalStore:
+        """The budget of the store in the job's cache directory, measured on its volume."""
+        directory = cache_directory(environment)
+        # Before kache's first build the directory may not exist yet; it will be created on the
+        # volume of the nearest directory above it, and the filesystem root always exists.
+        existing = directory
+        while not existing.exists():
+            existing = existing.parent
+        return cls.for_volume(shutil.disk_usage(existing).total)
+
+    def configuration(self) -> str:
+        """The store's table of the configuration file."""
+        return f"[cache]\nlocal_max_size = {toml_string(f'{self.max_size_gib}GiB')}\n"
+
+
+# A single-use runner's store needs no crash consistency: the machine and everything on it end with
+# the job. On Boat, kache's downloads spent most of their time waiting for the lock of its SQLite
+# index, whose holders wait on the disk, so a job keeps the index in memory and lets the other
+# writes on the store's volume skip the disk's write barrier.
+MEMORY_DIRECTORY = Path("/dev/shm")
+MEMORY_INDEX = "kache-index"
+# The index and the files SQLite keeps beside it in write-ahead-log mode. SQLite resolves a
+# symlinked database and keeps those files next to its target.
+INDEX_FILES = ("index.db", "index.db-wal", "index.db-shm")
+# The least free memory the index may move to.
+MEMORY_INDEX_FREE_BYTES = GIB
+SYSTEM_COMMAND_SECONDS = 30.0
+# What remounting the store's ext4 volume adds: no access-time writes, and no write barrier, so an
+# fsync returns once the device has the data instead of after its cache is flushed too.
+VOLUME_OPTIONS = ("noatime", "barrier=0")
+
+
+def existing_ancestor(path: Path) -> Path:
+    """`path`, or the nearest directory above it that exists; the filesystem root always does."""
+    existing = path
+    while not existing.exists():
+        existing = existing.parent
+    return existing
+
+
+def run_system(arguments: Sequence[str], environment: Mapping[str, str]) -> subprocess.CompletedProcess[str] | None:
+    """A system command's result, or None when it could not run or did not finish in time."""
+    try:
+        return subprocess.run(
+            list(arguments),
+            env=dict(environment),
+            capture_output=True,
+            text=True,
+            timeout=SYSTEM_COMMAND_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+@dataclass(frozen=True)
+class Mount:
+    """The mounted filesystem that holds a path, as findmnt reports it."""
+
+    target: str
+    filesystem: str
+    options: tuple[str, ...]
+
+    @classmethod
+    def holding(cls, path: Path, environment: Mapping[str, str]) -> Mount | None:
+        """None when findmnt cannot say."""
+        completed = run_system(
+            [
+                "findmnt", "--raw", "--noheadings", "--output", "TARGET,FSTYPE,OPTIONS",
+                "--target", str(existing_ancestor(path)),
+            ],
+            environment,
+        )
+        if completed is None or completed.returncode != 0:
+            return None
+        fields = completed.stdout.split()
+        if len(fields) != 3:
+            return None
+        return cls(target=fields[0], filesystem=fields[1], options=tuple(fields[2].split(",")))
+
+
+def keep_index_in_memory(cache_dir: Path, memory: Path) -> str:
+    """Move kache's index into `memory` behind a symlink. Only before any kache process opens it."""
+    index = cache_dir / INDEX_FILES[0]
+    if index.is_symlink():
+        return f"kache's index already lives at {os.readlink(index)}."
+    directory = memory / MEMORY_INDEX
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    for name in INDEX_FILES:
+        source = cache_dir / name
+        if source.exists():
+            shutil.move(source, directory / name)
+    index.symlink_to(directory / INDEX_FILES[0])
+    return f"kache's index and its write-ahead log live in memory, in {directory}."
+
+
+def lighten_volume(path: Path, environment: Mapping[str, str]) -> str:
+    """Remount the ext4 volume that holds `path` without access times and write barriers."""
+    mount = Mount.holding(path, environment)
+    if mount is None:
+        return f"The volume holding {path} was not remounted: findmnt could not describe it."
+    volume = f"The volume holding {path}, {mount.target},"
+    remounting = f"Remounting the volume holding {path}, {mount.target},"
+    if mount.filesystem != "ext4":
+        return f"{volume} is {mount.filesystem}, so it was not remounted."
+    options = ",".join(("remount", *VOLUME_OPTIONS))
+    completed = run_system(["sudo", "--non-interactive", "mount", "-o", options, mount.target], environment)
+    if completed is None:
+        return f"{remounting} did not run; it keeps its options."
+    if completed.returncode != 0:
+        return f"{remounting} exited with status {completed.returncode}: {completed.stderr.strip()}; it keeps its options."
+    remounted = Mount.holding(path, environment)
+    if remounted is None:
+        return f"{volume} is remounted; findmnt could not read its options."
+    return f"{volume} is remounted with {','.join(remounted.options)}."
+
+
+def prepare_index(environment: Mapping[str, str], memory: Path) -> str:
+    """Keep the store's index in `memory` when it is a tmpfs with room for it, before any kache
+    process opens the index; say what was done."""
+    memory_mount = Mount.holding(memory, environment)
+    if memory_mount is None or memory_mount.filesystem != "tmpfs":
+        return f"kache's index stays on disk: {memory} is not a tmpfs."
+    if shutil.disk_usage(memory).free < MEMORY_INDEX_FREE_BYTES:
+        return f"kache's index stays on disk: {memory} has less than 1 GiB free."
+    return keep_index_in_memory(cache_directory(environment), memory)
+
+
+def restore_index(cache_dir: Path) -> str:
+    """Move kache's index from memory back into the cache directory, once no kache process has it
+    open, so a store that outlives the memory, such as an image builder's cache mount, keeps it."""
+    index = cache_dir / INDEX_FILES[0]
+    if not index.is_symlink():
+        return "kache's index is already in the cache directory."
+    target = cache_dir / os.readlink(index)
+    index.unlink()
+    if not target.exists():
+        return f"kache's index in memory, {target}, is gone; kache starts a new one in {cache_dir}."
+    for name in INDEX_FILES:
+        source = target.parent / name
+        if source.exists():
+            shutil.move(source, cache_dir / name)
+    return f"kache's index is back in {cache_dir}."
+
+
+def prepare_store(environment: Mapping[str, str], memory: Path = MEMORY_DIRECTORY) -> list[str]:
+    """Keep the store's index in memory and lighten its volume's writes, before the job's daemon
+    opens the index. Neither is required: a runner where one does not apply keeps kache's default,
+    and the lines returned say what was done."""
+    return [
+        prepare_index(environment, memory),
+        lighten_volume(cache_directory(environment), environment),
+    ]
+
+
+@dataclass(frozen=True)
+class Configuration:
+    """The file every kache process of a job reads, through KACHE_CONFIG: its local store's budget
+    and its remote."""
+
+    store: LocalStore
+    remote: Remote
+
+    def text(self) -> str:
+        return self.store.configuration() + "\n" + self.remote.configuration()
+
+    def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            output.write(self.configuration())
+            output.write(self.text())
 
 
 def kache_environment(environment: Mapping[str, str]) -> dict[str, str]:
@@ -284,14 +509,76 @@ class DaemonState:
         return None
 
 
-def start(environment: Mapping[str, str], clock: Clock | None = None) -> DaemonState:
-    """Configure the job's remote, export it to later steps, and start the job's daemon with it."""
+@dataclass(frozen=True)
+class DaemonCheck:
+    """What the job's daemon answered when start last asked, and why it is not the job's daemon,
+    if it is not."""
+
+    daemon: DaemonState | None
+    refusal: str | None
+
+
+def await_daemon(
+    environment: Mapping[str, str], remote: Remote, configuration: Path, clock: Clock, verify_seconds: float
+) -> DaemonCheck:
+    """Poll the daemon until it runs with the job's remote or `verify_seconds` pass."""
+    deadline = clock.now() + verify_seconds
+    while True:
+        try:
+            daemon = DaemonState.read(environment, DAEMON_COMMAND_SECONDS)
+            check = DaemonCheck(daemon=daemon, refusal=daemon.refusal(remote, configuration))
+        except KacheError as error:
+            check = DaemonCheck(daemon=None, refusal=str(error))
+        if check.refusal is None or clock.now() >= deadline:
+            return check
+        clock.sleep(VERIFY_RETRY_SECONDS)
+
+
+def start_daemon(environment: Mapping[str, str]) -> None:
+    try:
+        started = run_kache(["daemon", "start"], environment, DAEMON_COMMAND_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        raise StartError(f"`kache daemon start` did not return within {DAEMON_COMMAND_SECONDS:.0f} s") from error
+    print((started.stdout + started.stderr).strip(), flush=True)
+    if started.returncode != 0:
+        raise StartError(f"`kache daemon start` exited with status {started.returncode}")
+
+
+def daemon_logs(environment: Mapping[str, str]) -> str:
+    """The end of every log in the job's kache runtime directory, where a daemon that cannot start
+    writes why."""
+    runtime = environment.get("KACHE_RUNTIME_DIR")
+    if not runtime:
+        return "KACHE_RUNTIME_DIR is not set, so no kache daemon log can be shown."
+    logs = sorted(Path(runtime).glob("*.log"))
+    if not logs:
+        return f"{runtime} holds no kache daemon log."
+    sections = []
+    for log in logs:
+        with log.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(stream.tell() - DAEMON_LOG_BYTES, 0))
+            tail = stream.read().decode(errors="replace").splitlines()[-DAEMON_LOG_LINES:]
+        sections.append(f"The end of {log}:\n" + "\n".join(tail))
+    return "\n".join(sections)
+
+
+def start(
+    environment: Mapping[str, str],
+    clock: Clock | None = None,
+    verify_seconds: float = VERIFY_SECONDS,
+    prepare: Callable[[Mapping[str, str]], list[str]] | None = None,
+) -> DaemonState:
+    """Configure the job's remote, prepare its store, export them to later steps, and start the
+    job's daemon with them."""
     clock = clock or Clock()
+    prepare = prepare or prepare_store
     remote = Remote.from_environment(environment)
+    store = LocalStore.from_environment(environment)
     manifest_key = required(environment, "KACHE_MANIFEST_KEY")
     configuration = Path(required(environment, "RUNNER_TEMP")) / "kache-remote.toml"
     job_environment = Path(required(environment, "GITHUB_ENV"))
-    remote.write_configuration(configuration)
+    Configuration(store=store, remote=remote).write(configuration)
     exported = {
         "KACHE_CONFIG": str(configuration),
         "KACHE_S3_ACCESS_KEY": remote.access_key,
@@ -303,31 +590,26 @@ def start(environment: Mapping[str, str], clock: Clock | None = None) -> DaemonS
     }
     append_job_environment(job_environment, exported)
     daemon_environment = kache_environment(environment) | exported
+    for line in prepare(environment):
+        print(line, flush=True)
 
-    try:
-        started = run_kache(["daemon", "start"], daemon_environment, DAEMON_COMMAND_SECONDS)
-    except subprocess.TimeoutExpired as error:
-        raise StartError(f"`kache daemon start` did not return within {DAEMON_COMMAND_SECONDS:.0f} s") from error
-    print((started.stdout + started.stderr).strip())
-    if started.returncode != 0:
-        raise StartError(f"`kache daemon start` exited with status {started.returncode}")
-
-    attempt = 1
-    while True:
-        try:
-            daemon = DaemonState.read(daemon_environment, DAEMON_COMMAND_SECONDS)
-            refusal = daemon.refusal(remote, configuration)
-        except KacheError as error:
-            daemon = None
-            refusal = str(error)
-        if refusal is None or attempt == VERIFY_ATTEMPTS:
+    for attempt in range(1, DAEMON_STARTS + 1):
+        start_daemon(daemon_environment)
+        check = await_daemon(daemon_environment, remote, configuration, clock, verify_seconds)
+        if check.refusal is None and check.daemon is not None:
+            daemon = check.daemon
             break
-        attempt += 1
-        clock.sleep(VERIFY_RETRY_SECONDS)
-    if refusal is not None or daemon is None:
-        raise StartError(f"the kache daemon is not running with {remote.description}: {refusal}")
+        failure = f"the kache daemon is not running with {remote.description}: {check.refusal}"
+        logs = daemon_logs(environment)
+        if attempt == DAEMON_STARTS:
+            raise StartError(f"{failure}\n{logs}")
+        print(f"::warning title=kache daemon start {attempt} of {DAEMON_STARTS}::{failure}", flush=True)
+        print(logs, flush=True)
     writes = "skips uploads" if daemon.remote_readonly else "publishes uploads"
-    print(f"kache daemon runs with {remote.description} from {configuration} and {writes}")
+    print(
+        f"kache daemon runs with {remote.description} and a {store.max_size_gib} GiB local store "
+        f"from {configuration}, and {writes}"
+    )
     return daemon
 
 
@@ -566,6 +848,15 @@ class Publisher:
         return min(max(self.remaining(), 1.0), DAEMON_COMMAND_SECONDS)
 
     def publish(self, publication: Publication) -> None:
+        if publication.job_status == "cancelled":
+            # The kache action's post step, whose daemon stop drains queued uploads, runs only
+            # after a job that succeeded or failed, and a job that reaches its time limit is
+            # cancelled.
+            publication.finish(
+                Outcome.NOT_RUN,
+                ["The job's work ended with status `cancelled`. The kache action's post step does not run for a cancelled job, so uploads still queued end with the machine."],
+            )
+            return
         if publication.job_status != "success":
             publication.finish(
                 Outcome.NOT_RUN,
@@ -749,9 +1040,18 @@ def record(publication: Publication, report_directory: Path, environment: Mappin
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    configure_parser = commands.add_parser("configure", help="write the daemon's remote configuration file")
+    configure_parser = commands.add_parser("configure", help="write the configuration file of kache's remote and store")
     configure_parser.add_argument("path", type=Path)
     commands.add_parser("start", help="configure the job's remote and start its kache daemon")
+    prepare_parser = commands.add_parser(
+        "prepare-index", help="keep kache's index in a tmpfs before any kache process opens it"
+    )
+    prepare_parser.add_argument("--memory", type=Path, required=True)
+    commands.add_parser("restore-index", help="move kache's index back into its cache directory")
+    lighten_parser = commands.add_parser(
+        "lighten-volume", help="remount the ext4 volume holding a path without access times and write barriers"
+    )
+    lighten_parser.add_argument("path", type=Path)
     publish_parser = commands.add_parser("publish", help="publish the job's cache within its budget")
     publish_parser.add_argument("--job-status", required=True, choices=JOB_STATUSES)
     publish_parser.add_argument("report_directory", type=Path)
@@ -760,9 +1060,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     environment = dict(os.environ)
     try:
         if arguments.command == "configure":
-            Remote.from_environment(environment).write_configuration(arguments.path)
+            remote = Remote.from_environment(environment)
+            store = LocalStore.from_environment(environment)
+            Configuration(store=store, remote=remote).write(arguments.path)
         elif arguments.command == "start":
             start(environment)
+        elif arguments.command == "prepare-index":
+            print(prepare_index(environment, arguments.memory), flush=True)
+        elif arguments.command == "restore-index":
+            print(restore_index(cache_directory(environment)), flush=True)
+        elif arguments.command == "lighten-volume":
+            print(lighten_volume(arguments.path, environment), flush=True)
         else:
             termination = Termination()
             termination.install()
