@@ -150,3 +150,74 @@ Feature: RabbitMQ emission
       | 3            |                                    | {"user_id":42}   |
       | 1            | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
       | 3            | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
+
+  # Lapin logs each message a broker returns at warn with the whole message, its body included. The
+  # node is one process with one log, so a single server process shows what an operator's filter
+  # lets into it. The first record proves the emitter checked its queue at open; the second is
+  # returned because the queue was deleted after that check, and the emitter's own report of that
+  # return names the reply without the record.
+  Scenario Outline: A message RabbitMQ returns stays out of the node log under the trace filter "<filter>"
+    Given RabbitMQ is running
+    And RabbitMQ queue "returned_{{test_id}}" exists
+    And a nervix-server process is started with trace filter "<filter>"
+    And the server process is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the server process is configured with these Plexus commands
+      """
+      CREATE SCHEMA returned_event ( sequence I64 );
+      CREATE WIRE JSON SCHEMA returned_event_wire MODE STRICT ( sequence integer );
+      CREATE CODEC returned_event_codec
+        FROM WIRE JSON SCHEMA returned_event_wire
+        TO SCHEMA returned_event;
+      CREATE RELAY returned_events SCHEMA returned_event UNBRANCHED;
+      CREATE VHOST edge returned-{{test_id}}.example.com;
+      CREATE ENDPOINT returned_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR returned_source
+        FROM returned_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING returned_event_codec
+        TIMESTAMP NOW
+        TO returned_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE RABBITMQ CLIENT rabbit_main
+      CONFIG {
+        'addr' = '{{rabbitmq_addr}}'
+      };
+      CREATE RABBITMQ QUEUE EMITTER returned_output FROM returned_events
+        TO rabbit_main QUEUE 'returned_{{test_id}}'
+        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 30s MAX 30s
+        ENCODE USING returned_event_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    When the server process eventually accepts http payload with host "returned-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":1}
+      """
+    Then RabbitMQ queue "returned_{{test_id}}" eventually has 1 outstanding deliveries in total
+    When RabbitMQ queue "returned_{{test_id}}" is deleted
+    And http payload is posted to the server process with host "returned-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":2}
+      """
+    Then within "60s" DESCRIBE EMITTER "returned_output" on the server process contains
+      """
+      rabbitmq returned message with reply code 312: NO_ROUTE
+      """
+    When the server process receives SIGKILL
+    Then the server process is terminated by SIGKILL within "30s" of the last signal
+    And the server process log contains "rabbitmq returned message with reply code 312: NO_ROUTE"
+    And the server process log does not contain "Server returned us a message"
+
+    Examples:
+      | filter                             |
+      | info                               |
+      | info,lapin::returned_messages=warn |
