@@ -933,7 +933,7 @@ the connector's description of the failure for the emitter's transient error, an
 TIMEOUT` is again the confirmation window's `ConfirmationWindowError`. A delivery error about the
 record itself, an invalid or oversized message, timestamp or record, rejects that record through
 `ON MESSAGE ERROR` instead. A producer that librdkafka cannot create keeps its `KafkaError` beneath
-`EmitterOpenError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `message.timeout.ms` can
+`EmitterOpenError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `delivery.timeout.ms` can
 hold is `KafkaMessageTimeoutError::TooLong` beneath `EmitterOpenError::InvalidConfiguration`. A
 finish whose producer queue does not empty before its deadline keeps librdkafka's `KafkaError`
 beneath `EmitterFinishError::Unsent`, which counts the records whose delivery report has not been
@@ -950,7 +950,11 @@ their existing reporting path. A Kafka client's attempt to set a host-owned key,
 `allow.auto.create.topics` or `delivery.report.only.error`, is
 `ClientConfigSchemaError::Reserved` beneath the registry's client context, naming the domain,
 client and owned key without its configured value. The source and both inspectors enforce `false`
-after pass-through configuration.
+after pass-through configuration. A key librdkafka reads as another name for a property the
+client accepts under one name, such as `metadata.broker.list` for `bootstrap.servers`, is
+`ClientConfigSchemaError::DriverAlias`, naming the key and the accepted name. A key written under
+librdkafka's `topic.` prefix is `ClientConfigSchemaError::DriverPrefix`, naming the key and the
+prefix. Both refusals sit beneath the same client context and carry no configured value.
 
 A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaTopicIngestorError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator

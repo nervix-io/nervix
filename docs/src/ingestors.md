@@ -1060,6 +1060,20 @@ the Nervix-owned keys `group.id`, `enable.auto.commit`, `enable.partition.eof`,
 `allow.auto.create.topics` and `delivery.report.only.error`. Other property names and values are
 checked offline by librdkafka before commitment and passed through to it.
 
+librdkafka reads some properties under two names and applies whichever it is handed last, and a
+client's entries reach it in no fixed order. A Kafka client therefore accepts each such property
+under one name, the one the Apache Kafka Java client uses, and refuses the other even when it is
+written alone, naming both: write `bootstrap.servers`, not `metadata.broker.list`, and
+`delivery.timeout.ms`, not `message.timeout.ms`. The
+[Kafka client reference](./connector-capabilities.md#kafka-client) lists every refused name with
+the name to write. librdkafka also reads a default-topic property written under a `topic.`
+prefix, so the client refuses a key written that way, except librdkafka's own global properties
+whose names begin with `topic.`, such as `topic.metadata.refresh.interval.ms`. Write a
+default-topic property under its own name. The topic-level `auto.commit.interval.ms`,
+`auto.commit.enable` and `offset.store.method` serve only librdkafka's legacy consumer, which
+Nervix does not run, and the default topic takes `compression.type` from the client's global
+setting. Each property a client sets therefore has one name and one value on every node.
+
 The statement's offset mode supplies the consumer's `group.id`. Only `OFFSET BY CONSUMER GROUP`
 with `MODE NO ACK` enables `enable.auto.commit`. Every consumer disables `enable.partition.eof`
 and `allow.auto.create.topics`. Nervix does not override

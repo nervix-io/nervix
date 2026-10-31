@@ -296,6 +296,156 @@ const OWNED_KEYS: [ClientConfigKey; 2] = [
 
 const OWNED_URL: ClientConfigSchema = ClientConfigSchema::new(&OWNED_KEYS, &[], &[]);
 
+const ALIASED_KEYS: [ClientConfigKey; 1] =
+    [ClientConfigKey::optional("accepted.name", ClientConfigValue::String).driver()];
+const ALIASES: [ClientConfigAlias; 1] = [ClientConfigAlias {
+    alias: "other.name",
+    accepted: "accepted.name",
+}];
+const SCOPE: ClientConfigStrippedPrefix = ClientConfigStrippedPrefix {
+    prefix: "scope.",
+    properties: &["scope.own"],
+};
+const ALIASED: ClientConfigSchema = ClientConfigSchema::new(
+    &ALIASED_KEYS,
+    &[ClientConfigNamespace::All],
+    &["owned.name"],
+)
+.with_driver_aliases(&ALIASES, Some(SCOPE));
+
+#[test]
+fn a_driver_alias_is_refused_alone_or_beside_its_accepted_name_at_both_stages() {
+    let alone = [entry("other.name", "value")];
+    let beside = [
+        entry("accepted.name", "value"),
+        entry("other.name", "value"),
+    ];
+    for refusal in [
+        ALIASED.validate(&alone),
+        ALIASED.validate_rendered(&alone),
+        ALIASED.validate(&beside),
+        ALIASED.validate_rendered(&beside),
+    ] {
+        let refusal = refusal.expect_err("the driver reads one property under both names");
+        assert_eq!(
+            refusal.current_context(),
+            &ClientConfigSchemaError::DriverAlias {
+                key: "other.name".to_string(),
+                accepted: "accepted.name",
+            }
+        );
+        assert_eq!(
+            refusal.to_string(),
+            "client config key 'other.name' is the driver's other name for 'accepted.name'; write \
+             'accepted.name'"
+        );
+    }
+    let accepted = [entry("accepted.name", "value")];
+    ALIASED
+        .validate(&accepted)
+        .assured("the accepted name passes to the driver");
+    ALIASED
+        .validate_rendered(&accepted)
+        .assured("the accepted name passes to the driver");
+    assert_eq!(ALIASED.aliases(), &ALIASES);
+}
+
+#[test]
+fn a_key_under_a_stripped_prefix_is_refused_except_the_drivers_own_properties() {
+    for key in ["scope.accepted.name", "scope.other.name", "scope.unknown"] {
+        let refusal = ALIASED
+            .validate(&[entry(key, "value")])
+            .expect_err("the driver reads a key under the prefix as another property's name");
+        assert_eq!(
+            refusal.current_context(),
+            &ClientConfigSchemaError::DriverPrefix {
+                key: key.to_string(),
+                prefix: "scope.",
+            }
+        );
+        assert_eq!(
+            refusal.to_string(),
+            format!(
+                "client config key '{key}' is written under the driver's 'scope.' prefix; write \
+                 it without the prefix"
+            )
+        );
+    }
+    for key in ["scope.own", "unscoped.scope.name", "scope"] {
+        ALIASED
+            .validate_rendered(&[entry(key, "value")])
+            .assured("a driver property of its own or a key outside the prefix passes");
+    }
+    assert_eq!(ALIASED.stripped_prefix(), Some(SCOPE));
+}
+
+#[test]
+fn a_schema_without_driver_aliases_refuses_none() {
+    assert!(OWNED_URL.aliases().is_empty());
+    assert_eq!(OWNED_URL.stripped_prefix(), None);
+    assert_eq!(
+        ClientConfigSchema::new(
+            &ALIASED_KEYS,
+            &[ClientConfigNamespace::All],
+            &["owned.name"]
+        )
+        .with_driver_aliases(&ALIASES, Some(SCOPE)),
+        ALIASED
+    );
+}
+
+#[test]
+#[should_panic(expected = "name_precedes")]
+fn driver_aliases_are_sorted_by_the_name_each_refuses() {
+    const UNSORTED: [ClientConfigAlias; 2] = [
+        ClientConfigAlias {
+            alias: "z.name",
+            accepted: "accepted.name",
+        },
+        ClientConfigAlias {
+            alias: "other.name",
+            accepted: "accepted.name",
+        },
+    ];
+    ClientConfigSchema::new(&ALIASED_KEYS, &[], &[]).with_driver_aliases(&UNSORTED, None);
+}
+
+#[test]
+#[should_panic(expected = "declares")]
+fn a_refused_name_is_no_declared_key() {
+    const DECLARED: [ClientConfigAlias; 1] = [ClientConfigAlias {
+        alias: "accepted.name",
+        accepted: "third.name",
+    }];
+    ClientConfigSchema::new(&ALIASED_KEYS, &[], &[]).with_driver_aliases(&DECLARED, None);
+}
+
+#[test]
+#[should_panic(expected = "refuses_alias")]
+fn an_accepted_name_is_no_name_another_pair_refuses() {
+    const CHAINED: [ClientConfigAlias; 2] = [
+        ClientConfigAlias {
+            alias: "first.name",
+            accepted: "second.name",
+        },
+        ClientConfigAlias {
+            alias: "second.name",
+            accepted: "accepted.name",
+        },
+    ];
+    ClientConfigSchema::new(&ALIASED_KEYS, &[], &[]).with_driver_aliases(&CHAINED, None);
+}
+
+#[test]
+#[should_panic(expected = "begins_with")]
+fn a_stripped_prefix_names_only_its_own_properties_under_it() {
+    const ELSEWHERE: ClientConfigStrippedPrefix = ClientConfigStrippedPrefix {
+        prefix: "scope.",
+        properties: &["unscoped.own"],
+    };
+    ClientConfigSchema::new(&ALIASED_KEYS, &[], &[]).with_driver_aliases(&[], Some(ELSEWHERE));
+}
+
 #[test]
 fn a_schema_is_built_only_when_its_address_offers_each_conditioning_choice() {
     assert_eq!(ClientConfigSchema::new(&OWNED_KEYS, &[], &[]), OWNED_URL);

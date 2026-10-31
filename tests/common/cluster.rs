@@ -5823,7 +5823,6 @@ async fn publish_kafka_payloads(
 ) -> io::Result<()> {
     let mut client_config = kafka_client_config(dependencies)?;
     let producer: FutureProducer = client_config
-        .set("message.timeout.ms", "5000")
         .set("delivery.timeout.ms", "5000")
         .set("request.timeout.ms", "5000")
         .create()
@@ -5889,7 +5888,6 @@ pub(crate) async fn publish_kafka_record_through(
     headers: &[(&str, &str)],
 ) -> io::Result<()> {
     let producer: FutureProducer = client_config
-        .set("message.timeout.ms", "5000")
         .set("delivery.timeout.ms", "5000")
         .set("request.timeout.ms", "5000")
         .create()
