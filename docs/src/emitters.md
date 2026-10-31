@@ -1168,9 +1168,10 @@ Transport-specific expectations:
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
-- `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
-  An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses
-  `tls_cert_file` and `tls_key_file`.
+- `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`,
+  and `CREATE SQS CLIENT` refuses a `tls_ca_file` that holds no certificate it could trust. An SQS
+  connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and
+  `tls_key_file`.
 - `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; its `tls_ca_file` adds
   a trust root beside the platform's native roots, and `tls_cert_file` with `tls_key_file` presents
   a client certificate.
@@ -1855,7 +1856,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start: unbounded<br>a send: `timeout_ms`; unbounded when omitted |
+| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start and a send: `timeout_ms`; unbounded when omitted |
 | Driver limits | A batch request holds at most 10 entries and 256 KiB; a record above 256 KiB is rejected. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
@@ -1881,18 +1882,21 @@ to U+D7FF, U+E000 to U+FFFD and U+10000 to U+10FFFF. Every other C0 control and 
 U+FFFE and U+FFFF are forbidden, while the other noncharacters fall inside those ranges and are
 sent.
 
-Set the SQS client's optional `timeout_ms` CONFIG key to bound both the complete service operation
-and its single SDK attempt. Nervix disables the AWS SDK's internal retries, so a timeout returns to
-the emitter and the mode's declared `RETRY POLICY` owns all retry pacing.
+Set the SQS client's optional `timeout_ms` CONFIG key to bound each request, the queue lookup at
+start and every send, as both the complete service operation and its single SDK attempt. Nervix
+disables the AWS SDK's internal retries in both directions, so a request that runs out of
+`timeout_ms` returns to the emitter, which `DESCRIBE EMITTER` shows as
+`an SQS send did not finish within timeout_ms 5s`, and the mode's declared `RETRY POLICY` owns all
+retry pacing.
 
 The client resolves the host of its `endpoint` through the node's asynchronous resolver each time it
 opens a connection, and tries the answers in order; a literal IPv4 or IPv6 address is dialled as
 written. Every request is still signed for the configured host, and over HTTPS the service
 certificate must name that host, whichever address accepted the connection. The lookup counts
 against the SDK's 3.1-second connect timeout and against `timeout_ms`. Without `tls_ca_file` the
-client trusts the platform's native roots and follows the `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`
-and `NO_PROXY` environment variables; with it, the client trusts that CA alone and connects
-directly. A missing name, a silent name server or an unreachable answer fails the queue lookup or
+client trusts the platform's native roots; with it, the client trusts that CA alone. Either way it
+connects directly and ignores the `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`
+environment variables of its node. A missing name, a silent name server or an unreachable answer fails the queue lookup or
 the send, which the emitter retries on its `RETRY POLICY`; nothing is acknowledged until SQS
 answers.
 
