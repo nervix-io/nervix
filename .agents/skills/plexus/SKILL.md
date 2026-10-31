@@ -19,8 +19,9 @@ lowercase HTTP field names, and on an emitter that keeps one value per header na
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, response-header reads, frame metadata and the closed client CONFIG key set.
-For ClickHouse HTTP connection tuning, read the ClickHouse Emitters section and the generated
-client key reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured values;
+For ClickHouse HTTP connection tuning, client certificates, compression and which insert failures
+reject a row rather than retry, read the ClickHouse Emitters section and the generated client key
+reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured values;
 `SHOW CREATE CLIENT <name>` preserves authored configuration. Both redact secrets.
 
 For delivery durations and direct-value mappings, follow the Ingestors delivery-mode and Emitters
@@ -444,7 +445,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
 - Request/response emitters do not take `ACK TIMEOUT`. ClickHouse, OTEL and Sentry clients require a
   positive `timeout_ms`; SQS or Iceberg object-store clients use it when a request
-  needs an explicit bound. A ClickHouse HTTPS address also requires `tls_ca_file` from a mounted
+  needs an explicit bound, which for SQS bounds every request of both directions. A ClickHouse HTTPS address also requires `tls_ca_file` from a mounted
   resource, while HTTP refuses TLS file keys. Its table locator has one or two case-preserving
   dot-separated parts, each quoted by the connector when sent. The emitter's declared retry
   policy owns pacing after that request fails. A ZeroMQ client's `timeout_ms` bounds each send,
