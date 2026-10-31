@@ -592,9 +592,9 @@ selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "tests::tracked_locks::a_waiting_acquisition_proceeds_once_the_lock_is_released"
 
 [[workload]]
-coverage = "State-store staging, publication, snapshot readers, queued checkpoint writers, cleanup and restore reclamation under tracked installation locks."
+coverage = "State-store staging and unit-keyed publication, snapshot readers, queued checkpoint writers, cleanup and restore reclamation under tracked installation locks."
 id = "owner.restore-storage"
-invariant = "One fresh diagnostic process runs the state store's restore staging, publication, cancellation, reader, writer, cleanup and reclamation regressions with its detector installed first, and records no finding."
+invariant = "One fresh diagnostic process runs the state store's restore staging, distinct partition publication, cancellation, reader, writer, cleanup and reclamation regressions with its detector installed first, and records no finding."
 invocation = "owner-tests"
 selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "runtime::state_store::backup::tests::deloxide_restore_storage"

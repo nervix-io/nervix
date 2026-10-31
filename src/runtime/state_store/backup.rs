@@ -492,6 +492,7 @@ mod tests {
         nervix_deadlock::DiagnosticRun::start(directory)
             .assured("the diagnostic storage process starts its detector once");
         bolero_restore_staging_and_publication_records_round_trip();
+        restore_publication_keeps_partition_checkpoints_distinct();
         incomplete_and_corrupt_staging_preserve_the_complete_published_state();
         a_durable_generation_is_retryable_and_fences_stale_installations_after_reopen();
         domain_view_keeps_current_state_kinds_and_empty_restore_leaves_other_domains();
@@ -680,6 +681,7 @@ mod tests {
             },
             identifier: ModelName::parse("source").assured("test entity is valid"),
             state,
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         }
     }
@@ -691,6 +693,50 @@ mod tests {
             crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
         )
         .assured("state store opens")
+    }
+
+    #[test]
+    fn restore_publication_keeps_partition_checkpoints_distinct() {
+        let dir = tempfile::tempdir().assured("state directory opens");
+        let store = open_store(dir.path());
+        let mut first = placement("orders", RuntimeState::KafkaOffset);
+        first.unit = nervix_models::Unit::Partition(0);
+        let mut second = first.clone();
+        second.unit = nervix_models::Unit::Partition(1);
+        let authority = authority();
+        store
+            .stage_checkpoint(&authority, &first, 11, b"first")
+            .assured("first partition stages");
+        store
+            .stage_checkpoint(&authority, &second, 12, b"second")
+            .assured("second partition stages");
+        store
+            .publish_checkpoint_set(
+                &first.domain,
+                &authority,
+                RestoreStateInventory {
+                    checkpoints: 2,
+                    payload_bytes: 11,
+                },
+            )
+            .assured("both partitions publish");
+
+        assert_eq!(
+            store
+                .latest_snapshot(&first)
+                .assured("first partition reads")
+                .assured("first partition exists")
+                .payload,
+            b"first"
+        );
+        assert_eq!(
+            store
+                .latest_snapshot(&second)
+                .assured("second partition reads")
+                .assured("second partition exists")
+                .payload,
+            b"second"
+        );
     }
 
     #[test]

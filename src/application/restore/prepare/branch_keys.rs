@@ -30,7 +30,7 @@ use nervix_backup::{DescribedRuntimeState, DescribedSection, StateField};
 use nervix_execution::{Cancellation, CpuClass, MemoryClass};
 use nervix_models::{
     BranchName, CreateSchema, DomainName, DomainSchedule, Model, ModelKind, ModelName, NodeRef,
-    ProcessorOutput, ResolvedBranching, ScheduledNode,
+    NodeUnitRef, ProcessorOutput, ResolvedBranching, ScheduledNode,
 };
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
@@ -360,25 +360,29 @@ impl VerifiedArchive {
             return Ok(());
         };
         let mut checks = Vec::new();
-        let mut resolved = HashMap::<NodeRef, Arc<RestoredBranchDeclarations>>::default();
+        let mut resolved = HashMap::<NodeUnitRef, Arc<RestoredBranchDeclarations>>::default();
         let states = &self.data.contents.description.domains[domain_index].state;
         for (index, archived) in states.iter().enumerate() {
             nervix_primitives::task::consume_budget().await;
-            let (entity, schema) = match archived {
+            let (entity, unit, schema) = match archived {
                 DescribedRuntimeState::BranchLifecycle { lifecycle, .. } => (
                     NodeRef::new(lifecycle.owner_kind, lifecycle.entity.clone()),
+                    lifecycle.unit,
                     lifecycle.schema,
                 ),
                 DescribedRuntimeState::Wasm { descriptor, .. } => (
                     NodeRef::new(ModelKind::WasmProcessor, descriptor.entity.clone()),
+                    descriptor.unit,
                     descriptor.schema,
                 ),
                 DescribedRuntimeState::Deduplicator { descriptor, .. } => (
                     NodeRef::new(ModelKind::Deduplicator, descriptor.entity.clone()),
+                    descriptor.unit,
                     descriptor.schema,
                 ),
                 DescribedRuntimeState::Window { descriptor, .. } => (
                     NodeRef::new(ModelKind::WindowProcessor, descriptor.entity.clone()),
+                    descriptor.unit,
                     descriptor.schema,
                 ),
                 DescribedRuntimeState::KafkaOffsets { .. }
@@ -387,10 +391,10 @@ impl VerifiedArchive {
             let Some(node) = schedule.nodes.get(&entity) else {
                 continue;
             };
-            if node.schema_fingerprint != schema {
+            if node.schema_fingerprint != schema || !node.units.contains_key(&unit) {
                 continue;
             }
-            let declarations = match resolved.entry(entity.clone()) {
+            let declarations = match resolved.entry(NodeUnitRef::new(entity.clone(), unit)) {
                 Entry::Occupied(occupied) => occupied.get().clone(),
                 Entry::Vacant(vacant) => {
                     let declarations = RestoredBranchDeclarations::of(schedule, &entity)

@@ -2404,10 +2404,10 @@ async fn given_archive_with_advanced_window_incarnations(
 /// processor `processor` advanced by one.
 fn with_advanced_window_incarnations(source: &Path, target: &Path, processor: &str) {
     let copy = copy_of_archive(source);
-    let suffix = format!("/state/branch_lifecycle/window_processor/{processor}/branches.rkyv");
+    let prefix = format!("/state/branch_lifecycle/window_processor/{processor}/");
     let mut replaced = BTreeMap::new();
     for (path, bytes) in &copy.sections {
-        if !path.ends_with(&suffix) {
+        if !path.contains(&prefix) || !path.ends_with("/branches.rkyv") {
             continue;
         }
         let mut lifecycle = BranchLifecycleRecord::decode(path, bytes)
@@ -2452,8 +2452,8 @@ fn wasm_branch_incarnations(path: &Path, expected: usize) -> BTreeMap<String, u6
     let copy = copy_of_archive(path);
     let mut values = BTreeMap::new();
     for (path, bytes) in &copy.sections {
-        if path.contains("/state/branch_lifecycle/")
-            && path.ends_with("/filter_even_rows/branches.rkyv")
+        if path.contains("/state/branch_lifecycle/wasm_processor/filter_even_rows/")
+            && path.ends_with("/branches.rkyv")
         {
             let lifecycle = BranchLifecycleRecord::decode(path, bytes)
                 .expect("the archived branch lifecycle decodes");

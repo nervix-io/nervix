@@ -37,39 +37,77 @@ impl SectionMappingCase {
         let entity = ModelName::parse(&format!("state_{}", self.entity))
             .assured("a generated decimal suffix makes a valid model name");
         match kind {
-            CapturedStateSectionKind::WasmDescriptor => {
-                SectionPath::wasm_state_descriptor(&domain, &entity, branch)
+            CapturedStateSectionKind::WasmDescriptor => SectionPath::wasm_state_descriptor(
+                &domain,
+                &entity,
+                nervix_models::Unit::Single,
+                branch,
+            ),
+            CapturedStateSectionKind::KafkaOffsets => {
+                SectionPath::kafka_offsets(&domain, &entity, nervix_models::Unit::Single)
             }
-            CapturedStateSectionKind::KafkaOffsets => SectionPath::kafka_offsets(&domain, &entity),
-            CapturedStateSectionKind::BranchLifecycle => {
-                SectionPath::branch_lifecycle(&domain, ModelKind::WasmProcessor, &entity)
-            }
+            CapturedStateSectionKind::BranchLifecycle => SectionPath::branch_lifecycle(
+                &domain,
+                ModelKind::WasmProcessor,
+                &entity,
+                nervix_models::Unit::Single,
+            ),
             CapturedStateSectionKind::WasmGuestBlob => {
-                SectionPath::wasm_guest_blob(&domain, &entity, branch)
+                SectionPath::wasm_guest_blob(&domain, &entity, nervix_models::Unit::Single, branch)
             }
             CapturedStateSectionKind::MaterializedDescriptor => {
-                SectionPath::materialized_descriptor(&domain, &entity)
+                SectionPath::materialized_descriptor(&domain, &entity, nervix_models::Unit::Single)
             }
             CapturedStateSectionKind::MaterializedIdentities => {
-                SectionPath::materialized_identities(&domain, &entity, self.group)
+                SectionPath::materialized_identities(
+                    &domain,
+                    &entity,
+                    nervix_models::Unit::Single,
+                    self.group,
+                )
             }
-            CapturedStateSectionKind::MaterializedColumns => {
-                SectionPath::materialized_columns(&domain, &entity, self.group)
-            }
+            CapturedStateSectionKind::MaterializedColumns => SectionPath::materialized_columns(
+                &domain,
+                &entity,
+                nervix_models::Unit::Single,
+                self.group,
+            ),
             CapturedStateSectionKind::DeduplicatorDescriptor => {
-                SectionPath::deduplicator_descriptor(&domain, &entity, branch)
+                SectionPath::deduplicator_descriptor(
+                    &domain,
+                    &entity,
+                    nervix_models::Unit::Single,
+                    branch,
+                )
             }
-            CapturedStateSectionKind::DeduplicatorKeys => {
-                SectionPath::deduplicator_keys(&domain, &entity, branch, self.group)
-            }
-            CapturedStateSectionKind::WindowDescriptor => {
-                SectionPath::window_descriptor(&domain, &entity, branch)
-            }
-            CapturedStateSectionKind::WindowInputRows => {
-                SectionPath::window_input_rows(&domain, &entity, branch, self.group)
-            }
+            CapturedStateSectionKind::DeduplicatorKeys => SectionPath::deduplicator_keys(
+                &domain,
+                &entity,
+                nervix_models::Unit::Single,
+                branch,
+                self.group,
+            ),
+            CapturedStateSectionKind::WindowDescriptor => SectionPath::window_descriptor(
+                &domain,
+                &entity,
+                nervix_models::Unit::Single,
+                branch,
+            ),
+            CapturedStateSectionKind::WindowInputRows => SectionPath::window_input_rows(
+                &domain,
+                &entity,
+                nervix_models::Unit::Single,
+                branch,
+                self.group,
+            ),
             CapturedStateSectionKind::WindowArgumentColumns => {
-                SectionPath::window_argument_columns(&domain, &entity, branch, self.group)
+                SectionPath::window_argument_columns(
+                    &domain,
+                    &entity,
+                    nervix_models::Unit::Single,
+                    branch,
+                    self.group,
+                )
             }
         }
     }

@@ -10,14 +10,14 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_models::{
     BackupCut, BackupQuiesceCounters, BackupResources, BranchKeyFingerprint, DomainClockPeriod,
     DomainClockSkew, DomainClockState, DomainName, DomainPace, DomainStartPoint, DomainStatus,
-    DomainTimeRate, ModelName, PlacementPolicy, ResourceName, SchemaFingerprint, Timestamp,
+    DomainTimeRate, ModelName, PlacementPolicy, ResourceName, SchemaFingerprint, Timestamp, Unit,
     UserName,
 };
 
@@ -90,6 +90,7 @@ impl State {
                     SectionPath::wasm_state_descriptor(
                         &descriptor.domain,
                         &descriptor.entity,
+                        descriptor.unit,
                         descriptor.branch_fingerprint.as_ref(),
                     ),
                     descriptor,
@@ -98,6 +99,7 @@ impl State {
                     SectionPath::wasm_guest_blob(
                         &descriptor.domain,
                         &descriptor.entity,
+                        descriptor.unit,
                         descriptor.branch_fingerprint.as_ref(),
                     ),
                     SectionContent::WasmGuestBlob,
@@ -105,11 +107,16 @@ impl State {
                 ));
             }
             Self::Kafka(record) => output.push(Section::record(
-                SectionPath::kafka_offsets(&record.domain, &record.entity),
+                SectionPath::kafka_offsets(&record.domain, &record.entity, record.unit),
                 record,
             )),
             Self::Lifecycle(record) => output.push(Section::record(
-                SectionPath::branch_lifecycle(&record.domain, record.owner_kind, &record.entity),
+                SectionPath::branch_lifecycle(
+                    &record.domain,
+                    record.owner_kind,
+                    &record.entity,
+                    record.unit,
+                ),
                 record,
             )),
         }
@@ -142,6 +149,19 @@ impl<'a> Values<'a> {
 
     pub fn digest(&mut self) -> [u8; 32] {
         std::array::from_fn(|_| self.0.entropy().byte())
+    }
+
+    pub fn unit(&mut self) -> Unit {
+        let ordinal = u32::from(self.0.entropy().byte());
+        match self
+            .0
+            .entropy()
+            .index(NonZeroUsize::new(3).assured("three unit kinds"))
+        {
+            0 => Unit::Single,
+            1 => Unit::Partition(ordinal),
+            _ => Unit::Instance(ordinal),
+        }
     }
 
     pub fn payload(&mut self) -> Vec<u8> {
@@ -321,6 +341,7 @@ impl<'a> Values<'a> {
         KafkaOffsetsRecord {
             domain,
             entity: self.0.name(),
+            unit: self.unit(),
             schema: SchemaFingerprint::from_digest(self.digest()),
             revision: self.0.entropy().any_u64(),
             applied_start_generation,
@@ -357,6 +378,7 @@ impl<'a> Values<'a> {
             domain,
             owner_kind: self.0.model_kind(),
             entity: self.0.name(),
+            unit: self.unit(),
             schema: SchemaFingerprint::from_digest(self.digest()),
             revision: self.0.entropy().any_u64(),
             branches,

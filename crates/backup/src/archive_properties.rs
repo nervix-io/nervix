@@ -194,11 +194,13 @@ impl Case {
                         record: location(SectionPath::wasm_state_descriptor(
                             &descriptor.domain,
                             &descriptor.entity,
+                            descriptor.unit,
                             descriptor.branch_fingerprint.as_ref(),
                         )),
                         guest: location(SectionPath::wasm_guest_blob(
                             &descriptor.domain,
                             &descriptor.entity,
+                            descriptor.unit,
                             descriptor.branch_fingerprint.as_ref(),
                         )),
                     },
@@ -207,6 +209,7 @@ impl Case {
                         record: location(SectionPath::kafka_offsets(
                             &offsets.domain,
                             &offsets.entity,
+                            offsets.unit,
                         )),
                     },
                     State::Lifecycle(lifecycle) => DescribedRuntimeState::BranchLifecycle {
@@ -215,6 +218,7 @@ impl Case {
                             &lifecycle.domain,
                             lifecycle.owner_kind,
                             &lifecycle.entity,
+                            lifecycle.unit,
                         )),
                     },
                     State::Materialized(value) => DescribedRuntimeState::Materialized {
@@ -222,6 +226,7 @@ impl Case {
                         record: location(SectionPath::materialized_descriptor(
                             &value.descriptor.domain,
                             &value.descriptor.entity,
+                            value.descriptor.unit,
                         )),
                         groups: value
                             .groups
@@ -232,11 +237,13 @@ impl Case {
                                     identities: location(SectionPath::materialized_identities(
                                         &identities.domain,
                                         &identities.entity,
+                                        identities.unit,
                                         identities.group,
                                     )),
                                     columns: location(SectionPath::materialized_columns(
                                         &identities.domain,
                                         &identities.entity,
+                                        identities.unit,
                                         identities.group,
                                     )),
                                     record_count: u64::try_from(identities.identities.len())
@@ -254,6 +261,7 @@ impl Case {
                             groups.push(location(SectionPath::deduplicator_keys(
                                 &descriptor.domain,
                                 &descriptor.entity,
+                                descriptor.unit,
                                 branch,
                                 group,
                             )));
@@ -263,6 +271,7 @@ impl Case {
                             record: location(SectionPath::deduplicator_descriptor(
                                 &descriptor.domain,
                                 &descriptor.entity,
+                                descriptor.unit,
                                 branch,
                             )),
                             groups,
@@ -278,12 +287,14 @@ impl Case {
                                 input: location(SectionPath::window_input_rows(
                                     &descriptor.domain,
                                     &descriptor.entity,
+                                    descriptor.unit,
                                     branch,
                                     group,
                                 )),
                                 arguments: location(SectionPath::window_argument_columns(
                                     &descriptor.domain,
                                     &descriptor.entity,
+                                    descriptor.unit,
                                     branch,
                                     group,
                                 )),
@@ -294,6 +305,7 @@ impl Case {
                             record: location(SectionPath::window_descriptor(
                                 &descriptor.domain,
                                 &descriptor.entity,
+                                descriptor.unit,
                                 branch,
                             )),
                             groups,

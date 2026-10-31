@@ -345,8 +345,8 @@ mod tests {
                 named::<ModelName>("moved"),
             ))
             .assured("the base schedule runs the moved junction");
-        moved.primary_node = Some(named("node-4"));
-        moved.assigned_nodes = vec![named("node-4")];
+        moved.single_unit_mut().primary_node = Some(named("node-4"));
+        moved.single_unit_mut().assigned_nodes = vec![named("node-4")];
         (base, target)
     }
 
@@ -501,10 +501,12 @@ mod tests {
             ],
             vec![
                 PlacementGroupSchedule {
+                    unit: nervix_models::Unit::Single,
                     members: vec![first.clone(), second.clone()],
                     primary_node: None,
                 },
                 PlacementGroupSchedule {
+                    unit: nervix_models::Unit::Single,
                     members: vec![second.clone(), third.clone()],
                     primary_node: None,
                 },

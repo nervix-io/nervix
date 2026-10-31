@@ -41,7 +41,11 @@ impl Materialized {
     pub fn sections(&self, sections: &mut Vec<Section>) {
         let descriptor = &self.descriptor;
         sections.push(Section::record(
-            SectionPath::materialized_descriptor(&descriptor.domain, &descriptor.entity),
+            SectionPath::materialized_descriptor(
+                &descriptor.domain,
+                &descriptor.entity,
+                descriptor.unit,
+            ),
             descriptor,
         ));
         for group in &self.groups {
@@ -50,6 +54,7 @@ impl Materialized {
                 SectionPath::materialized_identities(
                     &identities.domain,
                     &identities.entity,
+                    identities.unit,
                     identities.group,
                 ),
                 identities,
@@ -58,6 +63,7 @@ impl Materialized {
                 SectionPath::materialized_columns(
                     &identities.domain,
                     &identities.entity,
+                    identities.unit,
                     identities.group,
                 ),
                 SectionContent::MaterializedColumns,
@@ -69,6 +75,7 @@ impl Materialized {
 
 impl Values<'_> {
     pub fn materialized(&mut self, domain: &DomainName, shape: u8) -> Materialized {
+        let unit = self.unit();
         let entity = ModelName::parse(match shape {
             0 => "empty_materialized",
             1 => "unbranched_materialized",
@@ -120,6 +127,7 @@ impl Values<'_> {
                 identities: MaterializedIdentitiesRecord {
                     domain: domain.clone(),
                     entity: entity.clone(),
+                    unit,
                     group: u32::try_from(index).assured("bounded group counts fit"),
                     identities,
                 },
@@ -130,6 +138,7 @@ impl Values<'_> {
             descriptor: MaterializedRelayDescriptor {
                 domain: domain.clone(),
                 entity,
+                unit,
                 schema: SchemaFingerprint::from_digest(self.digest()),
                 revision: self.0.entropy().any_u64(),
                 fence: self.0.entropy().any_u64(),

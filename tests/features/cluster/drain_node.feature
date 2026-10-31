@@ -89,7 +89,8 @@ Feature: Drain node
     Then the entity gate pause for domain "{{domain}}" is reached
     When node "node-2" is stopped
     And the entity gate pause for domain "{{domain}}" is released
-    Then the background Plexus execution fails with "former owner 'node-2' became unavailable during ownership handoff"
+    # The pause precedes the owner-incarnation precheck, so either stage can observe the stopped node.
+    Then the background Plexus execution fails because either "former owner 'node-2' became unavailable during ownership handoff" or "former owner 'node-2' is unavailable before ownership handoff"
     And node "node-1" eventually observes a stable leader
     And within "60s" node "node-1" eventually reports scheduled "junction" "owner_loss_junction" owner different from placeholder "former_owner"
 

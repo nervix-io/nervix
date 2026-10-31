@@ -53,7 +53,12 @@ impl SessionServiceImpl {
             }) else {
                 continue;
             };
-            if node.primary_node.as_ref() != Some(self.inner.consensus.local_node_id()) {
+            if node
+                .units
+                .get(&placement.unit)
+                .and_then(|unit| unit.primary_node.as_ref())
+                != Some(self.inner.consensus.local_node_id())
+            {
                 continue;
             }
             let RuntimeState::MaterializedRelay { .. } = placement.state else {
@@ -69,6 +74,7 @@ impl SessionServiceImpl {
             let descriptor = MaterializedRelayDescriptor {
                 domain: request.domain.clone(),
                 entity: placement.identifier.clone(),
+                unit: placement.unit,
                 schema: node.schema_fingerprint,
                 revision: generation.revision(),
                 fence: generation.fence(),
@@ -91,6 +97,7 @@ impl SessionServiceImpl {
                 key: key(SectionPath::materialized_descriptor(
                     &request.domain,
                     &placement.identifier,
+                    placement.unit,
                 )),
                 content: SectionContent::Record(MaterializedRelayDescriptor::KIND),
                 artifact,
@@ -127,6 +134,7 @@ impl SessionServiceImpl {
                         let bytes = MaterializedIdentitiesRecord {
                             domain,
                             entity,
+                            unit: placement.unit,
                             group: index,
                             identities,
                         }
@@ -162,6 +170,7 @@ impl SessionServiceImpl {
                     key: key(SectionPath::materialized_identities(
                         &request.domain,
                         &placement.identifier,
+                        placement.unit,
                         index,
                     )),
                     content: SectionContent::Record(MaterializedIdentitiesRecord::KIND),
@@ -198,6 +207,7 @@ impl SessionServiceImpl {
                     key: key(SectionPath::materialized_columns(
                         &request.domain,
                         &placement.identifier,
+                        placement.unit,
                         index,
                     )),
                     content: SectionContent::MaterializedColumns,

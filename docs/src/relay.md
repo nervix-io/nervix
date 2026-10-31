@@ -22,6 +22,10 @@ Branching is defined by a schema name on a named branch:
 - `CREATE BRANCH by_tenant_user SCHEMA tenant_user_branch TTL 5m` isolates each tenant/user pair
 - `MAX INSTANCES <n> EVICT LRU` can cap active concrete branch instances for that branch
 
+Each branch declaration currently has one direct execution partition in its stored Model. Plexus
+has no `PARTITIONS` clause yet; concrete branch keys still isolate runtime state within that one
+partition.
+
 The web console's **Create** menu also has a branch form. Its schema picker searches internal
 schemas in the captured domain, including schemas staged earlier in the attached transaction; the
 form requires a TTL and accepts the optional positive LRU instance limit. Registry validation

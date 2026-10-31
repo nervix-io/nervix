@@ -1808,8 +1808,8 @@ mod tests {
             } else {
                 &owner
             };
-            node.primary_node = Some(placement.clone());
-            node.assigned_nodes = vec![placement.clone()];
+            node.single_unit_mut().primary_node = Some(placement.clone());
+            node.single_unit_mut().assigned_nodes = vec![placement.clone()];
         }
         let schedule = DomainSchedule::new(domain.clone(), nodes, Vec::new());
         let revision = ExecutionRevision::from_schedule(&schedule)
