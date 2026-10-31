@@ -1,0 +1,26 @@
+name: Download CI artifacts
+description: Extract artifacts of this run from its R2 artifact bucket.
+inputs:
+  name:
+    description: One artifact, extracted into path. It is an error if the run has no such artifact.
+    default: ""
+  pattern:
+    description: Artifacts whose name matches, each extracted into path/<name>. None is not an error.
+    default: ""
+  path:
+    description: Directory to extract into.
+    default: .
+runs:
+  using: composite
+  steps:
+    - name: Download ${{ inputs.name || inputs.pattern }}
+      shell: bash
+      env:
+        ARTIFACT_NAME: ${{ inputs.name }}
+        ARTIFACT_PATTERN: ${{ inputs.pattern }}
+        ARTIFACT_PATH: ${{ inputs.path }}
+      run: >-
+        python3 "${GITHUB_WORKSPACE}/scripts/ci_artifacts.py" download
+        --name "${ARTIFACT_NAME}"
+        --pattern "${ARTIFACT_PATTERN}"
+        --path "${ARTIFACT_PATH}"
