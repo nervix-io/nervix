@@ -7,26 +7,26 @@
 //! example writes its keywords, every requirement names a declared choice, and every generated
 //! Model states only what its entity declares.
 
-use std::num::NonZeroUsize;
+use std::{collections::BTreeSet, num::NonZeroUsize};
 
 use meticulous::OptionExt as _;
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_models::{
-    ChoiceRequirement, ClickHouseEmitterEntity, ClientEmitterEntity, ClientIngestorEntity,
-    ClientPooling, ConnectorKind, EmitterBatchLegality, EmitterBody, EmitterBodyForm,
-    EmitterEntityKind, EmitterPublishingModeKind, EmitterReferenceKind, EnvelopeClauseKind,
-    ExternalName, HttpEmitterEntity, HttpIngestorEntity, IcebergEmitterEntity,
+    ChoiceRequirement, ClickHouseEmitterEntity, ClientConfigReaders, ClientEmitterEntity,
+    ClientIngestorEntity, ClientPooling, ConnectorKind, EmitterBatchLegality, EmitterBody,
+    EmitterBodyForm, EmitterEntityKind, EmitterPublishingModeKind, EmitterReferenceKind,
+    EnvelopeClauseKind, ExternalName, HttpEmitterEntity, HttpIngestorEntity, IcebergEmitterEntity,
     IcebergStorageBackend, IngestDeliveryKind, IngestQuiesceKind, IngestorEntityKind,
-    KafkaConsumerGroupName, KafkaEmitterEntity, KafkaIngestorEntity, KafkaTopicName,
-    LocatorDeclaration, LocatorName, MongoDbEmitterEntity, MqttEmitterEntity, MqttIngestorEntity,
-    MqttTopicFilter, MySqlEmitterEntity, NatsEmitterEntity, NatsIngestorEntity, NatsQueueGroupName,
-    NatsSubjectName, OptionDeclaration, OptionForm, OptionPresence, OtelEmitterEntity,
-    PostgresEmitterEntity, PrometheusIngestorEntity, PulsarEmitterEntity, PulsarIngestorEntity,
-    PulsarSubscriptionName, PulsarTopicName, RabbitMqEmitterEntity, RabbitMqIngestorEntity,
-    RabbitMqQueueName, RedisChannelName, RedisEmitterEntity, RedisIngestorEntity,
-    RuntimeCapability, SentryEmitterEntity, SqsEmitterEntity, SqsIngestorEntity, SqsQueueName,
-    SyslogEmitterEntity, SyslogIngestorEntity, WebsocketsIngestorEntity, ZeroMqEmitterEntity,
-    ZeroMqIngestorEntity,
+    IngestorReferenceKind, KafkaConsumerGroupName, KafkaEmitterEntity, KafkaIngestorEntity,
+    KafkaTopicName, LocatorDeclaration, LocatorName, MongoDbEmitterEntity, MqttEmitterEntity,
+    MqttIngestorEntity, MqttTopicFilter, MySqlEmitterEntity, NatsEmitterEntity, NatsIngestorEntity,
+    NatsQueueGroupName, NatsSubjectName, OptionDeclaration, OptionForm, OptionPresence,
+    OtelEmitterEntity, PostgresEmitterEntity, PrometheusIngestorEntity, PulsarEmitterEntity,
+    PulsarIngestorEntity, PulsarSubscriptionName, PulsarTopicName, RabbitMqEmitterEntity,
+    RabbitMqIngestorEntity, RabbitMqQueueName, RedisChannelName, RedisEmitterEntity,
+    RedisIngestorEntity, RuntimeCapability, SentryEmitterEntity, SqsEmitterEntity,
+    SqsIngestorEntity, SqsQueueName, SyslogEmitterEntity, SyslogIngestorEntity,
+    WebsocketsIngestorEntity, ZeroMqEmitterEntity, ZeroMqIngestorEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -560,6 +560,41 @@ fn every_client_declares_its_pooling_and_its_current_key_schema() {
         option_shapes(websockets.options),
         [("WITH SIGNALING PROTOCOL", false)]
     );
+}
+
+#[test]
+fn only_a_client_both_sides_reference_declares_a_key_for_one_side() {
+    let mut read_through = BTreeSet::new();
+    for kind in IngestorEntityKind::all() {
+        if let IngestorReferenceKind::Client(connector) = kind.capabilities().reference {
+            read_through.insert(connector);
+        }
+    }
+    let mut written_through = BTreeSet::new();
+    for kind in EmitterEntityKind::all() {
+        for connector in ConnectorKind::iter() {
+            if kind.capabilities().reference.admits_client(connector) {
+                written_through.insert(connector);
+            }
+        }
+    }
+    for connector in ConnectorKind::iter() {
+        let Some(client) = connector.client() else {
+            continue;
+        };
+        let referenced_from_both_sides =
+            read_through.contains(&connector) && written_through.contains(&connector);
+        for key in client.config.keys() {
+            if key.readers == ClientConfigReaders::Every {
+                continue;
+            }
+            assert!(
+                referenced_from_both_sides,
+                "{connector} declares '{}' for one side, but only one side references its client",
+                key.name
+            );
+        }
+    }
 }
 
 #[test]
