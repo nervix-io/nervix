@@ -225,6 +225,9 @@ class InventoryTests(unittest.TestCase):
         workflow = (REPOSITORY / ".github/workflows/check.yaml").read_text(encoding="utf-8")
         job = job_section(workflow, "extra-tests")
         self.assertRegex(job, r"tool: [^\n]*\bcargo-llvm-cov\b")
+        # Each collection reads its profiles with the toolchain's own LLVM tools, so the job
+        # installs them with its toolchain instead of relying on the runner's image.
+        self.assertRegex(step_section(job, "Setup Rust"), r"components: [^\n]*\bllvm-tools\b")
         self.assertIn("run: just coverage-model-runner\n", job)
         for producer in native_coverage.PRODUCERS:
             with self.subTest(producer=producer.name):
