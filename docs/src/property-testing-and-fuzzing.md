@@ -303,10 +303,10 @@ before the campaign starts.
 
 The sanitizer shards budget instrumented builds separately from each target's bounded campaign.
 Each shard job has a four-hour limit; per-build, per-case and per-campaign deadlines remain
-enforced by the shared runner. Validation uses an 8-CPU runner and a two-hour limit
+enforced by the shared runner. Validation uses a 16-CPU runner and a two-hour limit
 to complete Clippy and the declared compiler synchronization matrix from a cold cache. Bolero
 inventory and compiled discovery run through the dedicated Bolero commands and workflow.
-The native extra-checks job retains its 8-CPU allocation and the same two-hour limit for ordinary
+The native extra-checks job has a 16-CPU runner too and the same two-hour limit for ordinary
 instrumentation and per-mode primitive conformance; the Shuttle and Loom suites run in jobs of
 their own.
 
@@ -501,7 +501,7 @@ metadata with a 7,200-second compilation deadline; it does not count as a comple
 An expected sanitizer or randomized skip contributes no execution or coverage evidence. The Check
 workflow's validation job and the Bolero randomized job retain their separate scopes and limits.
 Check calls the reusable Bolero workflow with its exact tested SHA, event and label snapshot.
-Scheduled and manual Bolero runs execute randomized checks and record a deliberate sanitizer skip.
+Manual Bolero runs execute randomized checks and record a deliberate sanitizer skip.
 
 ### Documentation-only Selection
 
@@ -656,6 +656,7 @@ just help
 just fuzz-list
 just test-bolero
 just test-bolero plexus-model
+just build-bolero
 just fuzz plexus-model 30
 just fuzz-all 30
 just fuzz-plan 3
@@ -691,34 +692,35 @@ Console builds stage the complete real Trunk output and publish only changed ass
 assets retain their file identity and timestamps, so repeated preparation preserves an already
 instrumented server build; failed builds leave the published assets intact.
 
-`just test-bolero` requires the configured randomized-case count and checked-in corpus
-replay for every selected property, checking Bolero's reported input counts. Fuzz runs use real
+`just test-bolero` requires the configured randomized-case count and checked-in corpus replay for
+every selected property, checking Bolero's reported input counts. `just build-bolero` compiles every
+ordinary harness the same selection runs, as `just test-bolero` builds it, and runs no property; the
+randomized CI job builds this way first and publishes its kache cache before the properties run, so
+a run that fails or reaches the job's time limit keeps what its build stored. Fuzz runs use real
 libFuzzer coverage with AddressSanitizer, bounded input length and per-case timeout. The fuzz
-profile enables optimization, debug information, debug assertions and overflow checks. Builds
-use the pinned nightly and keep the configured kache wrapper. Modeled execution features are
-excluded; Loom, Shuttle and Turmoil remain independent build invocations.
-The server package uses the current profile's lighter optimization and omits debug output for its
-single codegen unit; sanitizer instrumentation, coverage, debug assertions and overflow checks remain
-enabled.
-The pinned cargo-bolero CLI does not expose a Cargo test-harness selector. Each instrumented build
-therefore records a run-local Rustup adapter that forwards the declared `--lib`, `--bin` or `--test`
-selector to its Cargo test calls and forwards toolchain/version queries unchanged. It preserves the
-toolchain, features, sanitizer flags and compiler wrapper. Library properties compile and execute only their
-registered harness; they do not compile or invoke the server's Cucumber executable.
-The adapter selects the pinned compiler through `scripts/bolero_rustc.py`, still beneath the
-configured kache wrapper. For `proc-macro2` with `span-locations`, that compiler adapter removes
-only its generic `cfg(fuzzing)`: the dependency otherwise deliberately replaces source locations
-with zero, violating the source parser's contract and collapsing distinct findings. Sanitizer,
-coverage and libFuzzer flags remain intact, and every other crate keeps its configuration. The
-adapter's content digest separates build directories. The source-location property and saved
-regression corpus assert the same exact locations in ordinary and sanitizer execution.
-On a shared host, a cold server build can exceed the campaign runner's 30-minute compilation
-limit. `just prepare-bolero <id>` prepares that same pinned, scoped sanitizer build with a two-hour
-limit and retains its log and preparation metadata. It does not run a campaign or record fuzz
-completion. `just prepare-archive-counts-fuzz` uses this shared path for the declared registry library harness.
-`just prepare-bolero-shard <number>/<count>` prepares the declared harnesses one shard runs, as each
-CI shard does before its campaigns.
-The target must subsequently pass `just fuzz <id>` with the ordinary build and case
+profile enables optimization, debug information, debug assertions and overflow checks. Builds use
+the pinned nightly and keep the configured kache wrapper. Modeled execution features are excluded;
+Loom, Shuttle and Turmoil remain independent build invocations. The server package uses the current
+profile's lighter optimization and omits debug output for its single codegen unit; sanitizer
+instrumentation, coverage, debug assertions and overflow checks remain enabled. The pinned
+cargo-bolero CLI does not expose a Cargo test-harness selector. Each instrumented build therefore
+records a run-local Rustup adapter that forwards the declared `--lib`, `--bin` or `--test` selector
+to its Cargo test calls and forwards toolchain/version queries unchanged. It preserves the
+toolchain, features, sanitizer flags and compiler wrapper. Library properties compile and execute
+only their registered harness; they do not compile or invoke the server's Cucumber executable. The
+adapter selects the pinned compiler through `scripts/bolero_rustc.py`, still beneath the configured
+kache wrapper. For `proc-macro2` with `span-locations`, that compiler adapter removes only its
+generic `cfg(fuzzing)`: the dependency otherwise deliberately replaces source locations with zero,
+violating the source parser's contract and collapsing distinct findings. Sanitizer, coverage and
+libFuzzer flags remain intact, and every other crate keeps its configuration. The adapter's content
+digest separates build directories. The source-location property and saved regression corpus assert
+the same exact locations in ordinary and sanitizer execution. On a shared host, a cold server build
+can exceed the campaign runner's 30-minute compilation limit. `just prepare-bolero <id>` prepares
+that same pinned, scoped sanitizer build with a two-hour limit and retains its log and preparation
+metadata. It does not run a campaign or record fuzz completion. `just prepare-archive-counts-fuzz`
+uses this shared path for the declared registry library harness. `just prepare-bolero-shard
+<number>/<count>` prepares the declared harnesses one shard runs, as each CI shard does before its
+campaigns. The target must subsequently pass `just fuzz <id>` with the ordinary build and case
 limits; CI campaigns continue to use that bounded runner.
 
 PR CI runs each Bolero mode through Check's reusable Bolero call only when the PR carries its
@@ -726,7 +728,7 @@ label. The sanitizer libFuzzer shards run with `fuzz`, with 30 seconds of engine
 and the ordinary randomized/corpus job runs with `bolero-random`. Every job uses the native
 [CI linker](./developing-nervix.md#validation-and-tests), including sanitizer builds that supply
 their own compiler flags. Adding or removing a label reevaluates the jobs, and a push to a labeled
-PR runs them again. Scheduled and manual workflow runs execute the ordinary properties. Job limits
+PR runs them again. Manual workflow runs execute the ordinary properties. Job limits
 reserve additional time for compilation, artifacts and cleanup. A cache may seed a campaign but
 cannot skip a target or replace checked-in regressions. An empty selection, timeout, engine
 failure, sanitizer finding or property failure fails the job.
