@@ -994,7 +994,9 @@ See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md
   transport failure but never the endpoint's path or query.
 - `metadata.status` is the successful response's `U16` status and `metadata.polled_at` is the
   scheduled `DATETIME` instant of that poll. `read_header` and `read_headers` read the response's
-  headers; `204 No Content` emits no row.
+  headers, including non-ASCII UTF-8 values. A header value with invalid UTF-8 bytes is omitted
+  without discarding the row and counted in `nervix_ingestor_header_values_dropped_total`;
+  `204 No Content` emits no row.
 - polls a configured HTTP endpoint periodically
 - issues the first request immediately, then follows an anchored domain-clock cadence; slow
   responses coalesce missed occurrences into one request at the newest due instant

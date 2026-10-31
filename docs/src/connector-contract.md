@@ -1218,6 +1218,12 @@ WebSocket frame keeps its connection's exact header snapshot by reference rather
 endpoint and polling headers, WebSocket upgrade headers, Kafka record headers, NATS headers, Pulsar
 properties, RabbitMQ AMQP headers, and SQS attributes keep their transport's own semantics; other
 connector and entity pairs carry no transport headers.
+An HTTP poll retains every response-header value whose bytes are valid UTF-8, including non-ASCII
+characters, as the same UTF-8 bytes and in each field's repeat order. It drops an invalid UTF-8
+value alone while retaining the response body and other headers, and hands the drop count to the
+host for
+`nervix_ingestor_header_values_dropped_total`. An HTTP request emitter sends every admitted
+`write_header` value as its exact UTF-8 bytes.
 `read_header` and `read_headers` are validated against that declaration, and header values do not
 travel through relays unless an ingestor writes them into schema-backed fields. See
 [Header Context](./ingestors.md#header-context) for the exact expression behavior. The session

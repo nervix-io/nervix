@@ -349,7 +349,8 @@ parsed against the client origin. It cannot include a fragment, backslash, inval
 whitespace or control character; normalization must keep it on that origin and must not produce a
 leading `//`. The normalized target is limited to 8 KiB. `write_header` accepts valid HTTP field
 names and UTF-8 values without control characters or leading/trailing whitespace in a nonempty
-value. Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
+value. The request carries those values as their exact UTF-8 bytes, including non-ASCII characters.
+Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
 application headers and 32 KiB of name/value bytes are allowed.
 
 `ENCODE USING` permits the ordinary transforming construction clauses. `WITHOUT BODY` selects an

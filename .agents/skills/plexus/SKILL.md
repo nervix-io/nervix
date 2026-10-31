@@ -265,6 +265,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   evaluates returned data with a fresh execution snapshot. The declared quiesce mode still decides
   whether polling is suspended or buffered; withholding work does not pause or re-anchor the
   cadence. Connector timeouts, retries, backoff, and cancellation remain physical.
+- For HTTP REQUEST polling, `metadata.polled_at` is the scheduled instant and `metadata.status`
+  is the successful HTTP status. A `204 No Content` response emits no row. `read_header` retains
+  non-ASCII UTF-8 values; invalid UTF-8 header values are omitted and counted in
+  `nervix_ingestor_header_values_dropped_total`. Read the
+  [HTTP REQUEST ingestor contract](../../../docs/src/ingestors.md#http-request) for its declaration
+  and header model.
 - Treat domain execution time as one snapshot per accepted unit of work. Every expression in that
   unit uses the same instant, including filters, construction, keys, correlation and window
   programs, inferencer mappings, emitter `VALUES` and SQS FIFO groups, and subscription filters.
@@ -476,7 +482,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   request field is evaluated, a failed method, path, header write or body encoding rejects the
   record through `ON MESSAGE ERROR` before any part of its request is sent, and a retry resends the
   prepared request unchanged. Declare
-  `Content-Type` and any idempotency key with `write_header`; see
+  `Content-Type` and any idempotency key with `write_header`, whose valid UTF-8 value reaches
+  the request as the same bytes, including non-ASCII characters; see
   [HTTP requests](../../../docs/src/emitters.md#http-requests). Complete valid `2xx` response
   headers deliver the record without waiting for the response body. `401`, `403`, `407`, `408`,
   `425`, `429`, and `5xx` retain it for retry; other `3xx`/`4xx` statuses and `101` reject that
