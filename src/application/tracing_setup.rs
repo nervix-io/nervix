@@ -43,8 +43,8 @@ use opentelemetry_sdk::{
 use tower_service::Service;
 use tracing::{Level, Metadata, Subscriber};
 use tracing_subscriber::{
-    EnvFilter, Layer, filter::filter_fn, fmt, fmt::writer::BoxMakeWriter,
-    prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
+    EnvFilter, filter::filter_fn, fmt, fmt::writer::BoxMakeWriter,
+    prelude::__tracing_subscriber_SubscriberExt, registry::LookupSpan, util::SubscriberInitExt,
 };
 
 use super::{AppError, TracingArgs};
@@ -81,9 +81,21 @@ impl LogFilter {
         Self { configured }
     }
 
-    /// The layer a subscriber decides what it records with: the payload rule, then the filter.
-    fn into_layer<S: Subscriber>(self) -> impl Layer<S> {
-        self.configured.and_then(filter_fn(Self::admits))
+    /// The registry the process records through, which its writers are layered on: the payload rule
+    /// as the layer beneath and the filter above it. The filter answers first, so the subscriber's
+    /// level hint is the filter's, a callsite the filter refuses is never asked about again, and the
+    /// rule is asked only about what the filter selects.
+    ///
+    /// Composing the two with `Layer::and_then` would not keep that. A layer composed over the
+    /// registry takes its inner layer for the registry itself, so the composition would report the
+    /// rule's absent level hint, which raises the subscriber's maximum level to `trace`, and would
+    /// evaluate both filters on every event of a callsite the filter refuses.
+    fn into_subscriber(
+        self,
+    ) -> impl Subscriber + for<'span> LookupSpan<'span> + Send + Sync + 'static {
+        tracing_subscriber::registry()
+            .with(filter_fn(Self::admits))
+            .with(self.configured)
     }
 
     /// Whether the log may record what `metadata` describes, whatever the filter selects.
@@ -299,7 +311,7 @@ impl TraceExporter {
 pub fn init_tracing(args: &TracingArgs) -> Result<TracingGuard, Report<AppError>> {
     let sample_ratio = Setting::<TraceSampleRatio>::new(args.otel_trace_sample_ratio, &())
         .change_context(AppError::InitTracing)?;
-    let log_filter = LogFilter::from_environment(DEFAULT_TRACE_FILTER).into_layer();
+    let subscriber = LogFilter::from_environment(DEFAULT_TRACE_FILTER).into_subscriber();
     let fmt_layer = fmt::layer().with_ansi(false);
 
     if args.otel_enabled {
@@ -317,8 +329,7 @@ pub fn init_tracing(args: &TracingArgs) -> Result<TracingGuard, Report<AppError>
         let tracer = tracer_provider.tracer("nervix");
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
-        tracing_subscriber::registry()
-            .with(log_filter)
+        subscriber
             .with(fmt_layer)
             .with(otel_layer)
             .try_init()
@@ -331,8 +342,7 @@ pub fn init_tracing(args: &TracingArgs) -> Result<TracingGuard, Report<AppError>
             }),
         })
     } else {
-        tracing_subscriber::registry()
-            .with(log_filter)
+        subscriber
             .with(fmt_layer)
             .try_init()
             .change_context(AppError::InitTracing)?;
@@ -390,11 +400,8 @@ pub fn init_tracing_to_file(path: &Path) -> io::Result<()> {
     let file = OpenOptions::new().create(true).append(true).open(path)?;
     let file = Arc::new(ParkingMutex::new(file));
     let make_writer = BoxMakeWriter::new(move || SharedFileWriter(file.clone()));
-    let log_filter =
-        LogFilter::from_environment(&format!("{DEFAULT_TRACE_FILTER},{TEST_TRACE_FILTER}"))
-            .into_layer();
-    tracing_subscriber::registry()
-        .with(log_filter)
+    LogFilter::from_environment(&format!("{DEFAULT_TRACE_FILTER},{TEST_TRACE_FILTER}"))
+        .into_subscriber()
         .with(fmt::layer().with_ansi(false).with_writer(make_writer))
         .try_init()
         .discarded(

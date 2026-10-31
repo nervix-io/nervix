@@ -3,7 +3,7 @@
 //! Outside the layer order: tests may name any layer and product code may not name them.
 //!
 //! - **Owns.** Filters written as an operator writes `RUST_LOG`, the node's default, and
-//!   assertions over what a subscriber deciding with them records.
+//!   assertions over what a subscriber deciding with them records and answers for a callsite.
 //! - **Depends on.** The tracing owner and the captured-logs test support.
 //! - **Must not know.** What a connector does with a message its broker returned.
 //!
@@ -11,9 +11,12 @@
 //! while nothing is interested in it. Each case also records through the configured filter alone,
 //! which proves the filter would select the returned message the rule keeps out.
 
-use meticulous::ResultExt as _;
-use tracing::{debug, info, info_span, trace, warn};
-use tracing_subscriber::{EnvFilter, Layer, Registry, fmt, layer::SubscriberExt as _};
+use meticulous::{OptionExt as _, ResultExt as _};
+use tracing::{
+    Metadata, Span, Subscriber, debug, debug_span, info, info_span, subscriber::Interest, trace,
+    trace_span, warn, warn_span,
+};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt as _, registry::LookupSpan};
 
 use super::{DEFAULT_TRACE_FILTER, LogFilter};
 use crate::captured_logs::CapturedLogs;
@@ -31,12 +34,21 @@ fn operator_filter(directives: &str) -> LogFilter {
     LogFilter { configured }
 }
 
-/// What a subscriber deciding with `filter` records of what `write` logs.
-fn recorded(filter: impl Layer<Registry> + Send + Sync + 'static, write: impl FnOnce()) -> String {
+/// The configured filter alone, on the registry, which is what each case's control records through.
+fn filter_alone(
+    directives: &str,
+) -> impl Subscriber + for<'span> LookupSpan<'span> + Send + Sync + 'static {
+    tracing_subscriber::registry().with(operator_filter(directives).configured)
+}
+
+/// What `subscriber` records of what `write` logs, through a writer layered on it as the node
+/// layers its own.
+fn recorded<S>(subscriber: S, write: impl FnOnce()) -> String
+where
+    S: Subscriber + for<'span> LookupSpan<'span> + Send + Sync + 'static,
+{
     let logs = CapturedLogs::default();
-    let subscriber = tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_writer(logs.clone()).with_ansi(false));
+    let subscriber = subscriber.with(fmt::layer().with_writer(logs.clone()).with_ansi(false));
     tracing::subscriber::with_default(subscriber, write);
     logs.contents()
 }
@@ -76,12 +88,12 @@ fn holds_a_returned_message(log: &str) -> bool {
 /// returns what the rule let through after checking that the filter alone selects the returned
 /// message and the rule keeps it out.
 fn recorded_with_and_without_the_rule(directives: &str, write: fn()) -> String {
-    let unruled = recorded(operator_filter(directives).configured, write);
+    let unruled = recorded(filter_alone(directives), write);
     assert!(
         unruled.contains(RETURNED_MESSAGE),
         "the filter '{directives}' alone does not select Lapin's returned message:\n{unruled}"
     );
-    let ruled = recorded(operator_filter(directives).into_layer(), write);
+    let ruled = recorded(operator_filter(directives).into_subscriber(), write);
     assert!(
         !holds_a_returned_message(&ruled),
         "the filter '{directives}' let Lapin's returned message into the log:\n{ruled}"
@@ -150,4 +162,82 @@ fn an_operator_filter_keeps_its_choice_for_every_other_event() {
         "{log}"
     );
     assert!(!log.contains("node startup finished"), "{log}");
+}
+
+/// What a subscriber answers when a callsite registers, in a form the assertions compare.
+#[derive(Debug, PartialEq, Eq)]
+enum Answer {
+    Never,
+    Sometimes,
+    Always,
+}
+
+impl From<Interest> for Answer {
+    fn from(interest: Interest) -> Self {
+        if interest.is_never() {
+            return Self::Never;
+        }
+        if interest.is_always() {
+            return Self::Always;
+        }
+        Self::Sometimes
+    }
+}
+
+/// The callsite of the span `open` opens. A subscriber that records everything is in scope while
+/// it opens, so the span is enabled and carries its callsite's metadata.
+fn callsite_of(open: fn() -> Span) -> &'static Metadata<'static> {
+    let records_everything = tracing_subscriber::registry();
+    tracing::subscriber::with_default(records_everything, || open().metadata())
+        .assured("an enabled span carries its callsite's metadata")
+}
+
+#[test]
+fn the_payload_rule_leaves_the_filter_its_level_and_its_answer_for_every_other_callsite() {
+    let other_callsites = [
+        callsite_of(|| trace_span!(target: "nervix_server::runtime", "batch_trace")),
+        callsite_of(|| debug_span!(target: "nervix_server::runtime", "batch_debug")),
+        callsite_of(|| info_span!(target: "nervix_server::application", "startup")),
+        callsite_of(|| trace_span!(target: "lapin::returned_messages", "dropped_confirm")),
+    ];
+    let operator_filters = [
+        DEFAULT_TRACE_FILTER,
+        "info,nervix_server::runtime=debug",
+        "error,[io_loop]=trace",
+        "error,lapin::returned_messages[{message}]=warn",
+    ];
+    for directives in operator_filters {
+        let alone = filter_alone(directives);
+        let ruled = operator_filter(directives).into_subscriber();
+
+        assert_eq!(
+            ruled.max_level_hint(),
+            alone.max_level_hint(),
+            "the rule changed the level hint of the filter '{directives}'"
+        );
+        for callsite in other_callsites {
+            let expected = Answer::from(alone.register_callsite(callsite));
+            let answer = Answer::from(ruled.register_callsite(callsite));
+            assert_eq!(
+                answer, expected,
+                "the rule changed the answer of the filter '{directives}' for {callsite:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_returned_message_the_filter_would_always_record_is_never_recorded() {
+    let returned = callsite_of(|| warn_span!(target: "lapin::returned_messages", "returned"));
+    let alone = filter_alone("info");
+    let ruled = operator_filter("info").into_subscriber();
+
+    assert_eq!(
+        Answer::from(alone.register_callsite(returned)),
+        Answer::Always
+    );
+    assert_eq!(
+        Answer::from(ruled.register_callsite(returned)),
+        Answer::Never
+    );
 }

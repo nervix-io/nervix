@@ -2596,7 +2596,9 @@ variable is set and parses, and otherwise the node's default: `info` for every t
 OpenRaft's heartbeat worker and replication targets at `error`. Beneath whichever filter is in
 force, the subscriber drops every dependency event that carries a record's payload at `info` or
 above. No directive brings such an event back, a span-scoped or field-qualified one included, and
-every other event stays with the filter. The scenario run's subscriber, which writes
+every other event stays with the filter. The rule takes no decision away from the filter: the
+subscriber's maximum level stays the filter's, and an event the filter refuses costs what it would
+without the rule. The scenario run's subscriber, which writes
 `tests/logs/scenarios.log`, applies the same rule to its own default.
 
 The node drops one such event: Lapin's report of a message its broker returned. Lapin logs every
