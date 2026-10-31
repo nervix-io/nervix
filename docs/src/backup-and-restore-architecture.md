@@ -220,6 +220,15 @@ after the freeze ends. The leader's backup coordinator runs it in this order:
    release time and the quiesce counters.
 8. **Release.** It always releases the lease, and checks its tenure a last time.
 
+A pause, drain, resume or lease release that loses proposal authority leaves the admitted backup
+applying under its execution reference. This includes a leader that keeps its term but cannot
+confirm its lease, and a cut whose coordinator tenure changes. The client receives
+`OutcomeUnknown(LeadershipLost)` and its retry, or the leader's command reconciliation, runs the
+backup again with the same reference. The next attempt rejoins any mutation lease that execution
+still holds and takes its cuts again. Every cut uses the declared per-domain budget. An expired
+cut budget remains a definitive refusal, including expiry while lease admission was being refused
+by an unconfirmed leader lease.
+
 A drain that does not finish by the deadline fails the backup with the counts each node still held
 and resumes the domain; an unavailable emitter keeps its publish and acknowledgement counts outstanding
 until then. A tenure change at any check refuses the cut, still attempts the resume and the release,
@@ -966,7 +975,10 @@ execution reference, phase duration and total elapsed time. The timeout refusal 
 phase and ordered completed durations, including lease admission, alteration guard, opening
 counters and drain. The controlled boundary after drain is `capture`; configuration capture, owner
 capture and closing counters have distinct phases. Resume and lease release remain cleanup outside
-the cut's deadline and do not receive a new capture budget.
+the cut's deadline and do not receive a new capture budget. Every failed backup attempt logs its
+execution reference and complete typed cause chain before command finalization can pause or record
+its result, including an authority refusal whose execution remains recoverable. This distinguishes
+a cut that never starts from a missing observation of a cut that did.
 
 Owner capture logs identify the node and coordination identity and distinguish revision wait,
 cluster-state application, lifecycle checkpoints, storage capture, staging and inventory. The
@@ -1003,6 +1015,13 @@ The bounded native recovery outline in `backup_wait.feature` holds the first cut
 or twelve seconds with a ten-second client wait, on one and three nodes. An exhausted wait can
 precede the second cut without cancelling the admitted backup. A fresh client recovers its original
 execution and downloads an archive retaining both quiesced cuts and the first cut's measured hold.
+
+The lease-release recovery outline in that feature refuses the first domain's release proposal
+once as a lapsed leader lease, on one and three nodes. The native client recovers the same admitted
+reference, reaches the second domain and downloads both quiesced cuts. Boundary tests distinguish
+pause, resume and release authority loss from definitive cut expiry and storage failures, retaining
+their typed causes. The outline also runs in the active, order and restore-stress Deloxide selections;
+those runs cover the existing client and storage locks, not the asynchronous refusal or retry waits.
 
 The harness releases every test lease, drain and capture gate before it shuts nodes down, including
 after a failed body. `just test-backup-cut-cleanup` supervises deliberately failed public backup

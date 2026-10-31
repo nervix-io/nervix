@@ -1705,6 +1705,13 @@ archive, so a download is never sent back and forth. A node that has not applied
 the client to the leader, which answers from it. A command's outcome reaches a client only once
 every live node applied it, so the node a client hears the outcome from can always answer.
 
+If a backup's pause, resume or mutation lease release loses proposal authority, including a leader
+whose lease could not be confirmed while it keeps its term, the client receives
+`OutcomeUnknown` with cause `LeadershipLost`. The admitted execution remains applying, and the
+client repeats its original execution reference. Its next attempt rejoins any mutation lease the
+execution still holds and captures the domains again. A cut whose declared budget expired remains
+a definitive failure, including a lease wait whose last refusal named an unconfirmed leader lease.
+
 If leadership moves while a backup runs, the new leader resumes the applying command and assembles
 an archive of its own, while the former leader's run may still finish. The run that records its
 outcome first is the backup's outcome, wherever it assembled its archive. A run whose outcome the

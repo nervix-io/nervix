@@ -27,6 +27,8 @@ mod assembly;
 mod branch_state_sections;
 pub(in crate::application) mod cut_progress;
 pub(in crate::application) mod cut_reach;
+#[cfg(test)]
+mod failure_tests;
 pub(in crate::application) mod interconnect;
 mod materialized_sections;
 mod native_metadata_sections;
@@ -48,14 +50,14 @@ use nervix_backup::{
     ArchiveLayout, ArchivePiece, ArchiveScope, BackupManifest, DomainCapture, RaftLogPosition,
     SectionContent, SectionDigest, SectionDigester, SectionEntry, SectionPath,
 };
-use nervix_consensus::{CommandExecution, ConfigurationCapture};
+use nervix_consensus::{CommandExecution, ConfigurationCapture, ConsensusError};
 use nervix_execution::{ChargedBytes, Executor, MemoryClass};
 use nervix_interconnect::InterconnectStreamRequest as _;
 use nervix_models::{
     ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupDomainSummary,
-    BackupQuiesceCounters, BackupResources, BackupScope, ClusterNodeName, CoordinationIdentity,
-    DomainName, DomainSchedule, DomainStatus, IngestorName, ModelKind, NodeRef,
-    PLEXUS_LANGUAGE_VERSION, ResourceId, ResourceName, Timestamp,
+    BackupQuiesceCounters, BackupResources, BackupScope, ClusterNodeName,
+    CommandExecutionReference, CoordinationIdentity, DomainName, DomainSchedule, DomainStatus,
+    IngestorName, ModelKind, NodeRef, PLEXUS_LANGUAGE_VERSION, ResourceId, ResourceName, Timestamp,
 };
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
@@ -72,7 +74,7 @@ use self::{
     retained::{ArchiveBytes, ArchiveReadFailure, RetainedArtifact, RetainedBackups},
 };
 use super::{
-    command_result::{CommandDiagnostic, CommandResult},
+    command_result::{CommandDiagnostic, CommandDisposition, CommandResult, OutcomeUnknownCause},
     domain_clock::current_timestamp,
     domain_lifecycle::DomainDrainMode,
     model_mutation::{command_error, command_ok},
@@ -320,12 +322,59 @@ impl SessionServiceImpl {
                 }
             }
             Err(report) => {
-                let message = format!("backup failed: {report:#}");
-                CommandResult {
-                    diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
-                    ..command_error(message)
-                }
+                tracing::warn!(
+                    execution = %execution.reference,
+                    error = %format_args!("{report:#}"),
+                    "backup attempt failed"
+                );
+                self.backup_error_response(&execution.reference, report)
+                    .await
             }
+        }
+    }
+
+    /// Authority lost during an admitted cut leaves its execution applying. A cut whose budget
+    /// expired remains a terminal refusal, including a lease wait that last met a lapsed lease.
+    async fn backup_error_response(
+        &self,
+        reference: &CommandExecutionReference,
+        report: Report<BackupError>,
+    ) -> CommandResult {
+        if !matches!(report.current_context(), BackupError::CaptureTimeout { .. })
+            && let Some(ConsensusError::LeadershipLost { observed }) =
+                report.downcast_ref::<ConsensusError>()
+        {
+            let redirect = self.redirect_to_leader(observed.clone()).await;
+            let message = format!(
+                "{} while backup execution reference '{reference}' was applying: {report:#}; \
+                 retry it with the same reference to learn its outcome",
+                redirect.leadership_change()
+            );
+            return CommandResult {
+                diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
+                ..CommandResult::new(
+                    CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::LeadershipLost),
+                    message,
+                )
+            };
+        }
+        if let BackupError::CoordinatorChanged { .. } = report.current_context() {
+            let message = format!(
+                "backup execution reference '{reference}' lost its coordinator: {report:#}; retry \
+                 it with the same reference to learn its outcome"
+            );
+            return CommandResult {
+                diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
+                ..CommandResult::new(
+                    CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::LeadershipLost),
+                    message,
+                )
+            };
+        }
+        let message = format!("backup failed: {report:#}");
+        CommandResult {
+            diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
+            ..command_error(message)
         }
     }
 

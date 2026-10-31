@@ -2356,7 +2356,14 @@ completed `drain` duration. These are measurements of the same cut budget, never
 An owner request remains a terminal operation: a coordinator waiting for owners names that phase,
 and owner-local administrative logs distinguish revision catch-up, cluster-state application,
 lifecycle checkpoints, storage capture and staging. No remote progress is inferred from elapsed
-time. A cut that cannot reach a node it needs is refused as
+time. The command boundary reads a preserved `ConsensusError::LeadershipLost` beneath a capture or
+lifecycle context, or the cut's explicit `CoordinatorChanged`, as
+`OutcomeUnknown(LeadershipLost)`. The execution stays applying under its original reference,
+including when the same leader could not confirm its lease during pause, resume or mutation lease
+release. A `CaptureTimeout` remains a definitive refusal even when its last lease-admission cause
+was leadership loss; storage failures likewise retain their definitive failure and full chain.
+Every failed attempt logs its execution reference and report before command finalization can hold
+its result. A cut that cannot reach a node it needs is refused as
 `StateOwnerUnreachable` when the cluster does not report a placement's scheduled primary live, and
 as `ExecutorUnreachable` when, before a quiesced cut pauses, it does not report a node that runs the
 domain's work live. Each carries the domain, the entity's kind and name and the node as typed
