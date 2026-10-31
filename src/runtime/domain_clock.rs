@@ -1079,6 +1079,14 @@ impl Runtime {
             .mark_domain_clock_progress_delivered(domain, node);
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "clock maintenance accepts at most one progress report per tick period, domain \
+                      and authority node, coalesced to one request in flight"
+        )
+    )]
     pub(crate) fn handle_domain_clock_progress(
         &self,
         domain: &DomainName,

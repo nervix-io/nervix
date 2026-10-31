@@ -482,10 +482,13 @@ impl Runtime {
         forwarded: bool,
     ) -> Result<(ClientEmitterDescription, ClientEmitterConsumer), ClientEmitterRefusal> {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
-        let Some(endpoint) = self.inner.client_emitters.get(&key) else {
+        let Some(registered) = self.inner.client_emitters.get(&key) else {
             return Err(ClientEmitterRefusal::Closed);
         };
-        let endpoint = endpoint.clone();
+        let endpoint = registered.value().clone();
+        // The registry guard ends before the open waits for the endpoint's owner: an ending endpoint
+        // removes itself under the shard's write side, which a guard held across the wait would block.
+        drop(registered);
         let description = endpoint.description();
         let consumer = endpoint
             .open(expected_fields, max_batches, max_bytes, forwarded)
@@ -1484,6 +1487,42 @@ mod tests {
             retry_publisher.await.expect("publisher runs"),
             Ok(ClientEmitterResult::Acknowledged)
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn opening_a_consumer_holds_no_registry_guard_while_its_endpoint_answers() {
+        let runtime = Runtime::new();
+        let domain = DomainName::parse("test").assured("literal domain name");
+        let emitter = EmitterName::parse("output").assured("literal emitter name");
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
+        let endpoint = Arc::new(ClientEmitterEndpoint::new(
+            description(AckWindow::Sequential, Duration::from_secs(2)),
+            ClientEmitterBudget::default(),
+            series(),
+        ));
+        runtime.inner.client_emitters.insert(key.clone(), endpoint);
+        let credit = NonZeroU64::new(1024).assured("literal credit");
+        let expected_fields = fields();
+        let opening =
+            runtime.open_client_consumer(&domain, &emitter, &expected_fields, 1, credit, false);
+        let mut opening = std::pin::pin!(opening);
+
+        // The first poll takes the endpoint and asks its owner to attach a consumer. This task has
+        // not yielded since, so the owner has not answered and the open is waiting for it.
+        assert!(futures_util::poll!(&mut opening).is_pending());
+        // An ending endpoint removes itself from the registry under the shard's write side, so that
+        // side stays free while an open waits for the owner.
+        assert!(
+            runtime
+                .inner
+                .client_emitters
+                .try_get_mut(&key)
+                .is_present(),
+            "a waiting open holds no registry guard"
+        );
+
+        let (_, consumer) = opening.await.expect("the consumer opens");
+        drop(consumer);
     }
 }
 
