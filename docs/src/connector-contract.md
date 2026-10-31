@@ -929,7 +929,8 @@ can become an active graph. Kafka properties and object-store/catalog properties
 driver-delegated; database, Redis, RabbitMQ and NATS address query options belong to their driver.
 Undeclared delegated values are confidential in public inspection. Drivers retain their existing
 trust policy: HTTPS without a custom CA uses their built-in roots, while MQTT's `mqtts` address
-requires its declared `tls_ca_file` before commit. Conditional presence belongs to the key declaration.
+requires its declared `tls_ca_file` before commit and a plaintext `mqtt` address refuses it, as it
+refuses the client certificate pair. Conditional presence belongs to the key declaration.
 Configured CA replacement or augmentation follows the connector's documented policy. A Nervix-owned custom file must be readable; it does
 not disable verification or silently fall back when unavailable.
 
@@ -1039,6 +1040,24 @@ unpooled client's Nervix-owned keys are the address, `timeout_ms` and the TLS fi
 address's userinfo and query options belong to the driver and are masked in inspection. The
 NATS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
+
+`MQTT TOPIC` keeps a subscription's topic filter and a publication's topic exactly as written,
+letter case included, within MQTT's 65,535-byte string. A filter may write `+` for one level and
+`#` for every remaining level, each only as a whole level and `#` only last, but its first level
+is not `$share`: every instance subscribes through the shared subscription
+`$share/<domain>~<ingestor>/<filter>` that Nervix forms, so a filter naming its own would match
+nothing. A publication topic admits neither wildcard. The ingestor declares `NO ACK`, and
+`ACK SEQUENTIAL`, `ACK PARALLEL` and `SUSPEND` only with `SESSION PERSISTENT` and `QOS 1`, the
+session a broker keeps messages for and redelivers after a lost connection; `BUFFER` and `DROP`
+stay connected under any session. Neither direction carries transport headers, and the ingestor
+projects no typed metadata field. The emitter declares QoS as its publishing mode, `QOS 0`,
+`QOS 1 ACK` or `QOS 2 ACK`, with codec payloads, no envelope clause and optional batching up to the
+Maximum Packet Size each broker declares when the client connects. The unpooled client's keys are
+all Nervix-owned: `addr` names the broker by `mqtt` or `mqtts`, a host and a nonzero port, and
+nothing else, since a connection reads no credentials, path, query or fragment from it;
+`client_id`; and the TLS files, of which `tls_ca_file` is required exactly with `mqtts` and the
+client certificate pair is permitted only with it. The MQTT-specific declaration tests, generated
+grammar conformance and one-/three-node public declaration scenarios qualify these facts together.
 
 `KAFKA TOPIC` shares one topic-name rule between ingestion and emission: 1 to 249 ASCII letters,
 digits, `.`, `_` and `-`, other than `.` and `..`, passed through exactly as written. Its ingestor

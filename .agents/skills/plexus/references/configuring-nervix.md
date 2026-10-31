@@ -397,6 +397,11 @@ current connection, retry and deadline limits.
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
   session lifetime, the separate raw-frame and admitted-publish bounds, oversized-payload counts
   and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
+- An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
+  path or query; its `tls_*` files belong only with `mqtts`. Write MQTT wildcards only in an
+  ingestor's `TOPIC`, as whole levels with `#` last and never a leading `$share` level, which
+  Nervix forms itself; an emitter's `TOPIC` is one literal topic. Check both against the MQTT
+  sections of `Ingestors` and `Emitters`.
 - Redis Pub/Sub separates message read-ahead from the byte-bound quiesce buffer. Check the client
   required capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the source's explicit
   `BUFFER` or `DROP` policy in generated Plexus.
