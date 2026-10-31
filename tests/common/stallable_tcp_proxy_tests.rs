@@ -34,7 +34,10 @@ use pulsar::message::{
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::codec::Framed;
 
-use crate::stallable_tcp_proxy::StallableTcpProxy;
+use crate::{
+    port_pool::{PortPoolError, release_test_ports, reserve},
+    stallable_tcp_proxy::{AcceptedConnection, StallableTcpProxy},
+};
 
 /// How long a test waits for an outcome the proxy must produce. Generous, because each wait ends
 /// as soon as its outcome arrives.
@@ -247,6 +250,109 @@ async fn an_endpoint_records_when_it_accepted_each_connection_in_order() {
         "the endpoint recorded its connections out of order"
     );
     assert_eq!(endpoint.accepted_at(2), None);
+}
+
+/// The connections `proxy` accepted, once it has recorded the end of the first.
+async fn first_connection_ended(proxy: &StallableTcpProxy) -> Vec<AcceptedConnection> {
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let connections = proxy.accepted_connections();
+        if let Some(first) = connections.first()
+            && first.ended_at.is_some()
+        {
+            return connections;
+        }
+        nervix_primitives::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Whether the harness pool holds `port` for an owner: a draw that only ever lands on it misses
+/// until the pool reports itself exhausted. A port the pool does not hold is reserved by the draw
+/// and given straight back.
+fn pool_holds(port: u16) -> bool {
+    match reserve(1, || Ok(port)) {
+        Ok(drawn) => {
+            release_test_ports(&drawn);
+            false
+        }
+        Err(PortPoolError::Exhausted { .. }) => true,
+        Err(PortPoolError::Draw(error)) => {
+            panic!("a draw that only names one port has no draw to fail: {error}")
+        }
+    }
+}
+
+#[nervix_primitives::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_endpoint_listens_on_a_port_the_pool_holds_for_it_until_it_stops() {
+    let dependency = EchoDependency::start().await;
+    let proxy = dependency.proxy().await;
+    let silent = StallableTcpProxy::silent()
+        .await
+        .assured("the pool has a free port for the endpoint");
+    let ports = [proxy.local_port(), silent.local_port()];
+
+    // A port another scenario's peers may still dial stays in the pool until nothing can, so an
+    // endpoint that counts its client's connections must never be handed one.
+    for port in ports {
+        assert!(
+            pool_holds(port),
+            "an endpoint listens on port {port}, which the harness pool does not hold for it"
+        );
+    }
+
+    drop(proxy);
+    drop(silent);
+    for port in ports {
+        assert!(
+            !pool_holds(port),
+            "a stopped endpoint still holds port {port} in the harness pool"
+        );
+    }
+}
+
+#[nervix_primitives::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_endpoint_records_each_connections_peer_and_when_it_ended() {
+    let dependency = EchoDependency::start().await;
+    let proxy = dependency.proxy().await;
+    let mut closing = connect(&proxy).await;
+    let kept = connect(&proxy).await;
+    proxy.accepted_at_least(2).await;
+    let closing_peer = closing
+        .local_addr()
+        .assured("a connected socket knows its local address");
+    let kept_peer = kept
+        .local_addr()
+        .assured("a connected socket knows its local address");
+
+    closing
+        .shutdown()
+        .await
+        .assured("a loopback connection shuts its write side down");
+    drop(closing);
+    let connections = timeout(OUTCOME_BOUND, first_connection_ended(&proxy))
+        .await
+        .assured("the proxy records a closed connection's end within the bound");
+
+    let [first, second] = connections.as_slice() else {
+        panic!("the proxy accepted exactly two connections: {connections:?}");
+    };
+    assert_eq!(
+        first.peer, closing_peer,
+        "the first record names its client"
+    );
+    assert_eq!(second.peer, kept_peer, "the second record names its client");
+    let first_ended = first
+        .ended_at
+        .assured("the wait above returned once the first connection had ended");
+    assert!(
+        first.accepted_at <= first_ended,
+        "a connection ended before it was accepted"
+    );
+    assert_eq!(
+        second.ended_at, None,
+        "a connection its client keeps open has not ended"
+    );
+    drop(kept);
 }
 
 #[nervix_primitives::test(flavor = "multi_thread", worker_threads = 2)]
