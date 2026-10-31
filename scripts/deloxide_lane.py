@@ -1353,8 +1353,8 @@ def resolve_workspace(
     root: Path, target: Path, environment: Mapping[str, str], host: str
 ) -> Workspace:
     instrumented = COVERAGE_ATTEMPT_VARIABLE in environment
-    # A plain run keeps its diagnostic builds apart from the ordinary ones, so the diagnostic
-    # server binary never replaces the ordinary one; the collector already chose its own directory.
+    # A plain run keeps its diagnostic builds apart from the ordinary ones, so a diagnostic artifact
+    # never replaces an ordinary one; the collector already chose its own directory.
     if instrumented:
         build = target
     else:
