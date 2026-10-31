@@ -56,6 +56,7 @@ async fn snapshot_receive_admission(world: &mut ScenarioWorld, file: String, nod
                 },
                 kind: ModelKind::Deduplicator,
                 identifier: descriptor.entity.clone(),
+                unit: descriptor.unit,
                 branch_key: Some(
                     branch
                         .into_iter()
