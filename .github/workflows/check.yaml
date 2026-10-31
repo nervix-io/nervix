@@ -1872,8 +1872,8 @@ jobs:
         if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-connector-matrix
 
-      # Every pull request whose diff requires the suites tests the source selection and the console
-      # build's tooling here; the Bolero randomized job, which also runs them, needs `bolero-random`.
+      # A pull request labeled `extra-runners` measures the test selection and the console build's
+      # tooling here; the Bolero randomized job, which also runs them, needs `bolero-random`.
       - name: CI test selection
         if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-ci-selection
@@ -1894,9 +1894,13 @@ jobs:
         with:
           label: source-contracts-compiler-diagnostics-and-paired-api-doctests
 
+      # The analysis driver and its qualification build with the pinned nightly, which no other
+      # label's step is guaranteed to have installed and the justfile never installs on demand.
       - name: Source contracts, compiler diagnostics and paired API doctests
         if: contains(github.event.pull_request.labels.*.name, 'extra-compiler')
-        run: just coverage-native-extras test-typed-ratchet
+        run: |
+          just toolchains-install
+          just coverage-native-extras test-typed-ratchet
 
       - name: Runner diagnostics before Compiler cache changes, interruption and runner qualification
         if: contains(github.event.pull_request.labels.*.name, 'extra-compiler')

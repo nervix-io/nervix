@@ -272,6 +272,40 @@ class InventoryTests(unittest.TestCase):
             self.assertIn(f"target/native-coverage/**/{artifact}", upload)
         self.assertNotIn("profraw", upload)
 
+    def test_extra_tests_install_the_pinned_toolchain_before_each_step_that_builds_with_it(
+        self,
+    ) -> None:
+        workflow = (REPOSITORY / ".github/workflows/check.yaml").read_text(encoding="utf-8")
+        job = job_section(workflow, "extra-tests")
+        # Each extra-tests step runs only under its own label, and the justfile refuses to install
+        # a toolchain on demand, so a step that builds with the pinned analysis nightly runs after
+        # an installation under its own label, or under none, rather than after another label's.
+        pinned_commands = []
+        for producer in native_coverage.PRODUCERS:
+            if producer.toolchain is None:
+                continue
+            if producer.toolchain.startswith("nightly-"):
+                pinned_commands.append(f"just coverage-native-extras {producer.name}")
+        self.assertIn("just coverage-native-extras test-typed-ratchet", pinned_commands)
+        pinned_commands += ["just qualify-typed-ratchet-cache", "just coverage-typed-ratchet-python"]
+        installed: set[str | None] = set()
+        for name, condition, text in step_sections(job):
+            installation = text.find("just toolchains-install")
+            for command in pinned_commands:
+                position = text.find(command)
+                if position == -1:
+                    continue
+                with self.subTest(step=name, command=command):
+                    installed_before = None in installed or condition in installed
+                    installed_here = -1 < installation < position
+                    self.assertTrue(
+                        installed_before or installed_here,
+                        f"`{command}` runs under {condition!r} without installing the pinned "
+                        "toolchain under that condition first",
+                    )
+            if installation != -1:
+                installed.add(condition)
+
 
 def job_section(workflow: str, name: str) -> str:
     starts = list(re.finditer(r"^  ([a-z][a-z-]*):\n", workflow, re.MULTILINE))
@@ -286,6 +320,19 @@ def step_section(job: str, name: str) -> str:
     start = job.index(f"- name: {name}\n")
     following = job.find("\n      - name:", start + 1)
     return job[start : following if following != -1 else len(job)]
+
+
+def step_sections(job: str) -> list[tuple[str, str | None, str]]:
+    """Every step of a job in order: its name, its `if:` condition or None, and its text."""
+    steps = []
+    starts = [match.start() for match in re.finditer(r"^      - name: ", job, re.MULTILINE)]
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(job)
+        text = job[start:end]
+        name = text.splitlines()[0].removeprefix("      - name: ")
+        condition = re.search(r"^        if: (.+)$", text, re.MULTILINE)
+        steps.append((name, condition.group(1) if condition else None, text))
+    return steps
 
 
 class InstrumentationTests(unittest.TestCase):
