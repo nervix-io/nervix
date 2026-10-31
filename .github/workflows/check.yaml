@@ -1652,8 +1652,8 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
-          components: llvm-tools
           targets: wasm32-unknown-unknown
+          components: clippy, llvm-tools
 
       - name: Setup Rust nightly
         uses: dtolnay/rust-toolchain@nightly
