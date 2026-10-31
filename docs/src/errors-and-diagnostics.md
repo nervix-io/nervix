@@ -230,6 +230,16 @@ retain encoded input from that pool. The report preserves `AdmissionError` benea
 context, and refusal releases the input. A generator reports the failed read and tries a complete
 read again on its next occurrence; memory pressure never becomes absent or corrupt state.
 
+Interconnect rkyv decoders also refuse overlapping admission without waiting while retaining
+encoded input. Their local reports preserve `AdmissionError` beneath `TransportError`; a nested
+decoder owns its input charge through CPU completion even if the enclosing request is cancelled.
+At request dispatch, memory exhaustion, a request above the whole memory budget, a closed memory
+budget, a full execution queue and a closed execution pool are distinct `RemoteRequestFailure`
+variants. They preserve the traffic class and applicable byte or queue bounds. Temporary memory
+or queue exhaustion is recognized by `RequestError::is_capacity_exhaustion`; a stream opening answers
+503 for temporary refusal and 413 for a request above its budget. Malformed archive validation
+retains `InvalidPayload` with its complete rendered cause chain.
+
 ### Outcomes That Are Not Reports
 
 An ordinary outcome is a typed value, never an error report. Waiting for or skipping a message

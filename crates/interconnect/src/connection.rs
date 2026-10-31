@@ -103,7 +103,8 @@ pub(crate) mod stream_slots;
 mod targets;
 
 use body::{
-    read_body, read_body_in_free_room, read_body_into, send_body, send_response, send_static_error,
+    read_body, read_body_in_free_room, read_body_into, send_body, send_decode_refusal,
+    send_response, send_static_error,
 };
 use dial::{DialedStream, OutboundDial};
 pub(crate) use duplex::FrameReader;
