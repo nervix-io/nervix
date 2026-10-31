@@ -32,8 +32,8 @@ use crate::{
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody,
-    IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference, IngestorReferenceKind,
-    LocatorDeclaration, LocatorName, PositionClass,
+    IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, PositionClass,
 };
 
 configured_client!(Redis: pooled, config CLIENT_CONFIG, CreateClientRedis => RedisConfigEntry);
@@ -141,7 +141,7 @@ impl IngestorDeclaration for RedisPubSubIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // Redis Pub/Sub carries the channel and payload, without transport headers.
         headers: None,
-        metadata: IngestorMetadataScope::Headers,
+        metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Redis),
         position_class: PositionClass::None,

@@ -10,14 +10,15 @@ no binary or compiler, so repeating it over retained artifacts gives the same li
 downloaded artifact directory, or one report or record.
 
 The selection decides which producers the union requires. Every run whose tested diff requires the
-suites needs the ordinary workspace report the coverage job merged, the Shuttle, Loom, Turmoil and
-Deloxide primitive conformance collections of the extra-tests job, and the collections of the
-diagnostic-evidence job. The `shuttle`, `loom`, `turmoil` and `deloxide` labels add their jobs'
-canonical collections, and a pull request carrying `fuzz` adds the combined live Bolero fuzz
+suites needs the ordinary workspace report the coverage job merged and the collections of the
+diagnostic-evidence job. `extra-primitives` adds the extra-tests job's Shuttle, Loom, Turmoil and
+Deloxide primitive conformance collections, the `shuttle`, `loom`, `turmoil` and `deloxide` labels
+add their jobs' canonical collections, and a pull request carrying `fuzz` adds the combined live Bolero fuzz
 campaign. The Bolero call's selection record must show that its randomized properties passed exactly
 when `bolero-random` requested them and that its sanitizer campaigns ran exactly when `fuzz`
 requested them: a deliberate skip is valid and supplies no report. Every required producer job must
-have succeeded, and every other one must have been skipped.
+have succeeded, and every other one must have been skipped, except extra-tests, whose other labels
+run steps of their own.
 
 Each input is validated before any of its lines joins the union. A native collection must be
 complete; at the tested revision with an unmodified working tree; from this run at an attempt no
@@ -109,6 +110,10 @@ PULL_REQUEST = "pull_request"
 LOCAL_EVENT = "local"
 SUCCESS = "success"
 SKIPPED = "skipped"
+# The label that makes the extra-tests job collect the modeled primitive conformance.
+PRIMITIVES_LABEL = "extra-primitives"
+# A job another label can run for steps of its own, so it may succeed without any producer here.
+SHARED_JOBS = frozenset({"extra-tests"})
 NATIVE_PRODUCERS = {producer.name: producer for producer in native.PRODUCERS}
 DA_PREFIX = "DA:"
 
@@ -202,10 +207,22 @@ class Requirement:
 # hold each label-gated job, the producer it collects and the artifact it uploads to this table.
 REQUIREMENTS: tuple[Requirement, ...] = (
     Requirement(ORDINARY_REPORT, job="coverage", artifact="coverage-merged"),
-    Requirement("test-primitives-shuttle", job="extra-tests", artifact="coverage-native-extras"),
-    Requirement("test-primitives-loom", job="extra-tests", artifact="coverage-native-extras"),
-    Requirement("test-primitives-turmoil", job="extra-tests", artifact="coverage-native-extras"),
-    Requirement("test-primitives-deloxide", job="extra-tests", artifact="coverage-native-extras"),
+    Requirement(
+        "test-primitives-shuttle", job="extra-tests", artifact="coverage-native-extras",
+        label=PRIMITIVES_LABEL,
+    ),
+    Requirement(
+        "test-primitives-loom", job="extra-tests", artifact="coverage-native-extras",
+        label=PRIMITIVES_LABEL,
+    ),
+    Requirement(
+        "test-primitives-turmoil", job="extra-tests", artifact="coverage-native-extras",
+        label=PRIMITIVES_LABEL,
+    ),
+    Requirement(
+        "test-primitives-deloxide", job="extra-tests", artifact="coverage-native-extras",
+        label=PRIMITIVES_LABEL,
+    ),
     Requirement("test-deadlock-evidence-order", job="diagnostic-evidence", artifact="diagnostic-evidence"),
     Requirement("test-deadlock-report", job="diagnostic-evidence", artifact="diagnostic-evidence"),
     Requirement("test-shuttle", job="shuttle", artifact="coverage-shuttle", label="shuttle"),
@@ -650,7 +667,8 @@ class FullCoverage:
                     f"the {job} job ended {result or 'without a recorded result'}, so its coverage is not "
                     f"complete evidence of this run; fix that job first"
                 )
-            if job not in required and result != SKIPPED:
+            allowed = {SKIPPED, SUCCESS} if job in SHARED_JOBS else {SKIPPED}
+            if job not in required and result not in allowed:
                 self.problem(f"the {job} job ended {result}, although this run's selection does not require it")
 
     def one(self, requirement: Requirement, records: list[Record]) -> Record | None:

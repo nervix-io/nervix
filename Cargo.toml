@@ -1,4 +1,7 @@
 [package]
+# The test suites in `tests/` are the `nervix-scenarios` package, so building them links no server
+# binary: Cargo builds a package's binaries for that package's integration tests.
+autotests = false
 description = "The Nervix server: registry, runtime, control plane and the session, HTTP and cluster edges"
 edition.workspace = true
 name = "nervix-server"
@@ -237,68 +240,19 @@ webpki-roots = { workspace = true }
 
 [dev-dependencies]
 alloc_count = { workspace = true }
-async-nats = { workspace = true }
-aws-config = { workspace = true }
-aws-credential-types = { workspace = true }
-aws-sdk-sqs = { workspace = true }
 bolero = { workspace = true }
-nervix-connector-fake = { workspace = true }
-# The SDK crates disable their TLS defaults below; select AWS-LC on their shared client.
-aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 criterion = { workspace = true }
-cucumber = { workspace = true, features = ["libtest"] }
-flate2 = { workspace = true }
-h2 = { workspace = true }
-httparse = { workspace = true }
-iceberg = { workspace = true }
-iceberg-catalog-rest = { workspace = true }
-iceberg-storage-opendal = { workspace = true }
-lapin = { workspace = true }
-mongodb = { workspace = true }
-# This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
-mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-arbitrary = { workspace = true }
 nervix-client-core = { workspace = true, features = ["arrow"] }
-nervix-client-ffi = { workspace = true }
-# The scenarios read the deadlock evidence diagnostic nodes record.
-nervix-deadlock = { workspace = true }
-# The runtime's timer tests advance a paused clock.
+nervix-connector-fake = { workspace = true }
 nervix-model-harness = { workspace = true }
+# The runtime's timer tests advance a paused clock.
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 nervix-test-environment = { workspace = true }
 nix = { workspace = true, features = ["fs", "signal", "term"] }
-# The features the OTEL connector builds the crate with, so the scenarios decode the Export
-# requests it sends without compiling the crate a second time.
-opentelemetry-proto = { workspace = true, features = [
-  "gen-tonic",
-  "logs",
-  "metrics",
-  "trace",
-] }
-otel-prost = { workspace = true }
-playwright-rs = { workspace = true }
-pulsar = { workspace = true }
 rcgen = { workspace = true }
-redis = { workspace = true }
-reqwest = { workspace = true, features = [
-  "json",
-  "rustls",
-  "gzip",
-  "brotli",
-  "deflate",
-  "hickory-dns",
-] }
 rstest = { workspace = true }
-rumqttc = { workspace = true }
-sqlx = { workspace = true }
 tempfile = { workspace = true }
-tokio-util = { workspace = true, features = ["codec"] }
-zeromq = { workspace = true }
-
-[[test]]
-harness = false
-name = "scenarios"
-required-features = ["testing"]
 
 [[bench]]
 harness = false
@@ -400,6 +354,7 @@ members = [
   "crates/test-environment",
   "crates/nervix-cli",
   "examples/paced-simulation/rust",
+  "tests",
 ]
 
 [workspace.package]
@@ -556,7 +511,6 @@ js-sys = "0.3"
 # runtime that used it.
 lapin = "4.12.0"
 leptos = { version = "0.8.19", features = ["csr"] }
-libc = "0.2"
 # The model checker for memory-ordering claims. Only `nervix-primitives` selects its atomics and
 # threads, and only `nervix-model-harness` runs its models; both take it as an optional dependency,
 # so no ordinary dependency graph contains it.
@@ -625,6 +579,7 @@ nervix-primitives = { package = "nervix-primitives", path = "crates/primitives" 
 nervix-primitives-macros = { package = "nervix-primitives-macros", path = "crates/primitives/macros" }
 nervix-recovery = { package = "nervix-recovery", path = "crates/recovery" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
+nervix-server = { package = "nervix-server", path = "." }
 nervix-simd-kernels = { package = "nervix-simd-kernels", path = "crates/simd-kernels" }
 nervix-test-environment = { package = "nervix-test-environment", path = "crates/test-environment" }
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
@@ -725,7 +680,6 @@ rustyline = "17"
 ryu = "1"
 sentry-types = "0.48.5"
 serde = { version = "1", features = ["derive"] }
-serde_bytes = "0.11"
 # `float_roundtrip` reads a decimal as the float nearest to it. serde_json's default reader is
 # best-effort and names a neighbouring float for 10 to 25 percent of the sixteen- and
 # seventeen-digit decimals that computed floats print as, which changed an F64 on its way through
@@ -809,9 +763,6 @@ async-nats = { git = "https://github.com/glebpom/nats.rs.git", rev = "d131b7bc95
 # rkyv 0.8.18 leaks partial allocations when semantic deserialization refuses
 # an element. Pin its 0.8.18 ownership fix until https://github.com/rkyv/rkyv/pull/710 ships.
 rkyv = { git = "https://github.com/glebpom/rkyv.git", rev = "868fa9c3c268560ad3459ddb95e271c7167bc097" }
-# The archived 2.0.1 release triggers Rust's future-incompatibility lint; this is the focused fix
-# from https://github.com/GnomedDev/proc-macro-error-2/pull/14.
-proc-macro-error2 = { git = "https://github.com/fgardt/proc-macro-error-2.git", rev = "53ff94b61c678593158db1a3d50269c6f0de0db7" }
 # fjall up to 3.1.12 closes a database with a blocking send of each worker's stop message, which
 # waits forever once a worker has failed and the bounded channel is full, so terminal teardown could
 # hang (https://github.com/fjall-rs/fjall/issues/260). Pin the 3.1.10 fix that never blocks on that

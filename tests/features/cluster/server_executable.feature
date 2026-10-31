@@ -6,4 +6,3 @@ Feature: Server executable identity
       """
       Usage: nervix-server [OPTIONS]
       """
-    And the legacy nervix server executable is absent
