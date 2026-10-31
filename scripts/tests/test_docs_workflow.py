@@ -137,11 +137,10 @@ class DocsWorkflowTests(unittest.TestCase):
         self.assertNotIn("needs:", job)
         self.assertIn(
             "    if: >-\n"
-            "      github.event_name != 'schedule' &&\n"
-            "      (github.event_name != 'pull_request' ||\n"
-            "        (github.event.pull_request.head.repo.full_name == github.repository &&\n"
-            "          contains(github.event.pull_request.labels.*.name, 'book') &&\n"
-            "          (github.event.action != 'labeled' || github.event.label.name == 'book')))\n",
+            "      github.event_name != 'pull_request' ||\n"
+            "      (github.event.pull_request.head.repo.full_name == github.repository &&\n"
+            "        contains(github.event.pull_request.labels.*.name, 'book') &&\n"
+            "        (github.event.action != 'labeled' || github.event.label.name == 'book'))\n",
             job,
         )
         self.assertIn(

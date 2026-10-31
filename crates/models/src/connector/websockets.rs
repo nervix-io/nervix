@@ -48,8 +48,9 @@ use crate::{
     ClientResourceMount, ConnectorKind, DeclaredDelivery, DeclaredQuiesce, EndpointIngestMode,
     EndpointName, EndpointType, HeaderLayout, HeaderModel, IngestAcknowledgement,
     IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
-    IngestorMetadataScope, IngestorReference, IngestorReferenceKind, OptionDeclaration, OptionForm,
-    OptionPresence, OptionValue, PositionClass, SignalingProtocolName,
+    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
+    IngestorReferenceKind, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PositionClass, SignalingProtocolName,
 };
 
 /// The current keys this connector reads, shared by validation, completion and inspection.
@@ -205,10 +206,17 @@ const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["A message above 64 MiB or a frame above 16 MiB ends the session."],
 };
 
+/// The text or binary kind of one data frame of a WebSockets connection.
+const WEBSOCKETS_CONNECTION_METADATA: IngestorMetadataDeclaration =
+    IngestorMetadataDeclaration::new(&[IngestorMetadataField::new(
+        "frame_type",
+        IngestorMetadataType::String,
+    )]);
+
 impl IngestorDeclaration for WebsocketsConnectionIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-        metadata: IngestorMetadataScope::Websockets,
+        metadata: WEBSOCKETS_CONNECTION_METADATA,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Websockets),
         position_class: PositionClass::None,
@@ -278,7 +286,7 @@ impl IngestorDeclaration for WebsocketsEndpointIngestor {
         // The opening HTTP upgrade request's fields, as the server's header map keeps them: names in
         // lowercase, every value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-        metadata: IngestorMetadataScope::Headers,
+        metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: true,
         reference: IngestorReferenceKind::Endpoint(EndpointType::Websockets),
         position_class: PositionClass::None,

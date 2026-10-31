@@ -70,7 +70,7 @@ impl FromStr for Driver {
 impl Driver {
     /// The command that runs this driver.
     fn command(self) -> ProcessCommand {
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repository = workspace_root();
         match self {
             Self::Rust => {
                 let program = match std::env::var_os(RUST_DRIVER_ENV) {
@@ -109,7 +109,7 @@ impl Driver {
 fn build_directory() -> PathBuf {
     let target = match std::env::var_os("CARGO_TARGET_DIR") {
         Some(path) => PathBuf::from(path),
-        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("target"),
+        None => workspace_root().join("target"),
     };
     target.join("debug")
 }
@@ -616,7 +616,7 @@ async fn given_the_driver_file_contains(
 async fn given_the_leader_node_is_configured_with_the_example_graph(world: &mut ScenarioWorld) {
     world.last_command_error = None;
     world.last_command_output = None;
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(EXAMPLE_GRAPH);
+    let path = workspace_root().join(EXAMPLE_GRAPH);
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
     // `USE` is client-local: a client selects the domain itself and sends the rest. The harness's
