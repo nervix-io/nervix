@@ -21,6 +21,7 @@ shuttle = [
 arch-into = { workspace = true }
 arrow-array = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true }
 error-stack = { workspace = true }
 humantime = { workspace = true }
 meticulous = { workspace = true }
@@ -29,6 +30,7 @@ nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
+percent-encoding = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
@@ -49,3 +51,4 @@ nervix-model-harness = { workspace = true }
 # The physical-deadline tests advance a paused clock.
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }

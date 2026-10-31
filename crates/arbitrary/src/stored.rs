@@ -457,7 +457,7 @@ impl Arbitrary<'_> {
         let assigned = self.records(Self::rule_name::<ClusterNodeName>);
         node = node.placed_on(primary, assigned);
         if self.entropy.flag() {
-            node.ownership_transition = Some(self.ownership_transition());
+            node.single_unit_mut().ownership_transition = Some(self.ownership_transition());
         }
         self.advance_wasm_state(&mut node);
         node
@@ -471,6 +471,7 @@ impl Arbitrary<'_> {
         });
         let primary_node = self.optional_cluster_node();
         PlacementGroupSchedule {
+            unit: nervix_models::Unit::Single,
             members,
             primary_node,
         }

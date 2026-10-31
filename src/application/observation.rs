@@ -1831,7 +1831,7 @@ impl SessionServiceImpl {
                 {
                     targets.push(owner.clone());
                 }
-                for assigned in &lookup_node.assigned_nodes {
+                for assigned in &lookup_node.single_unit().assigned_nodes {
                     if assigned != local_node_id && !targets.contains(assigned) {
                         targets.push(assigned.clone());
                     }
@@ -1848,7 +1848,7 @@ impl SessionServiceImpl {
                 if let Some(owner) = lookup_node.execution_node() {
                     targets.push(owner.clone());
                 }
-                for assigned in &lookup_node.assigned_nodes {
+                for assigned in &lookup_node.single_unit().assigned_nodes {
                     if !targets.contains(assigned) {
                         targets.push(assigned.clone());
                     }

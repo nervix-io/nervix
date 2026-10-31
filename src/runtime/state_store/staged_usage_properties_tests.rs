@@ -58,6 +58,7 @@ impl StagedCheckpoint {
             kind: ModelKind::Ingestor,
             identifier: ModelName::parse(ENTITIES[self.entity]).assured("the test entity is valid"),
             state: RuntimeState::KafkaOffset,
+            unit: nervix_models::Unit::Single,
             branch_key: None,
         }
     }

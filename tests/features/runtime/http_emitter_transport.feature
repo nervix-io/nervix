@@ -417,7 +417,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
     And HTTP receiver "api" request 2 repeats request 1
     And within "30s" DESCRIBE EMITTER "published" on the leader node contains
       """
-      transient error: HTTP response header exchange failed: HTTP connection closed before complete final response headers
+      transient error: HTTP response header exchange failed: connection closed before message completed
       """
     And HTTP receiver "api" captured no request with request line "POST /events/2"
     When HTTP receiver "api" answers requests for "/events/1" with "respond 204"

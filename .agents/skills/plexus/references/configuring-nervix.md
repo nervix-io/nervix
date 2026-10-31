@@ -337,6 +337,10 @@ current connection, retry and deadline limits.
 - Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
   capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
   an ingestor's `NO ACK` or an emitter's `NO ACK`.
+- Every Kafka client sets `bootstrap.servers`; `CREATE KAFKA CLIENT` refuses a client without it.
+  Treat `TOPIC` as a literal, case-preserving Kafka topic name in both directions, and give every
+  `KAFKA TOPIC` ingestor `OFFSET BY DOMAIN` or `OFFSET BY CONSUMER GROUP '<group>'` and
+  `ON QUIESCE SUSPEND`.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default. Under `OFFSET BY DOMAIN` in an unpaced domain the same policy places a
@@ -632,7 +636,9 @@ Choose checks relevant to the configured graph:
   expiry outcomes.
 
 For a parse error, follow the reported expected token and compare clause order with the relevant
-public example. For a validation error, trace exact types, declaration order, domain ownership,
+public example. For an MQTT QoS or session-pairing refusal, use the underlined token and the
+connector's Ingestors or Emitters section to choose an accepted value or quiesce mode.
+For a validation error, trace exact types, declaration order, domain ownership,
 branch compatibility, construction completeness, and connector capabilities. For missing data,
 check domain lifecycle, source offsets, timestamps, filters, branch keys, route filters, flush
 boundaries, input collection boundaries, and external entity provisioning in that order.

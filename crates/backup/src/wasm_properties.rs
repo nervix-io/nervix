@@ -103,6 +103,7 @@ impl Descriptors<'_> {
         WasmStateDescriptor {
             domain: self.0.name(),
             entity: self.0.name(),
+            unit: crate::archive_values::Values(self.0.clone()).unit(),
             schema: SchemaFingerprint::from_digest(std::array::from_fn(|_| {
                 self.0.entropy().byte()
             })),

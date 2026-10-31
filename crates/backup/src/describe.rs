@@ -505,7 +505,11 @@ impl Describer {
         let bytes = content.read_all(entry, MAX_RECORD_BYTES)?;
         let descriptor = MaterializedRelayDescriptor::decode(entry.path.as_str(), &bytes)?;
         if entry.path
-            != SectionPath::materialized_descriptor(&descriptor.domain, &descriptor.entity)
+            != SectionPath::materialized_descriptor(
+                &descriptor.domain,
+                &descriptor.entity,
+                descriptor.unit,
+            )
         {
             return Err(misplaced(entry));
         }
@@ -542,12 +546,17 @@ impl Describer {
             != SectionPath::materialized_identities(
                 &identities.domain,
                 &identities.entity,
+                identities.unit,
                 identities.group,
             )
         {
             return Err(misplaced(entry));
         }
-        let path = SectionPath::materialized_descriptor(&identities.domain, &identities.entity);
+        let path = SectionPath::materialized_descriptor(
+            &identities.domain,
+            &identities.entity,
+            identities.unit,
+        );
         let (domain, index) = self
             .materialized_paths
             .get(&path)
@@ -618,7 +627,12 @@ impl Describer {
         };
         if group >= descriptor.groups
             || entry.path
-                != SectionPath::materialized_columns(&descriptor.domain, &descriptor.entity, group)
+                != SectionPath::materialized_columns(
+                    &descriptor.domain,
+                    &descriptor.entity,
+                    descriptor.unit,
+                    group,
+                )
         {
             return Err(misplaced(entry));
         }
@@ -640,6 +654,7 @@ impl Describer {
         let expected = SectionPath::deduplicator_descriptor(
             &descriptor.domain,
             &descriptor.entity,
+            descriptor.unit,
             descriptor.branch_fingerprint.as_ref(),
         );
         if entry.path != expected {
@@ -674,6 +689,7 @@ impl Describer {
         let expected = SectionPath::window_descriptor(
             &descriptor.domain,
             &descriptor.entity,
+            descriptor.unit,
             descriptor.branch_fingerprint.as_ref(),
         );
         if entry.path != expected {
@@ -745,6 +761,7 @@ impl Describer {
         let expected = SectionPath::deduplicator_keys(
             &descriptor.domain,
             &descriptor.entity,
+            descriptor.unit,
             descriptor.branch_fingerprint.as_ref(),
             group,
         );
@@ -777,12 +794,14 @@ impl Describer {
             WindowGroupSection::Input => SectionPath::window_input_rows(
                 &descriptor.domain,
                 &descriptor.entity,
+                descriptor.unit,
                 descriptor.branch_fingerprint.as_ref(),
                 group,
             ),
             WindowGroupSection::Arguments => SectionPath::window_argument_columns(
                 &descriptor.domain,
                 &descriptor.entity,
+                descriptor.unit,
                 descriptor.branch_fingerprint.as_ref(),
                 group,
             ),
@@ -812,6 +831,7 @@ impl Describer {
         let expected = SectionPath::wasm_state_descriptor(
             &descriptor.domain,
             &descriptor.entity,
+            descriptor.unit,
             descriptor.branch_fingerprint.as_ref(),
         );
         if entry.path != expected {
@@ -824,6 +844,7 @@ impl Describer {
         let blob_path = SectionPath::wasm_guest_blob(
             &descriptor.domain,
             &descriptor.entity,
+            descriptor.unit,
             descriptor.branch_fingerprint.as_ref(),
         );
         if self
@@ -848,7 +869,8 @@ impl Describer {
     ) -> Result<(), Report<ArchiveReadError>> {
         let bytes = content.read_all(entry, MAX_RECORD_BYTES)?;
         let offsets = KafkaOffsetsRecord::decode(entry.path.as_str(), &bytes)?;
-        if entry.path != SectionPath::kafka_offsets(&offsets.domain, &offsets.entity) {
+        if entry.path != SectionPath::kafka_offsets(&offsets.domain, &offsets.entity, offsets.unit)
+        {
             return Err(misplaced(entry));
         }
         let Some(domain) = self.domains.get_mut(&offsets.domain) else {
@@ -873,6 +895,7 @@ impl Describer {
                 &lifecycle.domain,
                 lifecycle.owner_kind,
                 &lifecycle.entity,
+                lifecycle.unit,
             )
         {
             return Err(misplaced(entry));

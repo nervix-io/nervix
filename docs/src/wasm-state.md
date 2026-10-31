@@ -216,13 +216,15 @@ can discard state after a failed restore.
 ### Placements
 
 Every checkpoint is stored, served, replicated, transferred, and restored under a placement: the
-domain, the processor, the concrete branch or the unbranched instance, the fingerprint of the
-schemas the processor's records are laid out by, and the branch's guest-state generation. A node
+domain, the processor, its scheduled execution unit, the concrete branch or the unbranched
+instance, the fingerprint of the schemas the processor's records are laid out by, and the branch's
+guest-state generation. A node
 places guest state only under the identity derived from the committed schedule in its applied typed
 execution revision, and acts on a placement only while that placement is current. The same revision
-carries the processor's reset and pinned module plans through a rebuild or owner change. A replica
+carries each unit's guest-state generations and the processor's pinned module plan through a
+rebuild or owner change. A replica
 acknowledgement counts only toward the placement it names. Installed replication routes retain the
-same entity assignment publication as guest checkpoint execution. Reset lifecycle confirmation
+same unit assignment publication as guest checkpoint execution. Reset lifecycle confirmation
 retains its route, follows replica reassignment, and refuses replacement or loss of primary
 ownership before declaring confirmation; neither that wait nor its announcer reads execution maps.
 See [Checkpoint
@@ -821,7 +823,7 @@ milliseconds for sixteen concurrent branches that share a synchronization.
 
 ## Retained Checkpoint Assignment
 
-A branch's guest-state owner retains its entity assignment publication. Schedule installation
+A branch's guest-state owner retains its unit assignment publication. Schedule installation
 publishes state identity and checkpoint executors/replicas together before a reset callback can
 checkpoint. Each callback and replica-boundary replan reads that retained slot. Replacement
 lifetimes and removed entities are rejected before guest capture; losing local execution ownership

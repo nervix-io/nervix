@@ -1515,7 +1515,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 }
 
 // The header identifies the current persisted Model shape before archive decoding.
-const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MODEL TAM";
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX UNIT META";
 
 #[cfg(test)]
 #[cfg_attr(
@@ -1886,7 +1886,7 @@ mod tests {
             ))
             .expect("fixture schedule must include its materialized relay");
         assert_eq!(
-            scheduled_relay.assigned_nodes,
+            scheduled_relay.single_unit().assigned_nodes,
             [named::<ClusterNodeName>("node-1")]
         );
 

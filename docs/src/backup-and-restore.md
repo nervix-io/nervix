@@ -462,7 +462,7 @@ shape, the field that is missing, undeclared or of another type. It never includ
 which a branch schema may declare `SENSITIVE`:
 
 ```text
-restore refused: the branch key of lifecycle entry 1 in archive section 'domains/payments/state/branch_lifecycle/deduplicator/unique_payment_filter/branches.rkyv' does not belong to the branching of deduplicator 'unique_payment_filter' in domain 'payments': it is not a key of branch 'by_tenant': field 'tenant' does not hold a value of its declared type: expected STRING, found I64
+restore refused: the branch key of lifecycle entry 1 in archive section 'domains/payments/state/branch_lifecycle/deduplicator/unique_payment_filter/single/branches.rkyv' does not belong to the branching of deduplicator 'unique_payment_filter' in domain 'payments': it is not a key of branch 'by_tenant': field 'tenant' does not hold a value of its declared type: expected STRING, found I64
 ```
 
 Installation checks the same keys against the schedule it installs under before it stages any
@@ -784,18 +784,20 @@ arrives.
 | `domains/<domain>/models.plexus` | The domain's models as Plexus | Every domain |
 | `domains/<domain>/resources/<resource>/<version>/version.rkyv` | One resource version record | Every resource version |
 | `domains/<domain>/resources/<resource>/<version>/archive.tar` | The version's original upload | Published versions, unless `WITHOUT RESOURCES` |
-| `domains/<domain>/state/wasm_processor/<processor>/<branch>/descriptor.rkyv` | Typed WASM checkpoint identity, schema fingerprint, generation and revision | Saved WASM branches unless `WITHOUT STATE` |
-| `domains/<domain>/state/wasm_processor/<processor>/<branch>/guest.bin` | Raw guest save bytes | With each WASM descriptor |
-| `domains/<domain>/state/kafka_offset/<ingestor>/offsets.rkyv` | Ingestor schema fingerprint and next offsets by topic and partition | Published Kafka domain offsets unless `WITHOUT STATE` |
-| `domains/<domain>/state/branch_lifecycle/<kind>/<processor>/branches.rkyv` | Typed branch keys, incarnations and LRU order | Published branch lifecycle unless `WITHOUT STATE` |
-| `domains/<domain>/state/materialized_relay/<relay>/descriptor.rkyv` | Domain/relay identity, raw schema fingerprint, revision, fence, branch generation, row and group counts | Every captured materialized relay unless `WITHOUT STATE` |
-| `domains/<domain>/state/materialized_relay/<relay>/groups/<group>/identities.rkyv` | Typed branch keys and low/high watermarks for the group's rows | Every nonempty materialized group |
-| `domains/<domain>/state/materialized_relay/<relay>/groups/<group>/columns.arrow` | Exact-schema Arrow IPC columns in identity order | With each identity group |
-| `domains/<domain>/state/deduplicator/<deduplicator>/<branch>/descriptor.rkyv` | Deduplicator identity, schema fingerprint, typed branch key, revision, key count and group count | Every captured deduplicator branch unless `WITHOUT STATE` |
-| `domains/<domain>/state/deduplicator/<deduplicator>/<branch>/groups/<group>/keys.arrow` | Arrow IPC with one typed column per `DEDUPLICATE ON` expression and the `seen_at` timestamp of each key | Every nonempty deduplicator group |
-| `domains/<domain>/state/window_processor/<processor>/<branch>/descriptor.rkyv` | Window identity, schema fingerprint, window model digest, typed branch key, revision, branch incarnation, row sequences and watermarks, group count and delayed histogram removals | Every captured window branch with a branch lifetime unless `WITHOUT STATE` |
-| `domains/<domain>/state/window_processor/<processor>/<branch>/groups/<group>/input.arrow` | The retained input rows as Arrow IPC of the window's input relay schema | Every nonempty window group |
-| `domains/<domain>/state/window_processor/<processor>/<branch>/groups/<group>/arguments.arrow` | Each retained row's aggregate argument values, one nullable column per argument in demand order, row-aligned with the input rows | With each window input group |
+| `domains/<domain>/state/wasm_processor/<processor>/<unit>/<branch>/descriptor.rkyv` | Typed WASM checkpoint identity, schema fingerprint, generation and revision | Saved WASM branches unless `WITHOUT STATE` |
+| `domains/<domain>/state/wasm_processor/<processor>/<unit>/<branch>/guest.bin` | Raw guest save bytes | With each WASM descriptor |
+| `domains/<domain>/state/kafka_offset/<ingestor>/<unit>/offsets.rkyv` | Ingestor schema fingerprint and next offsets by topic and partition | Published Kafka domain offsets unless `WITHOUT STATE` |
+| `domains/<domain>/state/branch_lifecycle/<kind>/<processor>/<unit>/branches.rkyv` | Typed branch keys, incarnations and LRU order | Published branch lifecycle unless `WITHOUT STATE` |
+| `domains/<domain>/state/materialized_relay/<relay>/<unit>/descriptor.rkyv` | Domain/relay identity, raw schema fingerprint, revision, fence, branch generation, row and group counts | Every captured materialized relay unless `WITHOUT STATE` |
+| `domains/<domain>/state/materialized_relay/<relay>/<unit>/groups/<group>/identities.rkyv` | Typed branch keys and low/high watermarks for the group's rows | Every nonempty materialized group |
+| `domains/<domain>/state/materialized_relay/<relay>/<unit>/groups/<group>/columns.arrow` | Exact-schema Arrow IPC columns in identity order | With each identity group |
+| `domains/<domain>/state/deduplicator/<deduplicator>/<unit>/<branch>/descriptor.rkyv` | Deduplicator identity, schema fingerprint, typed branch key, revision, key count and group count | Every captured deduplicator branch unless `WITHOUT STATE` |
+| `domains/<domain>/state/deduplicator/<deduplicator>/<unit>/<branch>/groups/<group>/keys.arrow` | Arrow IPC with one typed column per `DEDUPLICATE ON` expression and the `seen_at` timestamp of each key | Every nonempty deduplicator group |
+| `domains/<domain>/state/window_processor/<processor>/<unit>/<branch>/descriptor.rkyv` | Window identity, schema fingerprint, window model digest, typed branch key, revision, branch incarnation, row sequences and watermarks, group count and delayed histogram removals | Every captured window branch with a branch lifetime unless `WITHOUT STATE` |
+| `domains/<domain>/state/window_processor/<processor>/<unit>/<branch>/groups/<group>/input.arrow` | The retained input rows as Arrow IPC of the window's input relay schema | Every nonempty window group |
+| `domains/<domain>/state/window_processor/<processor>/<unit>/<branch>/groups/<group>/arguments.arrow` | Each retained row's aggregate argument values, one nullable column per argument in demand order, row-aligned with the input rows | With each window input group |
+
+The `<unit>` path portion is `single`, `partition/<number>`, or `instance/<number>`. The record descriptor carries the same typed unit; sections of separate units of one entity have distinct paths and restore destinations.
 
 Materialized group coordinates are zero-based decimal numbers padded to ten digits. A descriptor
 with zero rows has zero groups. A record comes before the sections it owns: a resource version
@@ -829,15 +831,17 @@ its format version, each a little-endian 16-bit integer. The rest is an
 | Users | 2 | 1 | Every user's name and password hash as a PHC string |
 | Domain | 3 | 1 | Pace, default placement policy, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number |
 | Resource version | 4 | 1 | The version's domain, resource and number, its upload state, and for a published version its checksums, file count, sizes, creation time and creating node |
-| WASM guest state descriptor | 5 | 1 | The saved branch key, schema fingerprint, guest state generation and checkpoint revision |
-| Kafka domain offsets | 6 | 2 | The ingestor schema fingerprint, optional applied explicit-start generation, and ordered topic and partition positions, expressed as the next offset to consume |
-| Branch lifecycle | 7 | 1 | The owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
-| Materialized relay descriptor | 8 | 1 | Domain and relay names, schema fingerprint, revision, ownership fence, branch generation, row count and group count |
-| Materialized record identities | 9 | 1 | Ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
-| Deduplicator keyspace descriptor | 10 | 1 | Domain and deduplicator names, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
-| Window state descriptor | 11 | 1 | Domain and window processor names, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
+| WASM guest state descriptor | 5 | 2 | The scheduled unit, saved branch key, schema fingerprint, guest state generation and checkpoint revision |
+| Kafka domain offsets | 6 | 3 | The scheduled unit, ingestor schema fingerprint, optional applied explicit-start generation, and ordered topic and partition positions, expressed as the next offset to consume |
+| Branch lifecycle | 7 | 2 | The scheduled unit, owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
+| Materialized relay descriptor | 8 | 2 | Domain and relay names, scheduled unit, schema fingerprint, revision, ownership fence, branch generation, row count and group count |
+| Materialized record identities | 9 | 2 | The scheduled unit and ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
+| Deduplicator keyspace descriptor | 10 | 2 | Domain and deduplicator names, scheduled unit, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
+| Window state descriptor | 11 | 2 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
 
-The archive format major version is `1`. A reader refuses invalid record magic, an unsupported
+The archive format major version is `2`. An archive with another major version fails before any
+state section can be skipped or installed; capture a new archive in the current unit-bearing
+format. A reader refuses invalid record magic, an unsupported
 manifest or required configuration record, an unknown record kind in the manifest, a first entry
 other than the manifest, and any section whose place, length or digest differs from what the
 manifest declares. A state record whose header names another state kind than the manifest declares,
