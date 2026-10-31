@@ -232,6 +232,8 @@ class InventoryTests(unittest.TestCase):
             "models-json-path-validation",
             "models-batch-limits",
             "models-batch-limit-validation",
+            "models-sqs-receive-windows",
+            "models-sqs-receive-window-validation",
             "models-identities",
             "models-identity-validation",
             "models-prerequisite-records",

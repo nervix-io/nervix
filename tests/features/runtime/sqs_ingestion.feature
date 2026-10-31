@@ -280,3 +280,164 @@ Feature: SQS ingestion
       | cluster_size |
       | 1            |
       | 3            |
+
+  # ACK PARALLEL MAX 10 asks each receive for up to ten messages and keeps gathering until its batch
+  # is full or its BATCH TIMEOUT ends. A stalled emitter holds the batch's acknowledgement, so the
+  # whole batch stays in flight: ten messages invisible to every other receive. Once the emitter
+  # resumes, the batch is acknowledged with one DeleteMessageBatch request, never one DeleteMessage
+  # request per message.
+  @sqs_parallel_batch @deloxide_stress
+  Scenario Outline: SQS ACK PARALLEL takes up to its MAX of messages into one batch and deletes them with batch requests
+    Given SQS is running
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And SQS is reached through a forwarder that can hold an answer
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And SQS queue "parallel_{{test_id}}" exists with a visibility timeout of "600s"
+    And SQS queue "parallel_out_{{test_id}}" is observed
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 16;
+        CREATE SQS CLIENT sqs_main
+        CONFIG {
+          'endpoint' = '{{sqs_held_endpoint}}',
+          'region' = 'us-east-1'
+        };
+        CREATE SQS CLIENT sqs_out
+        CONFIG {
+          'endpoint' = '{{sqs_endpoint}}',
+          'region' = 'us-east-1'
+        };
+        CREATE SQS QUEUE INGESTOR sqs_parallel
+        FROM sqs_main QUEUE 'parallel_{{test_id}}' MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 1h ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 200ms
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SQS QUEUE EMITTER sqs_forward FROM notifications TO sqs_out QUEUE 'parallel_out_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        START;
+      """
+    And emitter "sqs_forward" enters stall mode
+    And SQS messages are published to queue "parallel_{{test_id}}"
+      """
+      [{"user_id":301},{"user_id":302},{"user_id":303},{"user_id":304},{"user_id":305},{"user_id":306},{"user_id":307},{"user_id":308},{"user_id":309},{"user_id":310}]
+      """
+    Then SQS queue "parallel_{{test_id}}" eventually has 10 messages in flight
+    And within "40s" DESCRIBE INGESTOR "sqs_parallel" on the leader node contains
+      """
+      mode: ACK PARALLEL MAX 10 BATCH TIMEOUT 1h ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 200ms
+      """
+    When emitter "sqs_forward" leaves stall mode
+    Then within "40s" the observed broker receives payloads
+      """
+      "user_id":301
+      "user_id":302
+      "user_id":303
+      "user_id":304
+      "user_id":305
+      "user_id":306
+      "user_id":307
+      "user_id":308
+      "user_id":309
+      "user_id":310
+      """
+    And SQS queue "parallel_{{test_id}}" eventually holds no messages
+    And the SQS forwarder carried "DeleteMessageBatch" requests and no "DeleteMessage" request
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  # A rejected message is made visible again at once, so the ingestor reads it again after its RETRY
+  # POLICY delay. The queue's visibility timeout of ten minutes would otherwise hold it back far
+  # longer than the minute this scenario waits for it.
+  Scenario Outline: An SQS message its ingestor rejects returns on its RETRY POLICY instead of the queue's visibility timeout
+    Given SQS is running
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And SQS queue "rejected_{{test_id}}" exists with a visibility timeout of "600s"
+    And SQS queue "rejected_out_{{test_id}}" is observed
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+        CREATE SQS CLIENT sqs_main
+        CONFIG {
+          'endpoint' = '{{sqs_endpoint}}',
+          'region' = 'us-east-1'
+        };
+        CREATE SQS QUEUE INGESTOR sqs_rejecting
+        FROM sqs_main QUEUE 'rejected_{{test_id}}' MODE <mode>
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SQS QUEUE EMITTER sqs_forward FROM notifications TO sqs_main QUEUE 'rejected_out_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
+        START;
+      """
+    When emitter "sqs_forward" enters fault mode
+    And SQS message is published to queue "rejected_{{test_id}}"
+      """
+      {"user_id":45}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":45
+      """
+    And within "60s" the relay subscription receives payloads
+      """
+      "user_id":45
+      """
+    When emitter "sqs_forward" leaves fault mode
+    Then within "40s" the observed broker receives payloads
+      """
+      "user_id":45
+      """
+    And SQS queue "rejected_{{test_id}}" eventually holds no messages
+
+    Examples:
+      | cluster_size | replica_count | mode                                                                                           |
+      | 1            | 0             | ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms                          |
+      | 3            | 1             | ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms                          |
+      | 1            | 0             | ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms |
+      | 3            | 1             | ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms |

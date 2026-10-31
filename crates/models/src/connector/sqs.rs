@@ -4,7 +4,8 @@
 //!
 //! - **Owns.** The SQS client Model, the queue source and emitter Models with their delivery mode
 //!   and FIFO grouping, the queue name a source receives with and the rule SQS holds it to, the
-//!   message size SQS itself admits, and what each entity declares.
+//!   message size SQS itself admits, the most messages one receive returns, and what each entity
+//!   declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations, expressions and the names a body
 //!   references.
@@ -16,13 +17,23 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::num::NonZeroU64;
+use std::{
+    fmt,
+    num::{NonZeroU8, NonZeroU64, NonZeroUsize},
+};
 
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use rkyv::{
+    Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize,
+    rancor::{Fallible, Source},
+};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use super::{
-    bounds::{DeadlineKey, DeclaredBounds, DeclaredWait, OmittedDeadline, WaitBound},
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_emitters, connector_ingestors},
     external_name::{ExternalNameError, external_names, require_length},
@@ -32,10 +43,10 @@ use crate::{
     DeclaredQuiesce, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
     EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
     EmitterReferenceKind, Expression, HeaderLayout, HeaderModel, IngestAcknowledgement,
-    IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
-    IngestorMetadataDeclaration, IngestorReference, IngestorReferenceKind, LocatorDeclaration,
-    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
-    PayloadSizeLimit, PositionClass, RetryPolicy,
+    IngestDeliveryKind, IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody,
+    IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass, RetryPolicy,
 };
 
 configured_client!(Sqs: unpooled, config CLIENT_CONFIG, CreateClientSqs => SqsConfigEntry);
@@ -101,18 +112,40 @@ pub struct SqsQueueIngestor {
 
 /// What the connector of a SQS QUEUE ingestor holds and how long it waits.
 const SQS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
-    buffers: &[],
+    buffers: &[DeclaredBuffer {
+        holds: "messages gathered for one host read",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting(
+                "1 under ACK SEQUENTIAL; ACK PARALLEL MAX otherwise, at most 10",
+            ),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
     waits: &[
+        DeclaredWait {
+            wait: "gathering further messages after the first under ACK PARALLEL; cancellation \
+                   hands over every message already gathered",
+            bound: WaitBound::Clause("BATCH TIMEOUT"),
+        },
         DeclaredWait {
             wait: "connection: name resolution, TCP and TLS",
             bound: WaitBound::Driver("3.1 s"),
         },
         DeclaredWait {
-            wait: "the queue URL lookup, a receive and a delete",
+            wait: "the queue URL lookup, a receive, a batch deletion and a batch visibility change",
             bound: WaitBound::Unbounded,
         },
     ],
     driver_limits: &["A request that stalls below 1 byte a second for 5 s is cancelled."],
+};
+
+/// A parallel window of up to the ten messages one receive returns, gathered for up to its batch
+/// timeout and confirmed together.
+const SQS_ACK_PARALLEL: DeclaredDelivery = DeclaredDelivery {
+    kind: IngestDeliveryKind::AckParallel,
+    example: "ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX \
+              30s",
+    requires: &[],
 };
 
 /// What the connector of a SQS QUEUE emitter holds and how long it waits.
@@ -149,7 +182,7 @@ impl IngestorDeclaration for SqsQueueIngestor {
         reference: IngestorReferenceKind::Client(ConnectorKind::Sqs),
         position_class: PositionClass::BrokerRedelivered,
         acknowledgement_confirmation: AcknowledgementConfirmation::Answered,
-        delivery: &[DeclaredDelivery::ACK_SEQUENTIAL],
+        delivery: &[DeclaredDelivery::ACK_SEQUENTIAL, SQS_ACK_PARALLEL],
         // The queue keeps each message until the source deletes it, so suspending loses nothing.
         quiesce: &[DeclaredQuiesce::SUSPEND],
         locator: Some(LocatorDeclaration {
@@ -187,6 +220,14 @@ pub enum SqsIngestMode {
         timeout: String,
         retry_policy: RetryPolicy,
     },
+    /// Up to `max` messages, at most the ten one receive returns, wait on their acknowledgements
+    /// together.
+    AckParallel {
+        max: SqsReceiveMax,
+        batch_timeout: String,
+        timeout: String,
+        retry_policy: RetryPolicy,
+    },
 }
 
 impl SqsIngestMode {
@@ -199,7 +240,118 @@ impl SqsIngestMode {
                 timeout,
                 retry: retry_policy,
             },
+            Self::AckParallel {
+                max,
+                batch_timeout,
+                timeout,
+                retry_policy,
+            } => IngestAcknowledgement::Parallel {
+                max: max.get(),
+                batch_timeout,
+                timeout,
+                retry: retry_policy,
+            },
         }
+    }
+}
+
+/// How many messages an SQS ingestor's parallel window takes into one batch: 1 to
+/// [`SqsReceiveMax::MAX`], the most messages one receive returns, so a whole batch arrives in one
+/// receive when the queue holds it.
+///
+/// Every form of the count is decoded through its range check: the serde form through
+/// `TryFrom<u64>`, the archived form through the same conversion.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Archive, RkyvSerialize,
+)]
+#[serde(try_from = "u64", into = "u64")]
+pub struct SqsReceiveMax(NonZeroU8);
+
+impl<D> RkyvDeserialize<SqsReceiveMax, D> for ArchivedSqsReceiveMax
+where
+    D: Fallible + ?Sized,
+    D::Error: Source,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<SqsReceiveMax, D::Error> {
+        let count: NonZeroU8 = self.0.deserialize(deserializer)?;
+        SqsReceiveMax::try_from(u64::from(count.get())).map_err(D::Error::new)
+    }
+}
+
+impl SqsReceiveMax {
+    /// The most messages one SQS `ReceiveMessage` returns, and so the largest window an SQS
+    /// ingestor declares.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the SQS ReceiveMessage API returns at most ten messages per request"
+        )
+    )]
+    pub const MAX: u8 = 10;
+
+    /// The largest window: as many messages as one receive returns.
+    pub const LARGEST: Self = match NonZeroU8::new(Self::MAX) {
+        Some(max) => Self(max),
+        None => panic!("the receive maximum is ten messages"),
+    };
+
+    /// The window as the count a parallel acknowledgement states.
+    pub fn get(self) -> NonZeroU64 {
+        NonZeroU64::from(self.0)
+    }
+}
+
+impl From<SqsReceiveMax> for NonZeroUsize {
+    fn from(window: SqsReceiveMax) -> Self {
+        NonZeroUsize::from(window.0)
+    }
+}
+
+/// Why a count is not a window an SQS ingestor can take into one batch.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "receive-window construction returns a pure range validation refusal"
+    )
+)]
+pub enum SqsReceiveMaxError {
+    #[error(
+        "SQS ACK PARALLEL MAX must be between 1 and {max}, found {value}",
+        max = SqsReceiveMax::MAX
+    )]
+    OutOfRange { value: u64 },
+}
+
+impl TryFrom<u64> for SqsReceiveMax {
+    type Error = SqsReceiveMaxError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        let out_of_range = SqsReceiveMaxError::OutOfRange { value };
+        let Ok(count) = u8::try_from(value) else {
+            return Err(out_of_range);
+        };
+        if count > Self::MAX {
+            return Err(out_of_range);
+        }
+        let Some(count) = NonZeroU8::new(count) else {
+            return Err(out_of_range);
+        };
+        Ok(Self(count))
+    }
+}
+
+impl From<SqsReceiveMax> for u64 {
+    fn from(window: SqsReceiveMax) -> Self {
+        u64::from(window.0.get())
+    }
+}
+
+impl fmt::Display for SqsReceiveMax {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

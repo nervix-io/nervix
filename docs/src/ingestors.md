@@ -158,7 +158,8 @@ keeps the ingestor's accepted policy.
 | Entity | `MODE` forms |
 | --- | --- |
 | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `NO ACK`, `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` |
-| `RABBITMQ QUEUE`, `SQS QUEUE` | `ACK SEQUENTIAL ...` |
+| `RABBITMQ QUEUE` | `ACK SEQUENTIAL ...` |
+| `SQS QUEUE` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` with `MAX` at most 10 |
 | `CLIENT PRODUCER` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` without `BATCH TIMEOUT` |
 | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
 
@@ -1818,7 +1819,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | --- | --- |
 | Reference | SQS client |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |
-| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
@@ -1826,8 +1827,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | answered |
-| Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup, a receive and a delete: unbounded |
+| Buffers | messages gathered for one host read: set by 1 under ACK SEQUENTIAL; ACK PARALLEL MAX otherwise, at most 10; when full, holds back what fills it |
+| Network waits | gathering further messages after the first under ACK PARALLEL; cancellation hands over every message already gathered: `BATCH TIMEOUT`<br>connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup, a receive, a batch deletion and a batch visibility change: unbounded |
 | Driver limits | A request that stalls below 1 byte a second for 5 s is cancelled. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1838,16 +1839,19 @@ See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sq
 `-` and `_`, where a FIFO queue's name ends in `.fifo` and the suffix counts toward the 80. Nervix
 preserves its case in both directions, so `QUEUE 'Orders-EU_1.fifo'` reads exactly that queue. The
 ingestor reads a message's attributes through `read_header` and `read_headers`. It names
-`MODE ACK SEQUENTIAL` and `ON QUIESCE SUSPEND`, the only delivery and quiesce modes it declares: the
-queue keeps each message until the source deletes it, so suspending loses nothing.
+`MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n> ...`, and `ON QUIESCE SUSPEND`, the delivery
+and quiesce modes it declares: the queue keeps each message until the source deletes it, so
+suspending loses nothing. An `ACK PARALLEL` window holds 1 to 10 messages, the most one SQS receive
+returns, and `CREATE` refuses a larger one, as in `SQS ACK PARALLEL MAX must be between 1 and 10,
+found 11`.
 
 The `SQS CLIENT` an ingestor or emitter names declares `endpoint`, which is required, and the
 optional `region`, `access_key_id`, `secret_access_key`, `timeout_ms` and `tls_ca_file`, and
 `CREATE SQS CLIENT` refuses any other key. A client without `region` signs its requests for
 `us-east-1`, and one that omits `access_key_id` or `secret_access_key` signs with a placeholder in
 its place, which only an SQS-compatible endpoint that skips signature checks accepts. `timeout_ms`
-bounds an emitter's send; an ingestor's queue lookup, receives and deletions take the waits the
-table lists.
+bounds an emitter's send; an ingestor's queue lookup, receives, deletions and visibility changes
+take the waits the table lists.
 
 Starting the ingestor sends no request to the service. Each source instance looks its queue up
 before its first poll and keeps the queue's URL from then on, suspensions included. The source
@@ -1865,27 +1869,44 @@ the service is unreachable consumes once the service answers. A queue that does 
 lookup with its name, such as `SQS queue 'orders' does not exist`, and is retried the same way;
 Nervix never creates it.
 
-Each poll is a `ReceiveMessage` for one message with all of its attributes, which the service
-answers as soon as a message arrives or after a one-second wait without one. The service hides the
+Under `ACK SEQUENTIAL` each poll is a `ReceiveMessage` for one message with all of its attributes,
+which the service answers as soon as a message arrives or after a one-second wait without one.
+Under `ACK PARALLEL MAX <n>` the poll asks for `n` messages, and the service may answer with fewer
+than the queue holds. Once the first message arrives the source sends further receives for the
+messages its batch still lacks, until the batch holds `n` or its `BATCH TIMEOUT`, counted from that
+first message, has passed: a receive waits up to a second while a whole second of the window
+remains and does not wait after that, and a receive that did not wait and brought nothing ends the
+batch. The batch's messages then wait on their acknowledgements together. The service hides every
 message it returns from every other receive until the queue's visibility timeout ends, and the
-source deletes it only once it is acknowledged, so a failed lookup or poll never removes a message
-from the queue. A message whose acknowledgement fails or does not arrive within the mode's
-`ACK TIMEOUT` is rejected, which leaves it in the queue. So is one whose deletion fails, which
-`DESCRIBE INGESTOR` shows as a transient error; the source does not repeat the deletion. Either way
-the message becomes visible again once its visibility timeout ends and is received again, as a
-duplicate if the graph had already processed it, and the source polls again after its
-`RETRY POLICY` delay. A queue whose visibility timeout is shorter than the mode's `ACK TIMEOUT` can
-also hand a message that still awaits its acknowledgement to another receive.
+source deletes a batch's messages only once the batch is acknowledged, with one
+`DeleteMessageBatch` request for each ten of them, so a failed lookup or poll never removes a
+message from the queue.
+
+A batch whose acknowledgement fails or does not arrive within the mode's `ACK TIMEOUT` is rejected:
+one `ChangeMessageVisibilityBatch` request for each ten of its messages makes them visible again at
+once, and the source polls again after its `RETRY POLICY` delay, so it receives them again then
+instead of after the queue's visibility timeout. Under `INSTANCES` greater than one, another
+instance can receive them sooner. A rejected message whose receipt handle no longer holds it
+invisible needs no change, because it was deleted or its visibility timeout already ended. A
+deletion that fails, or one the service does not carry out for a message, is a transient error that
+`DESCRIBE INGESTOR` shows, and the batch is then rejected in the same way, so its messages are
+received again, as duplicates if the graph had already processed them. A visibility change that
+fails is a transient error too; the source does not repeat it, and such a message becomes visible
+again once its visibility timeout ends. A queue whose visibility timeout is shorter than the mode's
+`ACK TIMEOUT` can also hand a message that still awaits its acknowledgement to another receive. A
+message the service returns without the receipt handle that settles it stays out of the batch and
+fails the next poll with a typed error, after the batch's other messages reach the relay; it
+becomes visible again once its visibility timeout ends.
 
 Suspension stops polling. Messages wait in the queue only for its configured retention period, and
 the ingestor resumes by polling past anything the service expired. A poll still waiting when the
 ingestor quiesces or stops is never abandoned, because the service hides the message it answers
 with until its visibility timeout ends: the source sends no further poll and waits for that answer,
-which a responsive service gives within the poll's one-second wait, and a message it brings
-dispatches before the source suspends or closes. Only a service that has not answered within
-10 seconds of the quiesce change or the stop ends that poll unanswered, which `DESCRIBE INGESTOR`
-shows as a transient error; a message the poll was returning then stays invisible until its
-visibility timeout ends.
+which a responsive service gives within the poll's one-second wait, and the messages it brings
+dispatch, with those its batch had already gathered, before the source suspends or closes. Only a
+service that has not answered within 10 seconds of the quiesce change or the stop ends that poll
+unanswered, which `DESCRIBE INGESTOR` shows as a transient error; a message the poll was returning
+then stays invisible until its visibility timeout ends.
 
 ### Prometheus
 

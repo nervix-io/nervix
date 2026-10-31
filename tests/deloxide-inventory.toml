@@ -168,6 +168,7 @@ tags = [
   "@forced_failover_delivery",
   "@mqtt_parallel_gather_at_quiesce",
   "@sqs_receive_at_quiesce",
+  "@sqs_parallel_batch",
   "@kept_ingestor_offsets",
   "@redis_subscription_backpressure",
   "@redis_idle_subscription",
@@ -3507,6 +3508,8 @@ workloads = [
 [[owner]]
 path = "src/runtime_ack.rs"
 workloads = [
+  "scenario.sqs-parallel-batch",
+  "stress.sqs-parallel-batch",
   "scenario.client-alter-drain",
   "scenario.shutdown-source-confirmation",
   "scenario.shutdown-source-confirmation-handoff",
@@ -3617,6 +3620,26 @@ id = "stress.sqs-receive-at-quiesce"
 invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message reaches the relay without waiting for its visibility timeout, on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "An SQS ACK PARALLEL batch of ten messages that a stalled emitter holds in flight and that is then acknowledged as one batch, through public Plexus commands, including the tracked acknowledgement-tree locks the batch waits on. The SQS client, its receives, its batch deletions and the read's cancellation are outside the detector."
+examples = 2
+feature = "tests/features/runtime/sqs_ingestion.feature"
+id = "scenario.sqs-parallel-batch"
+invariant = "An SQS ACK PARALLEL MAX 10 ingestor holds ten messages in flight while their acknowledgements wait, and deletes them with batch requests once they are acknowledged, on one and three nodes."
+invocation = "scenarios"
+scenario = "SQS ACK PARALLEL takes up to its MAX of messages into one batch and deletes them with batch requests"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an SQS ACK PARALLEL batch of ten messages that a stalled emitter holds in flight and that is then acknowledged as one batch, through public Plexus commands, including the tracked acknowledgement-tree locks the batch waits on. The SQS client, its receives, its batch deletions and the read's cancellation are outside the detector."
+examples = 2
+feature = "tests/features/runtime/sqs_ingestion.feature"
+id = "stress.sqs-parallel-batch"
+invariant = "An SQS ACK PARALLEL MAX 10 ingestor holds ten messages in flight while their acknowledgements wait, and deletes them with batch requests once they are acknowledged, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "SQS ACK PARALLEL takes up to its MAX of messages into one batch and deletes them with batch requests"
 selections = ["deloxide-stress"]
 
 [[workload]]

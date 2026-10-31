@@ -396,7 +396,8 @@ current connection, retry and deadline limits.
   `BUFFER` or `DROP` policy in generated Plexus.
 - Redis Pub/Sub uses `NO ACK` in both directions. Treat `CHANNEL` as a literal, case-preserving
   name and consult the Redis manual sections for its byte bound and unavailable header operations.
-- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`, and an emitter
+- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL`, or `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT
+  ...` with `n` at most 10, with `ON QUIESCE SUSPEND`, and an emitter
   `MODE SINGLE` or `MODE BATCH`. Treat `QUEUE` as a literal, case-preserving SQS name, and check
   `SQS CLIENT` keys against `Ingestors` → `SQS`: it declares no client certificate keys.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
