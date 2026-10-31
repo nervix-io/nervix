@@ -1,8 +1,8 @@
 //! Public attribution of the phase that exhausts a backup cut's budget.
 //!
 //! Layer: test harness.
-//! - **Owns.** Checking a CLI timeout's active phase, its elapsed cut budget and its completed
-//!   drain measurement.
+//! - **Owns.** Checking a CLI timeout's active phase, its elapsed cut budget, whichever step of
+//!   the drain phase the deadline ended, and its completed drain measurement.
 //! - **Depends on.** The public CLI JSON failure and the shared duration reader.
 //! - **Must not know.** The coordinator's progress state or mutation lease representation.
 
@@ -38,11 +38,12 @@ fn then_capture_timeout_reports_completed_drain(world: &mut ScenarioWorld) {
     );
 }
 
-/// A drain that cannot finish is refused at its cut's deadline, which the cut's budget counts from
-/// before its lease, so the refusal reports at least the whole budget. A drain that measured its
-/// budget afresh once the held pause was applied would report that hold on top of the budget
-/// instead. The hold is longer than any poll round a loaded runner takes, so the one round that
-/// overshoots the deadline stays inside it.
+/// A cut's drain phase, its pause's application across the cluster and then its drain, ends at the
+/// cut's deadline, which the cut's budget counts from before its lease, so the refusal reports at
+/// least the whole budget. A cut that waited for a held application of its pause, or whose drain
+/// measured its budget afresh once the held pause was applied, would report that hold on top of
+/// the budget instead. The hold is longer than the poll round and the resume a loaded runner takes
+/// after the deadline, so the refusal they delay stays inside it.
 #[then(
     expr = "the CLI drain timeout reports at least its {int} second budget elapsed and less than \
             {int} seconds beyond it"
@@ -65,10 +66,11 @@ fn then_drain_timeout_ends_at_cut_deadline(world: &mut ScenarioWorld, budget: u6
         .assured("a scenario's budget and margin are a few seconds each");
     assert!(
         elapsed >= budget,
-        "the drain gave up before its cut's budget ended: {message}"
+        "the cut's drain phase gave up before its budget ended: {message}"
     );
     assert!(
         elapsed < limit,
-        "the drain outlasted its cut's deadline by a budget measured after the pause: {message}"
+        "the cut's drain phase outlasted its deadline by a hold it should not have waited for: \
+         {message}"
     );
 }
