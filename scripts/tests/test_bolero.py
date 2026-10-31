@@ -353,7 +353,7 @@ class InventoryTests(unittest.TestCase):
             "iceberg-staged-file-encoding",
             "sentry-prepared-envelopes",
             "sentry-event-models",
-            "http-request-heads",
+            "http-emitter-requests",
             "mqtt-publish-packets",
             "postgres-insert-measures",
             "mysql-insert-measures",
