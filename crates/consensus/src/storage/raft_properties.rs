@@ -117,7 +117,7 @@ fn bolero_consensus_raft_records_round_trip_through_the_storage_codec() {
 
             let metadata = StateMetadata {
                 parameters: Some(arbitrary.cluster_parameter_record()),
-                encoding: StateEncoding::ClusterParameters,
+                encoding: StateEncoding::ClusterState,
                 last_applied_log_id: optional_log_id(&mut arbitrary),
                 last_membership: Arc::new(stored_membership(&mut arbitrary)),
                 runtime_revision: arbitrary.entropy().any_u64(),
@@ -131,7 +131,7 @@ fn bolero_consensus_raft_records_round_trip_through_the_storage_codec() {
                 &StateMetadataRecord::from(&metadata),
             ))
             .assured("recovery metadata with a valid membership converts back");
-            let StateEncoding::ClusterParameters = restored.encoding;
+            let StateEncoding::ClusterState = restored.encoding;
             assert_eq!(restored.last_applied_log_id, metadata.last_applied_log_id);
             assert_eq!(restored.last_membership, metadata.last_membership);
             assert_eq!(restored.runtime_revision, metadata.runtime_revision);
