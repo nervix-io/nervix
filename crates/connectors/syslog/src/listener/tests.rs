@@ -156,7 +156,7 @@ fn reference_framing(
         };
         if first.is_ascii_digit() {
             let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
-            if digits > MAX_OCTET_COUNT_DIGITS {
+            if digits > SYSLOG_FRAME_LIMITS.octet_count_digits() {
                 break Ending::Failed(FrameFailure::MalformedOctetCount);
             }
             match rest.get(digits) {
@@ -412,7 +412,7 @@ fn an_octet_counted_payload_split_across_reads_keeps_its_count() {
 fn a_read_never_takes_more_than_the_frame_bound_admits() {
     let max_message_size = nonzero!(16usize);
     let mut decoder = StreamFrameDecoder::new(max_message_size, true);
-    let bound = max_message_size.get() + MAX_OCTET_COUNT_DIGITS + 1;
+    let bound = max_message_size.get() + SYSLOG_FRAME_LIMITS.octet_count_prefix();
     let stream = vec![b'7'; 64];
     assert_eq!(read_into(&mut decoder, &stream), Ok(bound));
     assert_eq!(

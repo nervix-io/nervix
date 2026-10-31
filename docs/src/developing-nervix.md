@@ -149,6 +149,10 @@ The server monitors all three interconnect PEM files. It reloads a changed bundl
 consecutive reads agree and the complete replacement passes certificate, identity, and lifetime
 validation; an incomplete or invalid update leaves the active bundle in service and is retried.
 
+`RUST_LOG` selects what the node logs to standard output, `info` for every target when it is unset.
+Whatever it selects, the node never logs a dependency event that carries a record's payload; see
+[The Node's Log](./errors-and-diagnostics.md#the-nodes-log).
+
 OpenTelemetry trace export is optional and uses the existing `tracing` instrumentation:
 
 - `--otel-enabled` or `NERVIX_OTEL_ENABLED=true` enables OTLP trace export
