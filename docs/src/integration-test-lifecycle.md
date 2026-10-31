@@ -76,6 +76,16 @@ both named branches, source headers, both count and byte limits, one- and three-
 the twenty-second flush and the forty-five-second exact-payload assertion. The receipt waits end
 when their condition holds and do not serialize other scenarios.
 
+The RabbitMQ parallel lost-rejection outline pauses its own dependency endpoint before resetting
+the connection. It observes all four original source ACK failures while recovery remains paused,
+then clears the terminal emitter fault before resuming the endpoint. This prevents the fault from
+rejecting only part of the replayed window into a further `MAX 4 BATCH TIMEOUT 1h` read. The
+downstream MQTT emitter uses QoS 1 with a four-record confirmation window; its sent counter and the
+RabbitMQ unacknowledged count distinguish output receipt from source settlement. The outline
+retains both sets of four payloads, one- and three-node coverage, the source's batching and ACK
+deadlines, and the forty-second payload assertions. The pause is scenario-local and adds no suite
+serialization or readiness sleep.
+
 The orphaned-transaction expiry scenario holds finished-transaction cleanup for its domain on each
 node before it begins the transaction. Expiry and the leadership transfer proceed normally. The
 successor reaches its cleanup barrier only after it observes the replicated terminal transaction;
@@ -200,8 +210,9 @@ resubmitting an outcome that might already have produced output.
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | Endpoint response observations | One abort-on-drop task per named POST, owning the request through response-body collection. The HTTP client bounds it at 60 seconds; the collection step also bounds the join. Response arrival uses a monotonic instant, compared with a boundary recorded before a consumer ACK/NACK, so an early answer cannot pass an ordering assertion | `tests/endpoint_intake/requests.rs` and the endpoint ACK scenarios |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
+| HTTP proxies | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP proxy fixture, `tests/common/http_proxy.rs` |
 | Unaccepted addresses | No task: a listening socket at a chosen loopback address and the one connection that fills its accept queue, so the kernel drops every later handshake. The scenario world owns both until the scenario ends | `tests/common/unaccepted_address.rs` |
-| Backup cut holds | No harness task: the fault injector's lease or capture gate holds each backup cut that reaches it on that cut's own task in the node, until the scenario releases the gate or for the duration the scenario timed from the cut's arrival | `src/fault_injection/backup_cut.rs`, driven by the backup steps in `tests/backup/mod.rs` and `tests/backup/wait.rs` |
+| Backup cut holds | No harness task: the fault injector's lease, drain or capture gate holds each backup cut that reaches it on that cut's own task in the node, until the scenario releases the gate or for the duration the scenario timed from the cut's arrival | `src/fault_injection/backup_cut.rs`, driven by the backup steps in `tests/backup/mod.rs` and `tests/backup/wait.rs` |
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact payload multiplicities, generator occurrences, broker counts and sequences, and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs` and `subscription_payloads.rs`, used by the payload, generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
 | Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
@@ -212,7 +223,7 @@ resubmitting an outcome that might already have produced output.
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
 | Broker observers | One task on the binary's runtime per observer, which reads the broker's client and hands each message to the step over a bounded channel and is aborted when the scenario drops the observer. A core NATS observer has no task of its own, because its client already buffers what the server delivers | The cluster fixture, `tests/common/cluster.rs`, the delivery owner, `tests/common/broker_observer.rs`, and the NATS observer, `tests/common/nats_observer.rs` |
-| Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards | The stallable TCP proxy in the cluster fixture, `tests/common/cluster.rs`, the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes, and the Iceberg catalog gate, `tests/common/iceberg_catalog_gate.rs`, which serves HTTP/1.1 and holds each commit to one table until the scenario refuses or passes it |
+| Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. A stallable or silent endpoint listens on a port drawn from the port pool, so it is never handed a port another scenario's peers may still dial, and records each connection it accepts with the client's address, when it accepted it and when it stopped forwarding or holding it, which a step counting its connections reports when it fails. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards, and gives a stallable or silent endpoint's port back | The stallable and silent endpoints, `tests/common/stallable_tcp_proxy.rs`, the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes, and the Iceberg catalog gate, `tests/common/iceberg_catalog_gate.rs`, which serves HTTP/1.1 and holds each commit to one table until the scenario refuses or passes it |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
 The Syslog mixed-framing sender assembles its octet-counted and non-transparent frames before
@@ -1382,8 +1393,9 @@ second module runs the operation, it is named after the owner.
 | The node startups of one cluster construction | `node_startup.rs`, run by `cluster.rs` | 84 seconds per node, shared by the whole construction | The node that ran out ends the construction |
 | A node a scenario stops itself | `cluster.rs`, recorded by `node_stop.rs` | The longest of five minutes, the configured shutdown timeout, and the configured drain phases | The step fails naming how long the node had been stopping and the shutdown phase it was in, and the node keeps its task and everything it holds |
 | Scenario cleanup of a whole cluster | `cluster_teardown.rs` | 60 seconds for every node together | Nodes still stopping are left to end themselves, keep their storage and ports until they have, and are recorded as still stopping |
-| Stopping a scenario's HTTP and gRPC receivers | `http_receiver.rs` and `grpc_receiver.rs`, run by `tests/scenarios.rs` | 6 seconds for every receiver together: 5 for its connections, 1 for its accept loop | Still-running connections, then the accept loop, are aborted and joined and recorded as forced |
+| Stopping a scenario's HTTP and gRPC receivers and its HTTP proxies | `http_receiver.rs`, `grpc_receiver.rs` and `http_proxy.rs`, run by `tests/scenarios.rs` | 6 seconds for every receiver and proxy together: 5 for its connections, 1 for its accept loop | Still-running connections, then the accept loop, are aborted and joined; a receiver records its stop as forced |
 | An HTTP receiver wait: captured requests or a recorded fault | `http_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
+| An HTTP proxy wait: a request it forwarded or a tunnel it opened | `http_proxy.rs`, run by `tests/http_transport` | 60 seconds from the start of the wait | The step fails with everything the proxy recorded |
 | A gRPC receiver wait: captured calls | `grpc_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
 | A server process's startup, its exit, or a log line | `server_process.rs`, reading the executable through `server_executable.rs` | 120 seconds from the launch for reading the executable, spawning the process and waiting until it accepts commands; 120 and 60 seconds | The step fails, quoting the last 80 lines of the process log. A failed startup also says how reading the executable went, which kinds of answer the readiness probes got and when, and, when its deadline passed, what the still-running process and its host were doing |
 | Convergence of a started or restarted real-process cluster, or of one restarted member | `process_cluster_convergence.rs`, run by `server_process_cluster.rs` | 120 seconds for the running members to report the targets they observe a killed member through before it is relaunched, then 120 seconds for convergence after the start or relaunch, with each status request capped at 10 seconds | The step fails naming the first condition the members' latest answers did not meet in the last round that ended before the deadline, with every member's latest status and any later failed request; a status line the wait cannot read fails it at once |
@@ -2082,7 +2094,7 @@ compaction failed; see [Terminal Teardown](./shutdown.md#terminal-teardown).
 ### What Cleanup Releases
 
 Before diagnostics and node shutdown, the after hook releases every armed backup cut gate,
-including both lease and capture boundaries. The gate owner publishes release to existing
+including its lease, drain and capture boundaries. The gate owner publishes release to existing
 waiters before clearing its registry, so a cut that already borrowed a gate continues and a
 later cut finds no hold. Cleanup applies after failed steps as well as successful bodies and is
 idempotent. It does not cancel an admitted backup or claim that releasing its gate completes it.
@@ -2245,9 +2257,11 @@ ports and admits no replacement.
 | In-process node | 7: gRPC, gRPC over HTTPS, HTTP, HTTPS, observability, web console, and interconnect | After its task has ended: at cluster cleanup, when a scenario stops every node, and when a failed startup attempt moves to fresh ports |
 | Scenario fixtures | 4: ZeroMQ ingest and emit, syslog ingest and emit, and 1 more for each port an ingest address moved off | At the end of cleanup, when the holds on the ingest addresses close |
 | HTTP receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
+| HTTP proxy | 1 per proxy, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
 | gRPC receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
 | DNS authority | 1 UDP port per cluster addressed by names | When the cluster is dropped at the end of cleanup, after its nodes have stopped |
 | TCP forwarders | 1 port, shared by every forwarder a scenario stands in front of a dependency | At the end of cleanup, after the cluster has stopped |
+| Stallable and silent endpoints | 1 per endpoint a scenario stands | When cleanup drops the endpoint, after the cluster has stopped |
 | Server process | 6, and 1 more for each port a relaunch after a lost bind moved it off | When the process is dropped, the ports it gave up included |
 | A node moved to a new interconnect address | 1 new interconnect port | The port it gave up stays reserved for the rest of the run |
 
@@ -2506,6 +2520,15 @@ replay assertion within eight seconds.
 
 The Pulsar broker announces a `maxMessageSize` of 1 MiB rather than Pulsar's 5 MiB default, the
 same limit the MQTT and NATS brokers keep, so one scenario message can exceed each broker's limit.
+Dependency startup waits for HTTP `200 OK` from `/admin/v2/namespaces/public/default` on its
+admin listener before publishing either the plaintext or TLS broker endpoint. The standalone
+starts those listeners before it creates the default namespace, so its early broker-ready log
+line or an accepting TCP port does not establish namespace readiness. The HTTP condition shares
+the existing 120-second fresh-container startup budget. Every attachment, including a running
+or restarted reusable container whose namespace already exists, checks the same HTTP condition
+within the existing 30-second readiness-probe budget. A pending connection or response cannot
+extend that probe, and its failure names the namespace URL and last completed response or request
+failure. The probe follows no redirects and uses no environment proxy.
 Its admin API serves the topic-level `maxMessageSize` policy a scenario sets on its own topic; the
 step waits up to 60 seconds for the broker to read the policy back, which shows that the policy
 applies to the next message.
@@ -2534,11 +2557,20 @@ run whose scenarios all passed; after a suite timeout it is printed beside the t
 
 ## HTTP Receivers
 
-A scenario about a node sending HTTP requests to an external endpoint starts an in-process HTTP/1.1
+A scenario about a node sending HTTP requests to an external endpoint starts an in-process HTTP
 receiver in its place, because only a receiver the harness controls can capture exactly what arrived
 and choose exactly how to answer: a status sequence, a delayed, held, or lost response, a stalled
 body, or malformed framing. A receiver can serve TLS with a certificate for chosen names and can
 require the client certificate it issued, whose files a node mounts as a resource.
+
+The receiver reads and answers HTTP/1.1 itself, byte for byte, which is what lets its script write
+framing no valid endpoint would. A TLS receiver can also offer HTTP/2 ahead of HTTP/1.1 in its
+handshake. A client that negotiates it is served by hyper's HTTP/2 server: each request is captured
+whole, as an HTTP/1.1 request is, and answered with the response its target takes, after that
+response's delay. Over HTTP/2 only a complete response has a form, a status, its fields and exactly
+its body; a request that takes any other is recorded as a fault and its stream is reset. Every
+capture records the HTTP version its client spoke, so a scenario can assert that a request arrived
+over HTTP/2.
 Its response script can generate exact and over-limit header counts and value sizes separately for
 an interim or final block. It timestamps a request when its complete body arrives, before its
 scripted response delay begins, so a scenario can assert the measured gap between two requests
@@ -2574,14 +2606,15 @@ Everything a receiver holds is bounded, and exceeding a bound is recorded as a f
 | One request body | 16 MiB |
 | Captured requests | 4,096 per receiver |
 | Kept faults | 256 per receiver; later faults are counted but not kept |
-| One generated response header value | 128 KiB, enough to test both sides of the emitter's 64 KiB header limit |
-| Generated response headers per block | 512, enough to test both sides of the emitter's 128-field limit |
+| One generated response header value | 1 MiB, enough to exceed the 417,792-byte response head hyper reads |
+| Generated response headers per block | 512, enough to test both sides of hyper's 100-field limit |
 | One generated response body | 64 MiB, written in 16 KiB chunks and never held in memory |
 | A scripted `Retry-After` date | One day ahead, far beyond any scenario's wait |
 
 Every await a receiver connection makes also waits for the receiver's stop, so a held response or
-a stalled body ends as soon as cleanup begins. The receivers of a scenario stop together in the
-`stopping` phase, before the cluster, under one 6-second budget: 5 seconds for every connection to
+a stalled body ends as soon as cleanup begins, and so does every task hyper's HTTP/2 server runs
+for a connection's streams. The receivers of a scenario stop together in the `stopping` phase,
+before the cluster, under one 6-second budget: 5 seconds for every connection to
 end on its own, after which the rest are aborted and joined, and 1 second to join the accept loop,
 after which it is aborted and joined too. The derivation asserts that this budget is shorter than
 the cluster's cleanup budget. Each stop is recorded in the scenario log:
@@ -2594,6 +2627,29 @@ scenario cleanup forced: HTTP receiver <name>: <the same record>
 The second line appears only when a connection or the accept loop had to be aborted, or panicked.
 A receiver's port is drawn with the scenario's fixture ports and goes back with them at the end of
 cleanup, once the nodes that dialed it have ended.
+
+## HTTP Proxies
+
+A scenario about the proxy an HTTP client declares, or about proxy environment variables a node
+must ignore, starts an in-process forward proxy, because only a proxy the harness controls can show
+which requests a client sent through it and which it sent past it. A connection carries one
+request. `CONNECT <host>:<port>` opens a tunnel, which the proxy copies bytes through without seeing
+what TLS carries inside; a request in absolute form is forwarded to its origin in origin form,
+without the proxy's own fields. The proxy records the request line of each, so a step can wait for a
+request it forwarded or a tunnel it opened, or assert that it carried nothing.
+
+The proxy resolves every name it is asked for to the loopback address where the scenario's
+receivers listen. A scenario can therefore name its receiver by a host the nodes cannot resolve,
+such as one under `.invalid`, and a request reaches that receiver only through the proxy. A proxy
+started with credentials answers `407` to a request without exactly those `Basic` credentials and
+records the refusal; a request in origin form is answered `400` and recorded as misdirected.
+
+A request head is bounded at 256 KiB and 512 fields, and a proxy records at most 4,096 requests.
+Every await a proxy connection makes also waits for the proxy's stop. The proxies of a scenario
+stop together with its receivers under the same 6-second budget: 5 seconds for every connection to
+end on its own, after which the rest are aborted and joined, and 1 second to join the accept loop,
+after which it is aborted too. A proxy's stop writes no record to the scenario log, and its port
+goes back with the scenario's other fixture ports at the end of cleanup.
 
 ## gRPC Receivers
 
@@ -3644,8 +3700,9 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | Feature waits do not occupy run slots, and limited chains start before and progress beside bulk work | `a_queued_web_console_scenario_does_not_hold_a_run_slot`, `limited_features_are_taken_up_before_the_bulk`, `the_next_limited_scenario_gets_a_slot_beside_bulk_work`, `releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain`, `each_web_console_feature_starts_before_one_feature_consumes_the_group` |
 | A declared long-running scenario is admitted ahead of ordinary first attempts and behind retries, runs beside the bulk instead of after it, and the suite summary names every undeclared attempt of two minutes, finished or still running | `a_declared_long_scenario_is_admitted_before_queued_ordinary_first_attempts`, `a_retry_runs_before_a_declared_long_first_attempt`, `a_declared_long_scenario_queued_last_runs_beside_the_bulk_instead_of_after_it`, `long_running_is_declared_by_a_tag_of_the_scenario_its_rule_or_its_feature`, `an_undeclared_attempt_of_two_minutes_names_its_scenario_long_running`, `the_suite_summary_names_every_undeclared_attempt_of_two_minutes_finished_or_running` |
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
+| A stallable or silent endpoint listens only on a port the pool holds for it until it stops, and records each connection it accepted with its client's address, when it accepted it and when it stopped forwarding or holding it | `an_endpoint_listens_on_a_port_the_pool_holds_for_it_until_it_stops`, `an_endpoint_records_each_connections_peer_and_when_it_ended`, `an_endpoint_records_when_it_accepted_each_connection_in_order` |
 | An address a node binds keeps its drawn port off every ephemeral pick and out of its node's way, moves off a port another socket took at its first use and only then, names what held that port, and gives back every port it drew | `a_held_port_is_no_ephemeral_pick`, `a_node_listener_binds_beside_the_hold_on_any_loopback_address_and_after_a_restart`, `naming_a_free_address_binds_its_port_once_and_keeps_it`, `naming_moves_an_address_off_a_port_another_listener_took`, `naming_moves_a_syslog_address_off_a_port_a_udp_socket_took`, `a_zeromq_address_keeps_a_port_only_a_udp_socket_holds`, `a_refusal_other_than_a_taken_port_fails_and_leaves_the_address_unnamed`, `an_address_whose_every_port_is_taken_ends_at_the_draw_limit`, `release_gives_back_every_port_the_address_drew`, `the_listing_names_a_listener_on_the_port_and_its_process`, `a_socket_table_row_reads_its_address_state_owner_and_inode` |
-| An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_awaiting_a_response_are_counted_until_their_final_head_begins`, `a_client_that_leaves_an_unfinished_response_abandons_it`, `a_wait_for_a_request_line_ends_once_that_request_is_captured`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
+| An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_awaiting_a_response_are_counted_until_their_final_head_begins`, `a_client_that_leaves_an_unfinished_response_abandons_it`, `a_wait_for_a_request_line_ends_once_that_request_is_captured`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_offering_http2_captures_and_answers_requests_over_http2`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
 | A gRPC receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_grpc_receiver_captures_calls_and_answers_its_script_in_order`, `a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one`, `held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops`, `a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture` |
 | A real-process cluster converges only once every node answers and reaches every other node, a relaunched voter through a target newer than the one its killed process had and on the port its new process answers on, and a wait that cannot converge names why | `a_relaunched_member_converges_only_once_every_peer_reaches_its_new_process`, `a_member_that_had_stopped_observing_the_exited_process_converges_on_its_first_target`, `a_started_cluster_converges_once_every_member_reaches_every_peer`, `a_one_member_cluster_converges_without_peers`, `a_member_that_stops_answering_keeps_the_cluster_from_converging`, `a_status_line_convergence_cannot_read_ends_the_wait_with_its_member_and_line`, `an_expired_wait_names_the_condition_a_member_did_not_meet`, `convergence_ends_at_its_budget_with_what_had_not_converged_and_what_each_member_said`, `a_relaunch_relaunches_nothing_while_a_running_member_has_not_reported_its_targets`, `a_failed_relaunch_keeps_its_cause_beneath_the_member_it_relaunched`, `a_relaunched_member_is_asked_where_its_new_process_answers` |
 | A server process launch reads exactly the ranges its executable maps, refuses an image it cannot read, and reads nothing once its deadline has passed | `a_preparation_reads_each_mapped_range_once_and_nothing_else`, `the_server_executable_maps_less_than_its_whole_file`, `a_file_that_is_not_an_elf_image_is_refused`, `a_file_shorter_than_an_elf_header_is_refused`, `a_program_header_table_outside_the_file_is_refused`, `program_headers_of_another_size_are_refused`, `a_mapped_range_past_the_end_of_the_file_is_refused`, `a_preparation_whose_deadline_has_passed_reads_nothing` |

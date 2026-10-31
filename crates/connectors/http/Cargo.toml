@@ -14,14 +14,19 @@ shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 
 [dependencies]
 async-trait = { workspace = true }
+bytes = { workspace = true }
 error-stack = { workspace = true }
-httparse = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
 httpdate = { workspace = true }
+hyper = { workspace = true, features = ["client", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["tokio"] }
 meticulous = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
+nervix-recovery = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
@@ -31,8 +36,13 @@ tokio-rustls = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+base64 = { workspace = true }
 bolero = { workspace = true }
+# HTTP/2 negotiation is exercised against a real HTTP/2 server.
+hyper = { workspace = true, features = ["client", "http1", "http2", "server"] }
+hyper-util = { workspace = true, features = ["server", "tokio"] }
 # The lookup's budget is measured on a paused clock against a name server that never answers.
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
+rcgen = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

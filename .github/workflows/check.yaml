@@ -1648,6 +1648,8 @@ jobs:
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
     steps:
+      # Each collection reads its profiles with the toolchain's own LLVM tools. The toolchain file's
+      # components and target are installed here, so no collection finds them missing.
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -1707,6 +1709,9 @@ jobs:
           sudo add-apt-repository --yes ppa:git-core/ppa
           sudo apt-get install --yes --no-install-recommends git
 
+      # The runner diagnostics tests that `extra-runners` runs execute sysbench and fio, which Boat's
+      # base image lacks. The diagnostics action installs them too, but each of its steps runs only
+      # under its own label, so none may precede those tests.
       - name: Install apt deps
         run: |
           sudo apt update
