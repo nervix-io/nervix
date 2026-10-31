@@ -448,6 +448,67 @@ Feature: Configuration backup into a public archive
       | 1            |
       | 3            |
 
+  # A cut's TIMEOUT counts from before its lease, and applying its pause across the cluster spends
+  # the same budget. The cut is held for 12 seconds once its pause is applied, as a slow application
+  # would hold it, so its drain has only what is left of the 20-second budget. The drain cannot
+  # finish while the emitter's publish is held, and it is refused at the cut's own deadline, never
+  # after a budget measured afresh once the pause was applied. The 12 seconds that separate the two
+  # also absorb the one poll round that overshoots the deadline on a loaded runner.
+  Scenario Outline: A backup drain ends at its cut's deadline after a slow pause application
+    Given HTTP receiver "api" is running
+    And HTTP receiver "api" answers with
+      """
+      hold response until released
+      """
+    And HTTP receiver "api" answers unscripted requests with "respond 204"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (event_id STRING);
+      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY outgoing SCHEMA event UNBRANCHED;
+      CREATE VHOST edge backup-slow-pause-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP CLIENT api_client CONFIG {
+        'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
+      };
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'POST' PATH concat('/events/', input.event_id)
+          MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "backup-slow-pause-{{test_id}}.example.com" path "/events"
+      """
+      [{"event_id":"1"}]
+      """
+    Then HTTP receiver "api" eventually receives at least 1 requests
+    Then the current leader node is saved as placeholder "leader"
+    Given the backup cut for domain "{{domain}}" will be held for 12 seconds once its pause is applied
+    When the CLI backs up "domain {{domain}} --timeout 20s" from node "{{leader}}" into "slow-pause.nvxb" reporting JSON
+    Then the CLI backup failed with JSON error code "BACKUP_REFUSED"
+    And the CLI backup failure mentions "publishing_emitters"
+    And the CLI drain timeout reports at least its 20 second budget elapsed and less than 12 seconds beyond it
+    And backup archive "slow-pause.nvxb" does not exist
+    When HTTP receiver "api" releases its held responses with "respond 204"
+    And http payload is posted to host "backup-slow-pause-{{test_id}}.example.com" path "/events"
+      """
+      [{"event_id":"2"}]
+      """
+    Then HTTP receiver "api" eventually receives at least 2 requests
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: A backup waits for a committing transaction's domain lease
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
