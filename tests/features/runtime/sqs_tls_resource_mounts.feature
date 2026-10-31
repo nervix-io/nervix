@@ -36,7 +36,9 @@ Feature: SQS TLS resource mounts
         CONFIG {
           'endpoint' = '{{sqs_tls_endpoint}}',
           'region' = 'us-east-1',
-          'tls_ca_file' = '{{dev_tls}}/ca.pem'
+          'tls_ca_file' = '{{dev_tls}}/ca.pem',
+          'access_key_id' = 'scenario-key',
+          'secret_access_key' = 'scenario-secret'
         };
         CREATE SQS QUEUE INGESTOR sqs_notifications
         FROM sqs_tls QUEUE 'notifications_{{test_id}}' INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
