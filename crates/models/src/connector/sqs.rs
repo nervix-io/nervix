@@ -2,9 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The SQS client Model, the queue source and emitter Models with their delivery mode
-//!   and FIFO grouping, the queue name a source receives with and the rule SQS holds it to, the
-//!   message size SQS itself admits, and what each entity declares.
+//! - **Owns.** The SQS client Model, the queue source and emitter Models with their delivery mode,
+//!   request shape and FIFO grouping, the queue name a source receives with and the rule SQS holds
+//!   it to, the message size and delay SQS itself admits, the attribute types it carries, and what
+//!   each entity declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations, expressions and the names a body
 //!   references.
@@ -16,7 +17,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, time::Duration};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -31,11 +32,12 @@ use crate::{
     AcknowledgementConfirmation, ByteSizeUnit, ClientName, ConnectorKind, DeclaredDelivery,
     DeclaredQuiesce, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
     EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
-    EmitterReferenceKind, Expression, HeaderLayout, HeaderModel, IngestAcknowledgement,
-    IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
-    IngestorMetadataDeclaration, IngestorReference, IngestorReferenceKind, LocatorDeclaration,
-    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
-    PayloadSizeLimit, PositionClass, RetryPolicy,
+    EmitterReferenceKind, EnvelopeClauseKind, Expression, HeaderLayout, HeaderModel,
+    HeaderValueType, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass, PropertyType,
+    RetryPolicy,
 };
 
 configured_client!(Sqs: unpooled, config CLIENT_CONFIG, CreateClientSqs => SqsConfigEntry);
@@ -136,7 +138,7 @@ const SQS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
     ],
     driver_limits: &[
-        "A batch request holds at most 10 entries and 256 KiB; a record above 256 KiB is rejected.",
+        "A batch request holds at most 10 entries and 1 MiB; a record above 1 MiB is rejected.",
     ],
 };
 
@@ -215,12 +217,72 @@ connector_ingestors! {
     }
 }
 
-/// The SQS message size limit Nervix enforces, 256 KiB, which a batch payload cannot exceed.
-const SQS_MESSAGE_SIZE_MAXIMUM: PayloadSizeLimit =
-    match PayloadSizeLimit::new(nonzero_ext::nonzero!(256u64), ByteSizeUnit::KiB) {
+/// The largest message SQS accepts, 1 MiB counting its body and attributes, which is also the most
+/// one `SendMessageBatch` request carries and the largest batch payload.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "SQS accepts a message, and a SendMessageBatch request, of at most 1 MiB"
+    )
+)]
+pub const SQS_MESSAGE_SIZE_MAXIMUM: PayloadSizeLimit =
+    match PayloadSizeLimit::new(nonzero_ext::nonzero!(1u64), ByteSizeUnit::MiB) {
         Some(maximum) => maximum,
-        None => panic!("256 KiB fits in a 64-bit byte count"),
+        None => panic!("1 MiB fits in a 64-bit byte count"),
     };
+
+/// The longest delay SQS gives one message, in the whole seconds `DelaySeconds` counts.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "SQS DelaySeconds accepts whole seconds from 0 to 900")
+)]
+pub const SQS_DELAY_MAXIMUM: Duration = Duration::from_secs(900);
+
+/// The types an SQS message attribute's value carries, each under the data type SQS names it by: a
+/// string as `String`, an integer as `Number` and bytes as `Binary`.
+pub const SQS_ATTRIBUTE_VALUES: &[HeaderValueType] = &[
+    HeaderValueType {
+        ty: PropertyType::String,
+        carried_as: "String",
+    },
+    HeaderValueType {
+        ty: PropertyType::U8,
+        carried_as: "Number",
+    },
+    HeaderValueType {
+        ty: PropertyType::I8,
+        carried_as: "Number",
+    },
+    HeaderValueType {
+        ty: PropertyType::U16,
+        carried_as: "Number",
+    },
+    HeaderValueType {
+        ty: PropertyType::I16,
+        carried_as: "Number",
+    },
+    HeaderValueType {
+        ty: PropertyType::U32,
+        carried_as: "Number",
+    },
+    HeaderValueType {
+        ty: PropertyType::I32,
+        carried_as: "Number",
+    },
+    HeaderValueType {
+        ty: PropertyType::U64,
+        carried_as: "Number",
+    },
+    HeaderValueType {
+        ty: PropertyType::I64,
+        carried_as: "Number",
+    },
+    HeaderValueType {
+        ty: PropertyType::Bytes,
+        carried_as: "Binary",
+    },
+];
 
 /// One queue an SQS client sends to. The queue is kept as written: words and whole numbers joined
 /// by hyphens, with an optional `.fifo` suffix.
@@ -232,6 +294,30 @@ pub struct SqsQueueEmitter {
     pub client: ClientName,
     pub queue: SqsQueueName,
     pub fifo_group: Option<SqsFifoGroup>,
+    pub send: SqsSend,
+}
+
+/// The request shape an SQS emitter sends its messages in.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    strum::IntoStaticStr,
+)]
+pub enum SqsSend {
+    /// One `SendMessage` request for each message.
+    #[strum(serialize = "SINGLE")]
+    Single,
+    /// `SendMessageBatch` requests of up to ten messages.
+    #[strum(serialize = "BATCH")]
+    Batch,
 }
 
 #[derive(
@@ -244,8 +330,11 @@ pub enum SqsFifoGroup {
 
 impl EmitterDeclaration for SqsQueueEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
-        // An SQS message's attributes: one value per name, the last written, in no order.
-        headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
+        // An SQS message's attributes: one value per name, the last written, in no order, each a
+        // string, a number or bytes.
+        headers: Some(
+            HeaderModel::exact(HeaderLayout::LastWins).with_typed_values(SQS_ATTRIBUTE_VALUES),
+        ),
         reference: EmitterReferenceKind::Client(ConnectorKind::Sqs),
         body: EmitterBodyForm::Codec,
         // A batch payload is one SQS message, so it fits within the message size SQS admits.
@@ -258,23 +347,46 @@ impl EmitterDeclaration for SqsQueueEmitter {
             keywords: "QUEUE",
             name: LocatorName::External(SqsQueueName::DECLARATION),
         }),
-        options: &[OptionDeclaration {
-            keywords: "FIFO GROUP",
-            presence: OptionPresence::Optional { default: None },
-            form: OptionForm::Choice(&[
-                OptionChoice {
-                    name: "<expression>",
-                    value: Some(OptionValue::Expression),
-                    example: "FIFO GROUP tenant",
-                },
-                OptionChoice {
-                    name: "FROM BRANCH",
-                    value: None,
-                    example: "FIFO GROUP FROM BRANCH",
-                },
-            ]),
-        }],
-        envelope: &[],
+        options: &[
+            OptionDeclaration {
+                keywords: "FIFO GROUP",
+                presence: OptionPresence::Optional { default: None },
+                form: OptionForm::Choice(&[
+                    OptionChoice {
+                        name: "<expression>",
+                        value: Some(OptionValue::Expression),
+                        example: "FIFO GROUP tenant",
+                    },
+                    OptionChoice {
+                        name: "FROM BRANCH",
+                        value: None,
+                        example: "FIFO GROUP FROM BRANCH",
+                    },
+                ]),
+            },
+            OptionDeclaration {
+                keywords: "SEND",
+                presence: OptionPresence::Required,
+                form: OptionForm::Choice(&[
+                    OptionChoice {
+                        name: "SINGLE",
+                        value: None,
+                        example: "SEND SINGLE",
+                    },
+                    OptionChoice {
+                        name: "BATCH",
+                        value: None,
+                        example: "SEND BATCH",
+                    },
+                ]),
+            },
+        ],
+        // A standard queue takes a per-message delay and a FIFO queue a deduplication id; the
+        // registry holds each clause to the queue that takes it.
+        envelope: &[
+            EnvelopeClauseKind::Delay,
+            EnvelopeClauseKind::DeduplicationId,
+        ],
         properties: &[],
         bounds: SQS_EMITTER_BOUNDS,
     };
@@ -307,8 +419,7 @@ connector_emitters! {
 
 super::publishing::emitter_modes! {
     pub enum SqsQueuePublishingMode {
-        Single { retry_policy: crate::RetryPolicy } => SqsSingle,
-        Batch { retry_policy: crate::RetryPolicy } => SqsBatch,
+        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
     }
 }
 
@@ -316,6 +427,13 @@ impl SqsQueueName {
     /// Whether this name identifies a FIFO queue, whose publication states its group.
     pub fn is_fifo(&self) -> bool {
         self.as_str().ends_with(SQS_FIFO_SUFFIX)
+    }
+}
+
+impl SqsSend {
+    /// The choice as a statement writes it after `SEND`.
+    pub fn keyword(self) -> &'static str {
+        self.into()
     }
 }
 

@@ -79,7 +79,7 @@ Feature: Emitters write envelope clauses only where their entity declares them
     And these Plexus commands fail with "found PROPERTIES"
       """
       CREATE SQS QUEUE EMITTER generated FROM events TO destination_client QUEUE 'orders'
-        MODE SINGLE RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING events_codec
+        SEND SINGLE MODE ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING events_codec
         PROPERTIES {'content_type' = 'application/json'}
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """

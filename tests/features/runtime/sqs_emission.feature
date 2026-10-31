@@ -43,7 +43,7 @@ Feature: SQS emission
           'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
         };
-        CREATE SQS QUEUE EMITTER sqs_notifications FROM notifications TO sqs_main QUEUE 'notifications_out_{{test_id}}' MODE <publishing_mode> RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE SQS QUEUE EMITTER sqs_notifications FROM notifications TO sqs_main QUEUE 'notifications_out_{{test_id}}' SEND <publishing_mode> MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -126,7 +126,7 @@ Feature: SQS emission
       CREATE SQS QUEUE EMITTER sqs_notifications
       FROM notifications
       TO sqs_main QUEUE 'sqs_batch_poison_{{test_id}}'
-      MODE BATCH RETRY POLICY BACKOFF 100ms MAX 1s
+      SEND BATCH MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       INVOKE write_header(input.header_name, "test")
@@ -211,7 +211,7 @@ Feature: SQS emission
       CREATE SQS QUEUE EMITTER sqs_notes
       FROM notes
       TO sqs_main QUEUE 'sqs_noncharacter_{{test_id}}'
-      MODE <publishing_mode> RETRY POLICY BACKOFF 100ms MAX 1s
+      SEND <publishing_mode> MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING note_codec
       INHERIT ALL
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
@@ -299,7 +299,7 @@ Feature: SQS emission
         WHEN now() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN input.tenant
         ELSE ''
       END
-      MODE BATCH RETRY POLICY BACKOFF 100ms MAX 1s
+      SEND BATCH MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING order_codec
       INHERIT ALL
       FLUSH EACH 1s MAX BATCH SIZE 1MiB
@@ -383,7 +383,7 @@ Feature: SQS emission
       FROM orders
       TO sqs_main QUEUE 'fifo_kept_{{test_id}}.fifo'
       FIFO GROUP FROM BRANCH
-      MODE BATCH RETRY POLICY BACKOFF 100ms MAX 1s
+      SEND BATCH MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING order_codec
       INHERIT ALL
       WHERE input.sequence != (2 AS I64)
@@ -474,7 +474,7 @@ Feature: SQS emission
         WHEN input.sequence = (2 AS I64) THEN (input.sequence / (input.sequence - (2 AS I64))) AS STRING
         ELSE input.tenant
       END
-      MODE BATCH RETRY POLICY BACKOFF 100ms MAX 1s
+      SEND BATCH MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING order_codec
       INHERIT ALL
       WHERE input.sequence != (3 AS I64)
@@ -517,3 +517,227 @@ Feature: SQS emission
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: SQS QUEUE emitters send typed attributes and a message above 256 KiB
+    Given MQTT is running
+    And SQS is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And SQS queue "typed_out_{{test_id}}" is observed
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA reading (
+        user_id I64,
+        tenant STRING,
+        note STRING
+      );
+      CREATE WIRE JSON SCHEMA reading_wire MODE STRICT (
+        user_id integer,
+        tenant string,
+        note string
+      );
+      CREATE CODEC reading_codec
+      FROM WIRE JSON SCHEMA reading_wire
+      TO SCHEMA reading;
+      CREATE RELAY readings SCHEMA reading UNBRANCHED;
+      CREATE MQTT CLIENT mqtt_ingress
+      CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-cucumber-sqs-typed-{{test_id}}'
+      };
+      CREATE MQTT TOPIC INGESTOR mqtt_readings
+      FROM mqtt_ingress TOPIC 'sqs_typed_in_{{test_id}}' MODE NO ACK
+      ON QUIESCE DROP DECODE USING reading_codec
+      TO readings
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE SQS CLIENT sqs_main
+      CONFIG {
+        'endpoint' = '{{sqs_endpoint}}',
+        'region' = 'us-east-1'
+      };
+      CREATE SQS QUEUE EMITTER typed_attributes
+      FROM readings
+      TO sqs_main QUEUE 'typed_out_{{test_id}}'
+      SEND <send> MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      ENCODE USING reading_codec
+      INHERIT ALL EXCEPT note
+      SET note = repeat('x', 614400)
+      INVOKE write_header('tenant', input.tenant),
+        write_header('user', input.user_id),
+        write_header('digest', hex_decode('00ff10'))
+      FLUSH EACH 100ms MAX BATCH SIZE 2MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    # The note makes the message 600 KiB, above the 256 KiB SQS once allowed and within its 1 MiB.
+    And MQTT message is published to topic "sqs_typed_in_{{test_id}}"
+      """
+      {"user_id":42,"tenant":"acme","note":""}
+      """
+    Then the observed broker receives a payload
+      """
+      "user_id":42
+      """
+    And the last observed broker payload is at least 614400 bytes long
+    And the last observed broker message has typed headers
+      """
+      tenant: String acme
+      user: Number 42
+      digest: Binary 00ff10
+      """
+
+    Examples:
+      | cluster_size | send   |
+      | 1            | SINGLE |
+      | 3            | BATCH  |
+
+  Scenario Outline: SQS FIFO emitters name each message's deduplication id
+    Given MQTT is running
+    And SQS is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And SQS FIFO queue "dedup_out_{{test_id}}.fifo" without content-based deduplication is observed
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA order_event (
+        order_id STRING,
+        attempt I64
+      );
+      CREATE WIRE JSON SCHEMA order_wire MODE STRICT (
+        order_id string,
+        attempt integer
+      );
+      CREATE CODEC order_codec
+      FROM WIRE JSON SCHEMA order_wire
+      TO SCHEMA order_event;
+      CREATE RELAY orders SCHEMA order_event UNBRANCHED;
+      CREATE MQTT CLIENT mqtt_ingress
+      CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-cucumber-sqs-dedup-{{test_id}}'
+      };
+      CREATE MQTT TOPIC INGESTOR mqtt_orders
+      FROM mqtt_ingress TOPIC 'sqs_dedup_in_{{test_id}}' MODE NO ACK
+      ON QUIESCE DROP DECODE USING order_codec
+      TO orders
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE SQS CLIENT sqs_main
+      CONFIG {
+        'endpoint' = '{{sqs_endpoint}}',
+        'region' = 'us-east-1'
+      };
+      CREATE SQS QUEUE EMITTER deduplicated
+      FROM orders
+      TO sqs_main QUEUE 'dedup_out_{{test_id}}.fifo'
+      FIFO GROUP input.order_id
+      SEND <send> MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      ENCODE USING order_codec
+      DEDUPLICATION ID input.order_id
+      INHERIT ALL
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    # The queue does no content-based deduplication, so it accepts each message only because the
+    # message names its deduplication id, and drops the second attempt of order o-1 as a repeat.
+    And these MQTT messages are rapidly published to topic "sqs_dedup_in_{{test_id}}"
+      """
+      {"order_id":"o-1","attempt":1}
+      {"order_id":"o-2","attempt":1}
+      {"order_id":"o-1","attempt":2}
+      """
+    Then within "15s" the observed broker receives exactly these payloads
+      """
+      {"order_id":"o-1","attempt":1}
+      {"order_id":"o-2","attempt":1}
+      """
+
+    Examples:
+      | cluster_size | send   |
+      | 1            | SINGLE |
+      | 3            | BATCH  |
+
+  Scenario Outline: SQS QUEUE emitters delay each message by their DELAY
+    Given MQTT is running
+    And SQS is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And SQS queue "delayed_out_{{test_id}}" is observed
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+      CREATE CODEC notification_codec
+      FROM WIRE JSON SCHEMA notification_wire
+      TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE MQTT CLIENT mqtt_ingress
+      CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-cucumber-sqs-delay-{{test_id}}'
+      };
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      FROM mqtt_ingress TOPIC 'sqs_delay_in_{{test_id}}' MODE NO ACK
+      ON QUIESCE DROP DECODE USING notification_codec
+      TO notifications
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE SQS CLIENT sqs_main
+      CONFIG {
+        'endpoint' = '{{sqs_endpoint}}',
+        'region' = 'us-east-1'
+      };
+      CREATE SQS QUEUE EMITTER delayed
+      FROM notifications
+      TO sqs_main QUEUE 'delayed_out_{{test_id}}'
+      SEND <send> MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      ENCODE USING notification_codec
+      DELAY 5s
+      INHERIT ALL
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    And MQTT message is published to topic "sqs_delay_in_{{test_id}}"
+      """
+      {"user_id":7}
+      """
+    Then the observed broker receives a payload no sooner than "5s" after it was published
+      """
+      {"user_id":7}
+      """
+
+    Examples:
+      | cluster_size | send   |
+      | 1            | SINGLE |
+      | 3            | BATCH  |

@@ -22,9 +22,9 @@ use nervix_connector::RecordEnvelope;
 use nervix_models::{
     AckMode, Assignment, AssignmentTarget, CodecName, CreateEmitter, CreateSchema, EmitterName,
     EnvelopeClauseForm, EnvelopeClauseKind, ErrorPolicies, Expression, FieldName, FlushPolicy,
-    InputCollectPolicy, MaterializedStateDependency, Model, ModelKind, ModelName, NodeRef,
-    PropertyDeclaration, RelayName, RouteConstruction, ScheduledNodes, SchemaField, SchemaName,
-    SqsFifoGroup, parse_duration_text,
+    HeaderValues, InputCollectPolicy, MaterializedStateDependency, Model, ModelKind, ModelName,
+    NodeRef, PropertyDeclaration, RelayName, RouteConstruction, ScheduledNodes, SchemaField,
+    SchemaName, SqsFifoGroup, parse_duration_text,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_vm::{
@@ -103,6 +103,9 @@ pub(crate) struct EmitterRoutePlan {
     pub(crate) program: SpannedNode<Program>,
     pub(crate) inherited_count: usize,
     pub(crate) codec_route: bool,
+    /// The values the route's `write_header` calls write, as the emitter's entity declares them,
+    /// or `None` for an entity whose messages carry no transport headers, whose route writes none.
+    pub(crate) header_writes: Option<HeaderValues>,
 }
 
 /// The source-row group that the host evaluates before handing an SQS record to its emitter.
@@ -369,10 +372,16 @@ impl EmitterExecutionPlan {
         } else {
             0
         };
+        let header_writes = emitter
+            .connector
+            .capabilities()
+            .headers
+            .map(|model| model.values);
         Ok(Some(EmitterRoutePlan {
             program,
             inherited_count,
             codec_route,
+            header_writes,
         }))
     }
 
@@ -755,12 +764,13 @@ mod tests {
     fn sqs_ordering_group_is_lowered_or_reads_the_branch() {
         let mut sqs = emitter(
             EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-                mode: nervix_models::SqsQueuePublishingMode::Single {
+                mode: nervix_models::SqsQueuePublishingMode::Ack {
                     retry_policy: retry_policy(),
                 },
                 client: named("queue_client"),
                 queue: named("events.fifo"),
                 fifo_group: Some(SqsFifoGroup::Expression(expression("'group'"))),
+                send: nervix_models::SqsSend::Single,
             })),
             EmitterBody::Codec {
                 codec: named("codec"),

@@ -15,6 +15,8 @@
 )]
 
 use error_stack::ResultExt as _;
+use nervix_connector::TypedRecordHeader;
+use nervix_models::HeaderValues;
 
 use super::*;
 
@@ -269,12 +271,21 @@ impl CompiledProgramWithMaterializedInterest {
     }
 }
 
-pub(in crate::runtime) type EmitterHeaders = Vec<(String, String)>;
+/// One row's `write_header` writes in written order, in the form its emitter's entity declares
+/// their values: text, or values of the exact types the entity declares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::runtime) enum EmitterHeaders {
+    Text(Vec<(String, String)>),
+    Typed(Vec<TypedRecordHeader>),
+}
 
 #[derive(Debug, Clone)]
 pub(in crate::runtime) struct CompiledEmitterFilterMapProgram {
     pub(in crate::runtime) body: CompiledProgramWithMaterializedInterest,
     pub(in crate::runtime) codec_route: bool,
+    /// The values the route's `write_header` calls write, as the emitter's entity declares them,
+    /// or `None` for an entity whose messages carry no transport headers.
+    pub(in crate::runtime) header_writes: Option<HeaderValues>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1217,12 +1228,14 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
         parsed,
         schemas,
         route.codec_route,
+        route.header_writes,
         error_sites,
         context,
     )?;
     Ok(Some(CompiledEmitterFilterMapProgram {
         body,
         codec_route: route.codec_route,
+        header_writes: route.header_writes,
     }))
 }
 
@@ -1231,6 +1244,7 @@ pub(super) fn compile_emitter_filter_map_part(
     parsed: nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     schemas: RuntimeVmSchemaPair,
     codec_route: bool,
+    header_writes: Option<HeaderValues>,
     error_sites: CompiledMessageErrorSites,
     context: RuntimeVmCompileContext<'_>,
 ) -> RuntimeVmCompileResult<CompiledProgramWithMaterializedInterest> {
@@ -1294,7 +1308,7 @@ pub(super) fn compile_emitter_filter_map_part(
                 VmOutputMode::PassthroughByName
             },
             allow_sensitive_output: false,
-            allow_header_writes: true,
+            header_writes,
             ..VmCompileOptions::default()
         }),
     )

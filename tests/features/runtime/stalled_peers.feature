@@ -702,7 +702,7 @@ Feature: Stalled peers
       };
       CREATE SQS QUEUE EMITTER sqs_out FROM notifications
         TO sqs_main QUEUE 'stalled_{{test_id}}'
-        MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        SEND SINGLE MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

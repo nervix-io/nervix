@@ -33,7 +33,7 @@ impl EmitterConnectorStarter {
                 SqsQueueEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     queue: connector.queue.clone(),
-                    mode: connector.mode,
+                    send: connector.send,
                     dns: context.dns()?,
                 },
                 context.emitter_host(),
