@@ -155,4 +155,15 @@ impl TransportState {
             }
         }
     }
+
+    /// The published peer targets in node order. A walk that acts on every target, by retiring its
+    /// slots or starting its reconnect workers, follows this order instead of the table's hash
+    /// order, which a per-process seed decides, so every process acts in the same sequence.
+    pub(super) fn targets_in_node_order(&self) -> BTreeMap<ClusterNodeName, Arc<OutboundTarget>> {
+        self.targets
+            .load()
+            .iter()
+            .map(|(node, target)| (node.clone(), target.clone()))
+            .collect()
+    }
 }
