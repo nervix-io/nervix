@@ -30,6 +30,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Resources, uploads, mounts, and TLS files | `Resources` |
 | Syslog wire schema, codec fields, UDP/TCP/TLS framing, per-connection versus total buffer bounds, clients, sources, and emitters | `Common` → `Syslog`, and `Connector Capabilities` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
+| Client, ingestor and emitter heads, their connector/entity choice, and kind-preserving ALTER | `Plexus Overview` → `Statement catalog`, then `Connector Capabilities` and the entity's manual section |
 | Kafka domain offsets across explicit starts, reconnects, instance changes and restored backups | `Ingestors` → `Kafka`, and `Backup And Restore` |
 | Plexus entity modes, ordered options, typed metadata, generated client CONFIG key/type/confidentiality tables and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
 | Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
@@ -155,7 +156,7 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 | Match records from left and right relay sets | `CORRELATOR` |
 | Change or remove branch grouping | `REINGESTOR` |
 | Produce timed records from one materialized relay | `GENERATOR` |
-| Publish records outside Nervix | `EMITTER` |
+| Publish records outside Nervix | `<CONNECTOR> <ENTITY> EMITTER`, selected from the declared pairs |
 | Deliver constructed Arrow batches to competing application consumers | `CLIENT CONSUMER EMITTER ... TO SCHEMA` |
 | Read a session-local filtered view | `CREATE SUBSCRIPTION` |
 | Follow the active domain's clock from a client session | `ATTACH DOMAIN CLOCK` |
@@ -164,6 +165,11 @@ Use materialized relay dependencies when a node needs the latest record from ano
 relay. Do not use them to scan across branches.
 
 ## Correctness checks
+
+Choose each ingestor or emitter's complete connector/entity head from the current catalog, and
+keep that pair in its ALTER head. A client head names its connector. Follow the selected entity's
+declared reference kind and body; inspection and addressing use the Model kind and name. Read
+`Plexus Overview` → `Statement catalog` for the forms.
 
 Client CONFIG keys follow the generated schema: lowercase, case-sensitive, present once, required keys supplied and TLS identity files paired. Only declared driver namespaces accept extra property names. Treat SHOW CREATE as a confidential inspection projection, and backups as complete secret-bearing configuration. Offline CREATE checks need no broker; runtime initialization still owns remote checks.
 
