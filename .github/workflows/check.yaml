@@ -1226,15 +1226,25 @@ jobs:
           name: coverage-tests
           path: coverage-inputs/tests
 
-      # Each shard's report lands in its own directory, named after its artifact.
-      - name: Download scenarios coverage
+      # v8 extracts a single match directly into path, so every artifact names its destination.
+      - name: Download scenarios coverage shard 1
         uses: actions/download-artifact@v8
         with:
-          pattern: coverage-scenarios-*
-          path: coverage-inputs
+          pattern: coverage-scenarios-1
+          path: coverage-inputs/coverage-scenarios-1
 
-      # The download action unpacks a pattern's only match straight into its path, so the native
-      # extras name the directory the merge reads.
+      - name: Download scenarios coverage shard 2
+        uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-scenarios-2
+          path: coverage-inputs/coverage-scenarios-2
+
+      - name: Download scenarios coverage shard 3
+        uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-scenarios-3
+          path: coverage-inputs/coverage-scenarios-3
+
       - name: Download native extra coverage
         uses: actions/download-artifact@v8
         with:
@@ -1245,16 +1255,21 @@ jobs:
       # merge leaves out the collections of other modes the native extras artifact holds, and fails
       # rather than publish an incomplete report.
       - name: Merge coverage
+        env:
+          EXTRA_TESTS_RESULT: ${{ needs.extra-tests.result }}
+          EXTRA_COVERAGE_REQUIRED: ${{ needs.extra-tests.outputs.coverage-required }}
         run: |
           # Every shard's report is an input, so a shard whose report is missing fails the merge.
           scenarios=()
           for shard in $(seq 1 "${SCENARIO_SHARDS}"); do
             scenarios+=("coverage-inputs/coverage-scenarios-${shard}")
           done
-          # The native extras exist only when an `extra-*` label selected a step that collects them.
+          # A successful selected producer must contribute its artifact; a missing download fails.
           extras=()
-          if [[ -d coverage-inputs/coverage-native-extras ]]; then
-            extras+=(coverage-inputs/coverage-native-extras)
+          if [[ "${EXTRA_TESTS_RESULT}" == "success" ]]; then
+            if [[ "${EXTRA_COVERAGE_REQUIRED}" == "true" ]]; then
+              extras+=(coverage-inputs/coverage-native-extras)
+            fi
           fi
           just coverage-merge coverage-inputs/tests "${scenarios[@]}" "${extras[@]}"
 
@@ -1358,9 +1373,6 @@ jobs:
           just coverage-full-select --event "$EVENT" --labels "$LABELS" \
             --tests-required "$TESTS_REQUIRED" --bolero-required "$BOLERO_REQUIRED" --jobs "$JOBS"
 
-      # The download action unpacks a pattern's only match straight into its path, and each of
-      # several matches into a directory named after it. Every download therefore names its own
-      # directory, and the union reads each artifact as one input.
       - name: Download ordinary coverage
         uses: actions/download-artifact@v8
         with:
@@ -1368,6 +1380,7 @@ jobs:
           path: coverage-full-inputs/coverage-merged
 
       - name: Download native extra coverage
+        if: needs.extra-tests.outputs.coverage-required == 'true'
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-native-extras
@@ -1399,13 +1412,29 @@ jobs:
           pattern: coverage-turmoil
           path: coverage-full-inputs/coverage-turmoil
 
-      # One lane's artifact unpacks into this directory and several into one directory each below
-      # it; the union reads the completion records beneath it either way.
-      - name: Download Deloxide lane coverage
+      - name: Download deloxide lane coverage
         uses: actions/download-artifact@v8
         with:
-          pattern: deloxide-*
-          path: coverage-full-inputs/deloxide
+          pattern: deloxide-deloxide
+          path: coverage-full-inputs/deloxide-deloxide
+
+      - name: Download deloxide-order lane coverage
+        uses: actions/download-artifact@v8
+        with:
+          pattern: deloxide-deloxide-order
+          path: coverage-full-inputs/deloxide-deloxide-order
+
+      - name: Download deloxide-stress lane coverage
+        uses: actions/download-artifact@v8
+        with:
+          pattern: deloxide-deloxide-stress
+          path: coverage-full-inputs/deloxide-deloxide-stress
+
+      - name: Download deloxide-stress-restore lane coverage
+        uses: actions/download-artifact@v8
+        with:
+          pattern: deloxide-deloxide-stress-restore
+          path: coverage-full-inputs/deloxide-deloxide-stress-restore
 
       - name: Download combined fuzz coverage
         uses: actions/download-artifact@v8
@@ -1639,6 +1668,14 @@ jobs:
   extra-tests:
     name: extra-tests
     needs: [test-selection]
+    outputs:
+      coverage-required: >-
+        ${{ contains(github.event.pull_request.labels.*.name, 'extra-runners') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-compiler') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-bench-smoke') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-primitives') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-completion-walk') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-connector-matrix') }}
     # It runs for a pull request with an `extra-*` label, and each label selects its own steps, so
     # a pull request pays only for the checks it asks for.
     if: >-
