@@ -772,19 +772,21 @@ owners:
   restoring its attachment.
 - The paced branch-buffering outline checks both tenant keys and both sequence values under
   one-minute logical flush and collection at rate 1200. Each window still closes 50 ms after it
-  opens, while a physical clock would hold it for a minute, so the five-second physical receive
-  budget rejects the wrong clock by a factor of twelve and leaves nearly all of itself to relay
+  opens, while a physical clock would hold it for a minute, so the ten-second physical receive
+  budget rejects the wrong clock by a factor of six and leaves nearly all of itself to relay
   delivery between three nodes. A companion outline makes every relay owner wait 250 ms before
   each batch it fans out and keeps the same budget. Each outline's subscription reader runs
   independently of the scenario runner. Controlled harness regressions distinguish timely rows
   learned about after a runner delay from a genuinely missing row whose original receive budget
   expires; they do not change the runtime's clock contract.
 - The slow historical-domain Immediate outline keeps both tenant keys and exact payloads on one
-  and three nodes at `TIME RATE 0.0001`. Its 100-microsecond physical batching minimum would take
-  one physical second if scaled as logical time, so the receive budget stays 500 milliseconds.
-  The caller delays collecting the result for one second while the independent reader must
-  record both rows inside the original budget. A paused-clock control requires receipt before
-  the caller first polls the result; a one-second cadence still expires the 500 ms sample.
+  and three nodes at `TIME RATE 0.000001`. Its 100-microsecond physical batching minimum would
+  hold each route for a hundred physical seconds if scaled as logical time, so the ten-second
+  receive budget rejects the wrong clock by a factor of ten and leaves nearly all of itself to
+  relay delivery between three nodes. The caller delays collecting the result for eleven seconds
+  while the independent reader must record both rows inside the original budget. A paused-clock
+  control requires receipt before the caller first polls the result; a hundred-second cadence
+  still expires the ten-second sample.
 - Registered Bolero properties keep the complete values of clock periods, skews and rates, of the
   attach and detach statements, and of the clock requests, replies and frames. Mutations of a
   current clock frame decode deterministically or fail within the verification budgets.

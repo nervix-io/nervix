@@ -182,7 +182,8 @@ after the freeze ends. The leader's backup coordinator runs it in this order:
    whose state the archive captures on no node, as when every node that could host it is cordoned
    or down: that entity's last state lies on a node the cut cannot name.
 4. **Pause.** A replicated pause stops intake as each ingestor's `ON QUIESCE` declares, and every
-   live node applies the paused state.
+   live node applies the paused state. Applying the pause spends the cut's budget, as every step
+   before it does.
 5. **Drain.** Every 50 milliseconds, the coordinator polls every live node and every node the
    schedule assigns the domain's work to for the admitted work it still holds: admitting ingestors
    and generators, outstanding source acknowledgement roots, relays that admitted a batch while the
@@ -207,7 +208,9 @@ after the freeze ends. The leader's backup coordinator runs it in this order:
    holds the cut for that read, after any periodic re-evaluation already under way when the
    confirmation arrives. A generation started for a node with nothing to release would be
    superseded by the confirmation after its participant had taken it, and the participant would
-   read the dependency for both.
+   read the dependency for both. The drain polls until the cut's own deadline. It never measures a
+   budget of its own before the pause and restarts it once every node has applied the pause, so a
+   pause the cluster applies slowly leaves the drain less time instead of lengthening the freeze.
 6. **Capture.** Under the remaining budget, the coordinator checks its tenure, reads the domain's
    configuration at the applied revision, which becomes the revision and Raft log entry the archive
    records, and asks every scheduled state owner to capture at that revision, as described in
@@ -985,7 +988,7 @@ keyspaces' disk allocation; until the first sweep completes they read zero.
 | Guarantee | Evidence |
 | --- | --- |
 | Archive fidelity | Registered Bolero properties over complete archives, records and descriptors, streamed records against rkyv's encoding, Arrow groups, native lifecycle and Kafka conversion, the capture section mapping, and the restore installation and staging records, each with a malformed-input target; [Property Testing And Fuzzing](./property-testing-and-fuzzing.md) lists them. |
-| Cut and capture | `backup.feature` and `backup_wait.feature` on one and three nodes: configuration-only, stopped, live and quiesced cuts, parked `REQUIRED WAIT` work, including work whose every re-evaluation reads its state slowly, a drain whose every node holds its runtime installation, an unavailable emitter, a committing transaction's lease, a leader change during a cut and between cuts, and a leader change while the leader holds a backup's outcome before recording it, after which the backup runs again under its reference, holds its delayed cuts again and returns the second domain's expiry again; `backup_owners.feature` on three nodes, where a quiesced and a stopped cut, with no replica and with one, refuse once their deduplicator's scheduled owner has stopped and the leader no longer reports it live, a quiesced cut refuses before it pauses once the deduplicator's owner, or a node that only runs the domain's work, has stopped, and a quiesced and a live cut refuse while no node can host the deduplicator; `backup_stored_branch_capture.feature`, `backup_metadata.feature` and `backup_guest_saves.feature` for stored and large state within the bulk budget. |
+| Cut and capture | `backup.feature` and `backup_wait.feature` on one and three nodes: configuration-only, stopped, live and quiesced cuts, parked `REQUIRED WAIT` work, including work whose every re-evaluation reads its state slowly, a drain whose every node holds its runtime installation, an unavailable emitter, alone and after a pause application held for most of the cut's budget, whose drain is refused at the cut's own deadline, a committing transaction's lease, a leader change during a cut and between cuts, and a leader change while the leader holds a backup's outcome before recording it, after which the backup runs again under its reference, holds its delayed cuts again and returns the second domain's expiry again; `backup_owners.feature` on three nodes, where a quiesced and a stopped cut, with no replica and with one, refuse once their deduplicator's scheduled owner has stopped and the leader no longer reports it live, a quiesced cut refuses before it pauses once the deduplicator's owner, or a node that only runs the domain's work, has stopped, and a quiesced and a live cut refuse while no node can host the deduplicator; `backup_stored_branch_capture.feature`, `backup_metadata.feature` and `backup_guest_saves.feature` for stored and large state within the bulk budget. |
 | Capture fence | The Loom models `server.backup.cut-includes-publication` and `server.backup.cut-generation`, each qualified by weakenings that must fail, and the Shuttle checks of the fence, of forced deduplicator and window publication at the cut, and of materialized capture against eviction. |
 | Downloads and retention | `backup.feature` and `backup_delivery.feature`, and the Shuttle checks that a download stays bounded, a lost client releases its hold once, and concurrent downloads collect an archive once. |
 | Restore progress | `restore.feature` on one and three nodes: verification refusals, a failed step, an interrupted upload, joined retries and a leader change while applying; the Shuttle checks that a resumed restore never repeats a recorded effect, an abandoned upload releases its quota once, and concurrent retries join one execution. |

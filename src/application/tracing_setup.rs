@@ -2,8 +2,9 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The subscriber the process installs, the OTLP exporter it may add, the guard that
-//!   flushes them on shutdown, and the trace sample ratio setting the exporter samples with.
+//! - **Owns.** The subscriber the process installs and the filter that decides what it records,
+//!   including the dependency events no filter may select, the OTLP exporter it may add, the guard
+//!   that flushes them on shutdown, and the trace sample ratio setting the exporter samples with.
 //! - **Depends on.** The tracing command-line arguments, the node resolver and telemetry transport
 //!   hooks.
 //! - **Must not know.** What any other module records.
@@ -40,9 +41,10 @@ use opentelemetry_sdk::{
     trace::{Sampler, SdkTracerProvider},
 };
 use tower_service::Service;
+use tracing::{Level, Metadata, Subscriber};
 use tracing_subscriber::{
-    EnvFilter, fmt, fmt::writer::BoxMakeWriter, prelude::__tracing_subscriber_SubscriberExt,
-    util::SubscriberInitExt,
+    EnvFilter, filter::filter_fn, fmt, fmt::writer::BoxMakeWriter,
+    prelude::__tracing_subscriber_SubscriberExt, registry::LookupSpan, util::SubscriberInitExt,
 };
 
 use super::{AppError, TracingArgs};
@@ -50,6 +52,59 @@ use super::{AppError, TracingArgs};
 const DEFAULT_TRACE_FILTER: &str =
     "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
      openraft::replication=error,openraft::engine::handler::replication_handler=error";
+
+/// What the node's log records: what its trace filter selects, except a dependency event that
+/// carries a record's payload, which no filter can select.
+///
+/// The trace filter is the operator's `RUST_LOG`, or the default when it is unset or does not
+/// parse. The payload rule is a filter of its own beneath it, not a directive added to it: a
+/// field-qualified directive outranks a plain one for the same target, and a span-scoped directive
+/// enables everything inside its span, but neither reaches an event the layer beneath refused.
+///
+/// Lapin logs every message a broker returns at `warn`, with the whole message, its body and
+/// properties included, inside its `io_loop` span. A RabbitMQ emitter that publishes mandatory
+/// messages gets back every record its broker cannot route, and reports each return itself,
+/// naming the broker's reply without the record. Lapin's `debug` and `trace` events about returned
+/// messages carry no message and stay with the filter, as every other target does.
+struct LogFilter {
+    configured: EnvFilter,
+}
+
+impl LogFilter {
+    /// The module Lapin logs a returned message from, which is the target of its events.
+    const LAPIN_RETURNED_MESSAGES: &'static str = "lapin::returned_messages";
+
+    /// The operator's `RUST_LOG`, or `default` when it is unset or does not parse.
+    fn from_environment(default: &str) -> Self {
+        let configured =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+        Self { configured }
+    }
+
+    /// The registry the process records through, which its writers are layered on: the payload rule
+    /// as the layer beneath and the filter above it. The filter answers first, so the subscriber's
+    /// level hint is the filter's, a callsite the filter refuses is never asked about again, and the
+    /// rule is asked only about what the filter selects.
+    ///
+    /// Composing the two with `Layer::and_then` would not keep that. A layer composed over the
+    /// registry takes its inner layer for the registry itself, so the composition would report the
+    /// rule's absent level hint, which raises the subscriber's maximum level to `trace`, and would
+    /// evaluate both filters on every event of a callsite the filter refuses.
+    fn into_subscriber(
+        self,
+    ) -> impl Subscriber + for<'span> LookupSpan<'span> + Send + Sync + 'static {
+        tracing_subscriber::registry()
+            .with(filter_fn(Self::admits))
+            .with(self.configured)
+    }
+
+    /// Whether the log may record what `metadata` describes, whatever the filter selects.
+    fn admits(metadata: &Metadata<'_>) -> bool {
+        let returned_message =
+            metadata.target() == Self::LAPIN_RETURNED_MESSAGES && *metadata.level() <= Level::INFO;
+        !returned_message
+    }
+}
 
 /// The share of root traces the node exports, between nothing and everything.
 pub struct TraceSampleRatio;
@@ -256,8 +311,7 @@ impl TraceExporter {
 pub fn init_tracing(args: &TracingArgs) -> Result<TracingGuard, Report<AppError>> {
     let sample_ratio = Setting::<TraceSampleRatio>::new(args.otel_trace_sample_ratio, &())
         .change_context(AppError::InitTracing)?;
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_TRACE_FILTER));
+    let subscriber = LogFilter::from_environment(DEFAULT_TRACE_FILTER).into_subscriber();
     let fmt_layer = fmt::layer().with_ansi(false);
 
     if args.otel_enabled {
@@ -275,8 +329,7 @@ pub fn init_tracing(args: &TracingArgs) -> Result<TracingGuard, Report<AppError>
         let tracer = tracer_provider.tracer("nervix");
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
-        tracing_subscriber::registry()
-            .with(env_filter)
+        subscriber
             .with(fmt_layer)
             .with(otel_layer)
             .try_init()
@@ -289,8 +342,7 @@ pub fn init_tracing(args: &TracingArgs) -> Result<TracingGuard, Report<AppError>
             }),
         })
     } else {
-        tracing_subscriber::registry()
-            .with(env_filter)
+        subscriber
             .with(fmt_layer)
             .try_init()
             .change_context(AppError::InitTracing)?;
@@ -302,6 +354,10 @@ pub fn init_tracing(args: &TracingArgs) -> Result<TracingGuard, Report<AppError>
 #[cfg(all(test, not(any(feature = "shuttle", feature = "loom"))))]
 #[path = "tracing_setup_tests.rs"]
 mod tests;
+
+#[cfg(all(test, not(any(feature = "shuttle", feature = "loom"))))]
+#[path = "tracing_setup_filter_tests.rs"]
+mod filter_tests;
 
 #[derive(Clone)]
 struct SharedFileWriter(Arc<ParkingMutex<std::fs::File>>);
@@ -344,12 +400,9 @@ pub fn init_tracing_to_file(path: &Path) -> io::Result<()> {
     let file = OpenOptions::new().create(true).append(true).open(path)?;
     let file = Arc::new(ParkingMutex::new(file));
     let make_writer = BoxMakeWriter::new(move || SharedFileWriter(file.clone()));
-    fmt()
-        .with_ansi(false)
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new(format!("{DEFAULT_TRACE_FILTER},{TEST_TRACE_FILTER}"))
-        }))
-        .with_writer(make_writer)
+    LogFilter::from_environment(&format!("{DEFAULT_TRACE_FILTER},{TEST_TRACE_FILTER}"))
+        .into_subscriber()
+        .with(fmt::layer().with_ansi(false).with_writer(make_writer))
         .try_init()
         .discarded(
             "the first call in this process installed the subscriber this one would replace",
