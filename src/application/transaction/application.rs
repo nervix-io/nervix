@@ -430,8 +430,9 @@ impl SessionServiceImpl {
                 if self.inner.consensus.current_leader().await.as_ref()
                     != Some(self.inner.consensus.local_node_id())
                 {
+                    let leader = self.inner.consensus.current_leader().await;
                     return Err(Report::new(ConsensusError::LeadershipLost {
-                        leader_id: self.inner.consensus.current_leader().await,
+                        observed: leader.into(),
                     })
                     .change_context(ConsensusTransactionError::Consensus)
                     .change_context(TransactionCommitError::Proposal));

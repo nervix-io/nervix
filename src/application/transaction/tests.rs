@@ -55,17 +55,21 @@ fn planning_error_message_includes_attached_validation_detail() {
 
 #[test]
 fn transaction_commit_proposal_retains_consensus_failure_for_display_and_redirect() {
-    let error = Report::new(ConsensusError::LeadershipLost { leader_id: None })
-        .change_context(ConsensusTransactionError::Consensus)
-        .change_context(super::TransactionCommitError::Proposal);
+    let error = Report::new(ConsensusError::LeadershipLost {
+        observed: nervix_consensus::LeadershipObservation::NoLeader,
+    })
+    .change_context(ConsensusTransactionError::Consensus)
+    .change_context(super::TransactionCommitError::Proposal);
 
     assert!(matches!(
         error.downcast_ref::<ConsensusError>(),
-        Some(ConsensusError::LeadershipLost { leader_id: None })
+        Some(ConsensusError::LeadershipLost {
+            observed: nervix_consensus::LeadershipObservation::NoLeader,
+        })
     ));
     assert_eq!(
         super::transaction_commit_error_message(&error),
-        "raft proposal lost leadership"
+        "this node cannot propose as the leader: no leader is known"
     );
 }
 
