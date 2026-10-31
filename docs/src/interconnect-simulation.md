@@ -496,15 +496,16 @@ committed seed of that case.
 
 ## CI And Budgets
 
-CI runs the simulation as a job of its own, `turmoil`, only for a pull request labeled
-`turmoil`, beside the default tests and the `shuttle` and `loom` jobs. Its build enables the
-`turmoil` feature and `tokio_unstable`, so it shares no compilation with them, and a failed
-case's record is its own artifact. The job runs `just coverage-native-extras test-turmoil`,
-which executes the canonical gating suite once under LLVM source instrumentation, then runs
-`just test-turmoil-replay-check` independently. Replay qualification contributes no counters.
-The instrumented build lives under `target/native-coverage-build-turmoil`; its failure records
-and suite logs, together with the ordinary replay's `target/turmoil-failures`, are uploaded as
-the `turmoil-failures` artifact when the job fails.
+CI runs the simulation as a job of its own, `turmoil`, only for a pull request labeled `turmoil`,
+beside the default tests and the `shuttle` and `loom` jobs. Its build enables the `turmoil` feature
+and `tokio_unstable`, so it shares no compilation with them, and a failed case's record is its own
+artifact. The job builds the suite's test targets with `just coverage-native-extras-build
+test-turmoil` and publishes its kache cache, then runs `just coverage-native-extras test-turmoil`,
+which compiles nothing more and executes the canonical gating suite once under LLVM source
+instrumentation, and then runs `just test-turmoil-replay-check` independently. Replay qualification
+contributes no counters. The instrumented build lives under `target/native-coverage-build-turmoil`;
+its failure records and suite logs, together with the ordinary replay's `target/turmoil-failures`,
+are uploaded as the `turmoil-failures` artifact when the job fails.
 
 The `coverage-turmoil` artifact retains the product-source report, `completion.json`,
 `executions.jsonl` and `export.log` from the collection's own attempt. Only a report beside a

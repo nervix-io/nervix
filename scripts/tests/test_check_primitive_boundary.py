@@ -60,6 +60,23 @@ nervix-vocabulary = { workspace = true }
 shuttle = { workspace = true, optional = true }
 """
 
+# A package of tests alone: its dev-dependencies are what its builds link.
+SCENARIOS = """
+[package]
+name = "nervix-scenarios"
+
+[[test]]
+name = "scenarios"
+path = "scenarios.rs"
+
+[features]
+shuttle = ["nervix-primitives/shuttle", "nervix-vocabulary/shuttle"]
+
+[dev-dependencies]
+nervix-primitives = { workspace = true }
+nervix-vocabulary = { workspace = true }
+"""
+
 VOCABULARY = """
 [package]
 name = "nervix-vocabulary"
@@ -594,6 +611,28 @@ class ManifestTests(CheckTestCase):
                     '[package]\nname = "nervix-vocabulary"\n\n[features]\nturmoil = []\n'
                 )
             },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("depends on nervix-primitives directly", report)
+
+    def test_a_package_of_tests_selects_a_mode_through_its_dev_dependencies(self) -> None:
+        status, report = self.check({}, manifests={"tests/Cargo.toml": SCENARIOS})
+        self.assertEqual(status, 0, report)
+
+    def test_a_package_of_tests_forwards_a_mode_to_every_dev_dependency_that_owns_it(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "tests/Cargo.toml": SCENARIOS.replace(', "nervix-vocabulary/shuttle"', "")
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("feature `shuttle` does not forward `nervix-vocabulary/shuttle`", report)
+
+    def test_a_dev_dependency_does_not_select_a_mode_for_a_package_with_a_library(self) -> None:
+        status, report = self.check(
+            {"tests/src/lib.rs": ""},
+            manifests={"tests/Cargo.toml": SCENARIOS},
         )
         self.assertEqual(status, 1)
         self.assertIn("depends on nervix-primitives directly", report)
