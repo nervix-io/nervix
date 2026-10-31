@@ -209,7 +209,7 @@ resubmitting an outcome that might already have produced output.
 | Element | Where it runs | Owner |
 | --- | --- | --- |
 | Scenario steps and hooks | One runner task: Cucumber polls every running scenario, and the suite watchdog around them, from the task the binary's main thread blocks on | `tests/scenarios.rs` |
-| Scenario admission and timing | Feature permits, prioritized run slots, the long-running declaration, queue reasons, and accumulated attempt times in the runner process | `scenario_schedule.rs` and `scenario_phase.rs` |
+| Scenario admission and timing | Feature permits, prioritized run slots, declared scenario weights and lengths, queue reasons, and accumulated attempt times in the runner process | `scenario_schedule.rs` and `scenario_phase.rs` |
 | In-process nodes | One Tokio task per node on the binary's multi-threaded runtime, which has one worker thread per CPU | The cluster fixture, `tests/common/cluster.rs` |
 | Server processes | Child processes of the scenario executable itself, started under the name `nervix-server` | The server-process fixture, `tests/common/server_process.rs`, and the program selection in `tests/common/process_program.rs` |
 | Real-process cluster | Three server children with separate durable stores, ports and identities under one test certificate authority | `tests/common/server_process_cluster.rs`, using the server-process fixture |
@@ -595,20 +595,41 @@ the measurements and failed attempts; changing the environment does not explain 
 retry observation.
 
 Admission grants feature capacity and the attempt's share of the run slots in one decision, after
-both are available. A scenario holds both through the end of teardown. A first run holds one slot.
-A retry holds a larger share, so it runs beside fewer scenarios than the run that failed. The first
+both are available. A scenario holds both through the end of teardown. The `@slots_N` tag declares
+its load as a positive whole number of slots. It counts on the feature, rule, scenario and an
+outline's examples; Cucumber carries example tags into the expanded scenario. The largest
+inherited declaration applies, independently of tag order, and a scenario without one has weight
+one. An invalid numeric declaration fails with the tag and scenario identity.
+
+An attempt holds the larger of its declared weight and its retry share, capped at a quarter of the
+pool, rounded down, and at least one slot. A weight above the pool's capacity therefore still
+admits in a small local run. In a 48-slot pool, weight four holds four slots on the first attempt
+and first retry, and six on the second retry; a weight above twelve holds twelve on every attempt.
+Pools of one, two or three slots give every attempt one. The cap preserves concurrent admission;
+no weight makes a scenario exclusive.
+
+A retry can hold a larger share, so it runs beside fewer scenarios than the run that failed. The first
 retry holds a sixteenth of the pool, and each later retry holds twice the share of the run before
-it. With Cucumber's two retries, the second retry holds an eighth, so the shares are 1, 3 and 6 of
-CI's 48 slots. Every run holds at least one slot, so a pool of fewer than sixteen slots gives its
-first retry one. A run past the configured retries, as a `--retry` override allows, keeps the last
-retry's share. No run holds more than a quarter of the pool, so no scenario runs alone. A retry
-whose share is not yet free keeps the slots that free up until its share fits. Otherwise the first
-attempts behind it would take those slots one at a time and starve it.
+it. With Cucumber's two retries, the second retry holds an eighth, so an unweighted scenario's
+shares are 1, 3 and 6 of CI's 48 slots. Every run holds at least one slot, so a pool of fewer than
+sixteen slots gives its first retry one. A run past the configured retries, as a `--retry` override
+allows, keeps the last retry's share. An eligible attempt whose share is not yet free keeps the
+slots that free up until its share fits. This applies to weighted first attempts as well as
+retries: smaller attempts behind it cannot consume those slots one at a time and starve it.
+
+Declare weights from measured load per attempt, including CPU work or memory demand rather than
+elapsed time alone. Compare complete sharded runs on the same product source for run-slot
+utilization, runner stalls, retries and suite length against the suite watchdog's budget. Keep the
+measurements and the declaration decision on the owning ClickUp task. A weight accounts for load;
+timing assumptions still have to hold beside the rest of the suite, including on the first
+attempt. Passing only after a weight or retry share quiets the machine identifies a scenario defect
+to repair.
 
 The active-scenario diagnostic names the feature limit or run slot a waiting scenario needs. Each
 `scenario started` line names the run slots the attempt holds. The suite summary counts scenario
 work as each attempt's running time multiplied by the slots it holds, and it reports the
-slot-seconds retries held beyond one slot each. That figure is what the larger shares cost the run.
+slot-seconds reservations held beyond one slot per attempt. That figure is what declared weights
+and retry shares together cost the run.
 Replayed against the 15 retries of Check run 40044052881, the shares cost 6,876 slot-seconds,
 about 143 seconds of a full 48-slot run. Against the 5 retries of run 39987498652, they cost about
 21 seconds.
@@ -648,8 +669,9 @@ A scenario declares itself long-running when its attempts reach two minutes in a
 producer. In the first run above, 34 attempts outside the limited features reached two minutes,
 about one in a hundred, while the median attempt took 25 seconds. The suite summary lists every
 attempt that reached two minutes without the declaration. The declaration orders admission only.
-A declared scenario's attempts take the same share of the run slots as any other scenario's, and
-run beside the rest of the suite. Its retries, deadlines and budgets are unchanged.
+A long-running declaration changes admission order independently of a scenario's weight. The
+attempt still holds the larger of its weight and retry share, and runs beside the rest of the
+suite. Its retries, deadlines and budgets are unchanged.
 
 The CI jobs divide the work at the scenario boundary:
 
@@ -2976,6 +2998,10 @@ scenario at a time, and its chain took 48.8 minutes of the 85.5-minute unsharded
 console features that run two at a time, and of every feature of long-running scenarios. A shard
 admits its runs to its own run slots and feature limits.
 
+Declared weights apply at admission inside each shard. Shards still deal runs by count: a weight
+expresses simultaneous load, while balancing total work needs an elapsed-work estimate. A weight
+also has a different effective cap in different local slot pools, so it is not a shard-work unit.
+
 `SCENARIO_SHARDS` in the Check workflow sets the number of shards, and `scenarios-build` turns it
 into the shards' matrix. In that run, a third of the 240,698 slot-seconds of work fills 48 slots
 for 28.5 minutes, while the longest attempt ran for 37.5 minutes, so the longest attempt bounds a
@@ -3756,6 +3782,8 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | One cleanup budget per cluster, and truthful phases | `stuck_nodes_spend_one_cleanup_budget_in_a_cluster_of_one_and_of_three`, `a_node_left_stopping_keeps_what_it_holds_until_its_own_task_ends`, `a_single_node_cleanup_keeps_how_its_task_ended`, `a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports`, `the_finished_phase_is_published_only_once_cleanup_has_completed`, `an_active_scenario_publishes_its_phase_and_the_age_of_that_phase` |
 | A stop a scenario waits for is timed by the node's own ending, and a node that outlives a wait is named with its shutdown phase | `a_stop_is_timed_from_its_first_request_to_the_ending_of_the_node_task`, `a_node_that_had_ended_before_it_was_asked_to_stop_took_no_time_to_stop`, `a_stopping_node_is_read_with_its_shutdown_phase_and_its_own_deadline`, `a_stop_record_reads_as_the_transition_the_harness_prints`, `a_node_left_stopping_is_recorded_with_where_its_own_shutdown_stood` |
 | Each retry holds twice the share of the run before it, from a sixteenth of the pool and never more than a quarter; a retry keeps the slots that free up until its share fits, gives its whole share back when it ends or is cancelled, and the suite summary counts the slot time it holds beyond one slot | `each_retry_holds_twice_the_share_of_the_run_before_it`, `a_retry_holds_its_share_of_the_run_slots_until_it_ends`, `a_retry_waiting_for_its_share_keeps_the_slots_that_free_up`, `a_cancelled_retry_returns_its_whole_share`, `the_suite_summary_counts_the_slot_time_a_retry_holds_beyond_one_slot` |
+| Positive numeric weights inherit from features, rules, scenarios and expanded examples; the largest declaration combines with the retry share and stays within the quarter cap, including in small pools | `scenario_weight_reads_feature_rule_scenario_and_expanded_example_tags`, `scenario_weight_uses_the_largest_declaration_without_changing_length`, `scenario_weight_refuses_invalid_numeric_declarations_with_their_tag`, `scenario_weight_combines_with_retries_by_maximum_and_caps_every_attempt` |
+| Weighted first attempts retain and release their whole reservation, gather free slots ahead of smaller successors, retain retry priority and feature limits, and contribute their reservation cost to the summary | `scenario_weight_holds_its_slots_through_the_admissions_lifetime`, `scenario_weight_gathers_free_slots_before_smaller_first_attempts`, `scenario_weight_still_gives_retries_priority_and_respects_feature_limits`, `scenario_weight_summary_counts_a_first_attempts_extra_reservation` |
 | Feature waits do not occupy run slots, and limited chains start before and progress beside bulk work | `a_queued_web_console_scenario_does_not_hold_a_run_slot`, `limited_features_are_taken_up_before_the_bulk`, `the_next_limited_scenario_gets_a_slot_beside_bulk_work`, `releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain`, `each_web_console_feature_starts_before_one_feature_consumes_the_group` |
 | A declared long-running scenario is admitted ahead of ordinary first attempts and behind retries, runs beside the bulk instead of after it, and the suite summary names every undeclared attempt of two minutes, finished or still running | `a_declared_long_scenario_is_admitted_before_queued_ordinary_first_attempts`, `a_retry_runs_before_a_declared_long_first_attempt`, `a_declared_long_scenario_queued_last_runs_beside_the_bulk_instead_of_after_it`, `long_running_is_declared_by_a_tag_of_the_scenario_its_rule_or_its_feature`, `an_undeclared_attempt_of_two_minutes_names_its_scenario_long_running`, `the_suite_summary_names_every_undeclared_attempt_of_two_minutes_finished_or_running` |
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
