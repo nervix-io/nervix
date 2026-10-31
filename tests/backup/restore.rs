@@ -17,6 +17,7 @@ mod native_restore_inspection;
 
 use std::os::unix::fs::OpenOptionsExt as _;
 
+use bytes::Bytes;
 use nervix_backup::{
     ArchiveLayout, ArchiveRecord, BackupManifest, BranchLifecycleRecord, SectionDigester,
     SectionPath, WasmStateDescriptor,
@@ -39,12 +40,78 @@ use crate::common::{
 
 /// How long a restore waits at an armed pause before a scenario gives up on reaching it.
 const RESTORE_PAUSE_TIMEOUT: Duration = Duration::from_secs(120);
+/// The interval between attempts of one immutable restore request.
+const RESTORE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A background request retains its immutable execution identity with the task that owns it.
 #[derive(Debug)]
 pub(crate) struct BackgroundRestore {
     reference: CommandExecutionReference,
     pub(super) task: AbortOnDropHandle<TestRestoreEnd>,
+    /// Only a raw probe that has not reached its requested boundary may restart its attempt.
+    retry_request: Option<RestoreStreamRequest>,
+}
+
+impl BackgroundRestore {
+    /// Reaches one armed boundary despite a refusal before admission. After reaching it, the
+    /// retained task answers raw: recovering that answer would erase the protocol being tested.
+    async fn wait_for_pause(
+        &mut self,
+        paused: impl std::future::Future<Output = ()>,
+        servers: Vec<String>,
+    ) {
+        let mut paused = std::pin::pin!(paused);
+        let mut routes = servers.iter().cycle();
+        nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let ended = nervix_primitives::select! {
+                    biased;
+                    () = &mut paused => {
+                        self.retry_request = None;
+                        return;
+                    },
+                    ended = &mut self.task => {
+                        ended.assured("the background restore task does not panic")
+                    }
+                };
+                let TestRestoreEnd::Replied(reply) = &ended else {
+                    panic!("restore ended before its armed pause: {ended:?}");
+                };
+                let RestoreDisposition::Outcome(outcome) = &reply.disposition else {
+                    panic!("restore upload was refused before its armed pause: {ended:?}");
+                };
+                assert_eq!(
+                    outcome.execution_reference, self.reference,
+                    "every pre-boundary attempt answers the original restore execution"
+                );
+                let retryable = matches!(
+                    &outcome.disposition,
+                    CommandDisposition::NotLeader(_)
+                        | CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::LeadershipLost)
+                );
+                assert!(retryable, "restore ended before its armed pause: {ended:?}");
+                let Some(request) = self.retry_request.as_mut() else {
+                    panic!("restore ended after its first boundary was observed: {ended:?}");
+                };
+                request.server = routes
+                    .next()
+                    .assured("a scenario cluster has at least one restore endpoint")
+                    .clone();
+                append_cucumber_log_line(&format!(
+                    "restore probe retry before pause: reference={}, route={}, end={ended:?}",
+                    self.reference, request.server
+                ));
+                nervix_primitives::time::sleep(RESTORE_RETRY_INTERVAL).await;
+                let request = request.clone();
+                self.task = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+                    stream_restore(&request, None, None).await
+                }));
+            }
+        })
+        .await
+        .assured("restore reaches its armed pause within the original observation budget");
+    }
 }
 
 #[given("the restore coordinator uses remote placement in a multi-node cluster")]
@@ -1414,11 +1481,12 @@ fn then_cli_restore_report_shows_step(
 }
 
 /// What one restore stream a scenario shapes carries, owned so it can be sent from a task.
+#[derive(Clone, Debug)]
 struct RestoreStreamRequest {
     server: String,
     reference: CommandExecutionReference,
     statement: String,
-    archive: Vec<u8>,
+    archive: Bytes,
 }
 
 /// Every current route is eligible to teach a probe the outcome of its immutable execution.
@@ -1475,7 +1543,7 @@ impl RestoreStreamRequest {
                 return end;
             }
             tracing::debug!(reference = %self.reference, ?end, "learning a restore probe's outcome");
-            deadline.pause(Duration::from_millis(100)).await;
+            deadline.pause(RESTORE_RETRY_INTERVAL).await;
             assert!(
                 !deadline.has_passed(),
                 "restore {} did not reach a known outcome: {end:?}",
@@ -1515,7 +1583,7 @@ async fn restore_stream_request(
         reference: CommandExecutionReference::parse(reference)
             .expect("scenario execution references are valid"),
         statement: format!("RESTORE {scope} FROM '{}'{lifecycle};", path.display()),
-        archive,
+        archive: Bytes::from(archive),
     }
 }
 
@@ -1637,6 +1705,7 @@ async fn when_restore_is_streamed_in_the_background(
     let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
     world.background_restore = Some(BackgroundRestore {
         reference: request.reference.clone(),
+        retry_request: Some(request.clone()),
         task: AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
             stream_restore(&request, None, None).await
         })),
@@ -1662,6 +1731,7 @@ async fn when_restore_is_streamed_with_outcome_recovery(
     let servers = restore_outcome_routes(world);
     world.background_restore = Some(BackgroundRestore {
         reference: request.reference.clone(),
+        retry_request: None,
         task: AbortOnDropHandle::new(nervix_primitives::task::spawn(request.complete(servers))),
     });
 }
@@ -1687,8 +1757,31 @@ async fn when_restore_is_streamed_until_its_outcome_is_known(
     world.last_restore_end = Some(end);
 }
 
-/// Waits until the node holds the outcome of the background restore before recording it, and
-/// fails with the restore's own end if the stream ends first.
+/// Holds the initial admission across a scenario-controlled leadership transfer.
+#[then(
+    expr = "the background restore's reference lookup is held on node {string} before admission"
+)]
+async fn then_background_restore_reference_lookup_is_held(world: &mut ScenarioWorld, node: String) {
+    let node = node_name(&expand_placeholders(world, &node));
+    let fault_injection = world.fault_injection.clone();
+    let background = world
+        .background_restore
+        .as_mut()
+        .assured("a restore stream runs in the background before admission");
+    nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, async {
+        nervix_primitives::select! {
+            biased;
+            () = fault_injection.wait_for_command_reference_lookup_pause(&node) => {},
+            ended = &mut background.task => {
+                panic!("restore ended before its reference lookup was held: {ended:?}");
+            }
+        }
+    })
+    .await
+    .assured("restore reaches its reference lookup before admission");
+}
+
+/// Reaches finalization under the same execution identity, then retains that attempt's raw reply.
 #[then(expr = "the background restore's outcome is held on node {string} before it is recorded")]
 async fn then_background_restore_outcome_is_held(world: &mut ScenarioWorld, node: String) {
     let node = node_name(&expand_placeholders(world, &node));
@@ -1697,18 +1790,12 @@ async fn then_background_restore_outcome_is_held(world: &mut ScenarioWorld, node
         .background_restore
         .take()
         .assured("a restore stream runs in the background before its outcome is held");
-    nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, async {
-        nervix_primitives::select! {
-            biased;
-            () = fault_injection.wait_for_command_finalization_pause(&node) => {},
-            ended = &mut background.task => {
-                let ended = ended.assured("the background restore task does not panic");
-                panic!("restore ended before its outcome was held: {ended:?}");
-            }
-        }
-    })
-    .await
-    .assured("restore reaches the finalization of its outcome");
+    background
+        .wait_for_pause(
+            fault_injection.wait_for_command_finalization_pause(&node),
+            restore_outcome_routes(world),
+        )
+        .await;
     world.background_restore = Some(background);
 }
 
@@ -1926,14 +2013,19 @@ async fn then_restore_pauses_at_step(
 ) {
     let step = restore_step(world, &kind, &domain);
     let node = expand_placeholders(world, &node);
-    nervix_primitives::time::timeout(
-        RESTORE_PAUSE_TIMEOUT,
-        world
-            .fault_injection
-            .wait_for_restore_step_pause(&node_name(&node), &step),
-    )
-    .await
-    .unwrap_or_else(|_| panic!("the restore did not reach step {step} on node '{node}'"));
+    let fault_injection = world.fault_injection.clone();
+    let node_name = node_name(&node);
+    let paused = fault_injection.wait_for_restore_step_pause(&node_name, &step);
+    if let Some(mut background) = world.background_restore.take() {
+        background
+            .wait_for_pause(paused, restore_outcome_routes(world))
+            .await;
+        world.background_restore = Some(background);
+        return;
+    }
+    nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, paused)
+        .await
+        .unwrap_or_else(|_| panic!("the restore did not reach step {step} on node '{node}'"));
 }
 
 #[when(expr = "the restore step pause on node {string} is released")]

@@ -1103,7 +1103,21 @@ The harness keeps these boundaries explicit.
   as it records the outcome; a single-node leader is its own quorum, and its lease never lapses. A
   raw probe therefore stays only where the answer is the subject: a repetition joining an applying
   restore or returning its recorded outcome, a reference conflict, a redirect, a controlled
-  leadership loss, or an interrupted upload sent again. The room and idle-lifetime scenarios hold
+  leadership loss, or an interrupted upload sent again. When a raw background probe must reach an
+  armed restore step or finalization pause, that observation may repeat a pre-boundary redirect or
+  `LeadershipLost` reply under the same reference, statement and immutable archive. The complete
+  observation, including every attempt and retry interval, keeps its original 120-second bound.
+  Upload refusals, terminal failures, `StillApplying` and other unknown causes do not satisfy that
+  observation. Reaching the requested pause disables further setup retries and retains the
+  reaching attempt's raw reply. The stale-route and held-admission regressions exercise both
+  pre-boundary replies before transferring leadership again at finalization and requiring the
+  exact `LeadershipLost`/`Executed` answer followed by `Completed`/`Recovered` under the same
+  reference. The interrupted-upload and repeated-reference outlines hold finalization too: their
+  one-node attempts answer `Completed`/`Executed`, and their three-node attempts deliberately
+  transfer leadership before release and answer `LeadershipLost`/`Executed`. Both then require
+  `Completed`/`Recovered`; the applying repetition and reference-conflict replies remain raw and
+  exact. The durable-failure outline retains its raw leadership-loss reply and recovered failure.
+  The room and idle-lifetime scenarios hold
   the restore's outcome before its coordinator records it and transfer leadership on three nodes
   before releasing it, so their three-node examples always learn the outcome under the same
   reference as recovered, and their one-node examples report it as executed. The staging scenario
