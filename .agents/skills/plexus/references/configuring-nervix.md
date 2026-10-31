@@ -320,7 +320,10 @@ current connection, retry and deadline limits.
   transient error while the emitter retries.
 - Provision Iceberg table columns with names and types matching the emitter's `VALUES`. A
   required `NAMESPACE` names the catalog namespace independently of the Nervix domain; provision
-  each of its case-preserving dot-separated levels before starting the emitter. A
+  each of its case-preserving dot-separated levels before starting the emitter. Until the catalog
+  holds the namespace and the table, the emitter retries its open and `DESCRIBE EMITTER` names the
+  namespace or the table it lacks. Move an emitter to another namespace with `SET TO`, restating
+  its complete destination with the new `NAMESPACE` and that table's `LOCATION`. A
   `DATETIME`, at the top level or inside a `VEC` or `ARRAY`, is written at the containing
   microsecond and needs a `timestamptz` column, not `timestamptz_ns`. A commit writes each mapped
   column into the table column of its name, in any `VALUES` order, and a null into each optional

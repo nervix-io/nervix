@@ -3151,6 +3151,30 @@ CREATE ICEBERG TABLE EMITTER iceberg_notifications
 
 The REST catalog is the authority for namespace and table metadata. Nervix does not write a separate object-store catalog pointer file and does not provision catalog entries from the emitter runtime path.
 
+#### Iceberg catalog namespace and table
+
+At open, the emitter loads the declared table from the REST catalog. Nervix creates neither the
+namespace nor the table: a catalog that holds no namespace of the declared name, or no table of the
+declared name in a namespace it holds, fails the open with the entity it lacks. A REST catalog
+answers the load of a table in a missing namespace exactly as it answers the load of a missing
+table, so the emitter asks the catalog for the namespace to tell the two apart. `DESCRIBE EMITTER`
+shows the outcome as the emitter's transient error, and the emitter retries the open on its declared
+retry policy, so it opens once an operator provisions what it lacks. Rows its relays deliver
+meanwhile wait for that open, and the emitter commits them once it opens:
+
+| Catalog state | Transient error |
+| --- | --- |
+| No namespace of the declared name | `ICEBERG namespace 'Analytics.Events' does not exist` |
+| The namespace, without a table of the declared name in it | `ICEBERG table 'orders' does not exist in namespace 'Analytics.Events'` |
+| A catalog that fails the load | `failed to load ICEBERG table 'orders' in namespace 'Analytics.Events'`, followed by the catalog's error |
+| A catalog that does not hold the table, then fails the namespace lookup | `failed to look up ICEBERG namespace 'Analytics.Events'`, followed by the catalog's error |
+
+To move an emitter to a table in another namespace, `ALTER ICEBERG TABLE EMITTER ... SET TO`
+restates the complete destination with the new `NAMESPACE` and that table's `LOCATION`, as
+[Altering emitters](#altering-emitters) describes for every entity. The replaced emitter opens the
+table in the new namespace, which must already exist, and `SHOW CREATE EMITTER` and
+`DESCRIBE EMITTER` show the new namespace.
+
 #### Iceberg table schema
 
 At open, the emitter loads the table through the catalog and requires the table's registered

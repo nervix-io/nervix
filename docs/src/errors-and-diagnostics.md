@@ -1233,6 +1233,15 @@ client's value is printed. A TLS file that either Iceberg client cannot use stop
 open with `EmitterOpenError::InvalidConfiguration`. Beneath it, `IcebergClientTlsError` names the
 catalog or the object-store client, and the shared `TlsClientConfigError` beneath that names the
 file and the step that failed.
+An Iceberg emitter whose catalog does not hold the declared table stops at open with
+`EmitterOpenError::MissingExternalEntity`: its kind is `namespace` when the catalog holds no
+namespace of the declared name, and `table`, named `<namespace>.<table>`, when it holds the
+namespace without the table. Beneath it, `IcebergTableOpenError::MissingNamespace` or
+`MissingTable` names what the catalog lacks, and its description is the emitter's transient error,
+such as `ICEBERG table 'orders' does not exist in namespace 'Analytics.Events'`. A catalog that fails
+the load, or fails the namespace lookup that tells the two apart, stops the open with
+`EmitterOpenError::Initialize`, with `IcebergTableOpenError::Load` or `NamespaceLookup` above the
+catalog's own typed error.
 An emitter whose connector keeps one value per header name and whose `INVOKE` clause writes one literal
 header name twice is refused with `RegistryError::ReplacedHeaderWrite`, which names the domain, the
 emitter, the emitter's connector and entity, the header as the emitter's

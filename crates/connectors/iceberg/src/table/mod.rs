@@ -30,6 +30,7 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+mod catalog_table;
 mod offline_config;
 mod parquet_bounds;
 mod storage;
@@ -38,8 +39,8 @@ mod table_projection;
 use std::{fs::File, ops::Range, path::PathBuf, time::Duration};
 
 use ::iceberg::{
-    Catalog, CatalogBuilder, Error as IcebergError, ErrorKind as IcebergErrorKind, NamespaceIdent,
-    Result as IcebergResult, TableIdent,
+    Catalog, CatalogBuilder, Error as IcebergError, ErrorKind as IcebergErrorKind,
+    Result as IcebergResult,
     spec::{DataFile, DataFileFormat, Snapshot, TableProperties},
     table::Table,
     transaction::{ApplyTransactionAction, Transaction},
@@ -63,6 +64,7 @@ use arrow_array::{
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{DataType, TimeUnit};
 use arrow_select::filter::filter as filter_arrow_array;
+use catalog_table::IcebergCatalogTable;
 use error_stack::{Report, ResultExt as _};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -525,20 +527,17 @@ impl IcebergTableEmitter {
             .await
             .map_err(initialize_catalog)?,
         );
-        let namespace = NamespaceIdent::from_strs(namespace.levels())
-            .assured("a validated Iceberg namespace has at least one nonempty level");
-        let table_ident = TableIdent::new(namespace, table.as_str().to_string());
-        let loaded = catalog.load_table(&table_ident).await.map_err(|error| {
-            Report::new(EmitterOpenError::Initialize { connector: ICEBERG }).attach_printable(
-                format!("failed to initialize Iceberg table {table_ident}: {error}"),
-            )
-        })?;
+        let catalog_table = IcebergCatalogTable {
+            namespace: &namespace,
+            table: &table,
+        };
+        let loaded = catalog_table.load(catalog.as_ref()).await?;
         if loaded.metadata().location() != location {
             return Err(
                 Report::new(EmitterOpenError::InvalidConfiguration { connector: ICEBERG })
                     .attach_printable(format!(
-                        "table '{table_ident}' is registered at '{}' but emitter location is \
-                         '{location}'",
+                        "table '{}' is registered at '{}' but emitter location is '{location}'",
+                        loaded.identifier(),
                         loaded.metadata().location()
                     )),
             );
@@ -1636,6 +1635,7 @@ impl IcebergCatalogConnection<'_> {
 )]
 mod tests {
     use ::iceberg::{
+        TableIdent,
         arrow::arrow_schema_to_schema_auto_assign_ids,
         io::{
             ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID,
