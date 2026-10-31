@@ -95,7 +95,7 @@ records their scope without treating a passing qualification as a completed camp
 | `models-identities` | `nervix-models` execution reference, upload identity, endpoint and pool-bound equality | valid identities, v3 | 256 | 512 bytes |
 | `models-identity-validation` | `nervix-models` identity parsers and decoders accept exactly their rule | arbitrary identity text and bounds, v3 | 256 | 512 bytes |
 | `models-connector-declarations` | `nervix-models` a generated ingestor and emitter state only what their entity declares: a declared mode with its required option choices, an honored quiesce mode, the declared body form, admitted batching and a client of a declared connector | ingestors and emitters of every connector entity, v17 | 256 | 2048 bytes |
-| `client-config-schema` | `nervix-models` complete client configuration-entry equality through JSON and archive, retained schema acceptance idempotent effective defaults preserving authored entries, and idempotent public inspection | every current client schema with its declared keys, delegated driver namespaces, omitted defaults, scheme-restricted keys, percent-encoded headers and bounded type-valid TCP intervals, string, boolean, integer, URL, scheme-restricted driver address, driver URLs with Nervix-owned query options and the keys conditioned on them, choice, file and level-template values, v19 | 256 | 1024 bytes |
+| `client-config-schema` | `nervix-models` complete client configuration-entry equality through JSON and archive, retained schema acceptance idempotent effective defaults preserving authored entries, and idempotent public inspection | every current client schema with its declared keys, delegated driver namespaces, omitted defaults, scheme-restricted and scheme-bound keys, percent-encoded headers and bounded type-valid TCP intervals, string, boolean, integer, URL, host-and-port URL, scheme-restricted driver address, driver URLs with Nervix-owned query options and the keys conditioned on them, choice, file and level-template values, v20 | 256 | 1024 bytes |
 | `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, full-width counts included, v25 | 256 | 4096 bytes |
 | `models-archived-counts` | `nervix-models` count-bearing Model, statement, transaction identity and WASM inspection archive equality | zero where permitted, `u32::MAX + 1`, `u64::MAX` and generated native counts, v3 | 256 | 16 bytes |
 | `scheduled-units` | `nervix-models` complete domain schedule equality through archive encoding | current Single, Partition and Instance unit placements with generated primary and assigned nodes, v1 | 256 | 128 bytes |
@@ -678,8 +678,10 @@ just combine-bolero-fuzz <shard-evidence> <output>
 Bolero, scans their property macros within each owning Cargo package, and queries compiled targets
 through filtered library and integration-test discovery with the inventory's declared features.
 Source scanning stops at nested Cargo manifests and excludes Cargo build output; an authored module
-named `target` remains part of its package. It rejects missing, unregistered, duplicate, ignored and
-zero-selected targets, plus
+named `target` remains part of its package. A property macro belongs to the innermost function
+whose body holds it, read without comments and literal contents, so a helper function nested
+before the macro is not taken for the property. It rejects missing, unregistered, duplicate,
+ignored and zero-selected targets, plus
 corpus paths different from Bolero's actual work directory. Discovery executes only
 `bolero_` tests of the registered library and integration-test targets under Bolero's selection
 mode; it cannot start the server's scenario harness. It reports discovered, selected, executed and
