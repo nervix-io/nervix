@@ -718,7 +718,7 @@ impl SessionServiceImpl {
                 .take_wasm_reset_publication_authority_loss(domain)
             {
                 Err(Report::new(ConsensusError::LeadershipLost {
-                    leader_id: None,
+                    observed: nervix_consensus::LeadershipObservation::NoLeader,
                 }))
             } else {
                 self.inner

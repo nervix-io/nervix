@@ -155,6 +155,25 @@ async fn an_initialized_namespace_is_ready_on_its_first_response() {
 }
 
 #[nervix_primitives::test]
+async fn a_stalled_first_request_yields_to_a_later_ready_response() {
+    let fixture = AdminFixture::bind().await;
+    let readiness = HttpReadiness::new(fixture.port(), NAMESPACE_PATH);
+    let server = task::spawn(async move {
+        let (_unanswered, _) = fixture.listener.accept().await?;
+        fixture.respond("200 OK").await
+    });
+    let result = readiness.wait(Duration::from_secs(30)).await;
+    if result.is_err() {
+        server.abort();
+    }
+    result.expect("one stalled request must leave time to observe the now-ready dependency");
+    server
+        .await
+        .expect("the readiness fixture should not panic")
+        .expect("the second request should receive the successful response");
+}
+
+#[nervix_primitives::test]
 async fn a_transport_failure_remains_visible_at_the_probe_deadline() {
     let fixture = AdminFixture::bind().await;
     let readiness = HttpReadiness::new(fixture.port(), NAMESPACE_PATH);

@@ -383,9 +383,9 @@ minute, hour and day. A job's size follows the memory and disk its builds use ra
 since a Boat machine has only 2 GB of memory per CPU, with 4 GB of swap beside it:
 
 - `boat-xlarge`, with 16 CPUs, 32 GB and 251 GB of disk, runs validation, the diagnostic evidence,
-  the unit tests, the scenario build and each of its shards, the extra checks, Shuttle, Loom, the
-  Deloxide lane, the Bolero randomized properties, the image builds and the benchmarks. In runs of
-  October 2026 the extra checks used about 95 GiB of disk and the amd64 image build lost its runner
+  the extra checks, Shuttle, Loom, the Deloxide lane, the Bolero randomized properties, the image
+  builds and the benchmarks. In October 2026 the extra checks used about 95 GiB of disk and the
+  amd64 image build lost its runner
   on a 16 GB machine.
   Sixteen compilers of the instrumented Loom build exceed the machine's 32 GB, so the `loom` job
   sets `CARGO_BUILD_JOBS` to eight; its build then peaked at 21 GiB.
@@ -402,9 +402,15 @@ Boat jobs that run the selection's tests install the current git from the git-co
 runner image does.
 
 [Blacksmith](https://www.blacksmith.sh)'s `blacksmith-16vcpu-ubuntu-2404`, with 16 CPUs, 64 GB and
-GitHub's runner image, runs the Bolero sanitizer shards, the Loom qualification shards and client
-conformance. The sanitizer shards' address-sanitized server build needs more than Boat's 32 GB, even
-with eight compilers. The other two are compile-bound builds that kache serves slowly on Boat: in
+GitHub's runner image, runs the scenario archive build, its unit-test reader and scenario shards,
+the Bolero sanitizer shards, the Loom qualification shards and client conformance. The archive
+build and its readers share the provider's checkout path, which the archive validates before it
+restores any file. In Check run 41176344914, Boat's third ordinary shard recorded mean CPU steal
+of 15.2% and a peak of 46.7%, alongside deadline failures; the contemporaneous Blacksmith sanitizer
+runner recorded 0.0% mean and 0.2% peak steal. The scenario jobs use Blacksmith with the same
+48 run slots, assertions and deadlines. These observations identify runner contention without
+attributing every scenario failure to it. The sanitizer shards' address-sanitized server build
+needs more than Boat's 32 GB, even with eight compilers. The other two are compile-bound builds that kache serves slowly on Boat: in
 Check run 40991534806 kache's downloads spent most of their time waiting for the lock of its local
 store, 1.8 to 4.6 seconds each against 0.4 seconds on Blacksmith, the Loom qualification shards
 reached their two-hour limit after about 107 minutes of compiling, and the client conformance build

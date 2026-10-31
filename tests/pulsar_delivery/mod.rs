@@ -18,6 +18,20 @@ use super::{
     ScenarioWorld, expand_placeholders, parse_duration_text, when_http_payload_is_posted_to_node,
 };
 
+#[when(expr = "the Pulsar endpoint pauses after its producer is ready within {string}")]
+async fn pause_after_producer_ready(world: &mut ScenarioWorld, within: String) {
+    let within = parse_duration_text(&within).assured("the fixture declares a readiness bound");
+    world
+        .stallable_tcp_proxies
+        .get("pulsar")
+        .verified("the scenario configured its Pulsar endpoint")
+        .pause_pulsar_after_producer_ready(within)
+        .await
+        .assured(
+            "the Pulsar fault must start after the producer creation reply reached its client",
+        );
+}
+
 #[when(expr = "this HTTP payload is posted while the Pulsar endpoint resumes after {string}")]
 async fn post_during_pulsar_fault(world: &mut ScenarioWorld, delay: String, #[step] step: &Step) {
     let delay = parse_duration_text(&delay).assured("the scenario declares a valid fault duration");

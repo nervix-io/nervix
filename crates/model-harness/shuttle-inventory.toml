@@ -36,6 +36,7 @@ checks = [
   "connection::stream_slots::shuttle_checks::replication_drain_stops_leasing_and_waits_for_every_leased_slot",
   "request::shuttle_checks::a_membership_change_between_a_callers_check_and_its_wait_is_never_lost",
   "request::shuttle_checks::racing_registrations_lose_no_handler_and_publish_each_name_once",
+  "wire::admission_tests::shuttle_bulk_receive_admission_releases_held_input_and_cancelled_jobs",
 ]
 name = "nervix-interconnect"
 
