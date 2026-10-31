@@ -96,6 +96,11 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   executable Plexus that the runtime reparses.
 - Grammar keywords are case-insensitive language tokens. Original spelling may be retained for
   diagnostics, but unknown words are not a substitute for declaring language keywords.
+- Ingestor and emitter statement heads name the connector and entity, even when that connector
+  serves only one entity; client heads name the connector. An ingestor or emitter `ALTER` repeats
+  its stored connector and entity. The head selects the kind, while the body writes that entity's
+  declared reference, locator and options. Each pair owns its grammar body and semantic Model
+  variant; completion composes its head from the shared tokens and vocabulary declaration.
 - External connector configuration remains raw only where pass-through is the intentional public
   contract.
 
@@ -364,8 +369,17 @@ ingestor contract, the emitter contract, or both, from `nervix-connector` in `cr
 - The server is the composition root and the only crate that names every connector.
 - No connector crate reads a Model. The decision layer converts Models into a typed plan once, and
   the connector receives that plan.
+- Models, plans and runtime composition nest connector then entity. Each entity has its own plan
+  variant and concrete connector type, including a connector's second entity; a mode flag does not
+  select between entities. The type declares its vocabulary kind through `IngestorConnector::KIND`
+  or the emitter's `KIND` and object-safe `EmitterLifecycle::kind()`, and the composition root
+  asserts the plan-to-implementation kind at compile time. Shared private encoding and intake
+  mechanisms do not replace these entity boundaries.
 - Capabilities the registry validates live in the vocabulary. The registry names no connector crate,
-  so a capability declared only inside one could never be validated.
+  so a capability declared only inside one could never be validated. Each entity declares its
+  capabilities and body reference kind once there; grammar, validation, planning, completion and
+  presentation consume that declaration. [Connector and entity kinds](docs/src/connector-contract.md#connector-and-entity-kinds)
+  owns this contract and the checklist for adding an entity.
 - Connector names come from the vocabulary's `ConnectorKind` display and entity names from their
   declarations. Derive labels and prefixes from those sources across configuration errors,
   transports, metrics, logs, dataflow identifiers and `DESCRIBE`; do not maintain another spelling
