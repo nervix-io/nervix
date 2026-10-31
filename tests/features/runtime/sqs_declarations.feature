@@ -86,7 +86,12 @@ Feature: SQS queue declarations
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:1' };
+      CREATE SQS CLIENT sqs_main CONFIG {
+        'endpoint' = 'http://127.0.0.1:1',
+        'region' = 'eu-west-1',
+        'access_key_id' = 'declaration-key',
+        'secret_access_key' = 'declaration-secret'
+      };
       """
     When these Plexus commands fail
       """
@@ -121,7 +126,12 @@ Feature: SQS queue declarations
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:1' };
+      CREATE SQS CLIENT sqs_main CONFIG {
+        'endpoint' = 'http://127.0.0.1:1',
+        'region' = 'eu-west-1',
+        'access_key_id' = 'declaration-key',
+        'secret_access_key' = 'declaration-secret'
+      };
       """
     When these Plexus commands fail
       """
@@ -154,7 +164,12 @@ Feature: SQS queue declarations
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:1' };
+      CREATE SQS CLIENT sqs_main CONFIG {
+        'endpoint' = 'http://127.0.0.1:1',
+        'region' = 'eu-west-1',
+        'access_key_id' = 'declaration-key',
+        'secret_access_key' = 'declaration-secret'
+      };
       """
     When these Plexus commands fail
       """
@@ -190,7 +205,12 @@ Feature: SQS queue declarations
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:1' };
+      CREATE SQS CLIENT sqs_main CONFIG {
+        'endpoint' = 'http://127.0.0.1:1',
+        'region' = 'eu-west-1',
+        'access_key_id' = 'declaration-key',
+        'secret_access_key' = 'declaration-secret'
+      };
       """
     When these Plexus commands fail
       """
@@ -247,15 +267,52 @@ Feature: SQS queue declarations
       """
 
     Examples:
-      | cluster_size | config                                                    | expected                                                                                  |
-      | 1            | 'region' = 'eu-west-1'                                    | missing required client config key 'endpoint'                                             |
-      | 3            | 'region' = 'eu-west-1'                                    | missing required client config key 'endpoint'                                             |
-      | 1            | 'endpoint' = 'ftp://127.0.0.1:1'                          | invalid client config key 'endpoint': expected URL                                        |
-      | 3            | 'endpoint' = 'ftp://127.0.0.1:1'                          | invalid client config key 'endpoint': expected URL                                        |
-      | 1            | 'endpoint' = 'http://127.0.0.1:1', 'timeout_ms' = 'soon'  | invalid client config key 'timeout_ms': expected positive, schedulable whole milliseconds |
-      | 3            | 'endpoint' = 'http://127.0.0.1:1', 'timeout_ms' = 'soon'  | invalid client config key 'timeout_ms': expected positive, schedulable whole milliseconds |
-      | 1            | 'endpoint' = 'http://127.0.0.1:1', 'regoin' = 'eu-west-1' | unknown client config key 'regoin'                                                        |
-      | 3            | 'endpoint' = 'http://127.0.0.1:1', 'regoin' = 'eu-west-1' | unknown client config key 'regoin'                                                        |
+      | cluster_size | config                                                                                                                                                             | expected                                                                                  |
+      | 1            | 'region' = 'eu-west-1', 'access_key_id' = 'declaration-key', 'secret_access_key' = 'declaration-secret'                                                            | missing required client config key 'endpoint'                                             |
+      | 3            | 'region' = 'eu-west-1', 'access_key_id' = 'declaration-key', 'secret_access_key' = 'declaration-secret'                                                            | missing required client config key 'endpoint'                                             |
+      | 1            | 'endpoint' = 'http://127.0.0.1:1', 'access_key_id' = 'declaration-key', 'secret_access_key' = 'declaration-secret'                                                 | missing required client config key 'region'                                               |
+      | 3            | 'endpoint' = 'http://127.0.0.1:1', 'access_key_id' = 'declaration-key', 'secret_access_key' = 'declaration-secret'                                                 | missing required client config key 'region'                                               |
+      | 1            | 'endpoint' = 'http://127.0.0.1:1', 'region' = 'eu-west-1', 'secret_access_key' = 'declaration-secret'                                                              | missing required client config key 'access_key_id'                                        |
+      | 3            | 'endpoint' = 'http://127.0.0.1:1', 'region' = 'eu-west-1', 'secret_access_key' = 'declaration-secret'                                                              | missing required client config key 'access_key_id'                                        |
+      | 1            | 'endpoint' = 'http://127.0.0.1:1', 'region' = 'eu-west-1', 'access_key_id' = 'declaration-key'                                                                     | missing required client config key 'secret_access_key'                                    |
+      | 3            | 'endpoint' = 'http://127.0.0.1:1', 'region' = 'eu-west-1', 'access_key_id' = 'declaration-key'                                                                     | missing required client config key 'secret_access_key'                                    |
+      | 1            | 'endpoint' = 'ftp://127.0.0.1:1', 'region' = 'eu-west-1', 'access_key_id' = 'declaration-key', 'secret_access_key' = 'declaration-secret'                          | invalid client config key 'endpoint': expected URL                                        |
+      | 3            | 'endpoint' = 'ftp://127.0.0.1:1', 'region' = 'eu-west-1', 'access_key_id' = 'declaration-key', 'secret_access_key' = 'declaration-secret'                          | invalid client config key 'endpoint': expected URL                                        |
+      | 1            | 'endpoint' = 'http://127.0.0.1:1', 'region' = 'eu-west-1', 'access_key_id' = 'declaration-key', 'secret_access_key' = 'declaration-secret', 'timeout_ms' = 'soon'  | invalid client config key 'timeout_ms': expected positive, schedulable whole milliseconds |
+      | 3            | 'endpoint' = 'http://127.0.0.1:1', 'region' = 'eu-west-1', 'access_key_id' = 'declaration-key', 'secret_access_key' = 'declaration-secret', 'timeout_ms' = 'soon'  | invalid client config key 'timeout_ms': expected positive, schedulable whole milliseconds |
+      | 1            | 'endpoint' = 'http://127.0.0.1:1', 'region' = 'eu-west-1', 'access_key_id' = 'declaration-key', 'secret_access_key' = 'declaration-secret', 'regoin' = 'eu-west-1' | unknown client config key 'regoin'                                                        |
+      | 3            | 'endpoint' = 'http://127.0.0.1:1', 'region' = 'eu-west-1', 'access_key_id' = 'declaration-key', 'secret_access_key' = 'declaration-secret', 'regoin' = 'eu-west-1' | unknown client config key 'regoin'                                                        |
+
+  Scenario Outline: An SQS client carries a session token as a confidential key
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SQS CLIENT session_client CONFIG {
+        'endpoint' = 'http://127.0.0.1:1',
+        'region' = 'eu-west-1',
+        'access_key_id' = 'declaration-key',
+        'secret_access_key' = 'declaration-secret',
+        'session_token' = 'declaration-session-token'
+      };
+      SHOW CREATE CLIENT session_client;
+      """
+    Then the last command output contains
+      """
+      'session_token' = '********'
+      """
+    And the last command output does not contain
+      """
+      declaration-session-token
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario Outline: SQS clients refuse a client identity that SQS connections never present
     Given a <cluster_size> node nervix cluster is started
@@ -264,10 +321,7 @@ Feature: SQS queue declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE sqs_tls;
       """
-    And node "node-1" has resource directory "sqs_tls_fixture" containing
-      """
-      {"ca.pem":"trust material is inspected by the connector when it initializes\n","client.pem":"an identity no SQS connection presents\n","client-key.pem":"an identity no SQS connection presents\n"}
-      """
+    And node "node-1" has TLS resource directory "sqs_tls_fixture" for hosts "sqs.nervix.test"
     When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE sqs_tls VERSION "{{sqs_tls_fixture}}";
@@ -278,9 +332,12 @@ Feature: SQS queue declarations
       MOUNT sqs_tls VERSION 1
       CONFIG {
         'endpoint' = 'https://127.0.0.1:1',
-        'tls_ca_file' = '{{ sqs_tls }}/ca.pem',
-        'tls_cert_file' = '{{ sqs_tls }}/client.pem',
-        'tls_key_file' = '{{ sqs_tls }}/client-key.pem'
+        'region' = 'eu-west-1',
+        'access_key_id' = 'declaration-key',
+        'secret_access_key' = 'declaration-secret',
+        'tls_ca_file' = '{{ sqs_tls }}/ca.crt',
+        'tls_cert_file' = '{{ sqs_tls }}/tls.crt',
+        'tls_key_file' = '{{ sqs_tls }}/tls.key'
       };
       """
     Then the last command error contains
@@ -293,16 +350,60 @@ Feature: SQS queue declarations
       MOUNT sqs_tls VERSION 1
       CONFIG {
         'endpoint' = 'https://127.0.0.1:1',
-        'tls_ca_file' = '{{ sqs_tls }}/ca.pem'
+        'region' = 'eu-west-1',
+        'access_key_id' = 'declaration-key',
+        'secret_access_key' = 'declaration-secret',
+        'tls_ca_file' = '{{ sqs_tls }}/ca.crt'
       };
       SHOW CREATE CLIENT trusting_client;
       """
     Then the last command output contains
       """
-      'tls_ca_file' = '{{ sqs_tls }}/ca.pem'
+      'tls_ca_file' = '{{ sqs_tls }}/ca.crt'
       """
 
     Examples:
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: SQS clients refuse a CA file that holds no certificate they could trust
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE sqs_trust;
+      """
+    And node "node-1" has resource directory "sqs_trust_fixture" containing
+      """
+      {"unencoded.pem":"-----BEGIN CERTIFICATE-----\n!this is not base64!\n-----END CERTIFICATE-----\n","undecodable.pem":"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n","empty.pem":"no certificate is written here\n"}
+      """
+    When these Plexus commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE sqs_trust VERSION "{{sqs_trust_fixture}}";
+      """
+    And these Plexus commands fail
+      """
+      CREATE SQS CLIENT untrusting_client
+      MOUNT sqs_trust VERSION 1
+      CONFIG {
+        'endpoint' = 'https://127.0.0.1:1',
+        'region' = 'eu-west-1',
+        'access_key_id' = 'declaration-key',
+        'secret_access_key' = 'declaration-secret',
+        'tls_ca_file' = '{{ sqs_trust }}/<file>'
+      };
+      """
+    Then the last command error contains
+      """
+      invalid client config key 'tls_ca_file'
+      """
+
+    Examples:
+      | cluster_size | file            |
+      | 1            | unencoded.pem   |
+      | 3            | unencoded.pem   |
+      | 1            | undecodable.pem |
+      | 3            | undecodable.pem |
+      | 1            | empty.pem       |
+      | 3            | empty.pem       |

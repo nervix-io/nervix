@@ -2589,10 +2589,6 @@ impl Cluster {
         reset_kafka_topic_partitions(&self.dependencies, topic, partitions).await
     }
 
-    pub(crate) async fn ensure_sqs_queue(&self, queue: &str) -> io::Result<()> {
-        ensure_sqs_queue(&self.dependencies, queue).await
-    }
-
     pub(crate) async fn ensure_sqs_queue_tls(&self, queue: &str) -> io::Result<()> {
         ensure_sqs_queue_tls(&self.dependencies, queue).await
     }
@@ -2611,10 +2607,6 @@ impl Cluster {
         );
         request.send().await.map_err(io::Error::other)?;
         Ok(())
-    }
-
-    pub(crate) async fn publish_sqs(&self, queue: &str, payload: &str) -> io::Result<()> {
-        publish_sqs(&self.dependencies, queue, payload).await
     }
 
     pub(crate) async fn publish_sqs_tls(&self, queue: &str, payload: &str) -> io::Result<()> {
@@ -2952,27 +2944,6 @@ impl Cluster {
 
     pub(crate) async fn observe_pulsar_tls(&self, topic: &str) -> io::Result<BrokerObserver> {
         observe_pulsar_tls(&self.dependencies, topic).await
-    }
-
-    pub(crate) async fn observe_sqs(&self, queue: &str) -> io::Result<BrokerObserver> {
-        observe_sqs(&self.dependencies, queue).await
-    }
-
-    /// Observes FIFO `queue`, created without content-based deduplication, so a message the
-    /// service accepts names its deduplication id.
-    pub(crate) async fn observe_sqs_fifo_without_content_deduplication(
-        &self,
-        queue: &str,
-    ) -> io::Result<BrokerObserver> {
-        let client = sqs_client(&self.dependencies).await?;
-        client
-            .create_queue()
-            .queue_name(queue)
-            .attributes(QueueAttributeName::FifoQueue, "true")
-            .send()
-            .await
-            .map_err(io::Error::other)?;
-        observe_created_sqs(&self.dependencies, queue).await
     }
 
     pub(crate) async fn observe_nats(&self, subject: &str) -> io::Result<BrokerObserver> {
@@ -6272,7 +6243,12 @@ pub(crate) async fn assert_kafka_consumer_group_next_offset_through(
     }
 }
 
-async fn ensure_sqs_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
+/// Creates `queue` on the scenario's SQS service, which serves in-process and real-process
+/// clusters alike.
+pub(crate) async fn ensure_sqs_queue(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<()> {
     let client = sqs_client(dependencies).await?;
     create_sqs_queue(&client, queue).await
 }
@@ -6293,7 +6269,8 @@ async fn create_sqs_queue(client: &SqsClient, queue: &str) -> io::Result<()> {
     Ok(())
 }
 
-async fn publish_sqs(
+/// Sends `payload` to `queue` on the scenario's SQS service.
+pub(crate) async fn publish_sqs(
     dependencies: &DependencyEndpoints,
     queue: &str,
     payload: &str,
@@ -6745,11 +6722,29 @@ async fn observe_pulsar_with_addr(
         .unwrap_or_else(|| io::Error::other(format!("failed to observe pulsar topic '{topic}'"))))
 }
 
-async fn observe_sqs(
+/// Creates `queue` on the scenario's SQS service and receives every message sent to it.
+pub(crate) async fn observe_sqs(
     dependencies: &DependencyEndpoints,
     queue: &str,
 ) -> io::Result<BrokerObserver> {
     ensure_sqs_queue(dependencies, queue).await?;
+    observe_created_sqs(dependencies, queue).await
+}
+
+/// Creates FIFO `queue` on the scenario's SQS service without content-based deduplication and
+/// receives every message sent to it, so a message the service accepts names its deduplication id.
+pub(crate) async fn observe_sqs_fifo_without_content_deduplication(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<BrokerObserver> {
+    let client = sqs_client(dependencies).await?;
+    client
+        .create_queue()
+        .queue_name(queue)
+        .attributes(QueueAttributeName::FifoQueue, "true")
+        .send()
+        .await
+        .map_err(io::Error::other)?;
     observe_created_sqs(dependencies, queue).await
 }
 

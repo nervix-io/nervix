@@ -2,10 +2,10 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The SQS client a configuration declares and the connections it makes, queue-URL
-//!   lookup, long polling and message deletion on the ingestor side, protocol validation of each
-//!   message body, typed attribute, FIFO group, deduplication id and delay, request batching, and
-//!   per-entry response classification.
+//! - **Owns.** The SQS client a configuration declares, built once for both directions, and the
+//!   connections it makes, queue-URL lookup, long polling and message deletion on the ingestor
+//!   side, protocol validation of each message body, typed attribute, FIFO group, deduplication
+//!   id and delay, request batching, and per-entry response classification.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio, the node
 //!   resolver, the kernel crate's XML character check, and the AWS SQS SDK with its Smithy HTTP
 //!   client.
@@ -27,31 +27,29 @@
 
 mod connection;
 mod ingestor;
+mod offline_config;
 
 use std::fmt::Debug;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use async_trait::async_trait;
-use aws_config::BehaviorVersion;
-use aws_credential_types::Credentials;
 use aws_sdk_sqs::{
-    Client as SqsClient,
     error::SdkError,
     operation::get_queue_url::GetQueueUrlError,
     types::{MessageAttributeValue, SendMessageBatchRequestEntry},
 };
-use connection::{FailedRequest, SqsTrust};
-use error_stack::{Report, ResultExt as _};
+pub use connection::{EmptyCaFile, InvalidSqsClientKey};
+use connection::{SqsClientConfig, SqsRequest, SqsServiceClient};
+use error_stack::Report;
 pub use ingestor::{
     SqsMessageAttributes, SqsQueueIngestor, SqsQueueIngestorError, SqsQueueIngestorMessage,
     SqsQueueIngestorPlan, SqsQueueIngestorPosition,
 };
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle,
-    EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError,
-    PerRecordOutcome, PropertyValue, RecordEmitter, RejectedEmitterMember, TypedRecordHeader,
-    client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
+    EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle, EmitterOpenError,
+    EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError, PerRecordOutcome,
+    PropertyValue, RecordEmitter, RejectedEmitterMember, TypedRecordHeader,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
@@ -60,6 +58,7 @@ use nervix_models::{
 };
 use nervix_primitives::time::Instant;
 use nervix_simd_kernels::{XmlChars, XmlCharsError};
+pub use offline_config::validate_client_configuration;
 use thiserror::Error;
 
 const SQS: &str = "sqs";
@@ -90,7 +89,7 @@ pub struct SqsQueueEmitterConfig {
 }
 
 pub struct SqsQueueEmitter {
-    client: SqsClient,
+    client: SqsServiceClient,
     queue_url: String,
     send: SqsSend,
 }
@@ -275,81 +274,38 @@ impl SqsQueueEmitter {
         })
     }
 
+    /// The client `config` declares, built the same way an SQS ingestor builds its own.
     async fn client_from_config(
         config: &[ClientConfigEntry],
         dns: DnsResolver,
-    ) -> EmitterStartResult<SqsClient> {
-        let endpoint = Self::config_value(config, "endpoint")?;
-        let region = optional_client_config_value(config, "region")
-            .unwrap_or("us-east-1")
-            .to_string();
-        let access_key_id = optional_client_config_value(config, "access_key_id")
-            .unwrap_or("x")
-            .to_string();
-        let secret_access_key = optional_client_config_value(config, "secret_access_key")
-            .unwrap_or("x")
-            .to_string();
-
-        let request_timeout = ConfiguredDeadline::timeout(config)
-            .change_context(EmitterOpenError::InvalidConfiguration { connector: SQS })?
-            .map(ConfiguredDeadline::bound);
-
-        let mut loader = aws_config::defaults(BehaviorVersion::latest())
-            .region(aws_sdk_sqs::config::Region::new(region))
-            .endpoint_url(endpoint)
-            .retry_config(aws_config::retry::RetryConfig::disabled())
-            .credentials_provider(Credentials::new(
-                access_key_id,
-                secret_access_key,
-                None,
-                None,
-                "nervix-sqs",
-            ));
-        if let Some(request_timeout) = request_timeout {
-            loader = loader.timeout_config(
-                aws_config::timeout::TimeoutConfig::builder()
-                    .operation_timeout(request_timeout)
-                    .operation_attempt_timeout(request_timeout)
-                    .build(),
-            );
-        }
-        let trust = match client_tls_paths(config).ca_file.as_ref() {
-            Some(ca_file) => {
-                let ca_pem = {
-                    let mapping_input = read_tls_file(ca_file, "TLS CA certificate");
-                    match mapping_input {
-                        Ok(mapped_value) => Ok(mapped_value),
-                        Err(error) => Err({
-                            let message = error.current_context().to_string();
-                            error
-                                .change_context(EmitterOpenError::InvalidConfiguration {
-                                    connector: SQS,
-                                })
-                                .attach_printable(message)
-                        }),
-                    }
-                }?;
-                SqsTrust::ca(ca_pem).map_err(Self::start_error)?
-            }
-            None => SqsTrust::Platform,
-        };
-        let sdk_config = loader.http_client(trust.http_client(dns)).load().await;
-        Ok(SqsClient::new(&sdk_config))
+    ) -> EmitterStartResult<SqsServiceClient> {
+        let config = SqsClientConfig::parse(config).map_err(Self::configuration_error)?;
+        Ok(config.client(dns).await)
     }
 
-    async fn queue_url(client: &SqsClient, queue: &str) -> EmitterStartResult<String> {
-        let response = match client.get_queue_url().queue_name(queue).send().await {
+    /// A key the client's connections cannot use as the emitter's configuration failure, with its
+    /// chain leading the report, which `DESCRIBE EMITTER` shows.
+    fn configuration_error(report: Report<InvalidSqsClientKey>) -> Report<EmitterOpenError> {
+        let message = format!("{report:#}");
+        report
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: SQS })
+            .attach_printable(message)
+    }
+
+    async fn queue_url(client: &SqsServiceClient, queue: &str) -> EmitterStartResult<String> {
+        let response = match client.sdk().get_queue_url().queue_name(queue).send().await {
             Ok(response) => response,
-            Err(error) => return Err(Self::queue_lookup_error(queue, &error)),
+            Err(error) => return Err(Self::queue_lookup_error(client, queue, &error)),
         };
         Self::require_queue_url(queue, response.queue_url().map(ToOwned::to_owned))
     }
 
     fn queue_lookup_error<R: Debug + 'static>(
+        client: &SqsServiceClient,
         queue: &str,
         error: &SdkError<GetQueueUrlError, R>,
     ) -> Report<EmitterOpenError> {
-        let failure = FailedRequest::new(error);
+        let failure = client.failed(SqsRequest::QueueLookup, error);
         let missing = error
             .as_service_error()
             .is_some_and(GetQueueUrlError::is_queue_does_not_exist);
@@ -361,10 +317,7 @@ impl SqsQueueEmitter {
             })
             .attach_printable(failure.description());
         }
-        failure.report(
-            EmitterOpenError::Initialize { connector: SQS },
-            "SQS GetQueueUrl failed",
-        )
+        failure.report(EmitterOpenError::Initialize { connector: SQS })
     }
 
     fn require_queue_url(queue: &str, queue_url: Option<String>) -> EmitterStartResult<String> {
@@ -383,6 +336,7 @@ impl SqsQueueEmitter {
             nervix_primitives::task::consume_budget().await;
             let mut request = self
                 .client
+                .sdk()
                 .send_message()
                 .queue_url(&self.queue_url)
                 .message_body(&record.body)
@@ -409,10 +363,11 @@ impl SqsQueueEmitter {
                     outcome.reject(record.rejected(format!("SQS rejected the record: {error}")));
                 }
                 Err(error) => {
-                    outcome.fail(FailedRequest::new(&error).report(
-                        EmitterWriteError::Publish { connector: SQS },
-                        "SQS SendMessage failed",
-                    ));
+                    outcome.fail(
+                        self.client
+                            .failed(SqsRequest::Send, &error)
+                            .report(EmitterWriteError::Publish { connector: SQS }),
+                    );
                     return;
                 }
             }
@@ -426,7 +381,11 @@ impl SqsQueueEmitter {
     ) {
         for records in Self::batch_chunks(records) {
             nervix_primitives::task::consume_budget().await;
-            let mut request = self.client.send_message_batch().queue_url(&self.queue_url);
+            let mut request = self
+                .client
+                .sdk()
+                .send_message_batch()
+                .queue_url(&self.queue_url);
             for (index, record) in records.iter().enumerate() {
                 let entry = match Self::batch_entry(index, record) {
                     Ok(entry) => entry,
@@ -442,10 +401,11 @@ impl SqsQueueEmitter {
             let response = match request.send().await {
                 Ok(response) => response,
                 Err(error) => {
-                    outcome.fail(FailedRequest::new(&error).report(
-                        EmitterWriteError::Publish { connector: SQS },
-                        "SQS SendMessageBatch failed",
-                    ));
+                    outcome.fail(
+                        self.client
+                            .failed(SqsRequest::SendBatch, &error)
+                            .report(EmitterWriteError::Publish { connector: SQS }),
+                    );
                     return;
                 }
             };
@@ -761,21 +721,6 @@ impl SqsQueueEmitter {
         character.is_ascii_alphanumeric() || character.is_ascii_punctuation()
     }
 
-    fn config_value(config: &[ClientConfigEntry], key: &str) -> EmitterStartResult<String> {
-        {
-            let mapping_input = client_config_value(config, key, "SQS");
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    let message = error.current_context().to_string();
-                    error
-                        .change_context(EmitterOpenError::InvalidConfiguration { connector: SQS })
-                        .attach_printable(message)
-                }),
-            }
-        }
-    }
-
     fn start_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {
         Report::new(EmitterOpenError::Initialize { connector: SQS })
             .attach_printable(error.to_string())
@@ -857,16 +802,12 @@ mod tests {
     use crate::queue::connection_tests::Fixture;
 
     fn client_config(timeout_ms: &str) -> Vec<ClientConfigEntry> {
-        vec![
-            ClientConfigEntry {
-                key: "endpoint".to_string(),
-                value: "http://127.0.0.1:9324".to_string(),
-            },
-            ClientConfigEntry {
-                key: "timeout_ms".to_string(),
-                value: timeout_ms.to_string(),
-            },
-        ]
+        let mut config = crate::queue::connection_tests::client_config("http://127.0.0.1:9324");
+        config.push(ClientConfigEntry {
+            key: "timeout_ms".to_string(),
+            value: timeout_ms.to_string(),
+        });
+        config
     }
 
     fn record(index: usize, payload: Vec<u8>) -> EmitterRecord {
@@ -1078,13 +1019,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sqs_queue_lookup_distinguishes_missing_entities_from_connection_failures() {
+    #[nervix_primitives::test]
+    async fn sqs_queue_lookup_distinguishes_missing_entities_from_connection_failures() {
+        let fixture = Fixture::start().await;
+        let client = SqsQueueEmitter::client_from_config(&client_config("275"), fixture.dns())
+            .await
+            .expect("SQS client config should be valid");
         let missing = SdkError::<GetQueueUrlError, ()>::service_error(
             GetQueueUrlError::QueueDoesNotExist(QueueDoesNotExist::builder().build()),
             (),
         );
-        let missing = SqsQueueEmitter::queue_lookup_error("missing-queue", &missing);
+        let missing = SqsQueueEmitter::queue_lookup_error(&client, "missing-queue", &missing);
         assert!(matches!(
             missing.current_context(),
             EmitterOpenError::MissingExternalEntity {
@@ -1097,7 +1042,7 @@ mod tests {
         let refused = SdkError::<GetQueueUrlError, ()>::dispatch_failure(ConnectorError::io(
             "connection refused".into(),
         ));
-        let connection = SqsQueueEmitter::queue_lookup_error("orders", &refused);
+        let connection = SqsQueueEmitter::queue_lookup_error(&client, "orders", &refused);
         assert_eq!(
             connection.current_context(),
             &EmitterOpenError::Initialize { connector: SQS }
@@ -1714,6 +1659,7 @@ mod tests {
             .await
             .expect("SQS client config should be valid");
         let timeout = client
+            .sdk()
             .config()
             .timeout_config()
             .expect("SQS client should have a request timeout");
@@ -1728,6 +1674,7 @@ mod tests {
         );
         assert_eq!(
             client
+                .sdk()
                 .config()
                 .retry_config()
                 .expect("SQS retry config should be explicit")

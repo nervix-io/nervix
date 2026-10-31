@@ -828,6 +828,14 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
                             key: "region".to_string(),
                             value: "us-east-1".to_string(),
                         },
+                        ClientConfigEntry {
+                            key: "access_key_id".to_string(),
+                            value: "fixture-key".to_string(),
+                        },
+                        ClientConfigEntry {
+                            key: "secret_access_key".to_string(),
+                            value: "fixture-secret".to_string(),
+                        },
                     ],
                 }),
             ],

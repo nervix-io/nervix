@@ -419,7 +419,9 @@ Feature: JAQ emission
         CREATE SQS CLIENT sqs_main
         CONFIG {
           'endpoint' = '{{sqs_endpoint}}',
-          'region' = 'us-east-1'
+          'region' = 'us-east-1',
+          'access_key_id' = 'scenario-key',
+          'secret_access_key' = 'scenario-secret'
         };
         CREATE SQS QUEUE EMITTER sqs_notifications FROM notifications TO sqs_main QUEUE 'notifications_out_{{test_id}}' SEND SINGLE MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL

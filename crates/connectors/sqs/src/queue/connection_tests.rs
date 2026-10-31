@@ -15,12 +15,13 @@ use aws_sdk_sqs::{
     error::SdkError, operation::get_queue_url::GetQueueUrlError, types::error::QueueDoesNotExist,
 };
 use nervix_connector::{
-    BrokerIngestorConnector as _, EmitterOpenError, EmitterRecord, EmitterRecordId,
-    EmitterWriteError, IngestorBatch, IngestorBatchRequest, IngestorConnector as _, IngestorError,
-    IngestorReadCancellation, IngestorResume, RecordEmitter as _,
+    BrokerIngestorConnector as _, DeadlineElapsed, EmitterOpenError, EmitterRecord,
+    EmitterRecordId, EmitterWriteError, IngestorBatch, IngestorBatchRequest,
+    IngestorConnector as _, IngestorError, IngestorReadCancellation, IngestorResume,
+    RecordEmitter as _,
 };
 use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
-use nervix_models::{ClientConfigEntry, SqsQueueName, Timestamp};
+use nervix_models::{ClientConfigEntry, DeadlineKey, SqsQueueName, Timestamp};
 use nervix_primitives::{
     net::{TcpListener, TcpSocket, TcpStream},
     task::JoinHandle,
@@ -30,8 +31,9 @@ use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::queue::{
-    SQS, SqsQueueEmitter, SqsQueueIngestor, SqsQueueIngestorError, SqsQueueIngestorPlan,
-    connection::FailedRequest,
+    EmptyCaFile, InvalidSqsClientKey, SQS, SqsQueueEmitter, SqsQueueIngestor,
+    SqsQueueIngestorError, SqsQueueIngestorPlan,
+    connection::{SqsClientConfig, SqsRequest},
 };
 
 /// The fixture name every check resolves.
@@ -99,6 +101,7 @@ pub(crate) fn client_config(endpoint: &str) -> Vec<ClientConfigEntry> {
     };
     vec![
         entry("endpoint", endpoint),
+        entry("region", "us-east-1"),
         entry("access_key_id", ACCESS_KEY_ID),
         entry("secret_access_key", "nervix-secret"),
     ]
@@ -402,8 +405,13 @@ async fn a_refused_connection_is_described_by_its_causes() {
     assert!(message.contains("tcp connect error"), "{message}");
 }
 
-#[test]
-fn a_service_response_keeps_its_short_description() {
+#[nervix_primitives::test]
+async fn a_service_response_keeps_its_short_description() {
+    let fixture = Fixture::start().await;
+    let client = SqsClientConfig::parse(&client_config("http://127.0.0.1:9324"))
+        .expect("the client configuration is valid")
+        .client(fixture.dns())
+        .await;
     let missing = QueueDoesNotExist::builder()
         .message("the queue orders does not exist")
         .build();
@@ -412,7 +420,7 @@ fn a_service_response_keeps_its_short_description() {
         (),
     );
 
-    let failure = FailedRequest::new(&error);
+    let failure = client.failed(SqsRequest::QueueLookup, &error);
 
     assert!(failure.lookup_failure().is_none());
     assert_eq!(failure.description(), "service error");
@@ -525,8 +533,28 @@ async fn a_ca_file_that_cannot_be_read_is_a_configuration_failure() {
         report.current_context(),
         &EmitterOpenError::InvalidConfiguration { connector: SQS }
     );
-    let message = message_of(&report).expect("the failure names the unreadable file");
-    assert!(message.contains("TLS CA certificate"), "{message}");
+    assert_eq!(
+        report
+            .downcast_ref::<InvalidSqsClientKey>()
+            .map(|invalid| invalid.key),
+        Some("tls_ca_file")
+    );
+    assert!(
+        matches!(
+            report.downcast_ref::<nervix_connector::ClientConfigError>(),
+            Some(nervix_connector::ClientConfigError::ReadTlsFile { label, .. })
+                if label == "TLS CA certificate"
+        ),
+        "the failure names the unreadable file: {report:?}"
+    );
+    assert_eq!(
+        message_of(&report),
+        Some(
+            "invalid SQS client config key 'tls_ca_file': failed to read TLS CA certificate \
+             '/nonexistent/nervix-sqs-ca.pem'"
+        ),
+        "the emitter leads its report with the whole chain, which DESCRIBE EMITTER shows"
+    );
 }
 
 /// A ingestor instance of the client `config` declares, polling the queue every check looks up.
@@ -685,5 +713,441 @@ async fn a_queue_the_service_does_not_have_fails_the_resume_with_its_name() {
             1,
             "{answer:?}: the SDK does not retry a refusal the service answered"
         );
+    }
+}
+
+/// The content of a CA file Smithy's TLS context cannot take as a trust store, and what the client
+/// configuration reports for it.
+const UNTRUSTABLE_CA_FILES: [(&str, &str); 3] = [
+    (
+        "a certificate section that is not base64",
+        "-----BEGIN CERTIFICATE-----\n!this is not base64!\n-----END CERTIFICATE-----\n",
+    ),
+    (
+        "base64 that is not a certificate",
+        "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+    ),
+    ("no certificate", "no certificate is written here\n"),
+];
+
+/// A client of `endpoint` that trusts the CA file holding `content` alone, with the directory
+/// that keeps the file.
+fn client_config_trusting(endpoint: &str, content: &str) -> (Vec<ClientConfigEntry>, TempDir) {
+    let directory = tempfile::tempdir().expect("a temporary directory can be created");
+    let ca_file = directory.path().join("ca.pem");
+    std::fs::write(&ca_file, content).expect("the CA file can be written");
+    let mut config = client_config(endpoint);
+    config.push(ClientConfigEntry {
+        key: "tls_ca_file".to_string(),
+        value: ca_file.display().to_string(),
+    });
+    (config, directory)
+}
+
+#[nervix_primitives::test]
+async fn a_ca_file_smithy_cannot_trust_fails_the_client_configuration_of_both_directions() {
+    let fixture = Fixture::start().await;
+    let endpoint = RefusedEndpoint::reserve();
+    let address = format!("https://127.0.0.1:{}", endpoint.port());
+    for (case, content) in UNTRUSTABLE_CA_FILES {
+        let (config, _directory) = client_config_trusting(&address, content);
+
+        let emitter = SqsQueueEmitter::client_from_config(&config, fixture.dns()).await;
+        let report = match emitter {
+            Ok(client) => {
+                // A request builds the connector, and with it the trust store.
+                let lookup = SqsQueueEmitter::queue_url(&client, QUEUE).await;
+                panic!("a CA file with {case} configured an emitter, whose lookup gave {lookup:?}");
+            }
+            Err(report) => report,
+        };
+        assert_eq!(
+            report.current_context(),
+            &EmitterOpenError::InvalidConfiguration { connector: SQS },
+            "{case}"
+        );
+        assert_untrusted_ca_file(&report, case);
+
+        let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
+        let plan = SqsQueueIngestorPlan::new(&config, queue, fixture.dns()).await;
+        let report = match plan {
+            Ok(plan) => {
+                let mut source = SqsQueueIngestor::open(&plan, 0)
+                    .await
+                    .expect("opening a source sends no request");
+                let resume = source.resume().await;
+                panic!("a CA file with {case} configured a source, whose resume gave {resume:?}");
+            }
+            Err(report) => report,
+        };
+        assert!(
+            matches!(
+                report.current_context(),
+                SqsQueueIngestorError::ClientConfig
+            ),
+            "{case}: {report:?}"
+        );
+        assert_untrusted_ca_file(&report, case);
+    }
+}
+
+/// `report` names `tls_ca_file` as the key the client cannot use, above the parse, the root store
+/// or the empty file that refused it.
+fn assert_untrusted_ca_file<C>(report: &error_stack::Report<C>, case: &str) {
+    assert_eq!(
+        report
+            .downcast_ref::<InvalidSqsClientKey>()
+            .map(|invalid| invalid.key),
+        Some("tls_ca_file"),
+        "{case}: {report:?}"
+    );
+    let refused_by_tls = matches!(
+        report.downcast_ref::<nervix_connector::TlsClientConfigError>(),
+        Some(
+            nervix_connector::TlsClientConfigError::ParseCaCertificate { .. }
+                | nervix_connector::TlsClientConfigError::AddCaCertificate { .. }
+        )
+    );
+    let empty = report.downcast_ref::<EmptyCaFile>().is_some();
+    assert!(refused_by_tls || empty, "{case}: {report:?}");
+}
+
+/// How long a check waits for a request that a deadline must end. Generous, because the deadline
+/// ends it much sooner.
+pub(crate) const GENEROUS_BUDGET: Duration = Duration::from_secs(30);
+
+/// A service on `listener` that accepts every connection, reads nothing and never answers, and
+/// hands each connection it accepted to `accepted`, which keeps it open.
+pub(crate) fn silent_service(
+    listener: TcpListener,
+    accepted: nervix_primitives::sync::mpsc::Sender<TcpStream>,
+) -> JoinHandle<()> {
+    nervix_primitives::task::spawn(async move {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            if accepted.send(stream).await.is_err() {
+                return;
+            }
+        }
+    })
+}
+
+#[nervix_primitives::test]
+async fn a_queue_lookup_the_service_never_answers_ends_within_timeout_ms_after_one_attempt() {
+    let fixture = Fixture::start().await;
+    let budget = Duration::from_millis(300);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("a loopback port is available");
+    let port = listener
+        .local_addr()
+        .expect("a bound listener has an address")
+        .port();
+    let (accepted, mut connections) = nervix_primitives::sync::mpsc::channel(8);
+    let _service = silent_service(listener, accepted);
+    let mut config = client_config(&format!("http://127.0.0.1:{port}"));
+    config.push(ClientConfigEntry {
+        key: "timeout_ms".to_string(),
+        value: budget.as_millis().to_string(),
+    });
+
+    let mut source = open_source(&config, fixture.dns()).await;
+    let resumed = nervix_primitives::time::timeout(GENEROUS_BUDGET, source.resume())
+        .await
+        .expect("a lookup the service never answers ends within the client's timeout_ms");
+    let report = resumed.expect_err("a service that never answers returns no queue URL");
+    let elapsed = report.downcast_ref::<DeadlineElapsed>().copied();
+    assert_eq!(
+        elapsed.map(|elapsed| (elapsed.operation, elapsed.key, elapsed.bound)),
+        Some(("the SQS queue lookup", DeadlineKey::Timeout, budget)),
+        "the lookup ran out of the client's timeout_ms: {report:?}"
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            report
+                .downcast_ref::<DeadlineElapsed>()
+                .expect("checked above")
+        ),
+        "the SQS queue lookup did not finish within timeout_ms 300ms"
+    );
+    let client = SqsQueueEmitter::client_from_config(&config, fixture.dns())
+        .await
+        .expect("the emitter client configuration is valid");
+    let looked_up = nervix_primitives::time::timeout(
+        GENEROUS_BUDGET,
+        SqsQueueEmitter::queue_url(&client, QUEUE),
+    )
+    .await
+    .expect("a lookup the service never answers ends within the client's timeout_ms");
+    let report = looked_up.expect_err("a service that never answers returns no queue URL");
+    assert_eq!(
+        report.current_context(),
+        &EmitterOpenError::Initialize { connector: SQS }
+    );
+    assert_eq!(
+        report
+            .downcast_ref::<DeadlineElapsed>()
+            .map(|elapsed| (elapsed.operation, elapsed.bound)),
+        Some(("the SQS queue lookup", budget)),
+        "{report:?}"
+    );
+
+    // The SDK made each lookup once: the host's RETRY POLICY owns every retry.
+    let mut accepted = Vec::new();
+    while let Ok(connection) = connections.try_recv() {
+        accepted.push(connection);
+    }
+    assert_eq!(
+        accepted.len(),
+        2,
+        "one connection for each side's single attempt"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_session_token_is_sent_with_the_requests_of_both_directions() {
+    let fixture = Fixture::start().await;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("a loopback port is available");
+    let port = listener
+        .local_addr()
+        .expect("a bound listener has an address")
+        .port();
+    let service = stand_in(listener, 2, QueueAnswer::Url);
+    let mut config = client_config(&format!("http://127.0.0.1:{port}"));
+    config.push(ClientConfigEntry {
+        key: "session_token".to_string(),
+        value: "nervix-session-token".to_string(),
+    });
+
+    let client = SqsQueueEmitter::client_from_config(&config, fixture.dns())
+        .await
+        .expect("a client with a session token is valid");
+    SqsQueueEmitter::queue_url(&client, QUEUE)
+        .await
+        .expect("the stand-in returns the queue URL");
+    let mut source = open_source(&config, fixture.dns()).await;
+    source
+        .resume()
+        .await
+        .expect("the stand-in returns the queue URL to the source too");
+
+    let requests = service.await.expect("the stand-in does not panic");
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("\r\nx-amz-security-token: nervix-session-token\r\n"),
+            "the request carries the temporary credentials' token: {request}"
+        );
+        assert!(
+            signed_headers(&request).contains(&"x-amz-security-token".to_string()),
+            "the signature covers the token: {request}"
+        );
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_client_must_name_its_region_and_credentials_in_both_directions() {
+    let fixture = Fixture::start().await;
+    for missing in ["region", "access_key_id", "secret_access_key"] {
+        let mut config = client_config("http://127.0.0.1:9324");
+        config.retain(|entry| entry.key != missing);
+
+        let emitter = SqsQueueEmitter::client_from_config(&config, fixture.dns()).await;
+        let Err(report) = emitter else {
+            panic!("an emitter client without {missing} was configured");
+        };
+        assert_eq!(
+            report.current_context(),
+            &EmitterOpenError::InvalidConfiguration { connector: SQS },
+            "{missing}"
+        );
+        let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
+        let plan = SqsQueueIngestorPlan::new(&config, queue, fixture.dns()).await;
+        let Err(report) = plan else {
+            panic!("a source client without {missing} was configured");
+        };
+        assert!(
+            matches!(
+                report.current_context(),
+                SqsQueueIngestorError::ClientConfig
+            ),
+            "{missing}: {report:?}"
+        );
+    }
+}
+
+/// A CA certificate rustls takes as a trust anchor, in PEM.
+pub(crate) fn ca_certificate_pem() -> String {
+    let key = rcgen::KeyPair::generate().expect("a CA key generates");
+    let mut params = rcgen::CertificateParams::new(Vec::new()).expect("an empty SAN list is valid");
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "nervix sqs test ca");
+    params
+        .self_signed(&key)
+        .expect("a CA certificate generates")
+        .pem()
+}
+
+#[nervix_primitives::test]
+async fn a_ca_file_holding_a_certificate_configures_both_directions() {
+    let fixture = Fixture::start().await;
+    let (config, _directory) =
+        client_config_trusting("https://sqs.nervix.test:9325", &ca_certificate_pem());
+
+    SqsQueueEmitter::client_from_config(&config, fixture.dns())
+        .await
+        .expect("an emitter trusting a CA certificate is configured");
+    let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
+    SqsQueueIngestorPlan::new(&config, queue, fixture.dns())
+        .await
+        .expect("a source trusting a CA certificate is configured");
+}
+
+#[nervix_primitives::test]
+async fn a_receive_extends_only_its_operation_timeouts_by_its_long_poll() {
+    let fixture = Fixture::start().await;
+    let mut config = client_config("http://127.0.0.1:9324");
+    config.push(ClientConfigEntry {
+        key: "timeout_ms".to_string(),
+        value: "250".to_string(),
+    });
+    let client = SqsClientConfig::parse(&config)
+        .expect("the client configuration is valid")
+        .client(fixture.dns())
+        .await;
+    let own = client
+        .sdk()
+        .config()
+        .timeout_config()
+        .cloned()
+        .expect("the client is built with its timeouts");
+    assert_eq!(own.operation_timeout(), Some(Duration::from_millis(250)));
+    assert_eq!(
+        own.operation_attempt_timeout(),
+        Some(Duration::from_millis(250))
+    );
+    assert!(
+        own.connect_timeout().is_some(),
+        "the SDK's connect timeout bounds every connection"
+    );
+    assert_eq!(
+        client
+            .sdk()
+            .config()
+            .retry_config()
+            .map(|retry| retry.max_attempts()),
+        Some(1),
+        "the SDK makes each request once"
+    );
+
+    let receive = client.receive_override(Duration::from_secs(1)).build();
+    let receive = receive
+        .timeout_config()
+        .expect("a client with timeout_ms overrides a receive's timeouts");
+    assert_eq!(
+        receive.operation_timeout(),
+        Some(Duration::from_millis(1250))
+    );
+    assert_eq!(
+        receive.operation_attempt_timeout(),
+        Some(Duration::from_millis(1250))
+    );
+    assert_eq!(receive.connect_timeout(), own.connect_timeout());
+
+    let unbounded = SqsClientConfig::parse(&client_config("http://127.0.0.1:9324"))
+        .expect("the client configuration is valid")
+        .client(fixture.dns())
+        .await;
+    assert!(
+        unbounded
+            .receive_override(Duration::from_secs(1))
+            .build()
+            .timeout_config()
+            .is_none(),
+        "a client without timeout_ms overrides nothing"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_send_the_service_never_answers_ends_within_timeout_ms_in_both_modes() {
+    let fixture = Fixture::start().await;
+    let budget = Duration::from_millis(300);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("a loopback port is available");
+    let port = listener
+        .local_addr()
+        .expect("a bound listener has an address")
+        .port();
+    let (accepted, _connections) = nervix_primitives::sync::mpsc::channel(8);
+    let _service = silent_service(listener, accepted);
+    let mut config = client_config(&format!("http://127.0.0.1:{port}"));
+    config.push(ClientConfigEntry {
+        key: "timeout_ms".to_string(),
+        value: budget.as_millis().to_string(),
+    });
+    for (send, request, message) in [
+        (
+            nervix_models::SqsSend::Single,
+            "an SQS send",
+            "SQS SendMessage failed: an SQS send did not finish within timeout_ms 300ms",
+        ),
+        (
+            nervix_models::SqsSend::Batch,
+            "an SQS batch send",
+            "SQS SendMessageBatch failed: an SQS batch send did not finish within timeout_ms 300ms",
+        ),
+    ] {
+        let client = SqsQueueEmitter::client_from_config(&config, fixture.dns())
+            .await
+            .expect("the emitter client configuration is valid");
+        let mut connector = SqsQueueEmitter {
+            client,
+            queue_url: format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"),
+            send,
+        };
+        let record = EmitterRecord::new(
+            EmitterRecordId::new(0),
+            None,
+            b"{\"user_id\":42}".to_vec(),
+            Vec::new(),
+            Timestamp::from_unix_nanos(0),
+        );
+
+        let outcome =
+            nervix_primitives::time::timeout(GENEROUS_BUDGET, connector.publish(vec![record]))
+                .await
+                .expect("a send the service never answers ends within the client's timeout_ms")
+                .into_parts();
+
+        assert!(outcome.delivered.is_empty(), "{send:?}");
+        assert!(outcome.rejected.is_empty(), "{send:?}");
+        let failure = outcome
+            .infrastructure_error
+            .expect("a send the service never answers fails the publish");
+        assert_eq!(
+            failure.current_context(),
+            &EmitterWriteError::Publish { connector: SQS }
+        );
+        assert_eq!(
+            failure.downcast_ref::<DeadlineElapsed>().map(|elapsed| (
+                elapsed.operation,
+                elapsed.key,
+                elapsed.bound
+            )),
+            Some((request, DeadlineKey::Timeout, budget)),
+            "{send:?}: {failure:?}"
+        );
+        assert_eq!(message_of(&failure), Some(message), "{send:?}");
     }
 }

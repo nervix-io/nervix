@@ -185,7 +185,12 @@ Feature: Header models
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:1' };
+      CREATE SQS CLIENT sqs_main CONFIG {
+        'endpoint' = 'http://127.0.0.1:1',
+        'region' = 'eu-west-1',
+        'access_key_id' = 'declaration-key',
+        'secret_access_key' = 'declaration-secret'
+      };
       """
     When these Plexus statements fail with "write_header value must be STRING, found Int64"
       """

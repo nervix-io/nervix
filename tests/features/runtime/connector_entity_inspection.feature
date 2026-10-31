@@ -28,7 +28,7 @@ Feature: Every connector entity uses the shared inspection rows
       CREATE NATS CLIENT nats_main CONFIG { 'addr' = 'nats://127.0.0.1:4222' };
       CREATE PROMETHEUS CLIENT prom_main CONFIG { 'addr' = 'http://127.0.0.1:9090', 'timeout_ms' = 5000 };
       CREATE ZEROMQ CLIENT zmq_main CONFIG { 'addr' = 'tcp://127.0.0.1:5555', 'bind' = 'false' };
-      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1' };
+      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' };
       CREATE WEBSOCKETS CLIENT ws_main CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
       CREATE SYSLOG CLIENT syslog_main CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
       CREATE HTTP REQUEST INGESTOR http_request_source
@@ -198,7 +198,7 @@ Feature: Every connector entity uses the shared inspection rows
       CREATE NATS CLIENT nats_main CONFIG { 'addr' = 'nats://127.0.0.1:4222' };
       CREATE PROMETHEUS CLIENT prom_main CONFIG { 'addr' = 'http://127.0.0.1:9090', 'timeout_ms' = 5000 };
       CREATE ZEROMQ CLIENT zmq_main CONFIG { 'addr' = 'tcp://127.0.0.1:5555', 'bind' = 'false' };
-      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1' };
+      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' };
       CREATE WEBSOCKETS CLIENT ws_main CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
       CREATE SYSLOG CLIENT syslog_main CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
       CREATE HTTP REQUEST INGESTOR http_request_source

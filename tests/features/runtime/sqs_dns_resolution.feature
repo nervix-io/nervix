@@ -33,7 +33,9 @@ Feature: SQS name resolution
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE SQS CLIENT sqs_main MOUNT dev_tls VERSION 1 CONFIG {
         <client_config>,
-        'region' = 'us-east-1'
+        'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret'
       };
       CREATE SQS QUEUE INGESTOR sqs_in
         FROM sqs_main QUEUE 'dns_in_{{test_id}}' INSTANCES 1
@@ -99,7 +101,9 @@ Feature: SQS name resolution
       CREATE SQS CLIENT sqs_main MOUNT dev_tls VERSION 1 CONFIG {
         'endpoint' = '{{sqs_tls_dns_endpoint}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem',
-        'region' = 'us-east-1'
+        'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret'
       };
       CREATE SQS QUEUE EMITTER sqs_out FROM notifications
         TO sqs_main QUEUE 'dns_out_{{test_id}}' SEND SINGLE MODE ACK RETRY POLICY BACKOFF 200ms MAX 1s
@@ -157,7 +161,9 @@ Feature: SQS name resolution
         ON GENERAL ERROR LOG;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_forwarded_endpoint}}',
-        'region' = 'us-east-1'
+        'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret'
       };
       CREATE SQS QUEUE EMITTER sqs_out FROM notifications
         TO sqs_main QUEUE 'dns_out_{{test_id}}' SEND SINGLE MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
@@ -221,7 +227,9 @@ Feature: SQS name resolution
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_forwarded_endpoint}}',
-        'region' = 'us-east-1'
+        'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret'
       };
       CREATE SQS QUEUE INGESTOR sqs_in
         FROM sqs_main QUEUE 'dns_in_{{test_id}}' INSTANCES 1

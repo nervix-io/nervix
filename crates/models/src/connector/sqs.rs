@@ -42,17 +42,20 @@ use crate::{
 
 configured_client!(Sqs: unpooled, config CLIENT_CONFIG, CreateClientSqs => SqsConfigEntry);
 
-/// The current keys this connector reads, shared by validation, completion and inspection. An SQS
-/// connection trusts `tls_ca_file`, or the platform's roots without it, and presents no client
-/// certificate, so the schema declares no client-identity key.
+/// The current keys this connector reads, shared by validation, completion and inspection. Every
+/// request is signed for `region` with the static credentials, so the client names them all, and
+/// `session_token` only where the credentials are temporary ones. An SQS connection trusts
+/// `tls_ca_file`, or the platform's roots without it, takes no proxy, and presents no client
+/// certificate, so the schema declares neither a proxy nor a client-identity key.
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
     use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
     ClientConfigSchema::new(
         &[
-            K::optional("access_key_id", V::String).secret(),
+            K::required("access_key_id", V::String).secret(),
             K::required("endpoint", V::Url(&["http", "https"])),
-            K::optional("region", V::String),
-            K::optional("secret_access_key", V::String).secret(),
+            K::required("region", V::String),
+            K::required("secret_access_key", V::String).secret(),
+            K::optional("session_token", V::String).secret(),
             K::TIMEOUT,
             K::TLS_CA,
         ],
@@ -110,8 +113,18 @@ const SQS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Driver("3.1 s"),
         },
         DeclaredWait {
-            wait: "the queue URL lookup, a receive and a delete",
-            bound: WaitBound::Unbounded,
+            wait: "the queue URL lookup and a delete",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
+        },
+        DeclaredWait {
+            wait: "a receive, after the one-second long poll it asks the service to hold it for",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
         },
     ],
     driver_limits: &["A request that stalls below 1 byte a second for 5 s is cancelled."],
@@ -126,11 +139,7 @@ const SQS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Driver("3.1 s"),
         },
         DeclaredWait {
-            wait: "the queue URL lookup at start",
-            bound: WaitBound::Unbounded,
-        },
-        DeclaredWait {
-            wait: "a send",
+            wait: "the queue URL lookup at start and a send",
             bound: WaitBound::Key {
                 key: DeadlineKey::Timeout,
                 omitted: OmittedDeadline::Unbounded,
