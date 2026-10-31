@@ -73,7 +73,7 @@ Feature: Domain-paced branch buffering
     # and the collection each still close 50ms after they open, while a physical clock would hold
     # each for a minute. The caller deliberately resumes after the receive budget; the independent
     # reader must still collect every row within it.
-    Then within "5s" the relay subscription receives payloads with its caller delayed by "6s"
+    Then within "10s" the relay subscription receives payloads with its caller delayed by "11s"
       """
       key={"tenant":"alpha"} payload={"path":"fast","sequence":1,"tenant":"alpha"}
       key={"tenant":"alpha"} payload={"path":"fast","sequence":2,"tenant":"alpha"}
@@ -160,7 +160,7 @@ Feature: Domain-paced branch buffering
     # Each relay owner fans out one batch at a time, every branch included, so each batch waits
     # for the owner's delay on both relays. The rows still arrive well inside the budget, while a
     # physical clock would hold the first window alone for a minute.
-    Then within "5s" the relay subscription receives payloads with its caller delayed by "6s"
+    Then within "10s" the relay subscription receives payloads with its caller delayed by "11s"
       """
       key={"tenant":"alpha"} payload={"path":"fast","sequence":1,"tenant":"alpha"}
       key={"tenant":"alpha"} payload={"path":"fast","sequence":2,"tenant":"alpha"}
@@ -235,11 +235,11 @@ Feature: Domain-paced branch buffering
       {"tenant":"beta","sequence":1,"path":"immediate"}
       """
     # A wrongly logical 100us batching minimum would hold each route for a hundred physical
-    # seconds at this rate, twenty times the receive budget, so the budget rejects the wrong clock
+    # seconds at this rate, ten times the receive budget, so the budget rejects the wrong clock
     # while leaving relay delivery between three nodes room on a loaded runner. The caller
     # deliberately resumes after the budget; the independent reader must still collect every row
     # within it.
-    Then within "5s" the relay subscription receives payloads with its caller delayed by "6s"
+    Then within "10s" the relay subscription receives payloads with its caller delayed by "11s"
       """
       key={"tenant":"alpha"} payload={"path":"immediate","sequence":1,"tenant":"alpha"}
       key={"tenant":"beta"} payload={"path":"immediate","sequence":1,"tenant":"beta"}

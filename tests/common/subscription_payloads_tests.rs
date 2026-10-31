@@ -17,9 +17,9 @@ use nervix_primitives::{
 use crate::subscription_payloads::{PayloadSubscription, SubscriptionPayloads};
 
 /// The receive budget the paced branch-buffering and slow historical Immediate outlines share.
-const RECEIVE_BUDGET: Duration = Duration::from_secs(5);
+const RECEIVE_BUDGET: Duration = Duration::from_secs(10);
 /// How long both outlines delay collecting the result of their sample, beyond its receive budget.
-const CALLER_DELAY: Duration = Duration::from_secs(6);
+const CALLER_DELAY: Duration = Duration::from_secs(11);
 /// What the Immediate outline's 100-microsecond batching minimum would hold at
 /// `TIME RATE 0.000001` if it were scaled as logical time.
 const IMMEDIATE_WRONG_CLOCK_CADENCE: Duration = Duration::from_secs(100);

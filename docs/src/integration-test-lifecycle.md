@@ -967,11 +967,11 @@ archive must retain both quiesced cuts and the measured first hold.
 The paced branch-buffering outline runs its domain at rate 1200 with one-minute logical input
 flush and collection, a six-second period and skew, and a five-hour branch TTL. Each of these is
 sixty times the physical time it takes, so the flush and the collection each still close 50 ms
-after they open, while a physical clock would hold each for a minute. The receive budget is five
-seconds: twelve times shorter than the wrong clock's first window, and many times longer than
-relay delivery takes on a loaded runner. With one-second windows at rate 20, the budget had to
-stay below a one-second physical cadence, and its 800 ms then measured relay delivery as much as
-the clock. A relay owner fans out one batch at a time, across every branch of the relay, and waits
+after they open, while a physical clock would hold each for a minute. The receive budget is ten
+seconds: six times shorter than the wrong clock's first window, and longer than relay delivery
+takes on a loaded runner. With one-second windows at rate 20, the budget had to stay below a
+one-second physical cadence, and its 800 ms then measured relay delivery as much as the clock. A
+relay owner fans out one batch at a time, across every branch of the relay, and waits
 for each remote receiver to admit the batch before it takes the next one. On three nodes the
 placement puts other nodes between a row's ingestor, both relay owners, the reingestor and the
 session, so each owner fan-out and each delivery to a remote owner waits for an admission between
@@ -979,26 +979,28 @@ nodes; on one node every hop is local. In a loaded parallel run the first rows o
 arrived 269 ms apart and both second rows missed the 800 ms deadline. A relay owner that spends
 that long on each batch produces exactly that pattern. A companion outline makes every relay owner
 wait 250 ms before each batch: at the 800 ms budget that wait failed the same way on one and three
-nodes, while the outline requires every row within the five-second budget.
+nodes, while the outline requires every row within the ten-second budget. A five-second budget
+held at 48 run slots on 16 runtime workers, with last receipts up to 3.4 seconds, but not in a
+full CI shard, where the first row took 3.6 seconds and the other three missed the deadline.
 
 Each outline's bounded payload sample owns the raw session on a runtime task and records every
 receipt instant, while Cucumber only awaits the completed sample. Checking the deadline between
 rows on the runner task could fail after the first tenant rows even when both second rows were
 already queued within the budget. A paused-clock regression supplies those rows at 100 ms and
-delays the caller past five seconds; another requires a missing second row to expire at exactly
-five seconds despite a duplicate first row. A transport disconnect instead fails immediately with
+delays the caller past ten seconds; another requires a missing second row to expire at exactly
+ten seconds despite a duplicate first row. A transport disconnect instead fails immediately with
 its cause. The public outlines check each concrete tenant key and both exact payloads while
-deliberately delaying collection of the result for six seconds, beyond the unchanged receive
+deliberately delaying collection of the result for eleven seconds, beyond the unchanged receive
 budget. That delay yields to the runtime and other scenarios; it does not block the shared runner.
-A scripted one-minute physical cadence still expires the same five-second sample. Every returned
+A scripted one-minute physical cadence still expires the same ten-second sample. Every returned
 row must also have a receipt instant strictly before the original deadline: a paused-clock reader
-that resumes at or beyond the five-second bound must fail even when its final row is ready.
+that resumes at or beyond the ten-second bound must fail even when its final row is ready.
 Offloading removes runner polling gaps; it neither extends the budget nor proves that runtime
 workers cannot be delayed.
 
 The slow historical-domain Immediate-flush outline runs its domain at rate 0.000001, where its
 100-microsecond batching minimum would hold each route for a hundred physical seconds if it were
-scaled as logical time. The receive budget is five seconds: twenty times shorter than the wrong
+scaled as logical time. The receive budget is ten seconds: ten times shorter than the wrong
 clock's window, and longer than relay delivery takes on a loaded runner. At rate 0.0001 the wrong
 clock took one second, so the budget had to stay below it, and its 500 ms then measured relay
 delivery instead of the clock. On three nodes a row can cross four admissions between nodes, and
@@ -1009,13 +1011,13 @@ longer budget under the same load, every sample received both rows, the last up 
 after it began and the two tenants' rows up to half a second apart.
 
 The outline keeps its physical batching minimum, both exact tenant keys and payloads, and one- and
-three-node topology. It delays collection of the observation result for six seconds, beyond its
-receive budget. The reader must start and capture its deadline before the caller first polls the
-result. Its paused-clock control supplies both rows at 100 ms and requires receipt signals inside
-the budget before the caller resumes after six seconds. A missing or late row still fails, and the
-wrong-clock control expires the same five-second budget with a hundred-second cadence, as it does
-with the paced outlines' one-minute cadence. The public receive bound qualifies the physical clock
-choice without changing domain time or the batching minimum.
+three-node topology. It delays collection of the observation result for eleven seconds, beyond
+its receive budget. The reader must start and capture its deadline before the caller first polls
+the result. Its paused-clock control supplies both rows at 100 ms and requires receipt signals
+inside the budget before the caller resumes after eleven seconds. A missing or late row still
+fails, and the wrong-clock control expires the same ten-second budget with a hundred-second
+cadence, as it does with the paced outlines' one-minute cadence. The public receive bound
+qualifies the physical clock choice without changing domain time or the batching minimum.
 
 The slow-branch collection outline holds each branch for one physical second at rate 0.0001, and
 its lower bound measures that hold. Its ten-second upper bound only has to outlast the hold and
