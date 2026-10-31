@@ -395,6 +395,54 @@ fn a_schema_without_driver_aliases_refuses_none() {
 }
 
 #[test]
+fn a_stripped_prefix_admits_its_own_properties_declared_as_keys() {
+    const OWN: ClientConfigStrippedPrefix = ClientConfigStrippedPrefix {
+        prefix: "scope.",
+        properties: &["scope.first", "scope.second"],
+    };
+    const KEYS: [ClientConfigKey; 2] = [
+        ClientConfigKey::optional("id", ClientConfigValue::String),
+        ClientConfigKey::optional("scope.first", ClientConfigValue::String),
+    ];
+    let schema = ClientConfigSchema::new(&KEYS, &[], &[]).with_driver_aliases(&[], Some(OWN));
+    assert_eq!(schema.stripped_prefix(), Some(OWN));
+    schema
+        .validate(&[entry("id", "value"), entry("scope.first", "value")])
+        .assured("a key shorter than the prefix and a declared property of its own pass");
+    let refusal = schema
+        .validate(&[entry("scope.third", "value")])
+        .expect_err("the driver strips the prefix from a key that names none of its properties");
+    assert_eq!(
+        refusal.current_context(),
+        &ClientConfigSchemaError::DriverPrefix {
+            key: "scope.third".to_string(),
+            prefix: "scope.",
+        }
+    );
+}
+
+#[test]
+#[should_panic(expected = "name_precedes")]
+fn a_stripped_prefix_lists_its_own_properties_sorted() {
+    const UNSORTED: ClientConfigStrippedPrefix = ClientConfigStrippedPrefix {
+        prefix: "scope.",
+        properties: &["scope.second", "scope.first"],
+    };
+    ClientConfigSchema::new(&ALIASED_KEYS, &[], &[]).with_driver_aliases(&[], Some(UNSORTED));
+}
+
+#[test]
+#[should_panic(expected = "holds_name")]
+fn a_refused_name_is_no_reserved_key() {
+    const RESERVED: [ClientConfigAlias; 1] = [ClientConfigAlias {
+        alias: "owned.name",
+        accepted: "accepted.name",
+    }];
+    ClientConfigSchema::new(&ALIASED_KEYS, &[], &["owned.name"])
+        .with_driver_aliases(&RESERVED, None);
+}
+
+#[test]
 #[should_panic(expected = "name_precedes")]
 fn driver_aliases_are_sorted_by_the_name_each_refuses() {
     const UNSORTED: [ClientConfigAlias; 2] = [
