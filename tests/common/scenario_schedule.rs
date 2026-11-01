@@ -3,20 +3,21 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** Feature-group admission, run-slot admission, feature take-up priority, the
-//!   long-running declaration that orders run-slot admission, the retry count, and the share of
-//!   the run slots each run of a scenario holds.
-//! - **Depends on.** Tokio channels, a short synchronous queue lock, and feature names and tags
-//!   supplied by the parser.
+//!   declared scenario weights and lengths, the retry count, and the share of the run slots each
+//!   attempt holds.
+//! - **Depends on.** Tokio channels, a short synchronous queue lock, and Gherkin feature names and
+//!   inherited tags supplied by the parser.
 //! - **Must not know.** Scenario steps, node state, or Cucumber's result writer.
 
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize, ParseIntError},
     time::Duration,
 };
 
 use arch_into::ArchInto as _;
+use cucumber::gherkin::{Feature, Rule, Scenario};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::sync::{StdArc, blocking::Mutex, oneshot, watch};
 
@@ -69,6 +70,52 @@ impl ScenarioLength {
     }
 }
 
+/// The run-slot load a scenario declares, before the pool's quarter-share cap is applied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ScenarioWeight(NonZeroUsize);
+
+#[derive(Debug, thiserror::Error)]
+#[error("invalid scenario run-slot tag @{tag}: expected @slots_<positive integer>")]
+pub(crate) struct ScenarioWeightError {
+    tag: String,
+    #[source]
+    source: ParseIntError,
+}
+
+impl ScenarioWeight {
+    /// The declaration of a scenario without a weight tag.
+    pub(crate) const ONE: Self = Self(NonZeroUsize::MIN);
+
+    /// Read all inherited declarations and retain the largest, independently of their order.
+    pub(crate) fn declared_by<'a>(
+        tags: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self, ScenarioWeightError> {
+        let mut weight = Self::ONE.0;
+        for tag in tags {
+            let Some(number) = tag.strip_prefix("slots_") else {
+                continue;
+            };
+            let declared: NonZeroUsize = number.parse().map_err(|source| ScenarioWeightError {
+                tag: tag.to_string(),
+                source,
+            })?;
+            weight = weight.max(declared);
+        }
+        Ok(Self(weight))
+    }
+
+    /// Examples' tags have already been carried into `scenario` by Cucumber's expansion.
+    pub(crate) fn for_scenario(
+        feature: &Feature,
+        rule: Option<&Rule>,
+        scenario: &Scenario,
+    ) -> Result<Self, ScenarioWeightError> {
+        let rule_tags = rule.into_iter().flat_map(|rule| &rule.tags);
+        let tags = feature.tags.iter().chain(rule_tags).chain(&scenario.tags);
+        Self::declared_by(tags.map(String::as_str))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FeatureLimit {
     WebConsole,
@@ -90,6 +137,9 @@ pub(crate) const SCENARIO_RETRIES: usize = 2;
 /// therefore runs again beside fewer other scenarios, and never alone.
 const FIRST_RETRY_SLOT_DIVISOR: usize = 16;
 
+/// Every admission leaves room for other scenarios by reserving at most a quarter of the pool.
+const MAX_RUN_SLOT_SHARE_DIVISOR: usize = 4;
+
 /// The share of the run slots the last retry holds, as a divisor of the pool: the first retry's
 /// share, doubled once for each retry after it.
 const LAST_RETRY_SLOT_DIVISOR: usize = FIRST_RETRY_SLOT_DIVISOR >> (SCENARIO_RETRIES - 1);
@@ -103,7 +153,7 @@ const _: () = assert!(
     "each retry holds exactly twice the share of the run before it"
 );
 const _: () = assert!(
-    LAST_RETRY_SLOT_DIVISOR >= 4,
+    LAST_RETRY_SLOT_DIVISOR >= MAX_RUN_SLOT_SHARE_DIVISOR,
     "no run holds more than a quarter of the run slots, so a retry never runs a scenario alone"
 );
 
@@ -135,11 +185,17 @@ impl ScenarioRun {
     /// How many of a pool of `slots` run slots this run holds from admission to the end of its
     /// teardown.
     ///
-    /// A first run holds one slot. The first retry holds a sixteenth of the pool and each later
-    /// retry twice the share of the run before it, so the second retry holds an eighth. A run past
-    /// the configured retries, as a `--retry` override allows, keeps the last retry's share. Every
-    /// run holds at least one slot, so a pool of fewer than sixteen slots gives a first retry one.
-    pub(crate) fn run_slots(self, slots: usize) -> usize {
+    /// The larger of the declared weight and retry share, capped at a quarter of the pool and at
+    /// least one slot. Even a declaration above the pool's size admits in a small local run.
+    pub(crate) fn run_slots(self, slots: usize, weight: ScenarioWeight) -> usize {
+        let requested = self.retry_slots(slots).max(weight.0.get());
+        let largest_share = (slots / MAX_RUN_SLOT_SHARE_DIVISOR).max(1);
+        requested.min(largest_share)
+    }
+
+    /// A first run's minimum is one slot. The first retry holds a sixteenth of the pool and each
+    /// later retry twice the share of the run before it, up to the configured last retry's share.
+    fn retry_slots(self, slots: usize) -> usize {
         let run: usize = self.number().arch_into();
         if run == 1 {
             return 1;
@@ -496,6 +552,7 @@ impl ScenarioRunSlots {
         &self,
         limit: FeatureLimit,
         length: ScenarioLength,
+        weight: ScenarioWeight,
         feature_name: &str,
         run: ScenarioRun,
         mut waiting_for: impl FnMut(AdmissionWait),
@@ -511,7 +568,7 @@ impl ScenarioRunSlots {
                 run.attempt(),
                 Waiter {
                     feature_name: feature_name.to_owned(),
-                    slots: run.run_slots(self.slots),
+                    slots: run.run_slots(self.slots, weight),
                     grant,
                     reason: reason_sender,
                 },

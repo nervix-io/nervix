@@ -262,10 +262,13 @@ just coverage-merge coverage-inputs/tests coverage-inputs/coverage-scenarios-1 \
 ```
 
 It names one input for each shard that `SCENARIO_SHARDS` runs, so a shard whose report is missing
-fails the merge as a missing input. The native extras are named only when they exist, because the
-coverage job does not require the extra-tests job: it needs that job to have succeeded or been
-skipped. The merge sums the counters of every report that measured a
-file, so the shards' reports add up to the suite's.
+fails the merge as a missing input. Native extras are a required input when the selected extra-tests
+job succeeds and a label selected a coverage-producing step; a missing download fails the merge.
+Extra jobs that collect no coverage, such as Miri, require no report. The extra-tests job publishes
+that selection once; both coverage jobs use it. Every download names one exact artifact and its destination directory, because
+`download-artifact` v8 extracts a single match directly into the supplied path. Workflow contract
+tests keep the scenario and Deloxide downloads aligned with their producer matrices. The merge sums
+the counters of every report that measured a file, so the shards' reports add up to the suite's.
 
 An input is a producer's artifact directory or one report, with the producer's
 `coverage-source-root.txt` in the directory or beside the report. The merge reads the workspace
@@ -512,6 +515,9 @@ just coverage-full-select --event "$EVENT" --labels "$LABELS" \
   --tests-required "$TESTS_REQUIRED" --bolero-required "$BOLERO_REQUIRED" --jobs "$JOBS"
 just coverage-full coverage-full-inputs/*
 ```
+
+Each downloaded artifact has its own directory below `coverage-full-inputs`, including a single
+matrix entry. The union therefore receives whole artifacts rather than their top-level files.
 
 The selection is the run's event and pull request label snapshot, whether the tested diff required
 the suites and the Bolero call, the run and its attempt, the tested revision, and every producer

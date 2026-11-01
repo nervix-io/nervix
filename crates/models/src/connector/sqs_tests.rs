@@ -134,31 +134,25 @@ fn batching_is_optional_up_to_the_largest_message_sqs_accepts() {
 }
 
 #[test]
-fn only_the_send_is_bounded_by_a_client_deadline_key() {
+fn every_request_of_both_directions_is_bounded_by_timeout_ms() {
     let ingest = IngestorEntityKind::Sqs(SqsIngestorEntity::Queue).capabilities();
     let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
+    let timeout = WaitBound::Key {
+        key: DeadlineKey::Timeout,
+        omitted: OmittedDeadline::Unbounded,
+    };
 
     assert!(ingest.bounds.buffers.is_empty());
     assert!(emit.bounds.buffers.is_empty());
-    assert!(ingest.bounds.deadline_keys().is_empty());
+    assert_eq!(ingest.bounds.deadline_keys(), vec![DeadlineKey::Timeout]);
     let ingest_waits: Vec<WaitBound> = ingest.bounds.waits.iter().map(|wait| wait.bound).collect();
     assert_eq!(
         ingest_waits,
-        vec![WaitBound::Driver("3.1 s"), WaitBound::Unbounded]
+        vec![WaitBound::Driver("3.1 s"), timeout, timeout]
     );
     assert_eq!(emit.bounds.deadline_keys(), vec![DeadlineKey::Timeout]);
     let emit_waits: Vec<WaitBound> = emit.bounds.waits.iter().map(|wait| wait.bound).collect();
-    assert_eq!(
-        emit_waits,
-        vec![
-            WaitBound::Driver("3.1 s"),
-            WaitBound::Unbounded,
-            WaitBound::Key {
-                key: DeadlineKey::Timeout,
-                omitted: OmittedDeadline::Unbounded,
-            },
-        ]
-    );
+    assert_eq!(emit_waits, vec![WaitBound::Driver("3.1 s"), timeout]);
 }
 
 fn config_entry(key: &str, value: &str) -> ClientConfigEntry {
@@ -180,6 +174,7 @@ fn client_schema_declares_exactly_the_keys_both_directions_read() {
             "endpoint",
             "region",
             "secret_access_key",
+            "session_token",
             "timeout_ms",
             "tls_ca_file"
         ]
@@ -190,13 +185,24 @@ fn client_schema_declares_exactly_the_keys_both_directions_read() {
     assert_eq!(endpoint.presence, ClientConfigPresence::Required);
     assert_eq!(endpoint.value, ClientConfigValue::Url(&["http", "https"]));
     assert_eq!(endpoint.owner, ClientConfigOwner::Nervix);
+    let region = config
+        .key("region")
+        .assured("the declared key list above names the region");
+    assert_eq!(region.presence, ClientConfigPresence::Required);
+    assert!(!region.confidential);
     for credential in ["access_key_id", "secret_access_key"] {
         let key = config
             .key(credential)
             .assured("the declared key list above names both credentials");
         assert!(key.confidential, "{credential} is redacted by inspection");
-        assert_eq!(key.presence, ClientConfigPresence::Optional);
+        assert_eq!(key.presence, ClientConfigPresence::Required);
     }
+    let session_token = config
+        .key("session_token")
+        .assured("the declared key list above names the session token");
+    assert!(session_token.confidential);
+    assert_eq!(session_token.presence, ClientConfigPresence::Optional);
+    assert_eq!(session_token.value, ClientConfigValue::String);
     let trust = config
         .key("tls_ca_file")
         .assured("the declared key list above names the trusted CA file");
@@ -218,22 +224,42 @@ fn client_schema_accepts_every_declared_key() {
             config_entry("region", "eu-west-1"),
             config_entry("access_key_id", "AKIDEXAMPLE"),
             config_entry("secret_access_key", "declared-secret"),
+            config_entry("session_token", "declared-session-token"),
             config_entry("timeout_ms", "5000"),
             config_entry("tls_ca_file", "trust.pem"),
         ])
         .assured("every declared SQS key with a valid value is accepted before mount resolution");
 }
 
-#[test]
-fn client_schema_requires_the_endpoint() {
+/// The keys every SQS client names: the endpoint it reaches and what each request is signed with.
+fn signing_entries() -> Vec<ClientConfigEntry> {
+    vec![
+        config_entry("endpoint", "http://127.0.0.1:9324"),
+        config_entry("region", "eu-west-1"),
+        config_entry("access_key_id", "AKIDEXAMPLE"),
+        config_entry("secret_access_key", "declared-secret"),
+    ]
+}
+
+#[rstest]
+#[case("endpoint")]
+#[case("region")]
+#[case("access_key_id")]
+#[case("secret_access_key")]
+fn client_schema_requires_the_endpoint_and_what_every_request_is_signed_with(
+    #[case] key: &'static str,
+) {
+    let mut entries = signing_entries();
+    entries.retain(|entry| entry.key != key);
+
     let refusal = CreateClientSqs::<u64>::DECLARATION
         .config
-        .validate(&[config_entry("region", "eu-west-1")])
-        .expect_err("an SQS client cannot reach the service without its endpoint");
+        .validate(&entries)
+        .expect_err("an SQS client reaches the service only with its endpoint, region and keys");
 
     assert_eq!(
         refusal.current_context(),
-        &ClientConfigSchemaError::MissingRequired { key: "endpoint" }
+        &ClientConfigSchemaError::MissingRequired { key }
     );
 }
 
@@ -246,10 +272,9 @@ fn client_schema_refuses_values_outside_their_declared_type(
     #[case] key: &str,
     #[case] value: &str,
 ) {
-    let mut entries = vec![config_entry(key, value)];
-    if key != "endpoint" {
-        entries.push(config_entry("endpoint", "http://127.0.0.1:9324"));
-    }
+    let mut entries = signing_entries();
+    entries.retain(|entry| entry.key != key);
+    entries.push(config_entry(key, value));
 
     let refusal = CreateClientSqs::<u64>::DECLARATION
         .config
@@ -264,10 +289,7 @@ fn client_schema_refuses_values_outside_their_declared_type(
 fn client_schema_refuses_an_undeclared_key() {
     let refusal = CreateClientSqs::<u64>::DECLARATION
         .config
-        .validate(&[
-            config_entry("endpoint", "http://127.0.0.1:9324"),
-            config_entry("regoin", "eu-west-1"),
-        ])
+        .validate(&[signing_entries(), vec![config_entry("regoin", "eu-west-1")]].concat())
         .expect_err("an SQS client is strict: only declared keys configure it");
 
     assert_eq!(
