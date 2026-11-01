@@ -611,6 +611,10 @@ test-package-lib package *args:
 test-nats-driver checkout *args:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/nats-driver") }} cargo test --manifest-path {{ quote(checkout + "/async-nats/Cargo.toml") }} --package async-nats --no-default-features --features aws-lc-rs,jetstream,server_2_10,server_2_11 --lib -- {{ args }}
 
+# Qualify the pinned Pulsar driver's metadata boundary with the product's enabled features.
+test-pulsar-driver checkout *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/pulsar-driver") }} cargo test --manifest-path {{ quote(checkout + "/Cargo.toml") }} --no-default-features --features compression,tokio-rustls-runtime --lib -- {{ args }}
+
 # Run the vocabulary settings' compiling and class-rejection API examples.
 test-settings:
     cargo test --package nervix-models --lib settings::

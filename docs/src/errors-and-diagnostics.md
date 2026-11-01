@@ -1099,6 +1099,13 @@ receipts still unanswered, `EmitterFinishError::Unsent` counts those receipts, r
 driver failure beneath it when present. An unanswered receipt leaves delivery unknown rather
 than proving that the broker did not store the message.
 
+Pulsar receive conversion uses `PulsarTopicIngestorError::PublishTime`, `EventTime` or `SequenceId`
+under `IngestorError::Read`, retaining `TimestampError` or `TryFromIntError` as the typed cause.
+Each field error carries the received topic and full message position. A valid batch prefix reaches
+the host before a later conversion or driver receive failure is reported on the next active read;
+cancellation leaves that pending failure available. An unsupported present value never becomes a
+missing metadata field.
+
 A Pulsar source classifies an acknowledgement or a redelivery request that did not take effect in
 `PulsarTopicIngestorError`, beneath `IngestorError::Acknowledge` or `IngestorError::Reject`. An
 acknowledgement the broker answered with a server error is `AcknowledgementRefused`, whose typed

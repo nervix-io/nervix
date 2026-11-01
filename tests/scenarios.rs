@@ -226,6 +226,7 @@ mod paced_simulation;
 mod postgres_fixtures;
 mod process_cluster;
 mod pulsar_delivery;
+mod pulsar_metadata;
 mod pulsar_readiness;
 mod pulsar_subscriptions;
 mod restarted_voter;

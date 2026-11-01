@@ -1755,6 +1755,24 @@ retired subscriptions lose theirs. Each phase runs at most its declared instance
 connections concurrently, and keeps no discovery-map guard while awaiting a connection.
 The [ingestor manual](./ingestors.md#mqtt) owns the public behavior.
 
+### Pulsar received metadata
+
+The Pulsar connector converts each driver delivery once into a message owning its payload,
+ordered properties, complete acknowledgement position and validated metadata. The visitor lends
+the nine fields declared by `PulsarTopicIngestor` in declaration order; it renders the message id
+only when read and lends binary ordering keys without a retained metadata row. Publish and optional
+event milliseconds become checked `Timestamp` values; sequence ids are checked into `I64`.
+Missing event time and keys remain absent, including the distinction from present epoch or empty
+values. The external `CommandMessage` contract defaults an omitted redelivery count to zero; the
+connector exposes that count losslessly as `I64`.
+
+A failed conversion preserves its typed timestamp or integer cause under the connector's field
+error and `IngestorError::Read`, including topic and message identity. During batch gathering the
+source returns the valid prefix and retains one pending failure for the next active read. A cancelled
+read preserves that pending failure. This state is instance-local, bounded to one report and never
+persisted. No receive queue, network wait or host cadence changes. The public field contracts live
+in the [Pulsar ingestor manual](./ingestors.md#pulsar).
+
 ### Pulsar subscription ownership
 
 A Pulsar source's Model declares who owns its subscription, and its plan carries the declaration.
@@ -2657,8 +2675,12 @@ sequenceDiagram
   acknowledgement boundary remains the state's highest durable replica progress.
 
 - **Pulsar client.** The Pulsar ingestor and emitter build on Nervix's fork of `pulsar-rs`,
-  `nervix-io/pulsar-rs`, because the released crate discards `CommandConnected` and returns from an
-  acknowledgement before the broker answers it. The fork keeps each connection's announced
+  `nervix-io/pulsar-rs`, because the released crate discards delivered redelivery counts and
+  `CommandConnected`, and returns from an
+  acknowledgement before the broker answers it. Its received-message envelope carries the optional
+  `CommandMessage.redelivery_count` through the bounded consumer channel, including every member
+  of a broker batch. The public `Message` constructor and getter preserve wire presence; message-id
+  equality and hashing remain identity operations. The fork keeps each connection's announced
   `maxMessageSize`, refuses a message whose serialized metadata and payload exceed it before
   writing it, as the Java client does, and resolves a send the broker answers with `SendError` with
   that error's server code and reason. The broker itself only closes the connection on a frame

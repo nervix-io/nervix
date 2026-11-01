@@ -811,6 +811,72 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "metadata.topic"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+]
+
+[[capability]]
+capability = "metadata.message_id"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar redelivery keeps its message identity and reports the broker's count" },
+]
+
+[[capability]]
+capability = "metadata.publish_time"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+]
+
+[[capability]]
+capability = "metadata.event_time"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "Pulsar event time flushes historical windows separately for two branches" },
+]
+
+[[capability]]
+capability = "metadata.key"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+]
+
+[[capability]]
+capability = "metadata.ordering_key"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+]
+
+[[capability]]
+capability = "metadata.producer_name"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+]
+
+[[capability]]
+capability = "metadata.sequence_id"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+]
+
+[[capability]]
+capability = "metadata.redelivery_count"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar redelivery keeps its message identity and reports the broker's count" },
+]
+
+[[capability]]
 capability = "INSTANCES"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
