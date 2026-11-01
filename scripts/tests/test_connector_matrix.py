@@ -54,7 +54,8 @@ def declarations():
                      "keys": [{"name": "sasl.password", "presence": "optional", "type": "string",
                                "owner": "driver; best effort", "confidential": True, "file": "none",
                                "readers": "every"}],
-                     "namespaces": ["all driver property names"], "reserved": ["group.id"], "constraints": []}],
+                     "namespaces": ["all driver property names"], "reserved": ["group.id"],
+                     "aliases": [], "stripped_prefix": None, "constraints": []}],
     }
 
 
@@ -84,6 +85,25 @@ class ConnectorMatrixTests(unittest.TestCase):
             self.assertIn(value, text)
         surface["emit"][0]["value_contract"]["fields"] = ["HISTOGRAM `count`: U64; optional"]
         self.assertNotEqual(text, matrix.render_matrix(surface, reasons()))
+
+    def test_driver_aliases_and_a_stripped_prefix_name_the_keys_a_client_refuses(self):
+        surface = declarations()
+        without = matrix.render_matrix(surface, reasons())
+        self.assertNotIn("Refused driver name", without)
+        surface["clients"][0]["aliases"] = [
+            {"alias": "metadata.broker.list", "accepted": "bootstrap.servers"},
+            {"alias": "request.required.acks", "accepted": "acks"},
+        ]
+        surface["clients"][0]["stripped_prefix"] = {"prefix": "topic.", "properties": ["topic.blacklist"]}
+        text = matrix.render_matrix(surface, reasons())
+        for value in ["| Refused driver name | Accepted name |",
+                      "| `metadata.broker.list` | `bootstrap.servers` |",
+                      "| `request.required.acks` | `acks` |",
+                      "strips its `topic.` prefix from a key that names none of its own properties",
+                      "whose names begin with it: `topic.blacklist`."]:
+            self.assertIn(value, text)
+        surface["clients"][0]["stripped_prefix"]["properties"] = []
+        self.assertIn("whose names begin with it: none.", matrix.render_matrix(surface, reasons()))
 
     def test_keys_one_side_reads_name_the_entities_of_that_side(self):
         surface = declarations()

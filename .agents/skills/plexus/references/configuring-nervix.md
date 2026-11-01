@@ -354,6 +354,12 @@ current connection, retry and deadline limits.
 - A Kafka client never sets `allow.auto.create.topics`; `CREATE KAFKA CLIENT` refuses it. Provision each
   topic a Kafka ingestor reads: an ingestor never creates its topic and reports it as missing until
   it exists.
+- Every Kafka client writes each librdkafka property under the Apache Kafka Java client's name,
+  such as `bootstrap.servers`, `linger.ms`, `acks`, `retries`, `compression.type` and
+  `delivery.timeout.ms`, and writes no `topic.` prefixed key other than librdkafka's own
+  `topic.metadata.*` and `topic.blacklist`. `CREATE KAFKA CLIENT` refuses librdkafka's other
+  name for a property, even alone, and a `topic.` prefixed key. Read `Connector Capabilities` →
+  `KAFKA client` for each refused name and the name to write.
 - For Kafka source control-call deadlines and bounded execution, follow `Ingestors` → `Client
   Deadlines`. Keep `socket.timeout.ms` distinct from the consumer-group commit caller deadline;
   an unanswered commit is retained before another can start.
@@ -465,9 +471,8 @@ current connection, retry and deadline limits.
   legitimately returns more. Samples enter the graph in batches of at most 1024.
 - Treat Kafka `NO ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
-  share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces any
-  `message.timeout.ms` or `delivery.timeout.ms` in the client's `CONFIG` as the producer's delivery
-  bound. The producer always reports every record, so `delivery.report.only.error` in a client's
+  share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces the
+  client's `delivery.timeout.ms` as the producer's delivery bound. The producer always reports every record, so `delivery.report.only.error` in a client's
   `CONFIG` has no effect.
 - Every Sentry emitter references a `SENTRY CLIENT` with a project DSN and a positive `timeout_ms`,
   encodes one event JSON object per record, or per batch through `ON EMITTING BATCH`, and has no

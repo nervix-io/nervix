@@ -236,6 +236,24 @@ def readers_text(surface, client):
     return " ".join(sentences) + "\n"
 
 
+def driver_names(client):
+    """The other names a client's driver reads for one property, which the client refuses."""
+    lines = []
+    if client["aliases"]:
+        lines.append("A property the driver reads under more than one name is accepted under one; "
+                     "the client refuses the other.\n")
+        lines.append(table([(f"`{alias['alias']}`", f"`{alias['accepted']}`") for alias in client["aliases"]],
+                           ("Refused driver name", "Accepted name")))
+    stripped = client["stripped_prefix"]
+    if stripped is not None:
+        own = ", ".join(f"`{name}`" for name in stripped["properties"]) or "none"
+        lines.append(f"The driver also strips its `{stripped['prefix']}` prefix from a key that names none of "
+                     f"its own properties and reads the rest as a property name, so the client refuses a key "
+                     f"written under the prefix, except the driver's own properties whose names begin with "
+                     f"it: {own}.\n")
+    return lines
+
+
 def render_matrix(surface, notes):
     validate_notes(surface, notes)
     lines = ["# Connector Capabilities\n", "This reference is generated from the current declarations in Plexus, the Nervix graph definition language. Regenerate it with `just connector-matrix`; `just validate-connector-matrix` rejects drift in this chapter and the generated manual regions.\n",
@@ -264,6 +282,7 @@ def render_matrix(surface, notes):
         namespaces = ", ".join(client["namespaces"]) or "none; only declared keys are accepted"
         reserved = ", ".join(f"`{key}`" for key in client["reserved"]) or "none"
         lines.append(f"Delegated property namespaces: {namespaces}. Reserved keys: {reserved}.\n")
+        lines.extend(driver_names(client))
         readers = readers_text(surface, client)
         if readers:
             lines.append(readers)
