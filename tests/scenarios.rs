@@ -26537,20 +26537,27 @@ async fn when_these_mqtt_messages_are_rapidly_published(
     }
 }
 
-#[when(expr = "MQTT QoS 1 message is published to topic {string}")]
-async fn when_mqtt_qos1_message_is_published(
+/// Publishes the docstring at QoS 1 or 2 and returns once the broker answered it: its PUBACK at
+/// QoS 1, its PUBREC and then PUBCOMP at QoS 2.
+#[when(expr = "MQTT QoS {int} message is published to topic {string}")]
+async fn when_mqtt_message_is_published_at_qos(
     world: &mut ScenarioWorld,
+    qos: u8,
     topic: String,
     #[step] step: &Step,
 ) {
     let topic = expand_placeholders(world, &topic);
     let payload = expand_placeholders(world, docstring(step));
     wait_for_mqtt_ingestors_ready(world).await;
-    world
-        .cluster()
-        .publish_mqtt_qos1(&topic, &payload)
-        .await
-        .expect("failed to publish mqtt QoS 1 message");
+    let published = match qos {
+        1 => world.cluster().publish_mqtt_qos1(&topic, &payload).await,
+        2 => world.cluster().publish_mqtt_qos2(&topic, &payload).await,
+        other => {
+            panic!("the scenario publishes an answered MQTT message at QoS 1 or 2, not {other}")
+        }
+    };
+    published
+        .unwrap_or_else(|error| panic!("failed to publish the MQTT QoS {qos} message: {error}"));
 }
 
 /// Publishes `count` QoS 1 messages whose payloads are exactly `bytes` long: JSON objects whose
@@ -26679,7 +26686,7 @@ async fn when_json_messages_with_user_id_are_rapidly_published_to_input(
     let count = count
         .try_into()
         .expect("rapid publish count must fit into usize");
-    if entity_kind == "MQTT" || entity_kind == "MQTT_QOS1" {
+    if entity_kind == "MQTT" || entity_kind == "MQTT_QOS1" || entity_kind == "MQTT_QOS2" {
         wait_for_mqtt_ingestors_ready(world).await;
     }
     match entity_kind.as_str() {
@@ -26698,6 +26705,11 @@ async fn when_json_messages_with_user_id_are_rapidly_published_to_input(
             .publish_mqtt_qos1_burst(&input, &payload, count)
             .await
             .expect("failed to publish mqtt QoS 1 message burst"),
+        "MQTT_QOS2" => world
+            .cluster()
+            .publish_mqtt_qos2_burst(&input, &payload, count)
+            .await
+            .expect("failed to publish mqtt QoS 2 message burst"),
         "REDIS" => world
             .cluster()
             .publish_redis_burst(&input, &payload, count)

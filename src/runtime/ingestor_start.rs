@@ -652,10 +652,9 @@ mod tests {
                                             )
                                             .expect("valid topic filter"),
                                             instances: nonzero!(2u64),
-                                            mode: MqttIngestMode::NoAck {
-                                                session: MqttSession::Clean,
-                                                qos: MqttQos::AtMostOnce,
-                                            },
+                                            session: MqttSession::Clean,
+                                            qos: MqttQos::AtMostOnce,
+                                            mode: MqttIngestMode::NoAck,
                                             quiesce: nervix_models::IngestQuiesceMode::Drop,
                                         },
                                     )),
@@ -782,6 +781,8 @@ mod tests {
                                 topic: nervix_models::MqttTopicFilter::parse("notifications")
                                     .expect("valid topic filter"),
                                 instances: nonzero!(1u64),
+                                session: MqttSession::Persistent,
+                                qos: MqttQos::AtLeastOnce,
                                 mode: MqttIngestMode::AckSequential {
                                     timeout: "oops".to_string(),
                                     retry_policy: RetryPolicy {

@@ -391,6 +391,14 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "QOS 2"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "Every legal pairing of an MQTT ingestor's session, quality of service and mode delivers what its topic receives" },
+  { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "MQTT ACK SEQUENTIAL retries while an attached emitter is faulted" },
+]
+
+[[capability]]
 capability = "SESSION CLEAN"
 entity = "MQTT TOPIC INGESTOR"
 scenarios = [

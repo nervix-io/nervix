@@ -109,16 +109,20 @@ const SESSION_OPTION: &str = "SESSION";
 const QOS_OPTION: &str = "QOS";
 
 /// The session a broker keeps a subscriber's messages for while the subscriber is away: a
-/// persistent one, whose messages are delivered at least once. Suspending a subscriber and
-/// acknowledging its messages both rely on it.
+/// persistent one, at a quality of service whose messages the broker holds until they are
+/// acknowledged, QoS 1 or QoS 2. Suspending a subscriber and acknowledging its messages both rely
+/// on it.
 const BROKER_KEPT_SESSION: &[ChoiceRequirement] = &[
     ChoiceRequirement {
         option: SESSION_OPTION,
-        choice: MqttSession::Persistent.keyword(),
+        choices: &[MqttSession::Persistent.keyword()],
     },
     ChoiceRequirement {
         option: QOS_OPTION,
-        choice: MqttQos::AtLeastOnce.spelling(),
+        choices: &[
+            MqttQos::AtLeastOnce.spelling(),
+            MqttQos::ExactlyOnce.spelling(),
+        ],
     },
 ];
 
@@ -131,6 +135,8 @@ pub struct MqttTopicIngestor {
     pub client: ClientName,
     pub topic: MqttTopicFilter,
     pub instances: NonZeroU64,
+    pub session: MqttSession,
+    pub qos: MqttQos,
     pub mode: MqttIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
@@ -234,7 +240,7 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredBuffer {
-            holds: "SUBSCRIBE and PUBACK requests for the connection",
+            holds: "SUBSCRIBE, PUBACK and PUBREC requests for the connection",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Setting("the Receive Maximum, or 1 under NO ACK"),
                 overflow: BufferOverflow::Backpressure,
@@ -304,8 +310,9 @@ impl IngestorDeclaration for MqttTopicIngestor {
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
         // A persistent session's broker delivers again every publish a lost connection did not
-        // acknowledge, and an acknowledgement is complete once its PUBACK is written: the broker
-        // answers none.
+        // acknowledge, and an acknowledgement is complete once its PUBACK, or at QoS 2 its PUBREC,
+        // is written: the broker answers a PUBACK with nothing, and a PUBREC with the PUBREL the
+        // connection completes on its own.
         position_class: PositionClass::BrokerRedelivered,
         acknowledgement_confirmation: AcknowledgementConfirmation::Written,
         delivery: &[
@@ -314,7 +321,7 @@ impl IngestorDeclaration for MqttTopicIngestor {
             DeclaredDelivery::ACK_PARALLEL.requiring(BROKER_KEPT_SESSION),
         ],
         // Suspending disconnects while the broker keeps the session's publishes, which only a
-        // persistent session at QoS 1 holds; buffering and dropping stay connected.
+        // persistent session at QoS 1 or 2 holds; buffering and dropping stay connected.
         quiesce: &[
             DeclaredQuiesce::SUSPEND.requiring(BROKER_KEPT_SESSION),
             DeclaredQuiesce::BUFFER,
@@ -328,9 +335,7 @@ impl IngestorDeclaration for MqttTopicIngestor {
             OptionDeclaration::INSTANCES,
             OptionDeclaration {
                 keywords: SESSION_OPTION,
-                presence: OptionPresence::Optional {
-                    default: Some(MqttSession::Clean.keyword()),
-                },
+                presence: OptionPresence::Required,
                 form: OptionForm::Choice(&[
                     OptionChoice {
                         name: MqttSession::Clean.keyword(),
@@ -346,9 +351,7 @@ impl IngestorDeclaration for MqttTopicIngestor {
             },
             OptionDeclaration {
                 keywords: QOS_OPTION,
-                presence: OptionPresence::Optional {
-                    default: Some(MqttQos::AtMostOnce.spelling()),
-                },
+                presence: OptionPresence::Required,
                 form: OptionForm::Choice(&[
                     OptionChoice {
                         name: MqttQos::AtMostOnce.spelling(),
@@ -360,11 +363,32 @@ impl IngestorDeclaration for MqttTopicIngestor {
                         value: None,
                         example: "QOS 1",
                     },
+                    OptionChoice {
+                        name: MqttQos::ExactlyOnce.spelling(),
+                        value: None,
+                        example: "QOS 2",
+                    },
                 ]),
             },
         ],
         bounds: MQTT_INGESTOR_BOUNDS,
     };
+}
+
+impl MqttTopicIngestor {
+    /// The choice a statement that subscribes with `session` at `qos` makes for the declared
+    /// option opened by `option`: the two options a requirement of this entity names.
+    pub fn subscription_choice(
+        session: MqttSession,
+        qos: MqttQos,
+        option: &str,
+    ) -> Option<&'static str> {
+        match option {
+            SESSION_OPTION => Some(session.keyword()),
+            QOS_OPTION => Some(qos.spelling()),
+            _ => None,
+        }
+    }
 }
 
 impl IngestorEntityBody for MqttTopicIngestor {
@@ -387,11 +411,7 @@ impl IngestorEntityBody for MqttTopicIngestor {
     /// The session and the quality of service this source subscribes with, which suspending it
     /// and acknowledging its messages require.
     fn chosen(&self, option: &str) -> Option<&'static str> {
-        match option {
-            SESSION_OPTION => Some(self.mode.session().keyword()),
-            QOS_OPTION => Some(self.mode.qos().spelling()),
-            _ => None,
-        }
+        Self::subscription_choice(self.session, self.qos, option)
     }
 }
 
@@ -441,6 +461,7 @@ impl MqttSession {
 pub enum MqttQos {
     AtMostOnce,
     AtLeastOnce,
+    ExactlyOnce,
 }
 
 impl MqttQos {
@@ -448,6 +469,7 @@ impl MqttQos {
         match self {
             Self::AtMostOnce => 0,
             Self::AtLeastOnce => 1,
+            Self::ExactlyOnce => 2,
         }
     }
 
@@ -456,6 +478,7 @@ impl MqttQos {
         match self {
             Self::AtMostOnce => "0",
             Self::AtLeastOnce => "1",
+            Self::ExactlyOnce => "2",
         }
     }
 }
@@ -464,10 +487,7 @@ impl MqttQos {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum MqttIngestMode {
-    NoAck {
-        session: MqttSession,
-        qos: MqttQos,
-    },
+    NoAck,
     AckSequential {
         timeout: String,
         retry_policy: RetryPolicy,
@@ -481,24 +501,10 @@ pub enum MqttIngestMode {
 }
 
 impl MqttIngestMode {
-    pub const fn session(&self) -> MqttSession {
-        match self {
-            Self::NoAck { session, .. } => *session,
-            Self::AckSequential { .. } | Self::AckParallel { .. } => MqttSession::Persistent,
-        }
-    }
-
-    pub const fn qos(&self) -> MqttQos {
-        match self {
-            Self::NoAck { qos, .. } => *qos,
-            Self::AckSequential { .. } | Self::AckParallel { .. } => MqttQos::AtLeastOnce,
-        }
-    }
-
     pub const fn is_ack(&self) -> bool {
         match self {
             Self::AckSequential { .. } | Self::AckParallel { .. } => true,
-            Self::NoAck { .. } => false,
+            Self::NoAck => false,
         }
     }
 
@@ -506,7 +512,7 @@ impl MqttIngestMode {
     /// `ACK SEQUENTIAL` and `MAX` under `ACK PARALLEL`. `NO ACK` acknowledges nothing, so none wait.
     pub const fn acknowledgement_window(&self) -> Option<NonZeroU64> {
         match self {
-            Self::NoAck { .. } => None,
+            Self::NoAck => None,
             Self::AckSequential { .. } => Some(NonZeroU64::MIN),
             Self::AckParallel { max, .. } => Some(*max),
         }
@@ -532,7 +538,7 @@ impl MqttIngestMode {
                 timeout,
                 retry: retry_policy,
             },
-            Self::NoAck { .. } => IngestAcknowledgement::Unacknowledged,
+            Self::NoAck => IngestAcknowledgement::Unacknowledged,
         }
     }
 }

@@ -15,6 +15,13 @@ Ingestor generators draw every timestamp source, `TIMESTAMP AT metadata.<field>`
 Plexus properties preserve the metadata source distinctly from a payload field of the same name,
 and the same signature and namespace fence that shape.
 
+MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
+persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration
+admits is generated and none it refuses. The Model/archive, registry, consensus and canonical
+Plexus properties preserve the session, quality of service and mode as separate written values.
+The `NERVIX MQTT QOS2` registry signature and `raft_mqtt_qos_` consensus namespace identify this
+current Model layout before decoding.
+
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions
 run in both modes. A target writes through the storage engine its boundary owns when it has one:

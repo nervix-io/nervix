@@ -209,13 +209,54 @@ impl OptionDeclaration {
     }
 }
 
-/// A choice of one of an entity's options that a mode needs written beside it.
+/// The choices of one of an entity's options of which a mode needs one written beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChoiceRequirement {
     /// The keywords of the option.
     pub option: &'static str,
-    /// The name of the choice the statement must make.
-    pub choice: &'static str,
+    /// The names of the choices that meet the requirement, in the order the option declares them.
+    /// A statement makes one of them.
+    pub choices: &'static [&'static str],
+}
+
+impl ChoiceRequirement {
+    /// Whether the choice named `chosen` meets this requirement.
+    ///
+    /// A requirement names a handful of the choices its option declares in one constant, so the
+    /// scan is bounded by the declaration rather than by any statement.
+    pub fn accepts(&self, chosen: &str) -> bool {
+        self.choices.contains(&chosen)
+    }
+
+    /// Whether a statement makes one of the choices this requirement accepts, where `chosen` names
+    /// the choice it makes for an option by the option's keywords.
+    fn met_by(&self, chosen: &dyn Fn(&str) -> Option<&'static str>) -> bool {
+        let Some(choice) = chosen(self.option) else {
+            return false;
+        };
+        self.accepts(choice)
+    }
+
+    /// Whether a statement meets every one of `requirements`, where `chosen` names the choice it
+    /// makes for an option by the option's keywords.
+    pub fn all_met(requirements: &[Self], chosen: &dyn Fn(&str) -> Option<&'static str>) -> bool {
+        requirements
+            .iter()
+            .all(|requirement| requirement.met_by(chosen))
+    }
+
+    /// The option with the choices that meet the requirement, as a statement writes them, such as
+    /// `QOS 1 or 2`.
+    pub fn phrase(&self) -> String {
+        format!("{} {}", self.option, self.choices.join(" or "))
+    }
+
+    /// Every requirement of `requirements`, as a statement meets them together, such as
+    /// `SESSION PERSISTENT and QOS 1 or 2`.
+    pub fn conjunction(requirements: &[Self]) -> String {
+        let phrases: Vec<String> = requirements.iter().map(Self::phrase).collect();
+        phrases.join(" and ")
+    }
 }
 
 /// A clause an emitter writes to set what its transport carries beside each payload.

@@ -40,7 +40,7 @@ Feature: Postgres TLS resource mounts
           'client_id' = 'nervix-cucumber-postgres-tls-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'postgres_tls_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'postgres_tls_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL

@@ -557,10 +557,9 @@ mod tests {
                     topic: nervix_models::MqttTopicFilter::parse("events")
                         .expect("valid topic filter"),
                     instances: NonZeroU64::MIN,
-                    mode: MqttIngestMode::NoAck {
-                        session: MqttSession::Clean,
-                        qos: MqttQos::AtMostOnce,
-                    },
+                    session: MqttSession::Clean,
+                    qos: MqttQos::AtMostOnce,
+                    mode: MqttIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Drop,
                 })),
                 Model::ClientMqtt(CreateClientMqtt {

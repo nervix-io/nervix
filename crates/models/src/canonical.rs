@@ -4910,15 +4910,14 @@ mod tests {
                         client: named("mqtt_main"),
                         topic: named("devices/+/Orders"),
                         instances: nonzero!(2u64),
-                        mode: MqttIngestMode::NoAck {
-                            session: MqttSession::Clean,
-                            qos: MqttQos::AtMostOnce,
-                        },
+                        session: MqttSession::Clean,
+                        qos: MqttQos::AtMostOnce,
+                        mode: MqttIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     }),
                 ),
                 "CREATE MQTT TOPIC INGESTOR mqtt_ingestor\n  FROM mqtt_main TOPIC \
-                 'devices/+/Orders' INSTANCES 2 MODE NO ACK ON QUIESCE DROP",
+                 'devices/+/Orders' INSTANCES 2 SESSION CLEAN QOS 0 MODE NO ACK ON QUIESCE DROP",
             ),
             (
                 orders_ingestor(
@@ -4927,15 +4926,14 @@ mod tests {
                         client: named("mqtt_main"),
                         topic: named("devices/#"),
                         instances: nonzero!(1u64),
-                        mode: MqttIngestMode::NoAck {
-                            session: MqttSession::Persistent,
-                            qos: MqttQos::AtLeastOnce,
-                        },
+                        session: MqttSession::Persistent,
+                        qos: MqttQos::ExactlyOnce,
+                        mode: MqttIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
                 ),
                 "CREATE MQTT TOPIC INGESTOR mqtt_session_ingestor\n  FROM mqtt_main TOPIC \
-                 'devices/#' SESSION PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND",
+                 'devices/#' SESSION PERSISTENT QOS 2 MODE NO ACK ON QUIESCE SUSPEND",
             ),
             (
                 orders_ingestor(

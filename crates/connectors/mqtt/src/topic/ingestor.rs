@@ -406,6 +406,7 @@ impl MqttTopicIngestorPlan {
             qos: match qos {
                 MqttQos::AtMostOnce => QoS::AtMostOnce,
                 MqttQos::AtLeastOnce => QoS::AtLeastOnce,
+                MqttQos::ExactlyOnce => QoS::ExactlyOnce,
             },
             acknowledgement: IngestorAcknowledgement::of(acknowledgement_window),
             client_id_conflict,
