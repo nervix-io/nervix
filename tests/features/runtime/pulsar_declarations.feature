@@ -350,12 +350,12 @@ Feature: Pulsar topic declarations
       """
 
     Examples:
-      | cluster_size | config                                                                                                              | expected                                       |
-      | 1            | 'addr' = 'pulsar+ssl://127.0.0.1:6651', 'tls_cert_file' = '/tmp/client.pem', 'tls_key_file' = '/tmp/client-key.pem' | unknown client config key 'tls_cert_file'      |
-      | 3            | 'addr' = 'pulsar+ssl://127.0.0.1:6651', 'tls_cert_file' = '/tmp/client.pem', 'tls_key_file' = '/tmp/client-key.pem' | unknown client config key 'tls_cert_file'      |
-      | 1            | 'addr' = 'pulsar://127.0.0.1:6650', 'namespcae' = 'public/default'                                                  | unknown client config key 'namespcae'          |
-      | 3            | 'addr' = 'pulsar://127.0.0.1:6650', 'namespcae' = 'public/default'                                                  | unknown client config key 'namespcae'          |
-      | 1            | 'addr' = 'http://127.0.0.1:6650'                                                                                    | invalid client config key 'addr': expected URL |
-      | 3            | 'addr' = 'http://127.0.0.1:6650'                                                                                    | invalid client config key 'addr': expected URL |
-      | 1            | 'namespace' = 'public/default'                                                                                      | missing required client config key 'addr'      |
-      | 3            | 'namespace' = 'public/default'                                                                                      | missing required client config key 'addr'      |
+      | cluster_size | config                                                                                                                                    | expected                                                      |
+      | 1            | 'addr' = 'pulsar+ssl://127.0.0.1:6651', 'tls_cert_file' = '/nervix-missing/client.pem', 'tls_key_file' = '/nervix-missing/client-key.pem' | client config file key 'tls_cert_file' is not a readable file |
+      | 3            | 'addr' = 'pulsar+ssl://127.0.0.1:6651', 'tls_cert_file' = '/nervix-missing/client.pem', 'tls_key_file' = '/nervix-missing/client-key.pem' | client config file key 'tls_cert_file' is not a readable file |
+      | 1            | 'addr' = 'pulsar://127.0.0.1:6650', 'namespcae' = 'public/default'                                                                        | unknown client config key 'namespcae'                         |
+      | 3            | 'addr' = 'pulsar://127.0.0.1:6650', 'namespcae' = 'public/default'                                                                        | unknown client config key 'namespcae'                         |
+      | 1            | 'addr' = 'http://127.0.0.1:6650'                                                                                                          | invalid client config key 'addr': expected URL                |
+      | 3            | 'addr' = 'http://127.0.0.1:6650'                                                                                                          | invalid client config key 'addr': expected URL                |
+      | 1            | 'namespace' = 'public/default'                                                                                                            | missing required client config key 'addr'                     |
+      | 3            | 'namespace' = 'public/default'                                                                                                            | missing required client config key 'addr'                     |

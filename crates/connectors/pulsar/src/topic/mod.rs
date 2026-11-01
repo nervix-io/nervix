@@ -439,7 +439,8 @@ impl PulsarTopicEmitter {
     }
 
     /// A client that did not connect: one its configuration cannot describe is invalid, and any
-    /// other could not be initialized.
+    /// other could not be initialized. An emitter shows the message its emitter attached, so the
+    /// failure's whole chain is what its status says.
     fn client_error(error: Report<PulsarClientError>) -> Report<EmitterOpenError> {
         let connector = PULSAR.keyword();
         let context = match error.current_context() {
@@ -450,7 +451,8 @@ impl PulsarTopicEmitter {
                 EmitterOpenError::Initialize { connector }
             }
         };
-        error.change_context(context)
+        let description = format!("{error:#}");
+        error.change_context(context).attach_printable(description)
     }
 
     fn start_error(error: PulsarError) -> Report<EmitterOpenError> {
@@ -672,6 +674,62 @@ mod tests {
                 Some("Reached the maximum number of connections".to_string()),
             )
         )));
+    }
+
+    /// The host shows the message an emitter attached, so a client's whole failure reaches the
+    /// emitter's status while the emitter's own context stays what a caller decides from.
+    #[test]
+    fn an_emitter_describes_a_client_that_did_not_connect_by_its_whole_failure() {
+        let refused = PulsarTopicEmitter::client_error(Report::new(PulsarClientError::Refused {
+            refusal: PulsarRefusal {
+                error: Some(PulsarServerError::AuthenticationError),
+                reason: Some("Unable to authenticate".to_string()),
+            },
+        }));
+        let not_opened = PulsarTopicEmitter::client_error(
+            Report::new(PulsarError::Connection(PulsarConnectionError::Disconnected))
+                .change_context(PulsarClientError::NotOpened),
+        );
+        let configuration =
+            PulsarTopicEmitter::client_error(Report::new(PulsarClientError::Configuration));
+
+        let connector = PULSAR.keyword();
+        assert_eq!(
+            refused.current_context(),
+            &EmitterOpenError::Initialize { connector }
+        );
+        assert_eq!(
+            not_opened.current_context(),
+            &EmitterOpenError::Initialize { connector }
+        );
+        assert_eq!(
+            configuration.current_context(),
+            &EmitterOpenError::InvalidConfiguration { connector }
+        );
+        assert_eq!(
+            attached_message(&refused),
+            "the PULSAR broker refused the connection with AuthenticationError: \
+             Unable to authenticate"
+        );
+        assert_eq!(
+            attached_message(&not_opened),
+            format!(
+                "no connection to the PULSAR broker opened: {}",
+                PulsarError::Connection(PulsarConnectionError::Disconnected)
+            )
+        );
+        assert_eq!(
+            attached_message(&configuration),
+            "invalid PULSAR client configuration"
+        );
+    }
+
+    /// The printable attachment the host reads for an emitter's status.
+    fn attached_message(error: &Report<EmitterOpenError>) -> String {
+        let attached = error
+            .downcast_ref::<String>()
+            .assured("the emitter attached the client's failure as text");
+        attached.clone()
     }
 
     /// How the fake broker answers one message, chosen by the first byte of its payload.

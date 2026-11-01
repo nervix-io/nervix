@@ -1095,11 +1095,13 @@ shows.
 Both Pulsar directions connect through one builder, whose `PulsarClientError` says why a client did
 not connect. `Configuration` keeps the client configuration or TLS cause beneath it. `Refused`
 carries the `PulsarRefusal` a broker answered the connection with, such as an `AuthenticationError`
-for a missing or rejected credential, so the refusal is the innermost context an emitter's transient
-status shows. `NotOpened` keeps the driver's `pulsar::Error` beneath it for a connection that never
-opened, including a TLS handshake that failed, so that status shows the driver's error. A source
-reports it beneath `PulsarTopicIngestorError::Connect`. An emitter reports `Configuration` beneath
-`EmitterOpenError::InvalidConfiguration` and the others beneath `EmitterOpenError::Initialize`.
+for a missing or rejected credential. `NotOpened` keeps the driver's `pulsar::Error` beneath it for
+a connection that never opened, including a TLS handshake that failed. A source reports it beneath
+`PulsarTopicIngestorError::Connect`. An emitter reports `Configuration` beneath
+`EmitterOpenError::InvalidConfiguration` and the others beneath `EmitterOpenError::Initialize`, and
+attaches the failure's whole chain, so its transient status reads
+`the PULSAR broker refused the connection with AuthenticationError: ...` or
+`no connection to the PULSAR broker opened: Connection error: ...`.
 
 A NATS source whose client loses its connection to the server reports
 `NatsSubjectIngestorError::ConnectionLost` beneath `IngestorError::Read` once it has handed over what the client

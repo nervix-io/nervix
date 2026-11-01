@@ -1220,7 +1220,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
 | Buffers | messages each partition consumer receives ahead of the host: driver default, a receiver queue of 1000 messages; when full, holds back what fills it |
-| Network waits | name resolution: unbounded<br>connection: TCP, TLS and CONNECT: driver default, 10 s per address, 12 retries<br>topic lookup and subscribe: driver default, 30 s per attempt, retried without limit<br>an acknowledgement under ACK: driver default, 30 s operation timeout<br>close: unbounded |
+| Network waits | name resolution: unbounded<br>connection: TCP, TLS and CONNECT: driver default, 10 s per address, one attempt<br>topic lookup and subscribe: driver default, 30 s, one attempt<br>an acknowledgement under ACK: driver default, 30 s operation timeout<br>close: unbounded |
 | Driver limits | Inbound frames have no size limit. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 

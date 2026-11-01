@@ -112,13 +112,13 @@ Feature: Pulsar clients authenticate to their broker
       """
 
     Examples:
-      | cluster_size | credential            | client_config                                                                                                     | reported                                                          |
-      | 1            | a missing token       | 'addr' = '{{pulsar_auth_addr}}'                                                                                   | the PULSAR broker refused the connection with AuthenticationError |
-      | 3            | a missing token       | 'addr' = '{{pulsar_auth_addr}}'                                                                                   | the PULSAR broker refused the connection with AuthenticationError |
-      | 1            | a forged token        | 'addr' = '{{pulsar_auth_addr}}', 'auth_token' = '{{pulsar_auth_forged_token}}'                                    | the PULSAR broker refused the connection with AuthenticationError |
-      | 3            | a forged token        | 'addr' = '{{pulsar_auth_addr}}', 'auth_token' = '{{pulsar_auth_forged_token}}'                                    | the PULSAR broker refused the connection with AuthenticationError |
-      | 1            | a missing certificate | 'addr' = '{{pulsar_auth_tls_addr}}', 'tls_ca_file' = '{{dev_tls}}/ca.pem', 'auth_token' = '{{pulsar_auth_token}}' | Connection error: received fatal alert                            |
-      | 3            | a missing certificate | 'addr' = '{{pulsar_auth_tls_addr}}', 'tls_ca_file' = '{{dev_tls}}/ca.pem', 'auth_token' = '{{pulsar_auth_token}}' | Connection error: received fatal alert                            |
+      | cluster_size | credential            | client_config                                                                                                     | reported                                                                          |
+      | 1            | a missing token       | 'addr' = '{{pulsar_auth_addr}}'                                                                                   | the PULSAR broker refused the connection with AuthenticationError                 |
+      | 3            | a missing token       | 'addr' = '{{pulsar_auth_addr}}'                                                                                   | the PULSAR broker refused the connection with AuthenticationError                 |
+      | 1            | a forged token        | 'addr' = '{{pulsar_auth_addr}}', 'auth_token' = '{{pulsar_auth_forged_token}}'                                    | the PULSAR broker refused the connection with AuthenticationError                 |
+      | 3            | a forged token        | 'addr' = '{{pulsar_auth_addr}}', 'auth_token' = '{{pulsar_auth_forged_token}}'                                    | the PULSAR broker refused the connection with AuthenticationError                 |
+      | 1            | a missing certificate | 'addr' = '{{pulsar_auth_tls_addr}}', 'tls_ca_file' = '{{dev_tls}}/ca.pem', 'auth_token' = '{{pulsar_auth_token}}' | no connection to the PULSAR broker opened: Connection error: received fatal alert |
+      | 3            | a missing certificate | 'addr' = '{{pulsar_auth_tls_addr}}', 'tls_ca_file' = '{{dev_tls}}/ca.pem', 'auth_token' = '{{pulsar_auth_token}}' | no connection to the PULSAR broker opened: Connection error: received fatal alert |
 
   Scenario Outline: A Pulsar client refuses a broker certificate <reason>
     Given Pulsar is running
@@ -157,7 +157,7 @@ Feature: Pulsar clients authenticate to their broker
       """
     Then within "60s" DESCRIBE EMITTER "checked_out" on the leader node contains
       """
-      transient error: Connection error: invalid peer certificate: <reported>
+      transient error: no connection to the PULSAR broker opened: Connection error: invalid peer certificate: <reported>
       """
 
     Examples:
