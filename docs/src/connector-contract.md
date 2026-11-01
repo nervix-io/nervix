@@ -963,11 +963,21 @@ refusal before either a PULL or PUSH socket opens; an omitted value selects conn
 The MySQL offline check also applies the vocabulary's pooled-client reserved-key declaration to
 URL query parameters. A pool override is a value-free refusal naming `POOL SIZE`, before storage
 or connection attempts; the host uses that same declaration for resolved configuration. MySQL's
-current client schema declares only the address and CA file its implementation consumes. Its
+current client schema declares `addr`, `timeout_ms`, `tls_ca_file`, `tls_cert_file` and
+`tls_key_file`, with paired certificate and key files. Its
 table declaration admits one or two nonempty, case-preserving identifier parts, and the connector
 quotes each part separately. Its declared placeholder bound is shared with the statement divider;
 the bound narrows rows by mapped column count. The [MySQL manual](emitters.md#mysql) gives its
 exact binary binding and conflict semantics.
+
+The insert measure counts SQL text and binary bound values, excluding packet headers, parameter
+types and the execute null bitmap. It does not narrow a write by the server's
+`max_allowed_packet`; operators leave protocol headroom below that setting. Mounted TLS files
+enable TLS. They preserve the URL's verification policy when `require_ssl=true` selected one,
+otherwise starting from the driver's TLS defaults. The node's shared pool validates
+one connection at open, then its minimum keeper waits one second before each pass and counts
+checked-out connections together with idle ones. Its `timeout_ms` is an operation bound, shared
+with that keeper, rather than a bound on the complete maintenance pass or emitter flush.
 
 The Postgres client schema declares its address as a driver URL whose scheme and `sslmode` Nervix
 owns: validation and the connector read the one TLS policy through the same declared option, and
