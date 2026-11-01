@@ -595,6 +595,7 @@ fn declared_creation<'src>()
         creation::<KafkaTopicEmitter, _>(kafka::topic_body(EmitterContext::Create)),
         creation::<PulsarTopicEmitter, _>(pulsar::topic_body(EmitterContext::Create)),
         creation::<RabbitMqQueueEmitter, _>(rabbitmq::queue_body(EmitterContext::Create)),
+        creation::<RabbitMqExchangeEmitter, _>(rabbitmq::exchange_body(EmitterContext::Create)),
         creation::<RedisPubSubEmitter, _>(redis::pubsub_body(EmitterContext::Create)),
         creation::<MqttTopicEmitter, _>(mqtt::topic_body(EmitterContext::Create)),
         creation::<NatsSubjectEmitter, _>(nats::subject_body(EmitterContext::Create)),
@@ -634,6 +635,10 @@ fn declared_alteration<'src>()
         alteration::<RabbitMqQueueEmitter, _, _>(
             rabbitmq::queue_body(EmitterContext::Alter),
             rabbitmq::mode()
+        ),
+        alteration::<RabbitMqExchangeEmitter, _, _>(
+            rabbitmq::exchange_body(EmitterContext::Alter),
+            rabbitmq::exchange_mode()
         ),
         alteration::<RedisPubSubEmitter, _, _>(
             redis::pubsub_body(EmitterContext::Alter),
