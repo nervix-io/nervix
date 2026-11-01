@@ -72,7 +72,7 @@ Feature: Typed ingestor metadata
     When these Plexus statements fail with "ingestor 'pulsar_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PULSAR TOPIC ingestors declare no metadata field"
       """
       CREATE PULSAR TOPIC INGESTOR pulsar_source
-        FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR
+        FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE

@@ -1679,6 +1679,11 @@ retaining the archive, whether resource bytes are included, the number of users,
 revision, cut kind and quiesce counters, section count, and bytes. The summary is part of the recorded outcome, so repeating the
 command under its reference returns the same summary and never assembles a second archive.
 
+A quiesced cut whose pause commits after its cut deadline is refused before the coordinator
+starts installation, even if reconciliation already installed that pause. The command records
+the timeout after resuming the domain and produces no archive. This is the cut's deadline;
+client command-wait and download bounds retain their separate meanings.
+
 A download call carries exactly one `BackupDownloadRequest`, which names the backup's execution
 reference, and the node authenticates the call from its metadata before it reads the request. A
 node that retains the archive answers with a `BackupArchiveStart` naming the archive's size and

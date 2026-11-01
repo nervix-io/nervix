@@ -1863,7 +1863,7 @@ no synchronization. The existing capture and cleanup paths retain their tracked-
 phase timing itself establishes no interleaving or memory-ordering guarantee. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
 owns the diagnostic contract.
 
-The test-only backup cut registry releases its watch-held lease, pause-application, drain and
+The test-only backup cut registry releases its watch-held lease, committed-pause, pause-application, drain and
 capture gates before clearing the map during scenario cleanup. Existing borrowers observe release;
 later cuts encounter no gate. Gate-owner tests with a paused clock cover waiting cuts, timed holds
 and later arrivals, the pause-application gate holding only revisions that pause its domain, and
@@ -1872,6 +1872,14 @@ capture boundaries on one and three nodes and requires every node to stop while 
 its failure. These watch channels and concurrent-map accesses are outside Deloxide's tracked locks.
 This harness cleanup adds no data-plane synchronization or memory-ordering claim; [Integration Test Lifecycle](./integration-test-lifecycle.md#what-cleanup-releases)
 owns its supervision verdict.
+
+The committed-pause gate holds only the cut coordinator after the replicated pause completes;
+reconciliation remains free to install that revision. The elapsed-cut outline checks the
+installation refusal and resumed domain. Paused-clock owner tests exercise available and held
+installation slots, including a deadline expiring between polls before its rounded timer tick.
+These async waits add no tracked lock or memory-ordering protocol; Deloxide covers the surrounding
+lifecycle through the registered ordinary and stressed backup scenarios, not the timer's polling
+order itself.
 
 A diagnostic node selects the `deloxide` mode. The `deloxide-order` feature adds historical order
 instrumentation to that same mode, and the `deloxide-stress` feature adds Deloxide's bounded

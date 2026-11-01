@@ -194,7 +194,10 @@ after the freeze ends. The leader's backup coordinator runs it in this order:
    pause write itself is not cut short. A write abandoned after it was proposed may still commit
    and leave the domain paused with no cut left to resume it, so the coordinator waits for the
    write's outcome; a pause that commits after the deadline is resumed without the coordinator
-   waiting for the cluster to apply it. An alteration's pause keeps waiting for as long as the
+   waiting for the cluster to apply it. This refusal names the installation wait even if its slot
+   is already available or reconciliation already installed the pause: an elapsed cut deadline
+   is observed before polling that wait, independently of the timer driver's next tick.
+   An alteration's pause keeps waiting for as long as the
    cluster's own revision budget allows.
 5. **Drain.** Every 50 milliseconds, the coordinator polls every live node and every node the
    schedule assigns the domain's work to for the admitted work it still holds: admitting ingestors

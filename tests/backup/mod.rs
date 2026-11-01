@@ -312,6 +312,28 @@ fn when_backup_lease_pause_released(world: &mut ScenarioWorld, raw_domain: Strin
         .release_backup_cut_pause(&domain, BackupCutBoundary::Lease);
 }
 
+/// Holds the coordinator after its replicated pause completes, before it tries to install the
+/// paused revision. Reconciliation may already have installed it when the coordinator continues.
+#[given(
+    expr = "the backup cut for domain {string} will be held for {int} seconds after its pause \
+            commits"
+)]
+fn given_backup_cut_held_after_pause_commits(
+    world: &mut ScenarioWorld,
+    raw_domain: String,
+    seconds: u64,
+) {
+    let domain = scenario_domain(world, &raw_domain);
+    world
+        .fault_injection
+        .pause_backup_cut_on(domain.clone(), BackupCutBoundary::PauseCommitted);
+    world.fault_injection.hold_backup_cuts_for(
+        &domain,
+        BackupCutBoundary::PauseCommitted,
+        Duration::from_secs(seconds),
+    );
+}
+
 /// Every node's wait for the cluster to ready a revision that pauses the domain, the cut's own wait
 /// included, is held `seconds` from its own arrival, as a cluster slow to apply a cut's pause would
 /// hold it. The revision that resumes the domain is not held.

@@ -255,7 +255,7 @@ ordered name/value rows. A RabbitMQ queue offers its declared `NO ACK`, `ACK SEQ
 preview and submitted command. A topic,
 queue, subject, channel, consumer group, queue group or subscription keeps its text exactly as
 typed, case and spaces included, and the form refuses a name its entity's rule refuses. A
-`PULSAR TOPIC` subscription also requires an explicit ownership choice, `OWNED BY INGESTOR` or
+`PULSAR TOPIC` subscription also requires an explicit ownership choice, `OWNED BY INGESTOR START AT EARLIEST` or
 `PROVISIONED`, which the form never defaults. The decoding codec list contains only codecs that
 support decoding. Timestamp behavior must be chosen explicitly: source timestamp, `NOW`, or `AT` a
 typed field from the codec's output schema.

@@ -2075,26 +2075,15 @@ impl CreateIngestor {
     }
 
     /// Applies the operations of an alteration of a transport's pair in order.
-    pub(crate) fn apply_transport_operations<Source>(
+    pub(crate) fn apply_transport_operations<Operation>(
         &mut self,
-        operations: &[AlterTransportIngestorOperation<Source>],
+        operations: &[Operation],
     ) -> error_stack::Result<(), AlterIngestorError>
     where
-        Source: crate::connector::AlteredIngestorEntity,
+        Operation: crate::connector::TransportIngestorOperation,
     {
         for operation in operations {
-            match operation {
-                AlterTransportIngestorOperation::Ingestor(operation) => {
-                    self.apply_operation(operation)?;
-                }
-                AlterTransportIngestorOperation::SetDecodeUsing { codec } => {
-                    let held = self
-                        .input
-                        .codec_mut()
-                        .verified(crate::connector::ALTERED_PAIR_CHECKED);
-                    *held = codec.clone();
-                }
-            }
+            operation.apply_to(self)?;
         }
         Ok(())
     }
@@ -2239,8 +2228,47 @@ impl<Source> From<AlterIngestorOperation<Source>> for AlterTransportIngestorOper
     }
 }
 
+impl<Source> crate::connector::TransportIngestorOperation
+    for AlterTransportIngestorOperation<Source>
+where
+    Source: crate::connector::AlteredIngestorEntity + crate::canonical::IngestorBodyPlexus,
+{
+    fn apply_to(
+        &self,
+        ingestor: &mut CreateIngestor,
+    ) -> error_stack::Result<(), AlterIngestorError> {
+        match self {
+            Self::Ingestor(operation) => ingestor.apply_operation(operation)?,
+            Self::SetDecodeUsing { codec } => {
+                let held = ingestor
+                    .input
+                    .codec_mut()
+                    .verified(crate::connector::ALTERED_PAIR_CHECKED);
+                *held = codec.clone();
+            }
+        }
+        Ok(())
+    }
+
+    fn to_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        match self {
+            Self::Ingestor(operation) => {
+                crate::canonical::alter_ingestor_operation_to_plexus(operation)
+            }
+            Self::SetDecodeUsing { codec } => Ok(format!("SET DECODE USING {}", codec.as_str())),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AlterIngestorError {
+    #[error(
+        "cannot set START AT on provisioned {} subscription '{subscription}'",
+        crate::ConnectorKind::Pulsar
+    )]
+    ProvisionedPulsarStartPosition {
+        subscription: crate::PulsarSubscriptionName,
+    },
     #[error("ALTER targets ingestor `{requested}`, but the stored ingestor is `{stored}`")]
     IngestorNameMismatch {
         stored: IngestorName,
