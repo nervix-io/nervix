@@ -596,8 +596,8 @@ impl GeneratedMessage {
 fn refusal_of(metadata: &IngestFilterMapMetadata, row: usize) -> Option<ExpectedRefusal> {
     let refusal = metadata.refusal(row)?;
     Some(ExpectedRefusal {
-        field: refusal.field().name(),
-        value: refusal.value().to_string(),
+        field: refusal.field.name(),
+        value: refusal.value.clone(),
     })
 }
 

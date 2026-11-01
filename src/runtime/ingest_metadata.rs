@@ -46,14 +46,6 @@ pub(super) struct IngestMetadataRefusal {
 }
 
 impl IngestMetadataRefusal {
-    pub(super) fn field(&self) -> IngestorMetadataField {
-        self.field
-    }
-
-    pub(super) fn value(&self) -> &str {
-        &self.value
-    }
-
     /// The refused field as a message error names it.
     pub(super) fn field_path(&self) -> FieldPath {
         FieldPath::new(format!("{INGEST_METADATA_NAMESPACE}.{}", self.field.name()))
