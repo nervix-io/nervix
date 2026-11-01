@@ -1451,6 +1451,16 @@ scenario = "A pause the cluster applies slowly ends at its cut's deadline"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "A committed-pause gate holds the coordinator past its cut deadline while reconciliation may install the pause; the public CLI verifies the installation refusal and resumed domain."
+examples = 2
+feature = "tests/features/cluster/backup_cut_diagnostics.feature"
+id = "scenario.backup-committed-pause-deadline"
+invariant = "An elapsed cut refuses at its installation wait even when the pause is already installed, creates no archive and resumes its domain on one and three nodes."
+invocation = "scenarios"
+scenario = "A backup whose pause commits after its deadline refuses before installation"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Diagnostic node capture and retained-result recovery through a raw session, followed by ordinary CLI archive download to stdout."
 examples = 2
 feature = "tests/features/cluster/backup_wait.feature"
@@ -2158,6 +2168,16 @@ id = "stress.backup-pause-application-deadline"
 invariant = "A cut whose pause application is held beyond its budget is refused within its deadline and the resume that follows, creates no archive and leaves the domain running and delivering on one and three nodes."
 invocation = "stress-restore-scenarios"
 scenario = "A pause the cluster applies slowly ends at its cut's deadline"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: a committed-pause gate holds the coordinator past its cut deadline while reconciliation may install the pause; the public CLI verifies the installation refusal and resumed domain."
+examples = 2
+feature = "tests/features/cluster/backup_cut_diagnostics.feature"
+id = "stress.backup-committed-pause-deadline"
+invariant = "An elapsed cut refuses at its installation wait even when the pause is already installed, creates no archive and resumes its domain on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A backup whose pause commits after its deadline refuses before installation"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
