@@ -283,6 +283,67 @@ async fn computed_values_are_evaluated_for_each_published_row_beside_the_fixed_c
     );
 }
 
+/// A RabbitMQ exchange emitter's routing key is computed for every row with the envelope, first,
+/// and a row whose key cannot be computed has no envelope, named by the destination's clause.
+#[nervix_primitives::test]
+async fn a_routing_key_is_computed_for_every_row_and_names_its_clause_where_it_fails() {
+    let input = test_schema(&[
+        ("category", ParseAsType::String),
+        ("divisor", ParseAsType::I64),
+    ]);
+    let envelope = compile(
+        RecordEnvelope {
+            mandatory: true,
+            ..RecordEnvelope::default()
+        },
+        vec![value(
+            EnvelopeTarget::RoutingKey,
+            ParseAsType::String,
+            "concat(input.category, '.', (6 / input.divisor) AS STRING)",
+        )],
+        &input,
+        None,
+    );
+    let mut published = batch(
+        input,
+        [("orders", 2), ("audit", 0), ("orders", 3)]
+            .into_iter()
+            .map(|(category, divisor)| {
+                vec![
+                    ("category", RuntimeValue::String(category.to_string())),
+                    ("divisor", RuntimeValue::I64(divisor)),
+                ]
+            })
+            .collect(),
+    );
+
+    let envelopes = evaluate(&envelope, &mut published, EnvelopeInput::Published).await;
+
+    let outcomes = rows(&envelopes, 3);
+    let [first, failed, last] = outcomes[..] else {
+        panic!("every published row has an envelope outcome: {outcomes:?}");
+    };
+    assert_eq!(
+        first.map(|envelope| (envelope.mandatory, envelope.routing_key.clone())),
+        Ok((true, Some("orders.3".to_string())))
+    );
+    assert_eq!(
+        last.map(|envelope| envelope.routing_key.clone()),
+        Ok(Some("orders.2".to_string()))
+    );
+    let Err(EnvelopeError::ExpressionFailed { site, .. }) = failed else {
+        panic!("dividing by zero fails only its own row: {failed:?}");
+    };
+    assert_eq!(*site, EnvelopeSite::RoutingKey);
+    let message = failed
+        .map_err(ToString::to_string)
+        .expect_err("the failed row has no envelope");
+    assert!(
+        message.starts_with("ROUTING KEY expression failed with division_by_zero at "),
+        "{message}"
+    );
+}
+
 #[nervix_primitives::test]
 async fn a_row_whose_value_fails_has_no_envelope_and_names_the_value_that_failed() {
     let input = test_schema(&[("left", ParseAsType::I64), ("divisor", ParseAsType::I64)]);

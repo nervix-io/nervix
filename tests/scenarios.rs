@@ -131,9 +131,10 @@ use crate::common::{
         DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
         InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
         TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
-        assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
-        command_connect_options, delete_rabbitmq_queue, ensure_rabbitmq_queue, ensure_sqs_queue,
-        observe_kafka_through, observe_sqs, publish_kafka_record_through, publish_sqs,
+        assert_kafka_consumer_group_next_offset_through, bind_rabbitmq_queue,
+        client_connect_options, client_domain, command_connect_options, delete_rabbitmq_queue,
+        ensure_rabbitmq_exchange, ensure_rabbitmq_queue, ensure_sqs_queue, observe_kafka_through,
+        observe_sqs, publish_kafka_record_through, publish_sqs,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
@@ -25285,6 +25286,52 @@ async fn given_rabbitmq_queue_exists(world: &mut ScenarioWorld, queue: String) {
         .expect("failed to declare rabbitmq queue");
 }
 
+/// An exchange of one of the types RabbitMQ routes by: `direct`, `topic` or `fanout`.
+#[given(expr = "RabbitMQ exchange {string} of type {word} exists")]
+#[when(expr = "the operator provisions RabbitMQ exchange {string} of type {word}")]
+async fn given_rabbitmq_exchange_exists(world: &mut ScenarioWorld, exchange: String, kind: String) {
+    let exchange = expand_placeholders(world, &exchange);
+    let kind = match kind.as_str() {
+        "direct" => lapin::ExchangeKind::Direct,
+        "topic" => lapin::ExchangeKind::Topic,
+        "fanout" => lapin::ExchangeKind::Fanout,
+        _ => {
+            panic!("a RabbitMQ exchange in these scenarios is direct, topic or fanout, not {kind}")
+        }
+    };
+    ensure_rabbitmq_exchange(world.dependencies.endpoints(), &exchange, kind)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to declare RabbitMQ exchange '{exchange}': {error}")
+        });
+}
+
+#[given(expr = "RabbitMQ queue {string} is bound to exchange {string} with routing key {string}")]
+#[when(
+    expr = "the operator binds RabbitMQ queue {string} to exchange {string} with routing key \
+            {string}"
+)]
+async fn given_rabbitmq_queue_is_bound(
+    world: &mut ScenarioWorld,
+    queue: String,
+    exchange: String,
+    routing_key: String,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let exchange = expand_placeholders(world, &exchange);
+    let routing_key = expand_placeholders(world, &routing_key);
+    bind_rabbitmq_queue(
+        world.dependencies.endpoints(),
+        &queue,
+        &exchange,
+        &routing_key,
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("failed to bind RabbitMQ queue '{queue}' to exchange '{exchange}': {error}")
+    });
+}
+
 #[when(expr = "RabbitMQ queue {string} is deleted")]
 async fn when_rabbitmq_queue_is_deleted(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
@@ -25652,7 +25699,10 @@ async fn given_pulsar_tls_topic_is_observed(world: &mut ScenarioWorld, topic: St
     );
 }
 
+/// Declares the queue, which creates it again after it was deleted, and observes what it receives
+/// from now on.
 #[given(expr = "RabbitMQ queue {string} is observed")]
+#[when(expr = "the operator recreates RabbitMQ queue {string} and observes it")]
 async fn given_rabbitmq_queue_is_observed(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
     world.broker_observer = Some(
