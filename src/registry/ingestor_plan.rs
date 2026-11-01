@@ -797,7 +797,7 @@ fn client_endpoint_contract(
             .get(&route.relay)
             .map(|relay| &relay.branching);
         match branching {
-            Some(ResolvedBranching::Branched { branch, schema }) => {
+            Some(ResolvedBranching::Branched { branch, schema, .. }) => {
                 add(branch.as_str());
                 add(&schema
                     .to_canonical_plexus()

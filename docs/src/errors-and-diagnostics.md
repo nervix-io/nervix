@@ -1317,8 +1317,17 @@ a member that does not exist names the domain and the member, a server-listener 
 ingestor, a corridor whose `FROM`/`TO` pairs are all disconnected, a hard group whose overrides
 request different strategies lists every member of that group, and an override outside the unit
 names its member. The failed command renders the chain, such as `relocation plan failed: junction
-'chain_distant' is not part of the relocation`. See [Control Plane](./control-plane.md) for
-activation and [Typed States And Validation Boundaries](./typed-states.md) for required state.
+'chain_distant' is not part of the relocation`. A relay divided into partitions has no one owner to
+move, so a relocation that selects it is refused with `RelocationError::MemberPartitioned`, naming
+the domain and the relay. See [Control Plane](./control-plane.md) for activation and
+[Typed States And Validation Boundaries](./typed-states.md) for required state.
+
+`ALTER BRANCH <branch> SET PARTITIONS <n>` on a domain that is running or paused is refused before
+anything is committed with `TransactionPlanningError::BranchPartitionsRequireStoppedDomain`, which
+names the operation, the domain and the branch and states the stopped-domain path, such as `branch
+'by_tenant' changes its partition count only while its domain is stopped: STOP domain 'payments',
+run ALTER BRANCH, then START it`. A domain build whose committed schedule lacks a unit its relay
+needs reports `ExecutionBuildError::RelayUnitNotScheduled`, naming the relay and the unit.
 
 Visual schema, branch, relay, and subscription editors report incomplete names, fields, types,
 modes, references, branching, capacities, instance limits, filters and sample rates before
@@ -2020,8 +2029,11 @@ from a failed request. A relay payload that does not decode is `RuntimeError::De
 naming the domain and relay, with the `RemoteRelayDecodeError` that says what the payload got wrong
 beneath it: no admission registration, a body that is not one Arrow section of the relay's schema,
 metadata or acknowledgement sidecars whose row count differs from the body's, acknowledgement
-registrations on a subscription fan-out, a branch key that does not decode, or rows that do not
-assemble into a relay batch. The Arrow body, `BranchKeyError` or relay batch failure stays beneath
+registrations on a subscription fan-out, a branch key that does not decode, a key that lands in
+another partition than the one the payload names (`RemoteRelayDecodeError::Unit`, naming the
+addressed unit), or rows that do not assemble into a relay batch. A batch of a partitioned relay that
+names no concrete key has no partition: the producer refuses it with
+`RelayPartitionError::UnbranchedBatchOfPartitionedRelay` and fails its record acknowledgements. The Arrow body, `BranchKeyError` or relay batch failure stays beneath
 that. An Arrow body that is not one canonical IPC stream framed within its own bytes is
 `ArrowBodyError::Framing`, naming the `IpcFramingDefect`: a message without its continuation
 marker, a stream cut inside a message, a negative length, metadata that is not an Arrow message, a

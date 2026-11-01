@@ -194,7 +194,11 @@ the applicable Turmoil suite and real-process Chaos faults retain their separate
 A concrete producer retains its branch channel handle. The relay publishes branch membership in a
 persistent immutable table; concurrent first binding selects one allocation with CAS. Each branch
 publishes an owner/consumer routing generation, whose cancellation parent fences ingress and
-outbound slots, including candidates created during replacement. Eviction cancels the exact branch
+outbound slots, including candidates created during replacement. A partitioned relay keeps one
+routing generation per partition, and a producer resolves its key's partition once, when it binds
+its branch channel, so no batch computes a partition or reaches a shared map. Replacing one
+partition's owner cancels only that partition's generation and the channels bound under it; the
+other partitions' producers keep their bindings. Eviction cancels the exact branch
 before withdrawing its allocation. Invalidation is scoped to the branch that ended: a relay owner
 invalidates its own relay's branch, and a processor, ingestor or reingestor invalidates the
 branches of the relays it publishes through for its key. Another relay's branch for the same key
@@ -285,8 +289,8 @@ writer.
 | Emitter execution plans | The decision layer prepares the domain's typed emitter and ordered source edges with lowered expressions from one schedule revision; schedule application installs them in that revision. Startup, swaps and relocation bind a selected plan to local mounts, schemas and UDFs; relay inputs are registered during those transitions. Remote consumer edges come from the same plans. | An emitter task owns its bound programs and emitter configuration for its lifetime. Per-batch work does not read the schedule or client Models; emitter retries reuse the typed configuration. A dynamic flush change sends only its new flush policy to the running task. |
 | Message-error route plans | The registry selects each DLQ route from the committed schedule. Domain installation binds its schemas, branch declaration, flush contract, relay target and SET program before tasks start. Schedule application publishes the complete bound route map with the routing state of one typed revision. | A failed record looks up its prepared route in the task’s retained immutable routing snapshot, which publishes the bound plans together with the routing revision, before running its VM program or delivery. A buffered route compares the bound plan allocation with its running delivery task; a replacement drains the preceding task and starts a task with the new target and cadence. |
 | Node identity and remote dispatcher | The node runtime publishes this once after cluster join, when the authenticated interconnect and process incarnation are known. Relay boundaries created afterwards retain the same dispatcher handle. | Readers borrow the stable node identity, incarnation, transport, admission service, and ACK registry without a write-once lock or repeated name allocation. |
-| Relay owner state | Each relay boundary publishes its scheduled owner, installed owner buffer, remote runtime-consumer set, and immutable branch-reset gate set. Schedule and relay lifecycle operations replace these values at their cutover points. | A batch borrows the current owner and buffer, then takes permits only from reset gates whose typed scope selects its branch. Multi-step ownership changes use the whole-relay dispatch gate described below so teardown cannot race an admitted dispatch. |
-| Relay branch presence | The relay's owner task publishes the complete membership of the concrete branches it holds, and whether it admitted unbranched work, when that membership changes: a branch appears, is evicted or expires, or the owner starts or stops. The relay's state placement keeps the same presence across execution rebuilds. See [Relay branch presence](#relay-branch-presence). | `DESCRIBE RELAY ... WHERE`, materialized reads, and the console's dataflow graph load one membership without a lock. A batch for a branch the owner already holds publishes nothing. |
+| Relay owner state | Each relay boundary publishes its scheduled owners, one per unit, as one immutable table, its installed owner buffers, one per unit this node owns, its remote runtime-consumer set, and immutable branch-reset gate set. Schedule and relay lifecycle operations replace these values whole at their cutover points; an owner task deactivates only the buffer it installed. | A batch borrows the current owner and buffer of the unit its producer resolved at binding, then takes permits only from reset gates whose typed scope selects its branch. Multi-step ownership changes use the whole-relay dispatch gate described below so teardown cannot race an admitted dispatch. |
+| Relay branch presence | The owner task of each unit of a relay publishes the complete membership of the concrete branches it holds, and whether it admitted unbranched work, when that membership changes: a branch appears, is evicted or expires, or the owner starts or stops. Each unit's state placement keeps the same presence across execution rebuilds. See [Relay branch presence](#relay-branch-presence). | `DESCRIBE RELAY ... WHERE`, materialized reads, and the console's dataflow graph load one membership without a lock. A batch for a branch the owner already holds publishes nothing. |
 | Subscription interest | The cluster live-state watcher rebuilds an immutable index from domain and relay to interested node incarnations and advertisement versions whenever gossip changes. | A relay owner performs borrowed lookups in one published index. It neither formats gossip keys nor waits on the gossip mutex per batch. Subscription creation waits until every live node has observed the exact subscriber incarnation and at least the current advertisement version before reporting success. |
 | Clock installation | Each domain-clock lifecycle on each node publishes the complete missing, stopped, uninstalled, unpaced, or paced installation. | A read validates its bound lifecycle generation against one installation, then advances that installation's nondecreasing timestamp watermark atomically. A same-generation replacement retains the watermark; a different generation cannot be clamped by a stale reader. |
 | Accepted clock progress | Each runtime domain publishes its newest accepted generation, tick id, logical boundary, and authority UTC observation through a watch. | The watch serializes comparison and replacement, so concurrent progress deliveries cannot regress the id or its authority UTC observation. Generation changes and stops publish absence. A session observer subscribes before reading, retains a sender for as long as its attachment lives, so removing the domain wakes it instead of closing its wait, and uses an execution snapshot only to add its serving node's logical reading to a tick frame. |
@@ -964,7 +968,9 @@ that is lost delays a checkpoint by at most one poll interval.
 ### Relay branch presence
 
 A relay's owner task owns its concrete branch instances: their activity order, the TTL scan that
-expires them, and the LRU eviction that bounds them. It keeps them in an ordinary indexed map beside
+expires them, and the LRU eviction that bounds them. A partitioned relay has one owner task, one
+presence and one LRU bound per partition, each changed only by its own owner; an observer of one key
+reads the presence of the key's partition. It keeps them in an ordinary indexed map beside
 a persistent set of their keys, and admits, evicts and expires through one owner type that changes
 both in the same step. A step that changes the membership publishes the set, sharing its structure
 with the membership published before it, so creating or releasing one branch copies only the path
@@ -1009,7 +1015,12 @@ branch generation. The persistent membership publication changes only at those b
 snapshot installation. Eviction first clears the exact row publication, then withdraws that member.
 Recreation allocates a new publication; a retained ended member never attaches to it. Rebinding
 waits for operations admitted under the preceding assignment before rebuilding the new task's
-mutable selections from the published views. Previous writer tokens refuse further mutations.
+mutable selections from the published views. Previous writer tokens refuse further mutations. A
+schedule change that places a relay again rebinds every unit of it a node keeps owning, including
+the partitions that did not move, so the node stops the relay-state task of each kept unit before
+the rebinding, while the relay's local dispatch is gated. The task applies the rows already queued
+to it under the assignment they were dispatched in, and its successor starts with the originator
+the new assignment issued.
 
 Domain routing retains one materialized publication per relay and its relay-state epoch. The
 installed state-replication routes supply the relay's immutable branch index. Dependency reads and
@@ -1429,7 +1440,13 @@ already admitted work retains its existing ACK and silence contracts.
 The production channel-owner Shuttle check
 `shuttle_forced_routing_fence_cancels_racing_bindings_until_successor_publication` races first-use
 binding against retirement and requires every preceding slot to remain cancelled across successor
-publication. The three-node `forced_failover_delivery` Cucumber scenario holds the former owner's
+publication. For a partitioned relay,
+`shuttle_replacing_one_partition_owner_retires_only_that_partitions_channels` races the producers
+of two partitions against replacing one partition's owner: the other partition's channel is never
+cancelled or rebound, the moved partition's preceding channel is cancelled, and its branch rebinds
+to the successor generation. `shuttle_fencing_one_partition_holds_only_its_bindings_until_successor_publication`
+races a binding of one partition against fencing the other, which stays fenced until its successor
+is published while the first keeps a live channel throughout. The three-node `forced_failover_delivery` Cucumber scenario holds the former owner's
 admission and runtime preparation, checks delivery and a later revision before releasing it, and
 runs in the active, order and lifecycle-stress Deloxide selections. Those selections observe the
 tracked gate, channel-ordering and ACK-owner locks; asynchronous cancellation, admission waits and

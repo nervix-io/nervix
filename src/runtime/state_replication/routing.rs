@@ -369,6 +369,7 @@ impl StateReplicationRouting {
         self.current.load().assignments.get(unit).cloned()
     }
 
+    #[cfg(test)]
     pub(in crate::runtime) fn materialized(
         &self,
         entity: &DomainNodeRef,

@@ -141,7 +141,9 @@ share a name. The preview and submitted command come from the completed semantic
 canonical renderer, just as they do for the earlier forms.
 
 A branch form selects an internal key schema from a server-backed, searchable, paged list, then
-requires a TTL. It may set a positive maximum instance count with LRU eviction. The schema list
+requires a TTL. Its partition count starts at 1 and accepts a whole number from 1 through 65535; the
+preview omits `PARTITIONS 1` as `SHOW CREATE BRANCH` does. It may set a positive maximum instance
+count with LRU eviction. The schema list
 uses the draft's captured domain and the session's attached transaction prefix, so a schema staged
 earlier in the same transaction is selectable. Changing the captured domain keeps a previous
 selection visible but marks it invalid until it is selected again. An invalid branch key schema,

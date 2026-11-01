@@ -117,6 +117,7 @@ pub fn statement_parser<'src>()
         crate::schema::alter_schema_parser().map(Statement::AlterSchema),
         crate::schema::alter_wire_schema_parser_any(),
         crate::relay::alter_relay_parser().map(Statement::AlterRelay),
+        crate::branch::alter_branch_parser().map(Statement::AlterBranch),
         crate::junction::alter_junction_parser().map(Statement::AlterJunction),
         crate::deduplicator::alter_deduplicator_parser().map(Statement::AlterDeduplicator),
         crate::reorderer::alter_reorderer_parser().map(Statement::AlterReorderer),
@@ -202,23 +203,30 @@ pub(crate) fn statement_tail(
     prefix: &str,
 ) -> Vec<String> {
     let trimmed = source.trim_end();
-    let normalized = trimmed.to_ascii_uppercase();
     // Nothing may follow a terminated statement, so a trailing `;` ends the offers.
     let open = source.len() > trimmed.len() && !trimmed.ends_with(';');
-    let optional_tail = if open && normalized == "START" {
+    if !open {
+        return Vec::new();
+    }
+    let normalized = trimmed.to_ascii_uppercase();
+    let optional_tail = open_statement_tail(statement, tokens, &normalized);
+    filter_by_prefix(optional_tail, prefix)
+}
+
+/// The optional clauses a complete statement that is not yet terminated can still take, by its
+/// form and by the words `normalized` holds in upper case, in the order the forms are checked.
+fn open_statement_tail(statement: &Statement, tokens: &[Token], normalized: &str) -> Vec<String> {
+    if normalized == "START" {
         vec![";".to_string(), "AT".to_string()]
-    } else if open && normalized.starts_with("START AT ") && !normalized.contains(" TIME RATE ") {
+    } else if normalized.starts_with("START AT ") && !normalized.contains(" TIME RATE ") {
         vec![";".to_string(), "TIME RATE".to_string()]
-    } else if open
-        && normalized.starts_with("DESCRIBE RESOURCE ")
-        && !normalized.contains(" VERSION ")
-    {
+    } else if normalized.starts_with("DESCRIBE RESOURCE ") && !normalized.contains(" VERSION ") {
         vec!["VERSION".to_string()]
-    } else if open && let Statement::DescribeTransaction(describe) = &statement {
+    } else if let Statement::DescribeTransaction(describe) = &statement {
         crate::describe_transaction::describe_transaction_tail(describe, tokens)
-    } else if open && matches!(&statement, Statement::DescribeWasmProcessor(_)) {
+    } else if matches!(&statement, Statement::DescribeWasmProcessor(_)) {
         crate::describe_wasm_processor::describe_wasm_processor_tail(tokens)
-    } else if open && let Statement::RebindResource(rebind) = &statement {
+    } else if let Statement::RebindResource(rebind) = &statement {
         if matches!(
             rebind.selection,
             nervix_models::RebindResourceSelection::Members(_)
@@ -227,28 +235,51 @@ pub(crate) fn statement_tail(
         } else {
             vec![";".to_string(), "FOR".to_string()]
         }
-    } else if open
-        && normalized.starts_with("CREATE ")
+    } else if normalized.starts_with("CREATE ")
         && normalized.contains(" DOMAIN ")
         && !normalized.contains(" PLACEMENT ")
     {
         vec![";".to_string(), "PLACEMENT".to_string()]
-    } else if open
-        && normalized.starts_with("CREATE ")
+    } else if normalized.starts_with("CREATE ")
         && normalized.contains(" PLACEMENT ")
         && !normalized.contains(" DOMAIN ")
         && !normalized.contains(" RANK ")
     {
         vec![";".to_string(), "RANK".to_string()]
-    } else if open
-        && (normalized.starts_with("RELOCATE ") || normalized.starts_with("DESCRIBE RELOCATION "))
+    } else if (normalized.starts_with("RELOCATE ")
+        || normalized.starts_with("DESCRIBE RELOCATION "))
         && normalized.ends_with(" PREFERENCES")
     {
         vec![";".to_string(), "FOR".to_string()]
+    } else if let Statement::Create(create) = &statement
+        && let Model::Branch(branch) = create.body.as_ref()
+    {
+        create_branch_tail(branch, tokens)
     } else {
         Vec::new()
-    };
-    filter_by_prefix(optional_tail, prefix)
+    }
+}
+
+/// The optional clauses a complete `CREATE BRANCH` can still take, in the order its grammar reads
+/// them: the partition count, then the LRU eviction bound.
+fn create_branch_tail(branch: &nervix_models::CreateBranch, tokens: &[Token]) -> Vec<String> {
+    if branch.eviction.is_some() {
+        return vec![";".to_string()];
+    }
+    let partitions_written = tokens.iter().any(|token| {
+        matches!(
+            token,
+            Token::Word(crate::lexer::Word::KnownWord {
+                iden: crate::lexer::Identifier::Partitions,
+                ..
+            })
+        )
+    });
+    if partitions_written {
+        vec![";".to_string(), "MAX".to_string()]
+    } else {
+        vec![";".to_string(), "MAX".to_string(), "PARTITIONS".to_string()]
+    }
 }
 
 #[cfg(test)]

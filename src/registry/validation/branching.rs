@@ -944,7 +944,11 @@ pub(in crate::registry) fn resolved_branch_selection(
     };
     let branch = branch_model(domain, identifier, models, branch_ref)?;
     let schema = schema_model(domain, identifier, models, &branch.schema)?.clone();
-    Ok(ResolvedBranching::branched(branch_ref.clone(), schema))
+    Ok(ResolvedBranching::branched(
+        branch_ref.clone(),
+        schema,
+        branch.partitions,
+    ))
 }
 
 pub(in crate::registry) fn branch_model<'a>(
@@ -1209,7 +1213,11 @@ mod tests {
                 sensitive: false,
             }],
         };
-        let branching = ResolvedBranching::branched(branch_name.clone(), branch_schema.clone());
+        let branching = ResolvedBranching::branched(
+            branch_name.clone(),
+            branch_schema.clone(),
+            nervix_models::BranchPartitions::ONE,
+        );
         let mut graph = DiGraph::<ActiveNode, EdgeKind>::new();
         let relay_index = graph.add_node(ActiveNode {
             identifier: named("events"),
@@ -1265,7 +1273,11 @@ mod tests {
             &domain,
             &producer,
             &relay_name,
-            ResolvedBranching::branched(branch_name, sensitive_schema),
+            ResolvedBranching::branched(
+                branch_name,
+                sensitive_schema,
+                nervix_models::BranchPartitions::ONE,
+            ),
             &indices,
             &mut graph,
         )
@@ -1276,7 +1288,11 @@ mod tests {
             &domain,
             &producer,
             &relay_name,
-            ResolvedBranching::branched(named("by_account"), branch_schema),
+            ResolvedBranching::branched(
+                named("by_account"),
+                branch_schema,
+                nervix_models::BranchPartitions::ONE,
+            ),
             &indices,
             &mut graph,
         )

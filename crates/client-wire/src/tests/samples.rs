@@ -544,6 +544,7 @@ fn full_effects() -> ImpactEffects {
         topology: AffectedTopology { before, after },
         ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
             node: junction_execution.clone(),
+            unit: nervix_models::Unit::Partition(2),
             source: name("node-1"),
             destination: name("node-2"),
             attribution: attribution(2, 2),

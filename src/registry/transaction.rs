@@ -17,20 +17,20 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, AffectedTopology,
-    AttributedGateBoundary, AttributedImpactNode, CanonicalImpactSet, CommandExecutionReference,
-    ConfigurationImpact, ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact,
-    DomainName, DomainSchedule, DomainState as ControlDomainState, DomainStatus,
-    DynamicModelUpdate, ExecutionStepImpactReport, ForceFlushImpact, ImpactAttribution,
-    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage, ImpactPlanningBasis,
-    ImpactReportCompleteness, ImpactReportError, ImpactTopology, ImpactTopologyEdge,
-    ModelChangeAspect, ModelIndex, NodeRef, OperationImpactReason, OperationImpactReport,
-    OwnershipMoveImpact, PauseRequirement, PlacementPolicy, PlannedExecutionStepImpact,
-    QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason, RequestedResourceVersion,
-    ResetWasmState, ResetWasmStateSelectionError, ResourceBindingImpact, ResourceCatalogAction,
-    ResourceCatalogImpact, ResourceName, ResourceUploads, ResourceVersionResolutionError,
-    StateResetImpact, Statement, TransactionCommitPlanStep, TransactionCommitStepKind,
-    TransactionImpactReport, TransactionOperation, TransactionOperationNumber,
-    TransactionOperationRange, TransactionPosition,
+    AttributedGateBoundary, AttributedImpactNode, BranchName, CanonicalImpactSet,
+    CommandExecutionReference, ConfigurationImpact, ConfigurationTransition, DomainLifecycleAction,
+    DomainLifecycleImpact, DomainName, DomainSchedule, DomainState as ControlDomainState,
+    DomainStatus, DynamicModelUpdate, ExecutionStepImpactReport, ForceFlushImpact,
+    ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage,
+    ImpactPlanningBasis, ImpactReportCompleteness, ImpactReportError, ImpactTopology,
+    ImpactTopologyEdge, ModelChangeAspect, ModelIndex, NodeRef, OperationImpactReason,
+    OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlacementPolicy,
+    PlannedExecutionStepImpact, QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason,
+    RequestedResourceVersion, ResetWasmState, ResetWasmStateSelectionError, ResourceBindingImpact,
+    ResourceCatalogAction, ResourceCatalogImpact, ResourceName, ResourceUploads,
+    ResourceVersionResolutionError, StateResetImpact, Statement, TransactionCommitPlanStep,
+    TransactionCommitStepKind, TransactionImpactReport, TransactionOperation,
+    TransactionOperationNumber, TransactionOperationRange, TransactionPosition,
 };
 use thiserror::Error;
 
@@ -185,6 +185,15 @@ pub(crate) enum TransactionPlanningError {
     #[error("domain '{domain}' is already stopped")]
     DomainAlreadyStopped { domain: DomainName },
     #[error(
+        "branch '{branch}' changes its partition count only while its domain is stopped: STOP \
+         domain '{domain}', run ALTER BRANCH, then START it"
+    )]
+    BranchPartitionsRequireStoppedDomain {
+        operation: TransactionOperationNumber,
+        domain: DomainName,
+        branch: BranchName,
+    },
+    #[error(
         "domain '{domain}' restore state installation is incomplete for execution '{execution}'"
     )]
     RestoreInstallation {
@@ -280,7 +289,8 @@ impl TransactionPlanningError {
             | Self::ResourceVersion { operation, .. }
             | Self::ModelPreflight { operation, .. }
             | Self::ExternalModelValidation { operation }
-            | Self::UdfPreparation { operation } => Some(*operation),
+            | Self::UdfPreparation { operation }
+            | Self::BranchPartitionsRequireStoppedDomain { operation, .. } => Some(*operation),
             Self::ResetIdentityMissing { operation } => Some(*operation),
             Self::DomainNotFound { .. }
             | Self::DomainPaused { .. }
@@ -894,6 +904,7 @@ impl Registry {
                 continue;
             }
 
+            ensure_branch_partitions_change_is_stopped(domain_state, statement, number)?;
             let operation = model_operation(domain, statement, number)?;
             let is_if_not_exists_noop = match statement {
                 Statement::Create(create) if create.if_not_exists => {
@@ -1139,6 +1150,32 @@ fn ensure_domain_not_paused(
         }));
     }
     Ok(())
+}
+
+/// A branch's partition count decides which unit of every relay it branches owns each key, and a
+/// running domain has no mechanism to move keys between units, so `ALTER BRANCH … SET PARTITIONS`
+/// is accepted only while the branch's domain is stopped. Its next `START` schedules the new units.
+fn ensure_branch_partitions_change_is_stopped(
+    domain: &ControlDomainState,
+    statement: &Statement,
+    operation: TransactionOperationNumber,
+) -> Result<(), Report<TransactionPlanningError>> {
+    let Statement::AlterBranch(alter) = statement else {
+        return Ok(());
+    };
+    if !alter.sets_partitions() {
+        return Ok(());
+    }
+    match domain.status {
+        DomainStatus::Stopped => Ok(()),
+        DomainStatus::Running | DomainStatus::Paused => Err(Report::new(
+            TransactionPlanningError::BranchPartitionsRequireStoppedDomain {
+                operation,
+                domain: domain.id.clone(),
+                branch: alter.branch.clone(),
+            },
+        )),
+    }
 }
 
 fn model_operation(

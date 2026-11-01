@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 
 use nervix_consensus::{GossipState, Observer};
-use nervix_models::{ClusterNodeName, ScheduledNode};
+use nervix_models::{ClusterNodeName, ScheduledUnit};
 
 use crate::cluster;
 
@@ -117,26 +117,31 @@ fn render_cluster_schedule_lines(schedule: &nervix_models::ClusterSchedule) -> V
             continue;
         }
 
+        // One line per unit: a node without partitions keeps its one line, and each partition of
+        // a partitioned relay names its own owner and replicas.
         for node in domain.nodes.values() {
-            let owner = match node.execution_node() {
-                Some(owner) => owner.as_str(),
-                None => "-",
-            };
-            lines.push(format!(
-                "- domain={} kind={} name={} owner={owner} replicas={}{}",
-                domain.domain.as_str(),
-                node.kind().as_str(),
-                node.identifier.as_str(),
-                format_schedule_status_replicas(node),
-                format_ownership_transition(node)
-            ));
+            for (unit, scheduled) in &node.units {
+                let owner = match node.unit_execution_node(*unit) {
+                    Some(owner) => owner.as_str(),
+                    None => "-",
+                };
+                lines.push(format!(
+                    "- domain={} kind={} name={}{} owner={owner} replicas={}{}",
+                    domain.domain.as_str(),
+                    node.kind().as_str(),
+                    node.identifier.as_str(),
+                    unit.status_field(),
+                    format_schedule_status_replicas(scheduled),
+                    format_ownership_transition(scheduled)
+                ));
+            }
         }
     }
     lines
 }
 
-fn format_schedule_status_replicas(node: &ScheduledNode) -> String {
-    let replicas = node.replica_nodes();
+fn format_schedule_status_replicas(unit: &ScheduledUnit) -> String {
+    let replicas = unit.replica_nodes();
     if replicas.is_empty() {
         "-".to_string()
     } else {
@@ -148,8 +153,8 @@ fn format_schedule_status_replicas(node: &ScheduledNode) -> String {
     }
 }
 
-fn format_ownership_transition(node: &ScheduledNode) -> String {
-    let Some(transition) = node.single_unit().ownership_transition.as_ref() else {
+fn format_ownership_transition(unit: &ScheduledUnit) -> String {
+    let Some(transition) = unit.ownership_transition.as_ref() else {
         return String::new();
     };
     let mut rendered = format!(

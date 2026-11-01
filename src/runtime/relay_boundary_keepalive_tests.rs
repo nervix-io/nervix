@@ -30,7 +30,7 @@ use crate::{
 #[nervix_primitives::test(start_paused = true)]
 async fn a_delivery_to_the_relay_owner_reports_its_records_alive_while_it_waits() {
     let services = test_relay_boundary_services();
-    services.replace_owner_node(Some(named("node-2")));
+    services.replace_owner_routes(RelayOwnerRoutes::single(named("node-2")));
     let lease = RelayDispatchGateLease::engage(
         services.fanout.dispatch_gate(),
         Instant::now() + Duration::from_secs(60),
@@ -41,7 +41,7 @@ async fn a_delivery_to_the_relay_owner_reports_its_records_alive_while_it_waits(
     batch.acks = vec![acks];
     let domain = domain("default");
     let relay = named::<RelayName>("orders");
-    let delivery = services.dispatch_to_owner(&domain, &relay, &batch);
+    let delivery = services.dispatch_to_owner(&domain, &relay, &batch, Unit::Single);
     tokio::pin!(delivery);
 
     for interval in 1..=3 {
@@ -91,7 +91,7 @@ async fn a_delivery_to_a_remote_consumer_reports_its_records_alive_while_it_wait
             mode: AckMode::Attached,
         }],
         Some(dispatcher),
-        Arc::new(BranchPresence::new()),
+        RelayBranchPresences::single(Arc::new(BranchPresence::new())),
         nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     );
     let (acks, mut completion) = AckSet::root();
@@ -102,13 +102,19 @@ async fn a_delivery_to_a_remote_consumer_reports_its_records_alive_while_it_wait
         acks,
     )
     .assured("the fixture batch carries one valid I64 row");
-    let channel = services.outbound_slot(&consumer, &relay, RelayPayloadKind::Routed, &batch.key);
+    let channel = services.outbound_slot(
+        &consumer,
+        &relay,
+        RelayPayloadKind::Routed,
+        &batch.key,
+        Unit::Single,
+    );
     let earlier_delivery = channel
         .lock_for_delivery()
         .await
         .expect("the open channel serves an earlier delivery");
     let domain = domain("default");
-    let delivery = services.dispatch_remote_runtime_consumers(&domain, &batch);
+    let delivery = services.dispatch_remote_runtime_consumers(&domain, Unit::Single, &batch);
     tokio::pin!(delivery);
 
     for interval in 1..=3 {

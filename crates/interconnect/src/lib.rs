@@ -270,6 +270,10 @@ pub struct RelayPayload {
     pub kind: RelayPayloadKind,
     pub domain: DomainName,
     pub relay: RelayName,
+    /// The unit of `relay` this payload is addressed to: the partition its key lands in for a relay
+    /// of a partitioned branch, and the relay's one `Single` unit otherwise. An owner admits an
+    /// ingress payload only for a unit it owns whose key lands there.
+    pub unit: Unit,
     pub key: Option<Vec<RemoteRuntimeField>>,
     /// The batch's Arrow IPC body, encoded once and shared. Every destination in a fanout and
     /// every retry of one delivery carries this same allocation, charged once, and writes a slice

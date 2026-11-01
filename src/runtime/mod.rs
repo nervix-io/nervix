@@ -64,7 +64,7 @@ use nervix_interconnect::{
     Transport, WasmStateResetTarget,
 };
 use nervix_models::{
-    AckMode, BranchKeyFingerprint, BranchName, ClientConfigEntry, ClientName,
+    AckMode, BranchKeyFingerprint, BranchName, BranchPartitions, ClientConfigEntry, ClientName,
     ClientProducerEndReason, ClientResourceMount, ClusterNodeIdentity, ClusterNodeIncarnation,
     ClusterNodeName, CodecName, CommandExecutionReference, CoordinationIdentity,
     CorrelationTimeoutAction, CorrelatorMatchPolicy, DomainClockAuthority, DomainConfig,
@@ -75,11 +75,12 @@ use nervix_models::{
     Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
     MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, NodeRef,
     OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    OwnershipStateResetCause, ParseAsType, RelayName, RemoteAckOutcome, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName,
-    RetryPolicy, RouteConstruction, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
-    StructuredMessageError, SubscriptionName, Timestamp, WasmCheckpointInspection,
-    WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
+    OwnershipStateResetCause, ParseAsType, PartitionSeed, RelayName, RemoteAckOutcome,
+    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResolvedBranching, ResourceId,
+    ResourceName, RetryPolicy, RouteConstruction, SchemaFingerprint, SignalingProtocolName,
+    SignalingWireFormat, StructuredMessageError, SubscriptionName, Timestamp, Unit,
+    WasmCheckpointInspection, WasmRejectedStatePolicy, WasmSavedStateRejection,
+    WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
 #[cfg_attr(
@@ -405,7 +406,7 @@ pub(crate) use domain_execution::{
     CommittedClockInstallation, DomainRoutingCache, SharedDomainRouting,
 };
 use domain_execution::{
-    DomainExecution, DomainRoutingError, DomainRoutingSnapshot, ObservedDomainTick,
+    DomainExecution, DomainRoutingError, DomainRoutingSnapshot, ObservedDomainTick, RelayUnitRef,
     RuntimeDomainState,
 };
 use domain_rebuild::branch_relays_from_plans;
@@ -521,7 +522,7 @@ use materialized_snapshot::{
 use materialized_state::{
     MaterializedRelaySnapshotInstaller, MaterializedRelayStateAssignment,
     MaterializedRelayStateOriginator, MaterializedRelayStatePersistence,
-    ReplicatedMaterializedRelayState,
+    MaterializedRelayStateRead, ReplicatedMaterializedRelayState,
 };
 use message_error::{
     InvalidOutputRows, MessageErrorFailure, MessageErrorHandling, MessageErrorSourceContext,
@@ -586,8 +587,9 @@ use relay_batch::build_stream_record_batch_preserving_acks;
 use relay_boundary::{
     BranchRelayDispatchGateLease, ConcreteRelayRuntime, ConcreteRelayRuntimeBuild,
     RelayBoundaryBuilder, RelayBoundaryFanout, RelayBoundaryFanoutMap, RelayBoundaryServices,
-    RelayBranchPresence, RelayOutboundSlot, RelayOwnerTask, RelayRetention, RelayRuntimeFanIn,
-    RelayStateTask, RelayStateTaskSpec, RemoteRuntimeConsumer, addressable_count,
+    RelayBranchPresence, RelayBranchPresences, RelayOutboundSlot, RelayOwnerRoutes, RelayOwnerTask,
+    RelayRetention, RelayRuntimeFanIn, RelayStateTask, RelayStateTaskSpec, RemoteRuntimeConsumer,
+    addressable_count,
 };
 pub(in crate::runtime) use relay_channel::{
     OwnedRelayDispatchPermit, RelayDispatchGate, RelayDispatchGateLease, RelayTryRecv,
@@ -755,7 +757,7 @@ mod window_state;
 
 #[doc(hidden)]
 pub use branch_key::BranchKey;
-pub(crate) use branch_key::BranchKeyShapeError;
+pub(crate) use branch_key::{BranchKeyShapeError, RelayPartitionError, RelayPartitioning};
 pub(crate) use domain_clock::{
     DomainClock, DomainClockAccessError, DomainClockLifecycle, DomainClockObserver,
     DomainExecutionSnapshot,
@@ -981,6 +983,7 @@ use ingest_task_handles::IngestTaskHandles;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
 pub(crate) use ingestors::IngestorStartError;
 pub(crate) use local_drain::LocalGraphDrainOutcome;
+pub(crate) use materialized_read::MaterializedReadError;
 pub(crate) use materialized_state::MaterializedRecordReport;
 use message_error_decode::DecodeRejections;
 pub(crate) use message_error_decode::{DecodeRejection, TransportPosition};

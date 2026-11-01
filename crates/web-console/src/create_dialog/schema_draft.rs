@@ -13,7 +13,7 @@
 
 use std::{
     collections::BTreeSet,
-    num::{NonZeroU32, NonZeroU64},
+    num::{NonZeroU16, NonZeroU32, NonZeroU64},
 };
 
 use error_stack::Report;
@@ -361,15 +361,32 @@ fn remove_item<T>(items: &mut Vec<T>, index: usize) {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BranchDraft {
     pub(super) name: String,
     pub(super) if_not_exists: bool,
     /// A changed domain keeps the prior reference visible until it is reselected.
     pub(super) schema: Option<SelectedReference<SchemaName>>,
     pub(super) ttl: String,
+    /// The partition count as typed; a new draft starts at the single partition every branch
+    /// has when its declaration writes no count.
+    pub(super) partitions: String,
     pub(super) limit_instances: bool,
     pub(super) max_instances: String,
+}
+
+impl Default for BranchDraft {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            if_not_exists: false,
+            schema: None,
+            ttl: String::new(),
+            partitions: nervix_models::BranchPartitions::ONE.count().to_string(),
+            limit_instances: false,
+            max_instances: String::new(),
+        }
+    }
 }
 
 impl BranchDraft {
@@ -409,6 +426,11 @@ impl BranchDraft {
         if ttl.is_empty() {
             return Err(Report::new(SchemaDraftError::TtlRequired));
         }
+        let partitions = self
+            .partitions
+            .trim()
+            .parse::<NonZeroU16>()
+            .map_err(|cause| Report::new(cause).change_context(SchemaDraftError::Partitions))?;
         let eviction = if self.limit_instances {
             let max_instances =
                 self.max_instances
@@ -425,7 +447,7 @@ impl BranchDraft {
             name,
             schema: schema.clone(),
             ttl: ttl.to_string(),
-            partitions: nervix_models::BranchPartitions::ONE,
+            partitions: nervix_models::BranchPartitions::Direct(partitions),
             eviction,
         })
     }
@@ -457,6 +479,8 @@ pub(super) enum SchemaDraftError {
     SchemaReferenceChanged,
     #[error("Branch TTL is required")]
     TtlRequired,
+    #[error("Partitions must be a whole number from 1 through 65535")]
+    Partitions,
     #[error("Maximum instances must be a positive integer")]
     MaxInstances,
 }
@@ -636,6 +660,36 @@ mod tests {
         assert_canonical_round_trip(Model::Branch(model), false);
         branch.max_instances = "0".to_string();
         assert_eq!(draft_error(branch.build()), SchemaDraftError::MaxInstances);
+    }
+
+    #[test]
+    fn branch_partitions_default_to_one_and_keep_the_typed_count() {
+        let schema = SchemaName::parse("branch_key").assured("the test name is valid");
+        let mut branch = BranchDraft {
+            name: "by_key".to_string(),
+            schema: Some(SelectedReference::chosen(schema)),
+            ttl: "5m".to_string(),
+            ..BranchDraft::default()
+        };
+        assert_eq!(branch.partitions, "1");
+        let model = branch
+            .build()
+            .assured("a new draft declares the default single partition");
+        assert_eq!(model.partitions, nervix_models::BranchPartitions::ONE);
+
+        branch.partitions = " 4 ".to_string();
+        let model = branch.build().assured("four partitions are a valid count");
+        assert_eq!(model.partitions.count().get(), 4);
+        assert_canonical_round_trip(Model::Branch(model), false);
+
+        for invalid in ["0", "65536", "", "four", "-1"] {
+            branch.partitions = invalid.to_string();
+            assert_eq!(
+                draft_error(branch.build()),
+                SchemaDraftError::Partitions,
+                "{invalid:?} is not a partition count"
+            );
+        }
     }
 
     #[test]

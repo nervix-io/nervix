@@ -181,7 +181,7 @@ impl RestoredBranchDeclarations {
         };
         match branching {
             ResolvedBranching::Unbranched => self.unbranched = true,
-            ResolvedBranching::Branched { branch, schema } => {
+            ResolvedBranching::Branched { branch, schema, .. } => {
                 self.branches.insert(branch.clone(), schema.clone());
             }
         }
@@ -479,6 +479,7 @@ mod tests {
                 "tenant_shard",
                 &[("tenant", ParseAsType::String), ("shard", ParseAsType::I32)],
             ),
+            nervix_models::BranchPartitions::ONE,
         )
     }
 
@@ -486,6 +487,7 @@ mod tests {
         ResolvedBranching::branched(
             branch("by_region"),
             key_schema("region_key", &[("region", ParseAsType::String)]),
+            nervix_models::BranchPartitions::ONE,
         )
     }
 

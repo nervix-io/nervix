@@ -5,8 +5,8 @@ use std::num::NonZeroUsize;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AlterDeduplicator, AlterDeduplicatorOperation, AlterDomain, AlterEmitter,
-    AlterEmitterOperation, AlterGenerator, AlterGeneratorOperation, AlterIngestor,
+    AlterBranch, AlterBranchOperation, AlterDeduplicator, AlterDeduplicatorOperation, AlterDomain,
+    AlterEmitter, AlterEmitterOperation, AlterGenerator, AlterGeneratorOperation, AlterIngestor,
     AlterIngestorOperation, AlterJunction, AlterPlacement, AlterPlacementOperation,
     AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterTransportIngestorOperation,
@@ -158,6 +158,7 @@ pub enum StatementVariant {
     ShowTransactions,
     DescribeTransaction,
     DescribeCluster,
+    AlterBranch,
 }
 
 impl StatementVariant {
@@ -190,6 +191,7 @@ impl StatementVariant {
             Statement::AlterReingestor(_) => Self::AlterReingestor,
             Statement::AlterGenerator(_) => Self::AlterGenerator,
             Statement::AlterPlacement(_) => Self::AlterPlacement,
+            Statement::AlterBranch(_) => Self::AlterBranch,
             Statement::Drop(_) => Self::Drop,
             Statement::DropNode(_) => Self::DropNode,
             Statement::CordonNode(_) => Self::CordonNode,
@@ -445,6 +447,15 @@ impl Arbitrary<'_> {
                 let operations = self.operations(Self::alter_relay_operation);
                 Statement::AlterRelay(AlterRelay {
                     relay: self.name(),
+                    operations,
+                })
+            }
+            StatementVariant::AlterBranch => {
+                let operations = self.operations(|arbitrary| AlterBranchOperation::SetPartitions {
+                    partitions: arbitrary.branch_partitions(),
+                });
+                Statement::AlterBranch(AlterBranch {
+                    branch: self.name(),
                     operations,
                 })
             }

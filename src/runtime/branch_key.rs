@@ -4,10 +4,14 @@ use nervix_models::SchemaField;
 use super::*;
 use crate::runtime_schema::RuntimeValueTypeError;
 
+/// A concrete branch key: its typed fields, the canonical text they render to, and the fingerprint
+/// of that text, which also gives the key's partition seed. The text and the fingerprint are
+/// computed once, when the key is constructed, so every later reader takes them as they are.
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct BranchKeyInner {
     fields: BTreeMap<FieldName, RuntimeValue>,
     json: String,
+    fingerprint: BranchKeyFingerprint,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -50,7 +54,70 @@ impl std::fmt::Debug for BranchKey {
         f.debug_struct("BranchKey")
             .field("fields", &self.0.fields)
             .field("json", &self.0.json)
+            .field("fingerprint", &self.0.fingerprint)
             .finish()
+    }
+}
+
+/// How the concrete keys of one relay are divided among its units, as its branch declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelayPartitioning {
+    /// An unbranched relay, or one whose branch declares one partition: its one `Single` unit owns
+    /// every key.
+    Whole,
+    /// A relay whose branch declares several partitions: `Partition(seed mod n)` owns a key.
+    Partitioned(BranchPartitions),
+}
+
+/// Why a batch names no unit of its relay.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub(crate) enum RelayPartitionError {
+    #[error("a batch of a partitioned relay names no concrete branch key")]
+    UnbranchedBatchOfPartitionedRelay,
+}
+
+impl RelayPartitioning {
+    /// The partitioning a relay of `branching` has.
+    pub(crate) fn of(branching: Option<&ResolvedBranching>) -> Self {
+        match branching.and_then(ResolvedBranching::partitions) {
+            Some(partitions) => Self::of_partitions(partitions),
+            None => Self::Whole,
+        }
+    }
+
+    /// The partitioning a relay of a branch declaring `partitions` has: one owner for a single
+    /// partition, and one unit per partition otherwise.
+    pub(crate) fn of_partitions(partitions: BranchPartitions) -> Self {
+        if partitions.is_partitioned() {
+            Self::Partitioned(partitions)
+        } else {
+            Self::Whole
+        }
+    }
+
+    /// The units such a relay is scheduled as, in partition order.
+    pub(crate) fn units(self) -> Vec<Unit> {
+        match self {
+            Self::Whole => vec![Unit::Single],
+            Self::Partitioned(partitions) => partitions.units(),
+        }
+    }
+
+    /// The unit that owns the branch `key` names. A relay divided into partitions has a concrete
+    /// key on every batch, so an absent key there is refused rather than given a unit.
+    pub(crate) fn unit_of(
+        self,
+        key: &Option<BranchKey>,
+    ) -> error_stack::Result<Unit, RelayPartitionError> {
+        match (self, key) {
+            (Self::Whole, _) => Ok(Unit::Single),
+            (Self::Partitioned(partitions), Some(key)) => {
+                Ok(partitions.unit_of(key.partition_seed()))
+            }
+            (Self::Partitioned(_), None) => Err(Report::new(
+                RelayPartitionError::UnbranchedBatchOfPartitionedRelay,
+            )),
+        }
     }
 }
 
@@ -133,7 +200,12 @@ impl BranchKey {
             object.insert(field.as_str().to_string(), value.to_json_value());
         }
         let json = serde_json::Value::Object(object).to_string();
-        Ok(Self(Arc::new(BranchKeyInner { fields, json })))
+        let fingerprint = BranchKeyFingerprint::of_canonical_text(&json);
+        Ok(Self(Arc::new(BranchKeyInner {
+            fields,
+            json,
+            fingerprint,
+        })))
     }
 
     pub(crate) fn from_remote_key(
@@ -177,9 +249,16 @@ impl BranchKey {
         self.0.json.as_str()
     }
 
-    /// The non-sensitive identity the control plane names this concrete branch by.
+    /// The non-sensitive identity the control plane names this concrete branch by, computed when
+    /// the key was constructed.
     pub(crate) fn fingerprint(&self) -> BranchKeyFingerprint {
-        BranchKeyFingerprint::of_canonical_text(self.as_str())
+        self.0.fingerprint
+    }
+
+    /// The seed this key is partitioned by: the first eight bytes of its fingerprint. A key lands
+    /// in partition `seed mod n` of a branch declared with n partitions.
+    pub(crate) fn partition_seed(&self) -> PartitionSeed {
+        self.0.fingerprint.partition_seed()
     }
 
     /// Orders two branch scopes by their canonical key text, the unbranched execution first, so

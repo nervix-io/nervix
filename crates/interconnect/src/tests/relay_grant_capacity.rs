@@ -38,6 +38,7 @@ async fn a_grant_asked_while_the_relay_budget_is_full_is_refused_for_capacity() 
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
+        unit: nervix_models::Unit::Single,
         key: None,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -106,6 +107,7 @@ async fn a_grant_request_larger_than_the_free_relay_room_is_refused_for_capacity
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
+        unit: nervix_models::Unit::Single,
         key: None,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -190,6 +192,7 @@ async fn a_free_room_decode_reports_a_full_class_instead_of_waiting() {
             kind: RelayPayloadKind::Routed,
             domain: DomainName::parse("test").expect("test domain should be valid"),
             relay: RelayName::parse("relay").expect("test relay should be valid"),
+            unit: nervix_models::Unit::Single,
             key: None,
             metadata: Vec::new(),
             acks: Vec::new(),

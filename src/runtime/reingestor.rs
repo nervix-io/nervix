@@ -1254,15 +1254,18 @@ mod tests {
             0,
             Vec::new(),
             None,
-            Arc::new(BranchPresence::new()),
+            RelayBranchPresences::single(Arc::new(BranchPresence::new())),
             nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
         ));
-        let owner_task = runtime.spawn_relay_owner_task(
-            &domain,
-            &root_relay,
-            services.clone(),
-            RelayRetention::default(),
-        );
+        let owner_task = runtime
+            .spawn_relay_owner_task(
+                &domain,
+                &root_relay,
+                Unit::Single,
+                services.clone(),
+                RelayRetention::default(),
+            )
+            .expect("a whole relay schedules its single unit");
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
@@ -1412,15 +1415,18 @@ mod tests {
             0,
             Vec::new(),
             None,
-            Arc::new(BranchPresence::new()),
+            RelayBranchPresences::single(Arc::new(BranchPresence::new())),
             nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
         ));
-        let owner_task = runtime.spawn_relay_owner_task(
-            &domain,
-            &root_relay,
-            services.clone(),
-            RelayRetention::default(),
-        );
+        let owner_task = runtime
+            .spawn_relay_owner_task(
+                &domain,
+                &root_relay,
+                Unit::Single,
+                services.clone(),
+                RelayRetention::default(),
+            )
+            .expect("a whole relay schedules its single unit");
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
@@ -1536,12 +1542,15 @@ mod tests {
             .expect("the fixture installs its controlled domain clock");
         let relay = named("tenant_orders");
         let output_services = test_relay_boundary_services();
-        let owner_task = runtime.spawn_relay_owner_task(
-            &domain,
-            &relay,
-            output_services.clone(),
-            RelayRetention::default(),
-        );
+        let owner_task = runtime
+            .spawn_relay_owner_task(
+                &domain,
+                &relay,
+                Unit::Single,
+                output_services.clone(),
+                RelayRetention::default(),
+            )
+            .expect("a whole relay schedules its single unit");
         let mut output_subscription = output_services.subscription_receiver();
         let schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -1582,8 +1591,8 @@ mod tests {
                 generator_tasks: HashMap::default(),
                 reingestor_tasks: HashMap::default(),
                 placement_tasks: HashMap::default(),
-                relay_state_tasks: HashMap::default(),
-                relay_owner_tasks: HashMap::default(),
+                relay_state_tasks: BTreeMap::default(),
+                relay_owner_tasks: BTreeMap::default(),
                 tasks: Vec::new(),
             },
         );
@@ -1916,8 +1925,8 @@ mod tests {
                 generator_tasks: HashMap::default(),
                 reingestor_tasks: HashMap::default(),
                 placement_tasks: HashMap::default(),
-                relay_state_tasks: HashMap::default(),
-                relay_owner_tasks: HashMap::default(),
+                relay_state_tasks: BTreeMap::default(),
+                relay_owner_tasks: BTreeMap::default(),
                 tasks: Vec::new(),
             },
         );
@@ -2177,8 +2186,8 @@ mod tests {
                 generator_tasks: HashMap::default(),
                 reingestor_tasks: HashMap::default(),
                 placement_tasks: HashMap::default(),
-                relay_state_tasks: HashMap::default(),
-                relay_owner_tasks: HashMap::default(),
+                relay_state_tasks: BTreeMap::default(),
+                relay_owner_tasks: BTreeMap::default(),
                 tasks: Vec::new(),
             },
         );

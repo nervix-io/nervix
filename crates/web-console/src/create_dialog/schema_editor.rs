@@ -413,6 +413,17 @@ pub(super) fn BranchEditor(
                     signals.edit();
                 } />
         </label>
+        <label class="create-field">
+            <span>"Partitions"</span>
+            <input class="create-partitions" type="number" min="1" max="65535"
+                prop:value=move || signals.structured.get().branch.partitions
+                disabled=move || signals.progress.get().is_pending()
+                on:input=move |event| {
+                    let partitions = event_target_value(&event);
+                    signals.structured.update(|drafts| drafts.branch.partitions = partitions);
+                    signals.edit();
+                } />
+        </label>
         <label class="create-check">
             <input class="create-limit-instances" type="checkbox"
                 prop:checked=move || signals.structured.get().branch.limit_instances

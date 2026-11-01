@@ -783,6 +783,19 @@ domain, destination relay, and concrete branch. Different channels may run concu
 channel, the sender preserves FIFO order and permits at most one batch to wait for runtime admission.
 Each sender channel has a unique incarnation and a monotonically increasing sequence number.
 
+Every relay payload names the unit of the relay its batch belongs to: the single unit of a relay
+with one owner, or the partition of a partitioned relay that owns the batch's key, as
+[Relay Partitions](relay.md#relay-partitions) describes. A producer resolves the partition once,
+when it binds the channel for a concrete branch, and the owner routes of that relay are a table of
+one owner per unit that a schedule replaces whole. A schedule that moves one partition's owner
+retires only the channels of that partition's branches; the producers of every other partition keep
+delivering on the channels they hold, and each partition has its own routing generation that a
+forced recovery fences on its own. A node admits a routed payload only for a unit it owns: the
+receiver refuses one addressed to a unit it does not own as owned elsewhere, and once it has decoded
+the key it refuses, as `RemoteRelayDecodeError::Unit`, a payload whose key lands in a partition other
+than the one the payload names. A subscription or consumer payload carries the unit of the
+partition owner that fanned it out.
+
 For fan-out, the source encodes an Arrow batch once and shares those immutable encoded bytes across
 destinations and transport retries. Delivery metadata, admission state, and attached record
 acknowledgements remain specific to each destination channel.

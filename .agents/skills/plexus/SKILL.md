@@ -69,8 +69,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   LATEST creation position, endpoints, delivery/ACK expectations,
   emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
   ordering, and offsets.
-- Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit. A branch
-  currently has one direct execution partition; do not write a `PARTITIONS` clause.
+- Isolation: unbranched or a concrete branch key, branch TTL, optional instance limit, and the
+  branch's partition count when one relay owner per branch would funnel too much traffic (see
+  [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)); the count changes only
+  while the domain is stopped.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.

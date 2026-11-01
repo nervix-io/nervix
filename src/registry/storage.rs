@@ -28,10 +28,11 @@ use meticulous::OptionExt;
 #[cfg(test)]
 use nervix_models::{AlterRelay, DropModel};
 use nervix_models::{
-    ClusterSchedule, CreateAvroWireSchema, CreateDeduplicator, CreateEmitter, CreateGenerator,
-    CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
-    CreateReorderer, CreateSchema, DomainName, Model, ModelIndex, ModelKind, ModelName, NodeRef,
-    PlacementPolicy, RequestedResourceVersion, TransactionModelTransition, UniquelyKindedModel,
+    ClusterSchedule, CreateAvroWireSchema, CreateBranch, CreateDeduplicator, CreateEmitter,
+    CreateGenerator, CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor,
+    CreateRelay, CreateReorderer, CreateSchema, DomainName, Model, ModelIndex, ModelKind,
+    ModelName, NodeRef, PlacementPolicy, RequestedResourceVersion, TransactionModelTransition,
+    UniquelyKindedModel,
 };
 use nervix_primitives::sync::{
     Arc,
@@ -557,6 +558,26 @@ impl Registry {
                     };
                     relay.apply_alter(alter).map_err(|rejection| {
                         RegistryError::invalid_model(domain, alter.relay.as_str(), rejection)
+                    })?;
+                }
+                RegistryMutation::AlterBranch(alter) => {
+                    info!(
+                        domain = domain.as_str(),
+                        model = alter.branch.as_str(),
+                        kind = ModelKind::Branch.as_str(),
+                        "staging branch alter from batch"
+                    );
+
+                    let Some(branch) =
+                        candidate.configured_mut::<CreateBranch>(alter.branch.clone())
+                    else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.branch.as_str().to_string(),
+                        }));
+                    };
+                    branch.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.branch.as_str(), rejection)
                     })?;
                 }
                 RegistryMutation::AlterJunction(alter) => {
@@ -1515,7 +1536,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 }
 
 // The header identifies the current persisted Model shape before archive decoding.
-const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX INGESTORS";
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX PART INGS";
 
 #[cfg(test)]
 #[cfg_attr(

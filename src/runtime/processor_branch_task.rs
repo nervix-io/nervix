@@ -2607,15 +2607,18 @@ mod tests {
             0,
             Vec::new(),
             None,
-            Arc::new(BranchPresence::new()),
+            RelayBranchPresences::single(Arc::new(BranchPresence::new())),
             nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
         ));
-        let owner = runtime.spawn_relay_owner_task(
-            &domain,
-            &output,
-            services.clone(),
-            RelayRetention::default(),
-        );
+        let owner = runtime
+            .spawn_relay_owner_task(
+                &domain,
+                &output,
+                Unit::Single,
+                services.clone(),
+                RelayRetention::default(),
+            )
+            .expect("a whole relay schedules its single unit");
         let mut template = junction_branch_template(processor.as_str(), "orders");
         template
             .relays

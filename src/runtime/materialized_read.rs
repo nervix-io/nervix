@@ -31,11 +31,12 @@ use super::{
 #[path = "materialized_read_reuse_tests.rs"]
 mod reuse_tests;
 
-/// One generator task's admitted remote source view. Its selected owner must confirm the full
-/// sealed identity on every read; the view is neither installed state nor recovery authority.
+/// One generator task's admitted remote source views, one for each unit of its source relay that a
+/// remote node owns. Each unit's selected owner must confirm the full sealed identity on every
+/// read; a view is neither installed state nor recovery authority.
 #[derive(Default)]
 pub(super) struct MaterializedGenerationReadCache {
-    remote: Option<CachedMaterializedGeneration>,
+    remote: BTreeMap<Unit, CachedMaterializedGeneration>,
 }
 
 struct CachedMaterializedGeneration {
@@ -53,6 +54,8 @@ pub(super) enum MaterializedGenerationRead {
         snapshot: Arc<RestoredMaterializedSnapshot>,
         next: usize,
     },
+    /// The reads of every unit of a partitioned relay, yielded one unit after another.
+    Units(VecDeque<MaterializedGenerationRead>),
 }
 
 impl From<Vec<MaterializedGenerationRecord>> for MaterializedGenerationRead {
@@ -75,28 +78,41 @@ impl Iterator for MaterializedGenerationRead {
                     row: record.row.clone(),
                 })
             }
+            // Bounded by the relay's partition count: each exhausted unit read is dropped once.
+            Self::Units(reads) => loop {
+                let current = reads.front_mut()?;
+                if let Some(record) = current.next() {
+                    return Some(record);
+                }
+                reads.pop_front();
+            },
         }
     }
 }
 
 impl MaterializedGenerationReadCache {
     pub(super) fn clear(&mut self) {
-        self.remote = None;
+        self.remote.clear();
+    }
+
+    fn clear_unit(&mut self, unit: Unit) {
+        self.remote.remove(&unit);
     }
 
     async fn records_from(
         &mut self,
         runtime: &Runtime,
+        unit: Unit,
         owner: &ClusterNodeName,
         placement: RuntimeStatePlacement,
         schema: &StdArc<arrow_schema::Schema>,
     ) -> error_stack::Result<MaterializedGenerationRead, MaterializedReadError> {
         if self
             .remote
-            .as_ref()
+            .get(&unit)
             .is_some_and(|cached| cached.owner != *owner || cached.placement != placement)
         {
-            self.clear();
+            self.clear_unit(unit);
         }
         let envelope = match runtime
             .describe_materialized_snapshot_from(owner, &placement, None)
@@ -104,24 +120,24 @@ impl MaterializedGenerationReadCache {
         {
             Ok(Some(envelope)) => envelope,
             Ok(None) => {
-                self.clear();
+                self.clear_unit(unit);
                 return Ok(Vec::new().into());
             }
             Err(error) => {
-                self.clear();
+                self.clear_unit(unit);
                 return Err(error.change_context(MaterializedReadError::RemoteSnapshot {
                     target: owner.clone(),
                     placement,
                 }));
             }
         };
-        if let Some(cached) = self.remote.as_ref()
+        if let Some(cached) = self.remote.get(&unit)
             && cached.envelope == envelope
         {
             return Ok(cached.records());
         }
         // Return the previous cache admission before trying to retain its replacement.
-        self.clear();
+        self.clear_unit(unit);
         let mut snapshot = runtime
             .fetch_described_materialized_snapshot(owner, &placement, schema, envelope)
             .await
@@ -143,7 +159,7 @@ impl MaterializedGenerationReadCache {
         };
         let records = cached.records();
         if retained {
-            self.remote = Some(cached);
+            self.remote.insert(unit, cached);
         }
         Ok(records)
     }
@@ -249,6 +265,60 @@ impl MaterializedReadError {
     }
 }
 
+/// The installed-state publications of every unit of one materialized relay, as one domain
+/// routing revision retains them. A key's record lives only in the publication of the unit that
+/// owns the key.
+#[derive(Clone)]
+pub(super) struct MaterializedRelayReads {
+    partitioning: RelayPartitioning,
+    by_unit: BTreeMap<Unit, state_replication::routing::MaterializedRelayPublication>,
+}
+
+impl MaterializedRelayReads {
+    fn of_key(
+        &self,
+        branch: &Option<BranchKey>,
+    ) -> Option<&state_replication::routing::MaterializedRelayPublication> {
+        let Ok(unit) = self.partitioning.unit_of(branch) else {
+            return None;
+        };
+        self.by_unit.get(&unit)
+    }
+
+    pub(in crate::runtime) fn record(
+        &self,
+        branch: &Option<BranchKey>,
+    ) -> Option<MaterializedGenerationRecord> {
+        self.of_key(branch)?.record(branch)
+    }
+
+    pub(in crate::runtime) fn has_state_for(&self, branch: &Option<BranchKey>) -> bool {
+        match self.of_key(branch) {
+            Some(published) => published.has_state_for(branch),
+            None => false,
+        }
+    }
+
+    /// The installed states of one unit, which hold the records of the keys that unit owns.
+    pub(in crate::runtime) fn unit_states(&self, unit: Unit) -> Vec<MaterializedRelayStateRead> {
+        match self.by_unit.get(&unit) {
+            Some(published) => published.states(),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// One branch's record read from the node that owns the branch's unit of a materialized relay.
+#[derive(Clone, Copy)]
+pub(super) struct RemoteBranchRead<'a> {
+    pub(super) owner: &'a ClusterNodeName,
+    pub(super) unit: Unit,
+    pub(super) domain: &'a DomainName,
+    pub(super) relay: &'a RelayName,
+    pub(super) branch_key: &'a Option<BranchKey>,
+    pub(super) schema: &'a StdArc<arrow_schema::Schema>,
+}
+
 pub(super) struct MaterializedRelayRead<'a> {
     pub(super) relay: &'a RelayName,
     pub(super) key_mode: MaterializedLookupKeyMode,
@@ -269,26 +339,38 @@ impl Runtime {
         &self,
         domain: &DomainName,
         specs: &HashMap<RelayName, RuntimeMaterializedRelaySpec>,
-    ) -> HashMap<RelayName, state_replication::routing::MaterializedRelayPublication> {
+    ) -> HashMap<RelayName, MaterializedRelayReads> {
         let mut publications = HashMap::default();
-        for relay in specs.keys() {
+        for (relay, spec) in specs {
             let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay);
-            let published = self
-                .inner
-                .state_replication_routing
-                .materialized(&entity)
-                .assured(
-                    "each materialized relay assignment is registered before routing is staged",
-                );
-            publications.insert(relay.clone(), published);
+            let partitioning = RelayPartitioning::of(Some(&spec.branching));
+            let mut by_unit = BTreeMap::new();
+            for unit in partitioning.units() {
+                let published = self
+                    .inner
+                    .state_replication_routing
+                    .materialized_unit(&DomainNodeUnitRef::new(entity.clone(), unit))
+                    .assured(
+                        "each unit's materialized relay assignment is registered before routing \
+                         is staged",
+                    );
+                by_unit.insert(unit, published);
+            }
+            publications.insert(
+                relay.clone(),
+                MaterializedRelayReads {
+                    partitioning,
+                    by_unit,
+                },
+            );
         }
         publications
     }
 
-    /// Every materialized record one relay holds on this node, each reported with the concrete
-    /// branch it belongs to.
+    /// Every materialized record one unit of a relay holds on this node, each reported with the
+    /// concrete branch it belongs to.
     ///
-    /// This is the relay-scoped report, and it says so. Reading one branch is a different
+    /// This is the unit-scoped report, and it says so. Reading one branch is a different
     /// operation that names that branch.
     #[cfg_attr(
         nervix_lint,
@@ -301,6 +383,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
     ) -> error_stack::Result<Vec<MaterializedRecordReport>, MaterializedReadError> {
         let routing = self
             .domain_routing(domain)
@@ -314,6 +397,7 @@ impl Runtime {
                 placement.domain == *domain
                     && placement.kind == ModelKind::Relay
                     && placement.identifier == ModelName::from(relay)
+                    && placement.unit == unit
             })
             .map(|state| {
                 (
@@ -338,11 +422,12 @@ impl Runtime {
             }
         }
         if !found {
-            let placement = match self.state_placement(
+            let placement = match self.state_placement_for_unit(
                 domain,
                 RuntimeStateKind::MaterializedRelay,
                 ModelKind::Relay,
                 relay,
+                unit,
                 None,
             ) {
                 Ok(placement) => placement,
@@ -392,7 +477,10 @@ impl Runtime {
         relay: &RelayName,
         branch_key: &Option<BranchKey>,
     ) -> error_stack::Result<Option<MaterializedGenerationRecord>, MaterializedReadError> {
-        let placements = self.materialized_record_placements(domain, relay, branch_key)?;
+        let Ok(unit) = routing.relay_partitioning(relay).unit_of(branch_key) else {
+            return Ok(None);
+        };
+        let placements = self.materialized_record_placements(domain, relay, unit, branch_key)?;
         let root = placements
             .last()
             .assured("a materialized read always has its relay placement");
@@ -429,19 +517,22 @@ impl Runtime {
         Ok(None)
     }
 
-    /// The placements that may hold one branch's record, most specific first.
+    /// The placements of the unit that owns one branch which may hold the branch's record, most
+    /// specific first.
     fn materialized_record_placements(
         &self,
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
         branch_key: &Option<BranchKey>,
     ) -> error_stack::Result<Vec<RuntimeStatePlacement>, MaterializedReadError> {
         let relay_scoped = self
-            .state_placement(
+            .state_placement_for_unit(
                 domain,
                 RuntimeStateKind::MaterializedRelay,
                 ModelKind::Relay,
                 relay,
+                unit,
                 None,
             )
             .change_context_lazy(|| MaterializedReadError::StateIdentity {
@@ -572,19 +663,18 @@ impl Runtime {
 
     pub(super) async fn remote_materialized_stream_values_for_branch(
         &self,
-        target_node_id: &ClusterNodeName,
-        domain: &DomainName,
-        relay: &RelayName,
-        branch_key: &Option<BranchKey>,
-        schema: &StdArc<arrow_schema::Schema>,
+        read: RemoteBranchRead<'_>,
         fields: &[MaterializedFieldInterest],
     ) -> error_stack::Result<Option<Vec<Option<RuntimeValue>>>, MaterializedReadError> {
-        let Some(record) = self
-            .remote_materialized_record(target_node_id, domain, relay, branch_key, schema)
-            .await?
-        else {
+        let Some(record) = self.remote_materialized_record(&read).await? else {
             return Ok(None);
         };
+        let RemoteBranchRead {
+            domain,
+            relay,
+            branch_key,
+            ..
+        } = read;
         fields
             .iter()
             .map(|field| {
@@ -638,23 +728,26 @@ impl Runtime {
         {
             return Ok(None);
         }
-        let owner = routing
-            .materialized_stream_owner_nodes
-            .get(relay)
-            .and_then(|node| node.as_ref())
-            .cloned();
+        let Ok(unit) = routing
+            .relay_partitioning(relay)
+            .unit_of(&placement_branch_key)
+        else {
+            return Ok(None);
+        };
+        let owner = routing.materialized_stream_owner_of(relay, unit);
         if let Some(owner) = owner
             && !self.is_local_node(&owner)
         {
+            let read = RemoteBranchRead {
+                owner: &owner,
+                unit,
+                domain,
+                relay,
+                branch_key: &placement_branch_key,
+                schema,
+            };
             return self
-                .remote_materialized_stream_values_for_branch(
-                    &owner,
-                    domain,
-                    relay,
-                    &placement_branch_key,
-                    schema,
-                    fields,
-                )
+                .remote_materialized_stream_values_for_branch(read, fields)
                 .await;
         }
         self.local_materialized_stream_values_for_branch(
@@ -673,42 +766,40 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         key: &Option<BranchKey>,
     ) -> bool {
-        let scheduled = if let Some(routing) = routing
-            && let Some(owner) = routing
-                .materialized_stream_owner_nodes
-                .get(&RelayName::from(&placement.identifier))
-        {
-            owner.is_some()
-        } else {
-            false
+        let Some(routing) = routing else {
+            return true;
         };
-        if scheduled {
+        let relay = RelayName::from(&placement.identifier);
+        // A scheduled unit's state is authoritative wherever its owner runs; only an unplaced
+        // graph's state answers through the presence its local owner publishes.
+        if routing
+            .materialized_stream_owner_of(&relay, placement.unit)
+            .is_some()
+        {
             return true;
         }
-        if let Some(routing) = routing
-            && let Some(services) = routing
-                .relay_services
-                .get(&RelayName::from(&placement.identifier))
-        {
-            return services.branch_presence.contains(key.as_ref());
+        match routing.relay_services.get(&relay) {
+            Some(services) => services.holds_branch(key),
+            None => true,
         }
-        true
     }
 
-    /// Every materialized record one relay holds on another node, reported the same way as the
-    /// local relay-scoped view.
+    /// Every materialized record one unit of a relay holds on another node, reported the same way
+    /// as the local unit-scoped view.
     pub(crate) async fn remote_materialized_stream_state(
         &self,
         target_node_id: &ClusterNodeName,
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
     ) -> error_stack::Result<Vec<MaterializedRecordReport>, MaterializedReadError> {
         let placement = self
-            .state_placement(
+            .state_placement_for_unit(
                 domain,
                 RuntimeStateKind::MaterializedRelay,
                 ModelKind::Relay,
                 relay,
+                unit,
                 None,
             )
             .change_context_lazy(|| MaterializedReadError::StateIdentity {
@@ -743,7 +834,7 @@ impl Runtime {
         Ok(reports)
     }
 
-    /// Every materialized record one relay holds, taken from the node that owns them.
+    /// Every materialized record one relay holds, taken from the node that owns each of its units.
     ///
     /// Records keep their columns and their typed concrete branch identity: nothing is turned into
     /// named scalar fields on the way, and nothing is rebuilt into a row on arrival.
@@ -755,42 +846,68 @@ impl Runtime {
         relay: &RelayName,
     ) -> error_stack::Result<MaterializedGenerationRead, MaterializedReadError> {
         let routing = routing.load().clone();
+        let units = routing.relay_partitioning(relay).units();
+        cache.remote.retain(|unit, _| units.contains(unit));
+        let mut reads = VecDeque::with_capacity(units.len());
+        for unit in units {
+            let read = self
+                .materialized_unit_records_from_owner(&routing, cache, domain, relay, unit)
+                .await?;
+            reads.push_back(read);
+        }
+        if reads.len() == 1 {
+            let read = reads
+                .pop_front()
+                .verified("the length check above found exactly one unit read");
+            return Ok(read);
+        }
+        Ok(MaterializedGenerationRead::Units(reads))
+    }
+
+    /// Every materialized record one unit of a relay holds, taken from the node that owns it.
+    async fn materialized_unit_records_from_owner(
+        &self,
+        routing: &DomainRoutingSnapshot,
+        cache: &mut MaterializedGenerationReadCache,
+        domain: &DomainName,
+        relay: &RelayName,
+        unit: Unit,
+    ) -> error_stack::Result<MaterializedGenerationRead, MaterializedReadError> {
         let placement = self
-            .state_placement(
+            .state_placement_for_unit(
                 domain,
                 RuntimeStateKind::MaterializedRelay,
                 ModelKind::Relay,
                 relay,
+                unit,
                 None,
             )
-            .inspect_err(|_| cache.clear())
+            .inspect_err(|_| cache.clear_unit(unit))
             .change_context_lazy(|| MaterializedReadError::StateIdentity {
                 domain: domain.clone(),
                 relay: relay.clone(),
                 branch: None,
             })?;
-        let owner = routing
-            .materialized_stream_owner_nodes
-            .get(relay)
-            .cloned()
-            .flatten();
+        let owner = routing.materialized_stream_owner_of(relay, unit);
         if let Some(owner) = owner
             && !self.is_local_node(&owner)
         {
-            let Some(schema) = self.materialized_relay_schema(Some(&routing), &placement) else {
-                cache.clear();
+            let Some(schema) = self.materialized_relay_schema(Some(routing), &placement) else {
+                cache.clear_unit(unit);
                 return Ok(Vec::new().into());
             };
-            return cache.records_from(self, &owner, placement, &schema).await;
+            return cache
+                .records_from(self, unit, &owner, placement, &schema)
+                .await;
         }
-        cache.clear();
+        cache.clear_unit(unit);
         let states = match routing.materialized_stream_reads.get(relay) {
-            Some(published) => published.states(),
+            Some(published) => published.unit_states(unit),
             None => Vec::new(),
         };
         if states.is_empty() {
             let Some(restored) = self
-                .open_stored_materialized_snapshot(Some(&routing), &placement)
+                .open_stored_materialized_snapshot(Some(routing), &placement)
                 .await?
             else {
                 return Ok(Vec::new().into());
@@ -804,7 +921,7 @@ impl Runtime {
         for state in states {
             for record in state.records() {
                 if self.materialized_stream_key_is_visible(
-                    Some(&routing),
+                    Some(routing),
                     state.placement(),
                     &record.branch,
                 ) {
@@ -815,21 +932,27 @@ impl Runtime {
         Ok(records.into())
     }
 
-    /// The record of exactly one branch of one relay, read from the node that owns it.
+    /// The record of exactly one branch of one relay, read from the node that owns the branch's
+    /// unit.
     async fn remote_materialized_record(
         &self,
-        target_node_id: &ClusterNodeName,
-        domain: &DomainName,
-        relay: &RelayName,
-        branch_key: &Option<BranchKey>,
-        schema: &StdArc<arrow_schema::Schema>,
+        read: &RemoteBranchRead<'_>,
     ) -> error_stack::Result<Option<MaterializedGenerationRecord>, MaterializedReadError> {
+        let RemoteBranchRead {
+            owner: target_node_id,
+            unit,
+            domain,
+            relay,
+            branch_key,
+            schema,
+        } = *read;
         let placement = self
-            .state_placement(
+            .state_placement_for_unit(
                 domain,
                 RuntimeStateKind::MaterializedRelay,
                 ModelKind::Relay,
                 relay,
+                unit,
                 None,
             )
             .change_context_lazy(|| MaterializedReadError::StateIdentity {
@@ -1514,8 +1637,8 @@ mod tests {
                 generator_tasks: HashMap::default(),
                 reingestor_tasks: HashMap::default(),
                 placement_tasks: HashMap::default(),
-                relay_state_tasks: HashMap::default(),
-                relay_owner_tasks: HashMap::default(),
+                relay_state_tasks: BTreeMap::default(),
+                relay_owner_tasks: BTreeMap::default(),
                 tasks: Vec::new(),
             },
         );

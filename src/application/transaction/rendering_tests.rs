@@ -533,6 +533,7 @@ fn every_kind_report() -> TransactionImpactReport {
                     branch: branch("tenant"),
                 },
             ),
+            unit: nervix_models::Unit::Single,
             source: cluster_node("node-1"),
             destination: cluster_node("node-2"),
             attribution: ImpactAttribution::single(operation(1)),

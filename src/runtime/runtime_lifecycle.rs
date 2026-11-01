@@ -755,23 +755,25 @@ impl Runtime {
             emitter_task.finish_by(emitter_finish_deadline);
         }
         execution.shutdown.send_replace(true);
-        for (relay, task) in execution.relay_owner_tasks {
+        for (owned, task) in execution.relay_owner_tasks {
             nervix_primitives::task::consume_budget().await;
             if let Err(reason) = task.stop(self.branch_task_stop_timeout()).await {
                 warn!(
                     domain = domain.as_str(),
-                    relay = relay.as_str(),
+                    relay = owned.relay.as_str(),
+                    unit = ?owned.unit,
                     reason = %reason,
                     "relay owner task did not stop cleanly"
                 );
             }
         }
-        for (relay, task) in execution.relay_state_tasks {
+        for (owned, task) in execution.relay_state_tasks {
             nervix_primitives::task::consume_budget().await;
             if let Err(reason) = task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE).await {
                 warn!(
                     domain = domain.as_str(),
-                    relay = relay.as_str(),
+                    relay = owned.relay.as_str(),
+                    unit = ?owned.unit,
                     reason = %reason,
                     "relay state task did not stop cleanly"
                 );

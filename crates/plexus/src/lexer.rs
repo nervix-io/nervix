@@ -288,6 +288,7 @@ pub enum Identifier {
     Consumer,
     Group,
     Instances,
+    Partitions,
     Evict,
     Lru,
     Clean,

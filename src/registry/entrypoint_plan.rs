@@ -451,6 +451,7 @@ impl EntrypointRouteContext<'_> {
                 ResolvedBranching::Branched {
                     branch: relay_branch,
                     schema: branch_schema,
+                    ..
                 },
             ) if branch == relay_branch => {
                 let retention = RouteBranchRetention::of(relay, branch);

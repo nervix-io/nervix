@@ -214,8 +214,10 @@ current connection, retry and deadline limits.
   reads, such as `framing` or `idle_timeout_ms`, only on a client that side uses; the SYSLOG
   client reference in `Connector Capabilities` names those keys.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
-  owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
-  nodes each have one additional fixed dispatch slot.
+  owner-buffer bound, once per partition when its branch declares `PARTITIONS <n>`, not a
+  per-branch or per-consumer bound; nonowner producer and remote consumer nodes each have one
+  additional fixed dispatch slot. A branch's partition count changes only on a stopped domain
+  (`ALTER BRANCH <branch> SET PARTITIONS <n>`); read `Streams And State` → `Relay Partitions`.
   On native 64-bit targets, its positive integer range ends at `18446744073709551615`, and stored,
   replicated, and restarted definitions retain the exact accepted capacity.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.
@@ -570,8 +572,10 @@ coverage limits, including requested-read historical edges and untracked async s
 Choose checks relevant to the configured graph:
 
 - `SHOW CREATE <kind> <name>;` confirms the stored canonical definition.
-- `DESCRIBE RELAY <relay>;` reports the relay owner and optional materialized-state replicas;
-  `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state.
+- `DESCRIBE RELAY <relay>;` reports the relay owner and optional materialized-state replicas, or
+  one owner line per partition of a partitioned relay;
+  `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state and names
+  the key's partition and its owner.
 - `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
   `DESCRIBE EMITTER` inspect runtime state and edge metrics. `SHOW INGESTORS;` lists every ingestor

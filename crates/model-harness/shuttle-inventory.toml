@@ -151,6 +151,8 @@ checks = [
   "runtime::relay_boundary::channels::shuttle_tests::shuttle_forced_routing_fence_cancels_racing_bindings_until_successor_publication",
   "runtime::relay_boundary::channels::shuttle_tests::shuttle_first_delivery_binding_racing_terminal_retirement_cannot_publish_a_live_channel",
   "runtime::relay_boundary::channels::shuttle_tests::shuttle_branch_retirement_racing_a_route_refresh_never_revives_a_retained_producer",
+  "runtime::relay_boundary::channels::shuttle_tests::shuttle_replacing_one_partition_owner_retires_only_that_partitions_channels",
+  "runtime::relay_boundary::channels::shuttle_tests::shuttle_fencing_one_partition_holds_only_its_bindings_until_successor_publication",
   "runtime::domain_execution::shuttle_tests::shuttle_a_reader_observes_one_complete_typed_routing_revision",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained",
