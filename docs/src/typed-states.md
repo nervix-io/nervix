@@ -79,6 +79,13 @@ and scheduled poll instant in that variant, while sources with no integration fi
 headers-only variant. The host copies the variant into a matching quiesce buffer and Arrow builder;
 neither a missing status nor a default timestamp can be mistaken for a valid HTTP response.
 
+A Pulsar subscription's ownership is a typed choice. Its owned variant carries the required
+`START AT` position and its provisioned variant carries none, so a Model cannot give an externally
+owned cursor a creation policy or omit the position of a subscription Nervix creates. Parsing and
+the visual draft establish that choice before planning; the plan and connector retain it without
+defaulting a missing position. The [connector contract](./connector-contract.md#pulsar-subscription-ownership)
+owns creation and cursor retention.
+
 The Pulsar emitter's running publishing choice keeps related state together: the `NO ACK` variant
 owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
 confirmation settings. An empty receipt collection means there are no outstanding receipts,
@@ -229,16 +236,16 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX PART QOS2` archive signature identifies the current Model layout, including
-the required 16-bit branch partition count, Sentry platform, an ingestor's
-`TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, and the session
-and quality of service an MQTT TOPIC ingestor writes beside its delivery mode. Consensus's
-`raft_partition_qos_` keyspaces and current state metadata encoding identify its stored shapes,
-including the partition count of every resolved branch declaration in the committed schedule. The
-runtime state store's `unit-labelled-metric-checkpoint-segments` format identifies the checkpoints it
-keeps, including the unit every branch-aggregated metric series carries. An unrecognized signature,
-namespace or encoding fails with the owning storage error and requires the stored data to be
-recreated.
+The registry's `NERVIX PART INGS` archive signature identifies the current Model layout, including
+an owned Pulsar subscription's required start position, the required 16-bit branch partition count,
+Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's
+`SEND` request shape, and the session and quality of service an MQTT TOPIC ingestor writes beside
+its delivery mode. Consensus's `raft_partition_ingestor_` keyspaces and current state metadata
+encoding identify its stored shapes, including the partition count of every resolved branch
+declaration in the committed schedule. The runtime state store's
+`unit-labelled-metric-checkpoint-segments` format identifies the checkpoints it keeps, including the
+unit every branch-aggregated metric series carries. An unrecognized signature, namespace or
+encoding fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
 

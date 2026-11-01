@@ -1165,9 +1165,19 @@ impl Arbitrary<'_> {
             IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) => {
                 self.transport_operations(Self::kafka_topic_source)
             }
-            IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => {
-                self.transport_operations(Self::pulsar_topic_source)
-            }
+            IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => self
+                .operations(|arbitrary| {
+                    if arbitrary.entropy.flag() {
+                        nervix_models::PulsarTopicIngestorOperation::SetStartAt {
+                            position: arbitrary.pulsar_start_position(),
+                        }
+                    } else {
+                        nervix_models::PulsarTopicIngestorOperation::Transport(
+                            arbitrary.transport_operation(Self::pulsar_topic_source),
+                        )
+                    }
+                })
+                .into(),
             IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => {
                 self.transport_operations(Self::mqtt_topic_source)
             }
@@ -1210,16 +1220,20 @@ impl Arbitrary<'_> {
     where
         Vec<AlterTransportIngestorOperation<Source>>: Into<IngestorAlteration>,
     {
-        self.operations(|arbitrary| {
-            if arbitrary.entropy.byte() % 12 == 11 {
-                AlterTransportIngestorOperation::SetDecodeUsing {
-                    codec: arbitrary.name(),
-                }
-            } else {
-                AlterTransportIngestorOperation::from(arbitrary.alter_ingestor_operation(&source))
-            }
-        })
-        .into()
+        self.operations(|arbitrary| arbitrary.transport_operation(&source))
+            .into()
+    }
+
+    /// One shared transport operation, reused when an entity composes its own options with it.
+    fn transport_operation<Source>(
+        &mut self,
+        source: impl Fn(&mut Self) -> Source,
+    ) -> AlterTransportIngestorOperation<Source> {
+        if self.entropy.byte() % 12 == 11 {
+            AlterTransportIngestorOperation::SetDecodeUsing { codec: self.name() }
+        } else {
+            AlterTransportIngestorOperation::from(self.alter_ingestor_operation(source))
+        }
     }
 
     /// One operation every ingestor accepts, whose `SET FROM` states a source `source` builds.

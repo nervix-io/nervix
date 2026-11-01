@@ -24,10 +24,10 @@ use crate::{
     AlterEmitter, AlterEmitterOperation, AlterGenerator, AlterGeneratorOperation, AlterIngestor,
     AlterIngestorOperation, AlterJunction, AlterPlacement, AlterPlacementOperation,
     AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
-    AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterTransportIngestorOperation,
-    AlterWireSchema, AlterWireSchemaOperation, AssignmentTarget, AssignmentTargetScope, AvroType,
-    Backup, BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction,
-    BranchPartitions, BranchSelection, ClickHouseValueMapping, ClientConfigEntry, ClientIngestMode,
+    AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
+    AlterWireSchemaOperation, AssignmentTarget, AssignmentTargetScope, AvroType, Backup,
+    BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction, BranchPartitions,
+    BranchSelection, ClickHouseValueMapping, ClientConfigEntry, ClientIngestMode,
     ClientResourceMount, CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName,
     CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob,
     CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
@@ -2759,25 +2759,19 @@ pub(crate) fn alter_ingestor_operations_to_plexus<Source: IngestorBodyPlexus>(
 }
 
 /// The canonical Plexus of every operation of an alteration of a transport's ingestor, in order.
-pub(crate) fn alter_transport_ingestor_operations_to_plexus<Source: IngestorBodyPlexus>(
-    operations: &[AlterTransportIngestorOperation<Source>],
+pub(crate) fn alter_transport_ingestor_operations_to_plexus<
+    Operation: crate::connector::TransportIngestorOperation,
+>(
+    operations: &[Operation],
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
     let mut rendered = Vec::with_capacity(operations.len());
     for operation in operations {
-        let operation = match operation {
-            AlterTransportIngestorOperation::Ingestor(operation) => {
-                alter_ingestor_operation_to_plexus(operation)?
-            }
-            AlterTransportIngestorOperation::SetDecodeUsing { codec } => {
-                format!("SET DECODE USING {}", codec.as_str())
-            }
-        };
-        rendered.push(operation);
+        rendered.push(operation.to_plexus()?);
     }
     Ok(rendered)
 }
 
-fn alter_ingestor_operation_to_plexus<Source: IngestorBodyPlexus>(
+pub(crate) fn alter_ingestor_operation_to_plexus<Source: IngestorBodyPlexus>(
     operation: &AlterIngestorOperation<Source>,
 ) -> error_stack::Result<String, CanonicalPlexusError> {
     match operation {

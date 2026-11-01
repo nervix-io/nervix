@@ -65,7 +65,8 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Payload: sample input, wire format, exact internal field types, optional fields, and sensitive
   fields.
 - Source and emitter: connector kinds, externally provisioned entity names, whether an operator
-  provisions a Pulsar subscription or its ingestor owns it, endpoints, delivery/ACK expectations,
+  provisions a Pulsar subscription or its ingestor owns it, the owned subscription's EARLIEST or
+  LATEST creation position, endpoints, delivery/ACK expectations,
   emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
   ordering, and offsets.
 - Isolation: unbranched or a concrete branch key, branch TTL, optional instance limit, and the
