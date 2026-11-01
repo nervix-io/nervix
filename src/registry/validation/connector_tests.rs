@@ -1267,10 +1267,9 @@ fn mqtt_instances_greater_than_one_are_valid() {
                             topic: nervix_models::MqttTopicFilter::parse("notifications")
                                 .expect("valid topic filter"),
                             instances: nonzero!(2u64),
-                            mode: MqttIngestMode::NoAck {
-                                session: MqttSession::Clean,
-                                qos: MqttQos::AtMostOnce,
-                            },
+                            session: MqttSession::Clean,
+                            qos: MqttQos::Qos0,
+                            mode: MqttIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Drop,
                         })),
                         codec: CodecName::parse("event_codec").expect("valid identifier"),
@@ -1562,6 +1561,87 @@ fn an_ingestor_source_says_why_its_reject_retry_delay_names_no_duration() {
             &error,
             &format!("invalid quiesce REJECT RETRY AFTER duration '{retry_after}': {why}"),
         );
+    }
+}
+
+/// An MQTT TOPIC source subscribing with `session` at `qos` under `mode`, as an alteration or a
+/// restored Model can state it without the grammar's own check.
+fn mqtt_source(session: MqttSession, qos: MqttQos, mode: MqttIngestMode) -> IngestorEntity {
+    IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
+        client: ClientName::parse("mqtt_main").expect("valid identifier"),
+        topic: nervix_models::MqttTopicFilter::parse("notifications").expect("valid topic filter"),
+        instances: nonzero!(1u64),
+        session,
+        qos,
+        mode,
+        quiesce: nervix_models::IngestQuiesceMode::Drop,
+    }))
+}
+
+fn acknowledged_mqtt_mode() -> MqttIngestMode {
+    MqttIngestMode::AckSequential {
+        timeout: "5s".to_string(),
+        retry_policy: RetryPolicy {
+            backoff: "100ms".to_string(),
+            max_backoff: "1s".to_string(),
+        },
+    }
+}
+
+#[test]
+fn an_mqtt_ack_mode_outside_a_kept_session_is_refused_naming_both_written_values() {
+    let domain: DomainName = named("validation");
+    let mut ingestor = ingestor_statement("edge_in", "notifications", "event_codec", "kafka", &[]);
+    let identifier = ModelName::from(&ingestor.name);
+    let nervix_models::IngestorInput::Transport(input) = &mut ingestor.input else {
+        unreachable!("the fixture builds a transport ingestor")
+    };
+    input.source = mqtt_source(MqttSession::Clean, MqttQos::Qos2, acknowledged_mqtt_mode());
+
+    let refused = validate_ingestor_source(&domain, &identifier, &ingestor)
+        .expect_err("an ACK mode needs the persistent session at QoS 1 or 2");
+
+    let RegistryError::InvalidConnectorDeclaration { node, issue, .. } = refused.current_context()
+    else {
+        panic!("an unmet delivery requirement is a declaration refusal: {refused:?}");
+    };
+    assert_eq!(node.identifier.as_str(), "edge_in");
+    let ConnectorDeclarationIssue::Delivery(unmet) = issue else {
+        panic!("the refusal names the unmet delivery requirement: {issue:?}");
+    };
+    assert_eq!(
+        unmet.written,
+        vec![
+            nervix_models::WrittenChoice {
+                option: "SESSION",
+                choice: Some("CLEAN"),
+            },
+            nervix_models::WrittenChoice {
+                option: "QOS",
+                choice: Some("2"),
+            },
+        ]
+    );
+    assert_eq!(
+        refused.current_context().to_string(),
+        "ingestor 'edge_in' in domain 'validation' is invalid: MQTT TOPIC ingestors name MODE ACK \
+         SEQUENTIAL only with SESSION PERSISTENT and QOS 1 or 2; the statement writes SESSION \
+         CLEAN and QOS 2"
+    );
+}
+
+#[test]
+fn an_mqtt_ack_mode_in_a_persistent_session_at_qos_one_or_two_is_valid() {
+    let domain: DomainName = named("validation");
+    let mut ingestor = ingestor_statement("edge_in", "notifications", "event_codec", "kafka", &[]);
+    let identifier = ModelName::from(&ingestor.name);
+    for qos in [MqttQos::Qos1, MqttQos::Qos2] {
+        let nervix_models::IngestorInput::Transport(input) = &mut ingestor.input else {
+            unreachable!("the fixture builds a transport ingestor")
+        };
+        input.source = mqtt_source(MqttSession::Persistent, qos, acknowledged_mqtt_mode());
+        validate_ingestor_source(&domain, &identifier, &ingestor)
+            .unwrap_or_else(|error| panic!("QoS {qos:?} keeps the session: {error:?}"));
     }
 }
 

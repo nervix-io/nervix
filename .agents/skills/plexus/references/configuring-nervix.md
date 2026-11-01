@@ -194,8 +194,8 @@ current connection, retry and deadline limits.
   `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
   schedule recomputation.
 - For `WEBSOCKETS CONNECTION` literal upgrade headers, subprotocol offers, frame metadata, strict client CONFIG,
-  handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close, read `Ingestors` →
-  `WEBSOCKETS CONNECTION` in the selected documentation index.
+  TLS trust roots, handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close,
+  read `Ingestors` → `WEBSOCKETS CONNECTION` in the selected documentation index.
   A successful upgrade does not establish data delivery or reset repeated-failure backoff.
   Check the effective idle bound together with the ping cadence and the peer's inbound activity.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
@@ -412,13 +412,21 @@ current connection, retry and deadline limits.
   And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
   shared client outcome labels, and sender retry semantics. Check that a WebSocket endpoint's
   declared signaling format can encode its acknowledgements, including during `ACCEPT DATA`.
+- To route endpoint requests by their method, path, query, peer address or host, or WebSocket
+  frames by their kind, read the metadata tables in that same section before writing a
+  `metadata.<field>`. An endpoint admits only `POST` at its exact `PATH`, so route on
+  `metadata.query`, `metadata.host` or `metadata.remote_addr` rather than expecting the method or
+  path to vary, and read a forwarding header such as `X-Forwarded-For` with `read_header`, because
+  `metadata.remote_addr` is the TCP peer.
 - Every external name an ingestor reads, such as a topic, consumer group, subscription, queue,
   channel, subject, queue group, or MQTT topic filter, is a string literal spelled exactly as the
   external system names it and within the rules of `Ingestors` → `External Names`.
 - Every transport ingestor source ends with its documented `ON QUIESCE` body immediately before
   `DECODE USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint
-  `RETRY AFTER` wherever that mode requires it. `MQTT TOPIC` `SUSPEND` also declares `SESSION
-  PERSISTENT QOS 1`. Do not mix mode bodies between entities or infer a default.
+  `RETRY AFTER` wherever that mode requires it. An `MQTT TOPIC` ingestor writes its `SESSION` and
+  then its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`; its `ACK` modes and `SUSPEND` also declare
+  `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Do not mix mode bodies between entities or infer a
+  default.
 - MQTT source client identities default to the domain and ingestor, with an instance suffix for
   multiple instances. Account for the broker state that input replacement and `DROP INGESTOR`
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,

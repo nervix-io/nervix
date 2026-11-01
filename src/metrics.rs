@@ -3613,7 +3613,8 @@ impl RuntimeMetrics {
     }
 
     /// The count of invalid UTF-8 transport header values an ingestor on this physical node
-    /// discarded while retaining their messages.
+    /// discarded while retaining their messages. A host resolves it once when it starts and hands
+    /// it to the endpoint intakes it binds, which count without reaching the registry.
     pub(crate) fn ingestor_header_values_dropped(
         &self,
         domain: &DomainName,

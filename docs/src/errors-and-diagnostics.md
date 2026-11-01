@@ -442,9 +442,11 @@ answers a Model canonical Plexus cannot spell with a fixed diagnostic.
 ### Plexus Language And Formatter
 
 MQTT QoS refusals identify the supplied number, its source span, and the levels that the ingestor
-or emitter accepts. A refused `ON QUIESCE SUSPEND` identifies `SUSPEND` and its required
-`SESSION PERSISTENT QOS 1` pairing. Completion offers the quiesce modes the written session can
-use; a clean session or QoS 0 offers `BUFFER` and `DROP`.
+or emitter accepts. An MQTT ingestor `ACK` mode outside a persistent session at QoS 1 or 2 is
+refused with the mode underlined and the session and QoS the statement writes named beside the
+required pairing. A refused `ON QUIESCE SUSPEND` identifies `SUSPEND` and its required
+`SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the quiesce modes the
+written session can use; a clean session or QoS 0 offers `BUFFER` and `DROP`.
 
 The language layer reports rejected source the same way. Lexing and parsing each create the report
 at the stage that failed, and its context names that stage and holds the rejected text with every
@@ -1229,7 +1231,12 @@ writes `DELAY` for a FIFO queue, a `DELAY` other than whole seconds up to 900s, 
 `DEDUPLICATION ID` for a standard queue is refused with `SqsFifoQueueDelay`, `SqsDelay` or
 `SqsStandardQueueDeduplication`, naming the queue or the duration as written. These are command
 refusals before publication, including during `ALTER`, rather than retried source or sink
-initialization failures. They never include a record's values.
+initialization failures. They never include a record's values. An ingestor whose delivery mode lacks
+the option choices its entity declares for it, such as an MQTT `ACK` mode outside a persistent
+session at QoS 1 or 2, is `ConnectorDeclarationIssue::Delivery`, carrying the vocabulary's typed
+`UnmetDeliveryRequirement` that names the entity, the mode, every required choice and the choice the
+statement writes for each option. The grammar refuses the same statement with the same text,
+underlining the mode.
 
 MySQL table-name construction refuses empty path parts and more than two parts with typed
 `ExternalNameError` outcomes. Its offline client check refuses pool-sizing URL parameters through

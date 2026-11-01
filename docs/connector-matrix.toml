@@ -16,7 +16,6 @@ properties = "This entity declares no typed PROPERTIES block; any encoded record
 
 [entity."HTTP ENDPOINT"]
 ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
-metadata = "HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields."
 mirror = "Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position."
 
 [entity."KAFKA TOPIC"]
@@ -83,7 +82,6 @@ mirror = "An outbound connection or server endpoint receives frames. The declare
 
 [entity."WEBSOCKETS ENDPOINT"]
 ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
-metadata = "The current frame declaration has no typed frame or handshake metadata namespace."
 mirror = "An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload."
 
 [entity."SYSLOG LISTENER"]
@@ -178,4 +176,4 @@ replayable = "The host retains the positions, suspends the source, and reestabli
 [confirmation]
 answered = "Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout."
 none = "The source acknowledges nothing on its transport."
-written = "Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT does not answer a `PUBACK`, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` the batch asks for to the connection."
+written = "Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT answers a `PUBACK` with nothing and a QoS 2 `PUBREC` only with the `PUBREL` the client completes on its own, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` and `PUBREC` the batch asks for to the connection."
