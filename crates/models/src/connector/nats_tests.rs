@@ -86,20 +86,14 @@ fn subject_ingestion_requires_its_queue_group_and_instance_count() {
 }
 
 #[test]
-fn subject_emission_declares_core_and_jetstream_publication() {
+fn subject_and_stream_emission_declare_their_publication_contracts() {
     let emit = EmitterEntityKind::Nats(NatsEmitterEntity::Subject).capabilities();
 
     assert_eq!(
         emit.reference,
         EmitterReferenceKind::Client(ConnectorKind::Nats)
     );
-    assert_eq!(
-        emit.publishing_modes,
-        &[
-            EmitterPublishingModeKind::NoAck,
-            EmitterPublishingModeKind::NatsJetStream,
-        ]
-    );
+    assert_eq!(emit.publishing_modes, &[EmitterPublishingModeKind::NoAck]);
     assert_eq!(emit.body, EmitterBodyForm::Codec);
     assert_eq!(emit.batch, EmitterBatchLegality::Optional { maximum: None });
     assert!(!emit.requires_batch_transformation);
@@ -113,6 +107,30 @@ fn subject_emission_declares_core_and_jetstream_publication() {
     assert!(emit.options.is_empty());
     assert!(emit.envelope.is_empty());
     assert!(emit.properties.is_empty());
+
+    let stream = EmitterEntityKind::Nats(NatsEmitterEntity::Stream).capabilities();
+    assert_eq!(
+        stream.publishing_modes,
+        &[EmitterPublishingModeKind::BrokerAck]
+    );
+    assert_eq!(
+        stream.reference,
+        EmitterReferenceKind::Client(ConnectorKind::Nats)
+    );
+    assert_eq!(stream.body, EmitterBodyForm::Codec);
+    assert_eq!(
+        stream.batch,
+        EmitterBatchLegality::Optional { maximum: None }
+    );
+    assert_eq!(
+        stream.locator,
+        Some(LocatorDeclaration {
+            keywords: "STREAM",
+            name: LocatorName::External(NatsStreamName::DECLARATION),
+        })
+    );
+    assert_eq!(stream.options[0].keywords, "SUBJECT");
+    assert_eq!(stream.envelope, &[EnvelopeClauseKind::MessageId]);
 }
 
 #[test]
@@ -175,7 +193,6 @@ fn subject_emission_bounds_a_core_write_by_its_client_timeout() {
                 key: DeadlineKey::Timeout,
                 omitted: OmittedDeadline::Unbounded,
             },
-            WaitBound::Clause("ACK TIMEOUT"),
         ]
     );
     assert_eq!(emit.bounds.deadline_keys(), vec![DeadlineKey::Timeout]);
@@ -183,6 +200,21 @@ fn subject_emission_bounds_a_core_write_by_its_client_timeout() {
         emit.bounds.driver_limits,
         &["Messages above the server's max_payload are rejected."]
     );
+}
+
+#[test]
+fn stream_emission_bounds_pub_ack_answers_by_its_window() {
+    let emit = EmitterEntityKind::Nats(NatsEmitterEntity::Stream).capabilities();
+    assert_eq!(emit.bounds.buffers.len(), 2);
+    assert_eq!(
+        emit.bounds.buffers[1].bound,
+        BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("ACK PARALLEL MAX, 1 under ACK SEQUENTIAL"),
+            overflow: BufferOverflow::Backpressure,
+        }
+    );
+    assert_eq!(emit.bounds.waits[2].bound, WaitBound::Clause("ACK TIMEOUT"));
+    assert_eq!(emit.bounds.waits[3].bound, WaitBound::Clause("ACK TIMEOUT"));
 }
 
 fn config_entry(key: &str, value: &str) -> ClientConfigEntry {
