@@ -48,7 +48,7 @@ Feature: Branch namespace
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
         FROM mqtt_main
         TOPIC 'branch_namespace_{{test_id}}'
-        MODE NO ACK
+        SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
           INHERIT ALL

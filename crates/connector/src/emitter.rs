@@ -31,7 +31,7 @@ use meticulous::OptionExt as _;
 use nervix_execution::Executor;
 use nervix_models::{
     FieldPath, HttpApplicationHeaders, HttpMethod, HttpTarget, MessageErrorCode,
-    MessageErrorOperation, StructuredMessageError, Timestamp,
+    MessageErrorOperation, PropertyType, StructuredMessageError, Timestamp,
 };
 use nervix_primitives::{sync::Arc, time::Instant};
 use thiserror::Error;
@@ -110,6 +110,10 @@ pub struct RecordEnvelope {
     pub message_id: Option<String>,
     /// `DEDUPLICATION ID <expression>`.
     pub deduplication_id: Option<String>,
+    /// `ROUTING KEY <expression>` of a `RABBITMQ EXCHANGE` emitter's destination: the key the
+    /// exchange routes the record by, which the host evaluates with the envelope because it reads
+    /// the same record at the same point.
+    pub routing_key: Option<String>,
     /// The properties the statement sets, in the order it writes them.
     pub properties: Vec<RecordProperty>,
 }
@@ -119,7 +123,12 @@ impl RecordEnvelope {
     /// record that carries them.
     pub fn held_bytes(&self) -> u64 {
         let mut bytes = 0_u64;
-        let texts = [&self.reply_to, &self.message_id, &self.deduplication_id];
+        let texts = [
+            &self.reply_to,
+            &self.message_id,
+            &self.deduplication_id,
+            &self.routing_key,
+        ];
         for text in texts.into_iter().flatten() {
             let length: u64 = text.len().arch_into();
             bytes = bytes.checked_add(length).assured(HELD_IN_MEMORY);
@@ -144,7 +153,8 @@ pub struct RecordProperty {
     pub value: PropertyValue,
 }
 
-/// The value of one property, of exactly the type its entity declares for it.
+/// The value of one property, or of one typed header, of exactly the type its entity declares for
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PropertyValue {
     U8(u8),
@@ -162,8 +172,26 @@ pub enum PropertyValue {
 }
 
 impl PropertyValue {
+    /// The exact type of the value.
+    pub fn ty(&self) -> PropertyType {
+        match self {
+            Self::U8(_) => PropertyType::U8,
+            Self::I8(_) => PropertyType::I8,
+            Self::U16(_) => PropertyType::U16,
+            Self::I16(_) => PropertyType::I16,
+            Self::U32(_) => PropertyType::U32,
+            Self::I32(_) => PropertyType::I32,
+            Self::U64(_) => PropertyType::U64,
+            Self::I64(_) => PropertyType::I64,
+            Self::Bool(_) => PropertyType::Bool,
+            Self::String(_) => PropertyType::String,
+            Self::Datetime(_) => PropertyType::Datetime,
+            Self::Bytes(_) => PropertyType::Bytes,
+        }
+    }
+
     /// The bytes the value holds beyond its fixed size.
-    fn held_bytes(&self) -> u64 {
+    pub fn held_bytes(&self) -> u64 {
         match self {
             Self::String(text) => text.len().arch_into(),
             Self::Bytes(bytes) => bytes.len().arch_into(),
@@ -181,17 +209,44 @@ impl PropertyValue {
     }
 }
 
+/// One `write_header` write of a record whose entity declares typed header values: the name, and
+/// a value of exactly one of the types the entity declares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedRecordHeader {
+    pub name: String,
+    pub value: PropertyValue,
+}
+
+impl TypedRecordHeader {
+    /// The bytes the header holds beyond its fixed size, which a host counts with the record that
+    /// carries it.
+    pub fn held_bytes(&self) -> u64 {
+        let name: u64 = self.name.len().arch_into();
+        name.checked_add(self.value.held_bytes())
+            .assured(HELD_IN_MEMORY)
+    }
+}
+
 /// One codec-encoded record ready for a connector to write.
 ///
 /// A record carries no runtime acknowledgement. The host retains the acknowledgements of the
 /// source rows a record carries and applies the connector's answer for the record to each of them
 /// after the connector's one batch-level virtual call completes.
+///
+/// A record's `write_header` writes arrive in the one form its entity's header model declares:
+/// `headers` holds them where the entity declares text values, and `typed_headers` where it
+/// declares typed ones, so a connector reads the field its declaration names and finds the other
+/// empty.
 #[derive(Debug)]
 pub struct EmitterRecord {
     pub id: EmitterRecordId,
     pub key: Option<String>,
     pub payload: Vec<u8>,
+    /// The writes in written order, each value a `STRING`, where the entity declares text values.
     pub headers: Vec<(String, String)>,
+    /// The writes in written order, each value of exactly one of the types the entity declares,
+    /// where the entity declares typed values.
+    pub typed_headers: Vec<TypedRecordHeader>,
     /// The group a service that delivers records in order per group writes this one under, as the
     /// host evaluated it for this record. Absent where the emitter declares no group.
     pub message_group: Option<String>,
@@ -214,10 +269,18 @@ impl EmitterRecord {
             key,
             payload,
             headers,
+            typed_headers: Vec::new(),
             message_group: None,
             envelope: RecordEnvelope::default(),
             occurred_at,
         }
+    }
+
+    /// This record carrying the typed header writes the host evaluated for it, in place of text
+    /// ones.
+    pub fn with_typed_headers(mut self, typed_headers: Vec<TypedRecordHeader>) -> Self {
+        self.typed_headers = typed_headers;
+        self
     }
 
     /// This record written under the ordering group the host evaluated for it.

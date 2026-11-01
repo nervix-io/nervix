@@ -2,8 +2,9 @@
 //!
 //! Layer: data plane.
 //! - **Owns.** Resolving a request's host and path to the endpoint routes and the ingestors bound
-//!   to them, request admission, the endpoint buffer, rejection with a retry delay, per-request
-//!   dispatch, and response disposition.
+//!   to them, the metadata a request or a WebSocket frame hands those ingestors, request admission,
+//!   the endpoint buffer, rejection with a retry delay, per-request dispatch, and response
+//!   disposition.
 //! - **Depends on.** The request intakes endpoint sources bind, Arrow decoding and actual-UTC
 //!   observation.
 //! - **Must not know.** When a route is bound or unbound, which the endpoint source owns; Plexus
@@ -14,12 +15,13 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
-use std::borrow::Cow;
+use std::{borrow::Cow, net::SocketAddr};
 
 use nervix_connector::{
-    IngestMessageHeaders, RetainedIngestHeaders, physical_time::actual_utc_now,
+    IngestMessageMetadata, IngestMetadataRow, IngestMetadataValues, physical_time::actual_utc_now,
 };
 use nervix_connector_websockets::CompiledSignalingProtocol;
+use nervix_models::WebsocketsFrameType;
 
 use super::*;
 
@@ -61,6 +63,72 @@ pub(crate) struct EndpointIngestBinding {
     pub(super) branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     /// Consumes a body the ingestor's codec refuses.
     pub(super) decode_rejections: DecodeRejections,
+    /// Counts the header values of the requests and WebSocket upgrades routed to the ingestor that
+    /// are not UTF-8, which it does not read.
+    pub(super) header_values_dropped: prometheus::IntCounter,
+}
+
+/// The metadata an `HTTP ENDPOINT` ingestor declares, as one admitted request carries it.
+///
+/// It hands its values over in the order the entity declares them: the method, path and query the
+/// request named, the address of the peer that sent it and the host it was routed by.
+pub(crate) struct HttpEndpointRequestMetadata<'a> {
+    method: &'a str,
+    path: &'a str,
+    query: Option<&'a str>,
+    remote_addr: SocketAddr,
+    host: Cow<'a, str>,
+}
+
+impl<'a> HttpEndpointRequestMetadata<'a> {
+    /// The metadata of a request that `remote_addr` sent with `method` for `path` and `query`,
+    /// whose `Host` value is read as routing reads it: in ASCII lowercase and without its port.
+    pub(crate) fn new(
+        method: &'a str,
+        path: &'a str,
+        query: Option<&'a str>,
+        remote_addr: SocketAddr,
+        host: &'a str,
+    ) -> Self {
+        Self {
+            method,
+            path,
+            query,
+            remote_addr,
+            host: normalize_http_host(host),
+        }
+    }
+}
+
+impl IngestMessageMetadata for HttpEndpointRequestMetadata<'_> {
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+        values.string(self.method);
+        values.string(self.path);
+        match self.query {
+            Some(query) => values.string(query),
+            None => values.absent(),
+        }
+        values.rendered(&self.remote_addr);
+        values.string(&self.host);
+    }
+}
+
+/// The metadata a `WEBSOCKETS ENDPOINT` ingestor declares, as one data frame carries it.
+///
+/// It hands its values over in the order the entity declares them: the frame's kind, the address of
+/// the peer that opened its connection and the path the connection's upgrade request named.
+pub(crate) struct WebsocketsEndpointFrameMetadata<'a> {
+    pub(crate) frame_type: WebsocketsFrameType,
+    pub(crate) remote_addr: SocketAddr,
+    pub(crate) path: &'a str,
+}
+
+impl IngestMessageMetadata for WebsocketsEndpointFrameMetadata<'_> {
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+        values.string(self.frame_type.as_ref());
+        values.rendered(&self.remote_addr);
+        values.string(self.path);
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -208,11 +276,13 @@ impl EndpointIntakeRoute<EndpointIngestBinding> {
         })
     }
 
+    /// Dispatches one request body or WebSocket frame to every ingestor bound to this route, each
+    /// reading `metadata`: the values its entity declares and the request's headers.
     pub(crate) async fn dispatch(
         &self,
         runtime: &Runtime,
         payload: &[u8],
-        headers: &dyn IngestMessageHeaders,
+        metadata: IngestMetadataRow<'_>,
         shutdown: &CancellationToken,
     ) -> EndpointDispatchOutcome {
         let protocol = match self.endpoint_type() {
@@ -222,10 +292,24 @@ impl EndpointIntakeRoute<EndpointIngestBinding> {
         let mut dispatches = Vec::with_capacity(self.bindings().len());
         for lifetime in self.bindings() {
             dispatches.push(
-                runtime.dispatch_endpoint_intake(lifetime, payload, headers, shutdown, protocol),
+                runtime.dispatch_endpoint_intake(lifetime, payload, metadata, shutdown, protocol),
             );
         }
         dispatch_endpoint_bindings(dispatches).await
+    }
+
+    /// Counts, for every ingestor bound to this route, the `dropped` header values of one request or
+    /// WebSocket upgrade that are not UTF-8, which none of them reads.
+    pub(crate) fn count_dropped_header_values(&self, dropped: usize) {
+        if dropped == 0 {
+            return;
+        }
+        for lifetime in self.bindings() {
+            let lease = lifetime.intake();
+            if let Some(binding) = lease.as_deref() {
+                binding.header_values_dropped.inc_by(dropped.arch_into());
+            }
+        }
     }
 }
 
@@ -302,7 +386,7 @@ impl Runtime {
         &self,
         lifetime: &endpoint_route_table::EndpointBinding<EndpointIngestBinding>,
         payload: &[u8],
-        headers: &dyn IngestMessageHeaders,
+        metadata: IngestMetadataRow<'_>,
         shutdown: &CancellationToken,
         protocol: &str,
     ) -> EndpointDispatchOutcome {
@@ -330,7 +414,7 @@ impl Runtime {
                         },
                         nervix_primitives::time::sleep(window.timeout),
                         self.dispatch_acknowledged_endpoint_binding(
-                            binding, payload, headers, protocol,
+                            binding, payload, metadata, protocol,
                         ),
                     )
                     .await
@@ -341,10 +425,10 @@ impl Runtime {
             });
         }
         // A binding may buffer this request until it resumes, so its copy of the
-        // request headers is taken here and only here.
+        // request's metadata and headers is taken here and only here.
         let payload = BufferedIngestPayload::new(
             payload,
-            BufferedIngestMetadata::headers(RetainedIngestHeaders::capture(headers)),
+            BufferedIngestMetadata::retain(&metadata),
             actual_utc_now(),
         );
         let admission = match binding.quiesce.intake(0, payload, true) {
@@ -386,7 +470,7 @@ impl Runtime {
         &self,
         binding: &EndpointIngestBinding,
         payload: &[u8],
-        headers: &dyn IngestMessageHeaders,
+        metadata: IngestMetadataRow<'_>,
         protocol: &str,
     ) -> EndpointRequestOutcome {
         let mut collector = IngestRouteCollector::new(
@@ -396,7 +480,6 @@ impl Runtime {
         );
         let (root, mut completion) = binding.handles.tracked_root();
         let observed_at = actual_utc_now();
-        let metadata = BufferedIngestMetadata::headers(RetainedIngestHeaders::capture(headers));
         match collector
             .decode_payload(
                 self.executor(),
@@ -421,7 +504,7 @@ impl Runtime {
             Err(PayloadDecodeFailure::Codec(report)) => {
                 root.no_ack("codec refused the endpoint payload");
                 let rejection =
-                    DecodeRejection::new(&binding.codec, &metadata.row(), &report, observed_at);
+                    DecodeRejection::new(&binding.codec, &metadata, &report, observed_at);
                 binding.decode_rejections.consume(
                     self,
                     &binding.domain,
@@ -436,7 +519,7 @@ impl Runtime {
         } else {
             root.attached()
         };
-        let metadata = [metadata.row()];
+        let metadata = [metadata];
         let dispatch = self
             .dispatch_ingested_records(IngestGroupDispatch {
                 handles: &binding.handles,
@@ -601,3 +684,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "endpoint_metadata_tests.rs"]
+mod metadata_tests;

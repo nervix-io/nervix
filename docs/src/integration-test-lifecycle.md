@@ -220,7 +220,7 @@ resubmitting an outcome that might already have produced output.
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | HTTP proxies | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP proxy fixture, `tests/common/http_proxy.rs` |
 | Unaccepted addresses | No task: a listening socket at a chosen loopback address and the one connection that fills its accept queue, so the kernel drops every later handshake. The scenario world owns both until the scenario ends | `tests/common/unaccepted_address.rs` |
-| Backup cut holds | No harness task: the fault injector's lease, drain or capture gate holds each backup cut that reaches it on that cut's own task in the node, and its pause-application gate holds each node's wait for the cluster to ready a revision that pauses the domain on the task applying that revision, until the scenario releases the gate or for the duration the scenario timed from each arrival | `src/fault_injection/backup_cut.rs`, driven by the backup steps in `tests/backup/mod.rs` and `tests/backup/wait.rs` |
+| Backup cut holds | No harness task: the fault injector's lease, committed-pause, drain or capture gate holds each backup cut that reaches it on that cut's own task in the node, and its pause-application gate holds each node's wait for the cluster to ready a revision that pauses the domain on the task applying that revision, until the scenario releases the gate or for the duration the scenario timed from each arrival | `src/fault_injection/backup_cut.rs`, driven by the backup steps in `tests/backup/mod.rs` and `tests/backup/wait.rs` |
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact payload multiplicities, generator occurrences, broker counts and sequences, and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs` and `subscription_payloads.rs`, used by the payload, generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
 | Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
@@ -981,6 +981,12 @@ and on the cut's own task in the node, and the step that injects the holds only 
 first one ended. A stalled runner delays when the step learns of a release, never the release
 itself. When the command is expected to outlast every hold, the step still watches it and reports a
 command that ends early with its own outcome.
+
+The committed-pause gate holds the cut coordinator after its replicated pause completes and
+before it tries to install the paused revision. It leaves reconciliation free to apply that
+revision. The elapsed-pause outline holds there beyond the cut's budget and requires the
+installation refusal, no archive and a resumed domain on one and three nodes. Its 25-second hold
+is measured on the cut's own task against the existing 20-second cut budget.
 
 A gate holds every cut that reaches it, not only the first. When the leader cannot record a
 backup's outcome, because leadership moved or because it could not confirm that it still leads,

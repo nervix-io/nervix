@@ -299,6 +299,17 @@ impl SessionServiceImpl {
             impact.confirm(attempt);
         }
 
+        #[cfg(feature = "testing")]
+        if let DomainDrainMode::Backup { .. } = mode {
+            self.inner
+                .runtime
+                .pause_backup_cut_if_armed(
+                    domain,
+                    crate::fault_injection::BackupCutBoundary::PauseCommitted,
+                )
+                .await;
+        }
+
         // A backup cut's deadline does not cut the replicated pause short: a write abandoned after
         // it was proposed may still commit and leave the domain paused with nobody to resume it.
         // The deadline ends the pause's application instead, at one of its waits. The domain is

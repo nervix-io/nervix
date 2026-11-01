@@ -38,7 +38,7 @@ Feature: MQTT TLS resource mounts
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_tls TOPIC 'notifications_{{test_id}}' MODE NO ACK
+        FROM mqtt_tls TOPIC 'notifications_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL

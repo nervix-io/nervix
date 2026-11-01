@@ -318,7 +318,7 @@ Feature: Plexus file formatting
     Given a Plexus file "pipeline.plexus" containing
       """
       create mqtt topic ingestor sensor_readings
-        from mqtt_main topic 'Sensors' mode no ack on quiesce drop
+        from mqtt_main topic 'Sensors' session clean qos 0 mode no ack on quiesce drop
         decode using reading_codec
         to readings unbranched flush immediate on message error log
         on general error log;
@@ -328,7 +328,7 @@ Feature: Plexus file formatting
     And the Plexus file "pipeline.plexus" contains
       """
       CREATE MQTT TOPIC INGESTOR sensor_readings
-        FROM mqtt_main TOPIC 'Sensors' MODE NO ACK ON QUIESCE DROP
+        FROM mqtt_main TOPIC 'Sensors' SESSION CLEAN QOS 0 MODE NO ACK ON QUIESCE DROP
       """
 
   Scenario: A dollar-quoted value ending in part of its delimiter keeps its value
@@ -399,7 +399,7 @@ Feature: Plexus file formatting
   Scenario: SQS queue names retain their case and quoting
     Given a Plexus file "pipeline.plexus" containing
       """
-      create SQS QUEUE EMITTER order_events from orders to sqs_main queue 'Orders.fifo' FIFO GROUP 'orders' mode single retry policy backoff 1s max 5s encode using order_codec flush immediate on message error log on general error log;
+      create SQS QUEUE EMITTER order_events from orders to sqs_main queue 'Orders.fifo' FIFO GROUP 'orders' send single mode ack retry policy backoff 1s max 5s encode using order_codec flush immediate on message error log on general error log;
       """
     When nervix-plexus-format formats the Plexus file "pipeline.plexus"
     Then the formatter exits with code 0

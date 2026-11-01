@@ -9112,7 +9112,7 @@ mod tests {
             [CompileBinding::writable("input", input_schema.clone())],
             CompileOptions {
                 allow_header_reads: true,
-                allow_header_writes: true,
+                header_writes: Some(nervix_models::HeaderValues::Text),
                 ..CompileOptions::default()
             },
         )
@@ -9156,6 +9156,77 @@ mod tests {
             panic!("write_header arguments must be Utf8");
         };
         assert_eq!(second_value.value(0), "second");
+    }
+
+    /// Values typed the way SQS types its message attributes: a string, an integer and bytes.
+    const TYPED_HEADER_VALUES: &[nervix_models::HeaderValueType] = &[
+        nervix_models::HeaderValueType {
+            ty: nervix_models::PropertyType::String,
+            carried_as: "String",
+        },
+        nervix_models::HeaderValueType {
+            ty: nervix_models::PropertyType::I64,
+            carried_as: "Number",
+        },
+        nervix_models::HeaderValueType {
+            ty: nervix_models::PropertyType::Bytes,
+            carried_as: "Binary",
+        },
+    ];
+
+    #[test]
+    fn typed_header_writes_return_each_value_in_its_own_exact_type() {
+        let parsed = parse_program(
+            "INVOKE write_header('tenant', input.tenant), write_header('count', input.count), \
+             write_header('digest', hex_decode('00ff10'))",
+        )
+        .expect("program must parse");
+        let input_schema = schema(vec![
+            Field::new("tenant", DataType::Utf8, false),
+            Field::new("count", DataType::Int64, false),
+        ]);
+        let compiled = compile_program_with_options_for_bindings(
+            &parsed,
+            input_schema.clone(),
+            [CompileBinding::writable("input", input_schema.clone())],
+            CompileOptions {
+                header_writes: Some(nervix_models::HeaderValues::Typed(TYPED_HEADER_VALUES)),
+                ..CompileOptions::default()
+            },
+        )
+        .expect("typed header writes compile for an emitter that declares their types");
+        let batch = TypedBatch::try_new(
+            input_schema,
+            vec![
+                TypedArray::Utf8(StringArray::from(vec!["acme"])),
+                TypedArray::Int64(Int64Array::from(vec![42])),
+            ],
+        )
+        .expect("batch must build");
+
+        let result = execute_program_in_context_sync(
+            &compiled,
+            &batch,
+            &ExecutionContext {
+                now: Timestamp::from_unix_nanos(1),
+                injector: None,
+            },
+        )
+        .expect("program must execute");
+
+        assert_eq!(result.invocations.len(), 3);
+        let [_, TypedArray::Utf8(tenant)] = result.invocations[0].arguments.as_slice() else {
+            panic!("a STRING value stays text");
+        };
+        assert_eq!(tenant.value(0), "acme");
+        let [_, TypedArray::Int64(count)] = result.invocations[1].arguments.as_slice() else {
+            panic!("an I64 value keeps its integer type");
+        };
+        assert_eq!(count.value(0), 42);
+        let [_, TypedArray::Binary(digest)] = result.invocations[2].arguments.as_slice() else {
+            panic!("a BYTES value keeps its bytes");
+        };
+        assert_eq!(digest.value(0), [0x00, 0xff, 0x10]);
     }
 
     #[nervix_primitives::test(flavor = "current_thread")]

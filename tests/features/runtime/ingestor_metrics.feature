@@ -284,11 +284,11 @@ Feature: Ingestor metrics
       """
 
     Examples:
-      | cluster_size | branch_strategy | relay_branching                        | output_branching                                                     | entity_kind | source_head  | source_clause                                              | input                     |
-      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | REDIS       | REDIS PUBSUB | redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK | notifications_{{test_id}} |
-      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | REDIS       | REDIS PUBSUB | redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK | notifications_{{test_id}} |
-      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | MQTT        | MQTT TOPIC   | mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK    | notifications_{{test_id}} |
-      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | MQTT        | MQTT TOPIC   | mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK    | notifications_{{test_id}} |
+      | cluster_size | branch_strategy | relay_branching                        | output_branching                                                     | entity_kind | source_head  | source_clause                                                               | input                     |
+      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | REDIS       | REDIS PUBSUB | redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK                  | notifications_{{test_id}} |
+      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | REDIS       | REDIS PUBSUB | redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK                  | notifications_{{test_id}} |
+      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | MQTT        | MQTT TOPIC   | mqtt_main TOPIC 'notifications_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK | notifications_{{test_id}} |
+      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | MQTT        | MQTT TOPIC   | mqtt_main TOPIC 'notifications_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK | notifications_{{test_id}} |
 
   Scenario Outline: FLUSH IMMEDIATE preserves batching during a rapid input burst
     Given MQTT is running
@@ -318,7 +318,7 @@ Feature: Ingestor metrics
           'client_id' = 'nervix-cucumber-immediate-flush-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR immediate_source
-        FROM mqtt_main TOPIC 'immediate_notifications_{{test_id}}' MODE NO ACK
+        FROM mqtt_main TOPIC 'immediate_notifications_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL

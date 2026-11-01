@@ -32,7 +32,7 @@ Feature: MySQL emission
           'client_id' = 'nervix-cucumber-mysql-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'mysql_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'mysql_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -111,7 +111,7 @@ Feature: MySQL emission
           'client_id' = 'nervix-cucumber-mysql-conflict-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'mysql_conflict_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'mysql_conflict_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -202,7 +202,7 @@ Feature: MySQL emission
         'client_id' = 'nervix-cucumber-mysql-batch-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'mysql_batch_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'mysql_batch_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL

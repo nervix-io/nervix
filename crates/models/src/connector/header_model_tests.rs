@@ -14,7 +14,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use strum::IntoEnumIterator as _;
 
-use super::{HeaderLayout, HeaderModel, HeaderNames, LiteralHeaderWrite, ReplacedHeaderWrite};
+use super::{
+    HeaderLayout, HeaderModel, HeaderNames, HeaderValueType, HeaderValues, LiteralHeaderWrite,
+    ReplacedHeaderWrite,
+};
+use crate::PropertyType;
 
 fn writes<'a>(names: &[&'a str]) -> Vec<LiteralHeaderWrite<'a>> {
     let mut writes = Vec::new();
@@ -90,7 +94,11 @@ fn lowercase_names_repeat_a_name_written_in_another_letter_case() {
 fn a_model_that_keeps_every_value_has_no_replaced_write() {
     for layout in [HeaderLayout::OrderedRepeats, HeaderLayout::RepeatsByName] {
         for names in HeaderNames::iter() {
-            let model = HeaderModel { layout, names };
+            let model = HeaderModel {
+                layout,
+                names,
+                values: HeaderValues::Text,
+            };
             assert_eq!(
                 model.replaced_write(writes(&["route", "route", "Route"])),
                 None,
@@ -117,6 +125,59 @@ fn a_model_displays_its_layout_and_names_and_every_layout_and_names_states_a_mea
     for names in HeaderNames::iter() {
         assert!(meanings.insert(names.meaning()), "{names:?}");
     }
+}
+
+/// Values typed the way a transport with string, number and binary values types them.
+const TYPED_VALUES: &[HeaderValueType] = &[
+    HeaderValueType {
+        ty: PropertyType::String,
+        carried_as: "String",
+    },
+    HeaderValueType {
+        ty: PropertyType::U8,
+        carried_as: "Number",
+    },
+    HeaderValueType {
+        ty: PropertyType::I64,
+        carried_as: "Number",
+    },
+    HeaderValueType {
+        ty: PropertyType::Bytes,
+        carried_as: "Binary",
+    },
+];
+
+#[test]
+fn text_values_hold_only_a_string_and_state_no_carried_type() {
+    let values = HeaderModel::exact(HeaderLayout::LastWins).values;
+    assert_eq!(values, HeaderValues::Text);
+    assert_eq!(values.types(), vec![PropertyType::String]);
+    assert_eq!(values.listed(), "STRING");
+    assert_eq!(values.carried(), None);
+}
+
+#[test]
+fn typed_values_hold_exactly_their_declared_types_and_state_what_carries_each() {
+    let model = HeaderModel::exact(HeaderLayout::LastWins).with_typed_values(TYPED_VALUES);
+    let values = model.values;
+    assert_eq!(
+        values.types(),
+        vec![
+            PropertyType::String,
+            PropertyType::U8,
+            PropertyType::I64,
+            PropertyType::Bytes
+        ]
+    );
+    assert_eq!(values.listed(), "STRING, U8, I64 or BYTES");
+    assert_eq!(
+        values.carried().as_deref(),
+        Some("STRING as String; U8, I64 as Number; BYTES as Binary")
+    );
+    assert_eq!(
+        model.to_string(),
+        "last_wins, exact names; STRING as String; U8, I64 as Number; BYTES as Binary"
+    );
 }
 
 /// The header names a generated write draws from: one name in three letter cases, and two more.
@@ -150,6 +211,7 @@ impl GeneratedHeaders {
         HeaderModel {
             layout: layouts[usize::from(self.layout) % layouts.len()],
             names: names[usize::from(self.names) % names.len()],
+            values: HeaderValues::Text,
         }
     }
 

@@ -48,7 +48,7 @@ Feature: SQS name resolution
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE SQS QUEUE EMITTER sqs_out FROM notifications
-        TO sqs_main QUEUE 'dns_out_{{test_id}}' MODE <mode> RETRY POLICY BACKOFF 200ms MAX 1s
+        TO sqs_main QUEUE 'dns_out_{{test_id}}' SEND <send> MODE ACK RETRY POLICY BACKOFF 200ms MAX 1s
           ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -67,7 +67,7 @@ Feature: SQS name resolution
     And the DNS fixture eventually receives a question for "sqs.nervix.test"
 
     Examples:
-      | scheme | cluster_size | mode   | client_config                                                                 |
+      | scheme | cluster_size | send   | client_config                                                                 |
       | HTTP   | 1            | SINGLE | 'endpoint' = '{{sqs_dns_endpoint}}'                                           |
       | HTTP   | 3            | BATCH  | 'endpoint' = '{{sqs_dns_endpoint}}'                                           |
       | HTTPS  | 1            | BATCH  | 'endpoint' = '{{sqs_tls_dns_endpoint}}', 'tls_ca_file' = '{{dev_tls}}/ca.pem' |
@@ -106,7 +106,7 @@ Feature: SQS name resolution
         'secret_access_key' = 'scenario-secret'
       };
       CREATE SQS QUEUE EMITTER sqs_out FROM notifications
-        TO sqs_main QUEUE 'dns_out_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 200ms MAX 1s
+        TO sqs_main QUEUE 'dns_out_{{test_id}}' SEND SINGLE MODE ACK RETRY POLICY BACKOFF 200ms MAX 1s
           ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -166,7 +166,7 @@ Feature: SQS name resolution
         'secret_access_key' = 'scenario-secret'
       };
       CREATE SQS QUEUE EMITTER sqs_out FROM notifications
-        TO sqs_main QUEUE 'dns_out_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 100ms MAX 1s
+        TO sqs_main QUEUE 'dns_out_{{test_id}}' SEND SINGLE MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE

@@ -49,7 +49,10 @@ use nervix_connector_otel::{
 };
 use nervix_connector_postgres::{PostgresTableEmitter, PostgresTableEmitterConfig};
 use nervix_connector_pulsar::{PulsarTopicEmitter, PulsarTopicEmitterConfig};
-use nervix_connector_rabbitmq::{RabbitMqQueueEmitter, RabbitMqQueueEmitterConfig};
+use nervix_connector_rabbitmq::{
+    RabbitMqExchangeEmitter, RabbitMqExchangeEmitterConfig, RabbitMqQueueEmitter,
+    RabbitMqQueueEmitterConfig,
+};
 use nervix_connector_redis::{RedisPubSubEmitter, RedisPubSubEmitterConfig};
 use nervix_connector_sentry::{SentryEventEmitter, SentryEventEmitterConfig};
 use nervix_connector_sqs::{SqsQueueEmitter, SqsQueueEmitterConfig};
@@ -88,6 +91,7 @@ impl EmitterConnectorStarter {
             | EmitterConnectorPlan::Kafka(KafkaEmitterPlan::Topic(_))
             | EmitterConnectorPlan::Pulsar(PulsarEmitterPlan::Topic(_))
             | EmitterConnectorPlan::RabbitMq(RabbitMqEmitterPlan::Queue(_))
+            | EmitterConnectorPlan::RabbitMq(RabbitMqEmitterPlan::Exchange(_))
             | EmitterConnectorPlan::Redis(RedisEmitterPlan::PubSub(_))
             | EmitterConnectorPlan::Mqtt(MqttEmitterPlan::Topic(_))
             | EmitterConnectorPlan::Nats(NatsEmitterPlan::Subject(_))
@@ -128,6 +132,9 @@ impl EmitterConnectorStarter {
             }
             EmitterConnectorPlan::RabbitMq(RabbitMqEmitterPlan::Queue(connector)) => {
                 Self::rabbitmq(connector, context, codec, label, batch).await?
+            }
+            EmitterConnectorPlan::RabbitMq(RabbitMqEmitterPlan::Exchange(connector)) => {
+                Self::rabbitmq_exchange(connector, context, codec, label, batch).await?
             }
             EmitterConnectorPlan::Redis(RedisEmitterPlan::PubSub(connector)) => {
                 Self::redis(connector, context, codec, label, batch).await?

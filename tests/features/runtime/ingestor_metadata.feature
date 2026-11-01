@@ -40,14 +40,14 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'http_endpoint_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but HTTP ENDPOINT ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'http_endpoint_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but HTTP ENDPOINT ingestors declare only metadata.method, metadata.path, metadata.query, metadata.remote_addr and metadata.host"
       """
       CREATE HTTP ENDPOINT INGESTOR http_endpoint_source
         FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'ws_endpoint_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but WEBSOCKETS ENDPOINT ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'ws_endpoint_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but WEBSOCKETS ENDPOINT ingestors declare only metadata.frame_type, metadata.remote_addr and metadata.path"
       """
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_source
         FROM ws_ingress MODE NO ACK ON QUIESCE REJECT RETRY AFTER 5s DECODE USING event_codec

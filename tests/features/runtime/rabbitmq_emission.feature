@@ -29,7 +29,7 @@ Feature: RabbitMQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -154,8 +154,8 @@ Feature: RabbitMQ emission
   # Lapin logs each message a broker returns at warn with the whole message, its body included. The
   # node is one process with one log, so a single server process shows what an operator's filter
   # lets into it. The first record proves the emitter checked its queue at open; the second is
-  # returned because the queue was deleted after that check, and the emitter's own report of that
-  # return names the reply without the record.
+  # published MANDATORY and returned because the queue was deleted after that check, and the
+  # emitter's own report of that return, the record's rejection, names the reply without the record.
   Scenario Outline: A message RabbitMQ returns stays out of the node log under the trace filter "<filter>"
     Given RabbitMQ is running
     And RabbitMQ queue "returned_{{test_id}}" exists
@@ -192,6 +192,7 @@ Feature: RabbitMQ emission
         TO rabbit_main QUEUE 'returned_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 30s MAX 30s
         ENCODE USING returned_event_codec
+        MANDATORY
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -208,13 +209,9 @@ Feature: RabbitMQ emission
       """
       {"sequence":2}
       """
-    Then within "60s" DESCRIBE EMITTER "returned_output" on the server process contains
-      """
-      rabbitmq returned message with reply code 312: NO_ROUTE
-      """
+    Then the server process log eventually contains "rabbitmq returned the message unrouted with reply code 312: NO_ROUTE"
     When the server process receives SIGKILL
     Then the server process is terminated by SIGKILL within "30s" of the last signal
-    And the server process log contains "rabbitmq returned message with reply code 312: NO_ROUTE"
     And the server process log does not contain "Server returned us a message"
 
     Examples:
