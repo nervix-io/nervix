@@ -866,6 +866,7 @@ deadline keys mean the same thing for every connector:
 | `timeout_ms` | The whole of one request or operation: name resolution, connection setup, TLS and the answer. |
 | `connect_timeout_ms` | Establishing a connection: name resolution, the address attempts, TLS and the protocol's own handshake. |
 | `idle_timeout_ms` | Silence while waiting for peer activity on an established connection, including its liveness probe; expiry closes the connection. Each entity declares its activity and whether cancellation or handoff backpressure retains the activity deadline. |
+| `pool_acquire_timeout_ms` | One checkout from a connection pool: the wait for the pool, then opening or testing the connection it hands over, with name resolution, TLS and authentication. How long an accepted operation then runs is outside it. |
 
 A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or by
 `idle_timeout_ms`, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
@@ -999,8 +1000,10 @@ query option before commit. Its table declaration admits one or two nonempty, ca
 identifier parts, which the connector quotes separately in the insert and its catalog lookup. Its
 declared batch maximum is the largest protocol message the server reads, the same bound the
 statement divider keeps every insert within, and its conflict rule is the vocabulary's, which the
-grammar applies at `CREATE`. The [Postgres manual](emitters.md#postgres) gives its text binding
-and conflict semantics.
+grammar applies at `CREATE`. The pool reads `pool_acquire_timeout_ms`, `pool_idle_timeout_ms`,
+`pool_max_lifetime_ms` and `pool_test_before_acquire` from the client's effective entries, so each
+default is written once, in the client schema, and the same value reaches inspection and the pool.
+The [Postgres manual](emitters.md#postgres) gives its text binding and conflict semantics.
 
 Offline refusals keep their driver cause beneath `OfflineClientConfigError`; lapin's URI parser
 exposes only a string, which remains an attached diagnostic. Public command outcomes select reviewed
@@ -1096,7 +1099,8 @@ and a required `OFFSET BY` choice between the domain's replicated offsets and a 
 group. Its emitter declares `NO ACK` and `ACK` with either window, optional batching with no
 protocol-fixed batch limit, since the producer's configurable `message.max.bytes` bounds each record
 it writes, and no envelope or properties. Headers are `ordered_repeats` exact names in both
-directions; the ingestor's metadata is the record's topic, partition and offset. A Kafka client
+directions; the ingestor's metadata is the record's topic, partition, offset, binary key, timestamp,
+timestamp kind and tombstone flag. A Kafka client
 requires `bootstrap.servers`, without which no consumer or producer reaches a broker. Every other
 property is librdkafka's, checked offline before commit, except the keys Nervix sets itself on the
 consumers and producers it runs, which the client refuses. librdkafka reads some properties under
@@ -1330,10 +1334,11 @@ Each source entity declares its typed metadata fields beside its other capabilit
 vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the response status and
 the poll's scheduled instant, `HTTP ENDPOINT` the request's method, path, query, peer address and
 routed host, `WEBSOCKETS CONNECTION` the frame kind, `WEBSOCKETS ENDPOINT` the frame kind, the
-connection's peer address and its path, `KAFKA TOPIC` the topic, partition and offset,
-`SYSLOG LISTENER` the peer address, and every other entity none. The endpoint entities are served by
-the host itself rather than a connector crate, so the server's endpoint intake hands their values
-over the same way a connector's message does. Registry
+connection's peer address and its path, `KAFKA TOPIC` the topic, partition, offset, binary key,
+timestamp, timestamp kind and tombstone flag, `SYSLOG LISTENER` the peer address, and every other
+entity none. The endpoint entities are served by the host itself rather than a connector crate,
+so the server's endpoint intake hands their values over the same way a connector's message does.
+Registry
 validation reads that declaration for the fields an ingestor's route programs and its
 `TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
 connector's message hands the host the value of every declared field in declared order, one typed
@@ -1351,6 +1356,18 @@ group of the ingestor builds Arrow columns for those fields and no others. A gro
 that reads none visits no metadata value at all. Transport headers keep their projection whatever
 the programs read, because an ingestor's error-route programs may call `read_header` and are
 compiled with the domain's routing, outside the source host.
+
+Kafka metadata borrows the record's key without allocating another byte sequence. Missing keys
+remain distinct from empty keys. Its timestamp is the exact instant of the driver's Unix
+milliseconds, with `create_time` or `log_append_time` as its kind; an unavailable timestamp has no
+instant or kind. A null value and an empty non-null value both lend an empty payload, but their
+tombstone flags differ. The codec decides whether an empty payload yields any rows. Every row
+that it yields shares the originating record's metadata and transport position. Kafka's
+`SUSPEND`-only quiesce declaration makes retained quiesce metadata unreachable for this entity.
+An unrepresentable present timestamp is a typed source read failure. If conversion fails after a
+valid prefix was gathered, the source returns that prefix and keeps one report for the next
+admitted read. A cancelled read leaves the report pending; no later record is taken while it is
+pending. The source declares this single-report bound beside its driver buffers.
 
 Beside its fields and headers, a message names the position its transport gives it, where the
 transport has one: a Kafka record's topic, partition and offset, or a syslog frame's peer. It is the
@@ -2889,6 +2906,13 @@ sequenceDiagram
   Domain teardown removes only that domain's definitions and ends its bound lifetimes, preserving
   other domains publishing the same host and path. The host continues to own quiesce, buffering,
   decoding, routing, flush cadence, and error reporting.
+  Both entities execute on every live node, independently of leadership and placement. The host
+  captures HTTP method, path, raw query, TCP peer and routed host, or WebSocket data-frame kind,
+  upgrade path and TCP peer. Requested metadata columns are projected from this retained context,
+  including during signaling and after buffered replay. Header reads retain the request's
+  lowercase names and repeated values in their per-name order; WebSocket reads use upgrade headers.
+  The [endpoint manual](ingestors.md#http-endpoint-and-websockets-endpoint) owns the public fields
+  and exact value contracts.
   `MODE ACK MAX <n> ACK TIMEOUT <duration>` gives each node's intake an explicit 1–65,535-response
   window. Immediate permit admission holds one response through the payload's existing ACK root;
   codec or local route refusal yields HTTP 400, successful graph completion 200, and downstream
@@ -2903,7 +2927,10 @@ sequenceDiagram
   Shared YAML encoding uses JSON-compatible flow syntax with quoted strings, preserving their
   complete contents through signaling and codec round trips.
   The source remains request-scoped. HTTP body reads and the driver's frame limits retain their
-  separate bounds. `MODE NO ACK` still confirms admission with 202.
+  separate bounds. The absolute physical ACK deadline starts at payload admission and is not
+  extended by keepalive. `MODE NO ACK` confirms HTTP admission with 202 and sends no per-frame
+  graph acknowledgement on WebSockets. Only that mode accepts `BUFFER MAX SIZE <bytes>`, with no
+  overflow clause: capacity refuses new input instead of discarding accepted bodies.
 
 ## Failure and observation
 

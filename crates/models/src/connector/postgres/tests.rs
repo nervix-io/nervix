@@ -15,7 +15,10 @@ use std::num::NonZeroU32;
 use meticulous::OptionExt as _;
 
 use super::*;
-use crate::{ClientConfigEntry, Expression, ExternalNameError, Literal};
+use crate::{
+    ClientConfigEntry, ClientConfigKey, ClientConfigOwner, ClientConfigPresence,
+    ClientConfigReaders, ClientConfigValue, Expression, ExternalNameError, Literal,
+};
 
 fn entries(pairs: &[(&str, &str)]) -> Vec<ClientConfigEntry> {
     pairs
@@ -222,6 +225,140 @@ fn the_address_selects_one_declared_tls_policy() {
             "{address}: {refusal:?}"
         );
     }
+}
+
+#[test]
+fn the_client_schema_declares_the_pool_keys_with_their_defaults() {
+    let schema = ConnectorKind::Postgres
+        .client()
+        .assured("Postgres declares a configured client")
+        .config;
+    let milliseconds = ClientConfigValue::Milliseconds;
+    for (name, value, default) in [
+        ("pool_acquire_timeout_ms", milliseconds, "30000"),
+        ("pool_idle_timeout_ms", milliseconds, "600000"),
+        ("pool_max_lifetime_ms", milliseconds, "1800000"),
+        (
+            "pool_test_before_acquire",
+            ClientConfigValue::Boolean,
+            "true",
+        ),
+    ] {
+        let declared = ClientConfigKey {
+            name,
+            presence: ClientConfigPresence::Defaulted(default),
+            value,
+            owner: ClientConfigOwner::Nervix,
+            confidential: false,
+            readers: ClientConfigReaders::Every,
+        };
+        assert_eq!(schema.key(name), Some(&declared));
+    }
+
+    let address = ("addr", "postgres://127.0.0.1/nervix?sslmode=disable");
+    assert_eq!(
+        schema.effective_entries(&entries(&[address])),
+        entries(&[
+            address,
+            ("pool_acquire_timeout_ms", "30000"),
+            ("pool_idle_timeout_ms", "600000"),
+            ("pool_max_lifetime_ms", "1800000"),
+            ("pool_test_before_acquire", "true"),
+        ])
+    );
+    let authored = entries(&[
+        address,
+        ("pool_max_lifetime_ms", "5000"),
+        ("pool_test_before_acquire", "false"),
+    ]);
+    let effective = schema.effective_entries(&authored);
+    assert_eq!(
+        effective,
+        entries(&[
+            address,
+            ("pool_max_lifetime_ms", "5000"),
+            ("pool_test_before_acquire", "false"),
+            ("pool_acquire_timeout_ms", "30000"),
+            ("pool_idle_timeout_ms", "600000"),
+        ])
+    );
+    schema
+        .validate(&effective)
+        .assured("the declared defaults keep their own value rules");
+}
+
+#[test]
+fn the_client_schema_refuses_a_pool_key_that_breaks_its_rule() {
+    let schema = ConnectorKind::Postgres
+        .client()
+        .assured("Postgres declares a configured client")
+        .config;
+    let address = ("addr", "postgres://127.0.0.1/nervix?sslmode=disable");
+    for (key, value, expected) in [
+        (
+            "pool_acquire_timeout_ms",
+            "0",
+            ClientConfigValue::Milliseconds.label(),
+        ),
+        (
+            "pool_idle_timeout_ms",
+            "1.5s",
+            ClientConfigValue::Milliseconds.label(),
+        ),
+        (
+            "pool_max_lifetime_ms",
+            "-1",
+            ClientConfigValue::Milliseconds.label(),
+        ),
+        (
+            "pool_test_before_acquire",
+            "yes",
+            ClientConfigValue::Boolean.label(),
+        ),
+    ] {
+        let refusal = schema
+            .validate(&entries(&[address, (key, value)]))
+            .expect_err("the value breaks its declared rule");
+        assert_eq!(
+            refusal.current_context(),
+            &ClientConfigSchemaError::InvalidValue {
+                key: key.to_string(),
+                expected,
+            }
+        );
+    }
+    let refusal = schema
+        .validate(&entries(&[address, ("pool_max_lifetime", "1000")]))
+        .expect_err("the schema declares every key Nervix reads");
+    assert_eq!(
+        refusal.to_string(),
+        "unknown client config key 'pool_max_lifetime'"
+    );
+}
+
+#[test]
+fn a_pool_checkout_is_bounded_by_its_key_with_the_default_the_schema_declares() {
+    let declared = PostgresTableEmitter::CAPABILITIES.bounds;
+    assert_eq!(
+        declared.deadline_keys(),
+        vec![DeadlineKey::PoolAcquireTimeout]
+    );
+    let bounds: Vec<WaitBound> = declared.waits.iter().map(|wait| wait.bound).collect();
+    assert_eq!(
+        bounds[0],
+        WaitBound::Key {
+            key: DeadlineKey::PoolAcquireTimeout,
+            omitted: OmittedDeadline::Default(Duration::from_secs(30)),
+        }
+    );
+    let schema = ConnectorKind::Postgres
+        .client()
+        .assured("Postgres declares a configured client")
+        .config;
+    let key = schema
+        .key(DeadlineKey::PoolAcquireTimeout.key())
+        .assured("the client declares the key its emitter's wait names");
+    assert_eq!(key.presence, ClientConfigPresence::Defaulted("30000"));
 }
 
 #[test]
