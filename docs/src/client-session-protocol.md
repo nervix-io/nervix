@@ -221,6 +221,14 @@ sanitizer-backed fuzzing run the same assertions through the
 Every live node runs both client listeners. Neither depends on leadership or placement, and both
 close only when the node begins to stop.
 
+Configured `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT` ingestors use the server's VHOST listeners on
+every live node. Their codec payloads and configured WebSocket signaling follow the
+[endpoint ingestion contract](ingestors.md#http-endpoint-and-websockets-endpoint), independently of
+the session framing and attachment recovery described here. Endpoint `MODE ACK` reuses the client
+submission outcome labels in an HTTP JSON response or a signaling frame; it has its own per-node
+response window and absolute ACK deadline. `MODE NO ACK` confirms HTTP admission with 202 and sends
+no per-frame graph acknowledgement on WebSockets.
+
 ### Native gRPC
 
 Native clients reach the gRPC service `nervix.session.Session`, which serves four methods and
@@ -1998,61 +2006,16 @@ they cover, and how to run them.
 
 ## Measured Costs
 
-The protocol's costs were measured against the accepted FlatBuffers Row form and recorded, with
-their raw results and reproduction commands, in `tests/client-wire-16-performance.md` and
-`tests/evidence/client-wire-16`. The figures below summarize that record. They were taken on a
-shared host with a release server and a debug measurement harness, so they show where the cost of
-each stage lies and bound regressions. They are not throughput guarantees, and the record does not
-attribute a difference between two of its runs to the protocol unless it says so.
+[Client Wire 16](https://app.clickup.com/t/86bc1ahz3) retains the performance report, raw samples,
+reproduction commands, tested revisions and regression alarms. Measurements qualify their recorded
+workload, build profile and host; they do not establish throughput guarantees for another revision.
 
-**Construction and verification.** The server writes each Arrow column value directly into
-FlatBuffers tables, with no record-shaped JSON object, map of fields, or intermediate row. A frame
-is verified once, and every later read borrows from it:
-
-| Workload | Rows / frames / wire bytes | Arrow to wire p50 | Verify p50 | Borrowed full scan p50 | Owning every cell p50 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| One row per frame, alternating branches | 100 / 100 / 131,192 | 112 µs | 52 µs | 7 µs | 15 µs |
-| Narrow rows in one batch | 1,024 / 4 / 135,896 | 415 µs | 250 µs | 47 µs | 91 µs |
-| Wide rows with strings, bytes, nulls, and redaction | 100 / 1 / 124,576 | 271 µs | 132 µs | 28 µs | 50 µs |
-| Large batch | 4,096 / 16 / 4,672,376 | 2,441 µs | 1,263 µs | 393 µs | 873 µs |
-| Rows of 16 KiB, limited by frame bytes | 256 / 2 / 4,224,416 | 332 µs | 134 µs | 25 µs | 160 µs |
-| Every fourth row selected | 256 / 1 / 33,968 | 100 µs | 58 µs | 25 µs | 20 µs |
-
-Verification and borrowed reads allocate nothing; reading one cell per frame takes about 0.2 µs.
-Owning every cell of 1,024 narrow rows allocates about 172 KB, and rendering them as the JSON text
-the CLI and console display allocates about 724 KB, with escaped field names computed once per batch
-rather than once per row.
-
-**Copies and retained buffers.** Variable-length values are copied once, into the builder, and the
-finished buffer becomes the queued frame without another copy. The gRPC sender copies a frame into
-its output buffer, about 77 µs for the 4.67 MB large batch. The gRPC receiver copies a frame below
-64 KiB into an allocation of its own and shares the receive buffer of a larger one. A WebSocket
-message must be owned, so the console transport copies a frame once more, about 79 µs for the same
-batch. The 256-row and frame-byte limits keep a frame from growing into an unbounded buffer: the
-large batch held 8.38 MB of live allocation for 4.67 MB of frames, the byte-limited batch 4.28 MB
-for 4.22 MB, and live allocation returned to its baseline once the frames were released.
-
-**End to end.** The record repeats the workload of the original Protobuf baseline. In its last run,
-on a clean commit, the release server answered a native command in 2.9 ms at p50 and 3.9 ms at p99,
-delivered a typed HTTP input to a Row subscriber in 23.6 ms and 28.9 ms, served a live graph
-snapshot on the console WebSocket in 176 µs and 397 µs, and completed a one-file upload in 15.0 ms
-and 15.6 ms. Of the command time, about 2.1 ms at p50 is preparation in the debug client, dominated
-by its statement parser, and about 1.0 ms is the prepared request and its reply. Control commands
-sent while a subscriber was paused or draining slowly completed in 4.5 ms and 4.9 ms at p50, because
-replies take the control lane ahead of queued rows. The median command request and response were 176
-and 1,640 bytes, and a one-row subscription frame 1,320 bytes.
-
-**Transport and bindings.** Opening a session on one node took about 2 to 4 ms over plaintext and 4
-to 5 ms over TLS; the per-command difference between the two did not stay stable across runs.
-Through the C ABI, borrowing a verified frame takes about 60 to 70 ns, retaining and releasing an
-event 80 to 90 ns, and copying the states, fixed-width values, or variable-length values of a
-100-row column into caller buffers 64 to 122 µs. Through CPython and `ctypes`, each call costs about
-0.6 to 6 µs, which is why a host reads a batch column by column rather than value by value.
-
-The record also sets regression alarms derived from the Protobuf baseline: a p99 of 6.5 ms and a
-1,900-byte response for a command, 90 ms and 1,500 bytes for a typed Row delivery, 3.6 ms and 4,600
-bytes for a graph snapshot, and 75 ms and 200 bytes for an upload acknowledgement. They are
-qualification thresholds, not promises.
+The cost model follows the protocol boundaries: the server writes Arrow column values directly
+into FlatBuffers tables, verification runs once per frame, and later views borrow that frame.
+Owning cells and rendering their display text allocate separately. The gRPC sender copies into its
+output buffer, small received frames detach from the receive buffer, and WebSocket messages require
+owned bytes. The row and frame-byte limits bound retained buffers. Binding hosts read columns in
+bulk to avoid paying a host-language call for each cell.
 
 ## Guarantees And Non-Guarantees
 

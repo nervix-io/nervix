@@ -231,7 +231,7 @@ pub(super) fn project_vm_input_column(
                         })
                     });
                 }
-                runtime_values_input_column(std::iter::repeat_n(None, row_count), row_count, field)
+                null_input_column(field, row_count)
             };
             return match shared {
                 Some(shared) => shared.column(field, build),
@@ -252,11 +252,7 @@ pub(super) fn project_vm_input_column(
         }
         if sources.has_strict_namespace(field.name()) {
             if field.is_nullable() {
-                return runtime_values_input_column(
-                    std::iter::repeat_n(None, row_count),
-                    row_count,
-                    field,
-                );
+                return null_input_column(field, row_count);
             }
             return Err(Report::new(RuntimeSchemaError::MissingField {
                 field: field.name().clone(),
@@ -269,11 +265,22 @@ pub(super) fn project_vm_input_column(
         }
     }
     if field.is_nullable() {
-        return runtime_values_input_column(std::iter::repeat_n(None, row_count), row_count, field);
+        return null_input_column(field, row_count);
     }
     Err(Report::new(RuntimeSchemaError::MissingField {
         field: field.name().clone(),
     }))
+}
+
+/// Missing nullable input is an Arrow null column, including types with no RuntimeValue scalar.
+fn null_input_column(
+    field: &arrow_schema::Field,
+    row_count: usize,
+) -> error_stack::Result<VmTypedArray, RuntimeSchemaError> {
+    VmTypedArray::try_from_array_ref(arrow_array::new_null_array(field.data_type(), row_count))
+        .change_context(RuntimeSchemaError::UnsupportedArrowType {
+            data_type: field.data_type().clone(),
+        })
 }
 
 pub(super) fn carrier_input_column(
