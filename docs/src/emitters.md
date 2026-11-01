@@ -1260,7 +1260,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
-| Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, message.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
+| Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
 | Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1280,9 +1280,10 @@ report is still ambiguous: the broker may have accepted the record, so a retry c
 
 Kafka's `acks`, idempotence, batching, linger, and compression remain pass-through client
 configuration. `ACK TIMEOUT` bounds the report wait and is also the producer's own delivery bound:
-the emitter sets librdkafka's `message.timeout.ms` to its
-`ACK TIMEOUT`, rounded up to the millisecond, and removes `delivery.timeout.ms`, overriding either
-name in the client's `CONFIG`. The producer therefore gives up a record within about a second of
+the emitter sets the producer's `delivery.timeout.ms` to its
+`ACK TIMEOUT`, rounded up to the millisecond, replacing the client's own `delivery.timeout.ms`, the
+one name a Kafka client accepts for that librdkafka property. The producer therefore gives up a
+record within about a second of
 the emitter doing so, the interval at which librdkafka checks message timeouts, instead of
 delivering it later beside the copy the retry sends. An `ACK TIMEOUT` longer than the 2147483647
 milliseconds librdkafka holds refuses the emitter when it starts. `NO ACK` is fire-and-forget after
@@ -3216,6 +3217,30 @@ CREATE ICEBERG TABLE EMITTER iceberg_notifications
 ```
 
 The REST catalog is the authority for namespace and table metadata. Nervix does not write a separate object-store catalog pointer file and does not provision catalog entries from the emitter runtime path.
+
+#### Iceberg catalog namespace and table
+
+At open, the emitter loads the declared table from the REST catalog. Nervix creates neither the
+namespace nor the table: a catalog that holds no namespace of the declared name, or no table of the
+declared name in a namespace it holds, fails the open with the entity it lacks. A REST catalog
+answers the load of a table in a missing namespace exactly as it answers the load of a missing
+table, so the emitter asks the catalog for the namespace to tell the two apart. `DESCRIBE EMITTER`
+shows the outcome as the emitter's transient error, and the emitter retries the open on its declared
+retry policy, so it opens once an operator provisions what it lacks. Rows its relays deliver
+meanwhile wait for that open, and the emitter commits them once it opens:
+
+| Catalog state | Transient error |
+| --- | --- |
+| No namespace of the declared name | `ICEBERG namespace 'Analytics.Events' does not exist` |
+| The namespace, without a table of the declared name in it | `ICEBERG table 'orders' does not exist in namespace 'Analytics.Events'` |
+| A catalog that fails the load | `failed to load ICEBERG table 'orders' in namespace 'Analytics.Events'`, followed by the catalog's error |
+| A catalog that does not hold the table, then fails the namespace lookup | `failed to look up ICEBERG namespace 'Analytics.Events'`, followed by the catalog's error |
+
+To move an emitter to a table in another namespace, `ALTER ICEBERG TABLE EMITTER ... SET TO`
+restates the complete destination with the new `NAMESPACE` and that table's `LOCATION`, as
+[Altering emitters](#altering-emitters) describes for every entity. The replaced emitter opens the
+table in the new namespace, which must already exist, and `SHOW CREATE EMITTER` and
+`DESCRIBE EMITTER` show the new namespace.
 
 #### Iceberg table schema
 
