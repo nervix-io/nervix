@@ -1102,8 +1102,9 @@ build and the existing tests, and nothing in it changes behavior.
   production path and complete assertion in ordinary randomized/corpus and coverage-guided
   libFuzzer runs. Registration in both CI modes is mandatory even while other work is concurrent.
   CI runs each mode only for a PR carrying its label: the sanitizer mode for `fuzz` and the
-  ordinary randomized/corpus mode for `bolero-random`. `fuzz` is the preferred Bolero evidence; a
-  PR carries `bolero-random` only when its task requires the randomized/corpus run itself, such as
+  ordinary randomized/corpus mode for `bolero-random`. `fuzz` is the preferred Bolero evidence, run
+  locally by default under the expensive label rule below; a PR carries `bolero-random` only when
+  its task requires the randomized/corpus run itself, such as
   a change to that run or a release qualification. Check may exclude the reusable Bolero workflow
   only for a verified prose-only PR without either label.
   A target addition or change also updates the target register in
@@ -1177,8 +1178,9 @@ build and the existing tests, and nothing in it changes behavior.
   condition variable, the order in which tracked locks are acquired, or a shutdown, drain, restore,
   cancellation, handoff or other lifecycle or ownership path that uses tracked locks runs
   `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress` and
-  `just test-deloxide-stress-restore` and carries the `deloxide` label, so that CI's `deloxide` job,
-  which runs only for a pull request with that label, runs all four. The two stress selections
+  `just test-deloxide-stress-restore` locally. CI's `deloxide` job runs all four only for a pull
+  request labeled `deloxide`, and that label stays off by default under the expensive label rule
+  below. The two stress selections
   compile one build with Deloxide's bounded scheduling disturbance and each keeps its own lane
   budget: `deloxide-stress` runs the active-only probes, conformance checks and owner tests, the
   lifecycle scenarios tagged `@deloxide_stress` and the paced-driver scenarios, and
@@ -1197,8 +1199,8 @@ build and the existing tests, and nothing in it changes behavior.
   does not reach and why; `just validate-deloxide-applicability` holds the records to the compiler's
   acquisition catalog, and a recorded gap is a reviewed declaration, never a waiver of the other
   evidence. The change records what the diagnostic run covered, what it cannot see, and the
-  evidence it retained: the lane's attempts under `target/deloxide/test-deloxide` and the CI job's
-  artifacts. An active cycle it reports is fixed in the owner, never suppressed, retried away or
+  evidence it retained: the lane's attempts under `target/deloxide/test-deloxide` and, when the
+  label enabled it, the CI job's artifacts. An active cycle it reports is fixed in the owner, never suppressed, retried away or
   excluded from the run. A run that executed no check, lost a finding or could not record one is a
   failed diagnostic execution, never a clean result. Every potential-order finding remains visible
   until its owner fixes it or records a specific non-overlap, shared-reader or lifecycle proof
@@ -1499,8 +1501,8 @@ build and the existing tests, and nothing in it changes behavior.
   built image; [External Cluster Chaos](docs/src/cluster-chaos.md) documents them. CI runs the smoke
   suite against a pull request's own images only for a pull request labeled `chaos`, and the soak
   suite for one labeled `chaos-soak`; a pull request that changes the chaos runner, or the
-  membership, failover, recovery or delivery behavior its scenarios verify, carries the `chaos`
-  label. Each suite runs against the release image and against the Deloxide diagnostic image of the
+  membership, failover, recovery or delivery behavior its scenarios verify, runs the suite locally,
+  and those labels stay off by default under the expensive label rule below. Each suite runs against the release image and against the Deloxide diagnostic image of the
   same revision, whose label makes every run fail unless the deadlock evidence of each process its
   nodes started qualifies; a change to the diagnostic image, its evidence collection or a path its
   scenarios exercise under tracked locks keeps both green.
@@ -1573,6 +1575,17 @@ build and the existing tests, and nothing in it changes behavior.
   `no-docker` only when nothing in it needs an image. Adding or removing any label cancels a Check
   in progress and starts it again, so a pull request sets its labels before the run it means to
   keep.
+- `fuzz`, `chaos`, `chaos-soak` and `deloxide` are expensive in CI, so they stay off by default and
+  their checks run locally first. A pull request carries one only for a strong, task-specific need
+  that local verification cannot reasonably satisfy, not because it touches related code. It
+  enables the fewest lanes that need CI, says why in its description, and records the local
+  commands, revision, seeds or scenarios and results there. A release qualification still needs
+  them, because `just release-evidence` requires their checks. Once a label has enabled a check,
+  the check's result stands: removing the label never hides a failure.
+- An agent never changes which runner a job uses on its own: not a `runs-on` label, a runner's size
+  or provider, or the cache bucket that follows them, in any pull request. When CI malfunctions, the
+  agent stops, reports the evidence to the user and asks for approval. A runner change lands only
+  with the user's explicit approval for that change, and never inside a feature or a fix.
 - `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
   instrumentation: `test-typed-ratchet`, `bench-smoke`, `plexus-completion-walk`,
   `validate-connector-matrix`, the canonical `test-shuttle` and `test-loom` runners, the canonical

@@ -2847,10 +2847,13 @@ attempt in its verdict.
 
 ### Labels And Release Evidence
 
-Label a pull request `chaos` when it changes either of these:
+Run the suite locally for a change to either of these:
 
 - the chaos runner
 - the membership, failover, recovery or delivery behavior its scenarios verify
+
+The `chaos` and `chaos-soak` labels stay off by default, and a pull request carries one only for
+the need [CI labels](./developing-nervix.md#ci-labels) describes.
 
 Use `chaos-soak` to run the whole matrix against the pull request's own images, and select both
 labels when qualifying the complete matrix. A change to the diagnostic image, its evidence

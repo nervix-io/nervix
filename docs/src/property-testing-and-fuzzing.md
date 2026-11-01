@@ -743,7 +743,9 @@ reserve additional time for compilation, artifacts and cleanup. A cache may seed
 cannot skip a target or replace checked-in regressions. An empty selection, timeout, engine
 failure, sanitizer finding or property failure fails the job.
 
-`fuzz` is the preferred Bolero evidence in CI. Its shards discover the inventory, run a
+`fuzz` is the preferred Bolero evidence in CI, and it stays off by default: run `just fuzz` locally
+first, and label a pull request only for the need [CI labels](./developing-nervix.md#ci-labels)
+describes. Its shards discover the inventory, run a
 coverage-guided sanitizer campaign of every registered target from its checked-in corpus, measure
 the Rust source those campaigns execute and qualify the runner's failure paths. A pull request whose
 diff requires the ordinary suites runs each product property there as an ordinary Rust test that
