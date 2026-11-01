@@ -314,7 +314,9 @@ publication and relocation.
 ## Sources, Emitters, And Error Routes
 
 An ingestor start uses the scheduled source class, client configuration, codec, ACK boundary,
-and bound ordered routes from its entrypoint plan. A reingestor binds its source predicates and
+and bound ordered routes from its entrypoint plan. A Pulsar plan retains the owned subscription's
+required creation position alongside its ownership; composition passes that typed choice to the
+connector without inventing a position for a provisioned cursor. A reingestor binds its source predicates and
 incoming-branch materialized dependencies before attaching relay inputs. Initial build, entity
 swap, reassignment, memory-pressure resume, and Kafka domain-offset placement all use those
 typed contracts. Route plans decide whether output is unbranched, preserves an incoming key, or
