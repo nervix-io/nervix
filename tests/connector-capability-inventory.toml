@@ -1138,6 +1138,7 @@ capability = "HEADERS"
 entity = "WEBSOCKETS CONNECTION INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection sends literal upgrade headers and exposes response headers and frame types" },
+  { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection offers subprotocols and reads the one its peer selects on <cluster_size> nodes" },
 ]
 
 [[capability]]

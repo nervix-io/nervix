@@ -2326,8 +2326,24 @@ See the [WEBSOCKETS CONNECTION capability and mirror reference](connector-capabi
 This opens an outbound WebSocket connection through a `WEBSOCKETS CLIENT` and decodes text or
 binary frames. Its optional `HEADERS { 'authorization' = 'Bearer token' }` clause follows `FROM
 <client>` and takes literal string names and values. Names are case-insensitive; repeated names,
-protocol-owned fields (`Host`, hop-by-hop framing fields and `Sec-WebSocket-*`), malformed values,
-more than 128 fields, or more than 32 KiB of field name/value bytes are refused before activation.
+protocol-owned fields (`Host`, hop-by-hop framing fields and every `Sec-WebSocket-*` field except
+`Sec-WebSocket-Protocol`), malformed values, more than 128 fields, or more than 32 KiB of field
+name/value bytes are refused before activation.
+
+`HEADERS { 'sec-websocket-protocol' = 'v2.events, v1.events' }` offers subprotocols in the order
+of preference written. The value lists one or more subprotocol tokens (RFC 6455): elements
+separated by commas, with optional spaces or tabs around each comma. An empty element, an element
+that is not a token, and a token offered twice are refused before activation. The upgrade writes
+the offer as its tokens joined by commas alone, so the example sends `v2.events,v1.events`, and
+the offer counts toward the field bounds above. The peer must select exactly one of the offered
+subprotocols. A peer that selects none of them, selects one the upgrade did not offer, or selects
+one when the upgrade offered none fails that connection before any frame is read. The source then
+tries none of the endpoint's other addresses: the endpoint answered, so another address would
+answer the offer the same way. `DESCRIBE INGESTOR` shows the refusal as the transient error,
+without naming a subprotocol, because an offer can carry a credential, and the source reconnects
+on the host's cadence below. Refusals of a malformed offer likewise name the element's position,
+never its value. The selected subprotocol is the opening response's
+`sec-websocket-protocol` header, which `read_header('sec-websocket-protocol')` reads.
 
 Each data frame exposes `metadata.frame_type` as `text` or `binary`. `read_header` and
 `read_headers` read the opening response's printable ASCII header values, including repeated values in their
@@ -2347,14 +2363,16 @@ The client's Nervix-owned `CONFIG` is strict, with lowercase, case-sensitive key
 | `handshake_buffer_capacity` | Accepted signaling messages retained before readiness: 1–65535, default 16. A full queue backpressures the connection within the signaling `TIMEOUT`. |
 | `max_message_size` | Positive whole bytes per incoming message, including fragmented messages: at most 4294967295, default 67108864 (64 MiB). |
 | `max_frame_size` | Positive whole bytes per incoming frame: at most 4294967295, default 16777216 (16 MiB). |
-| `tls_ca_file` | Optional CA file for `wss://`. |
-| `tls_cert_file`, `tls_key_file` | Optional client identity files, supplied together for `wss://`. |
+| `tls_ca_file` | Optional CA file; only with a `wss://` endpoint. |
+| `tls_cert_file`, `tls_key_file` | Optional client identity files, supplied together; only with a `wss://` endpoint. |
 
-Durations obey the shared schedulable physical-duration bound. Unknown or repeated keys are
-refused. TLS file keys are refused with `ws://`. Resource mounts and
-configuration templates keep their shared client contract; rendered values are checked before
-commitment and again when opening the source. A ping write has a one-second physical budget and a
-failure triggers recovery.
+The client's declared key schema refuses unknown, repeated or mistyped keys and TLS file keys with
+`ws://`, and supplies the three declared defaults that `DESCRIBE CLIENT` shows. The WebSocket
+configuration then refuses an endpoint with a fragment, a count above its maximum and three ping
+intervals beyond the schedulable bound. Durations obey the shared schedulable physical-duration
+bound. Resource mounts and configuration templates keep their shared client contract; rendered
+values are checked before commitment and again when opening the source. A ping write has a
+one-second physical budget and a failure triggers recovery.
 
 After signaling succeeds, the idle timer starts. An explicit idle timeout overrides the
 ping-derived value. Every received frame, including a ping or pong, refreshes activity. Sending a
