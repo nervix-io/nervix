@@ -37,9 +37,10 @@ use crate::{
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
-    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, PositionClass, RetryPolicy,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration,
+    IngestorMetadataField, IngestorMetadataType, IngestorReference, IngestorReferenceKind,
+    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
+    OptionValue, PositionClass, RetryPolicy,
 };
 
 configured_client!(Pulsar: unpooled, config CLIENT_CONFIG, CreateClientPulsar => PulsarConfigEntry);
@@ -424,11 +425,24 @@ const PULSAR_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["Messages above the broker's announced maximum are rejected."],
 };
 
+/// The identity, producer metadata and delivery count of a Pulsar message.
+const PULSAR_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("topic", IngestorMetadataType::String),
+    IngestorMetadataField::new("message_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("publish_time", IngestorMetadataType::Datetime),
+    IngestorMetadataField::new("event_time", IngestorMetadataType::Datetime),
+    IngestorMetadataField::new("key", IngestorMetadataType::String),
+    IngestorMetadataField::new("ordering_key", IngestorMetadataType::Bytes),
+    IngestorMetadataField::new("producer_name", IngestorMetadataType::String),
+    IngestorMetadataField::new("sequence_id", IngestorMetadataType::I64),
+    IngestorMetadataField::new("redelivery_count", IngestorMetadataType::I64),
+]);
+
 impl IngestorDeclaration for PulsarTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // A Pulsar message carries its properties as a list, in the order the producer wrote them.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
-        metadata: IngestorMetadataDeclaration::NONE,
+        metadata: PULSAR_TOPIC_METADATA,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Pulsar),
         position_class: PositionClass::Replayable,

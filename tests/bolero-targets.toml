@@ -3281,6 +3281,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/pulsar/src/topic/__fuzz__/topic__ingestor__metadata_tests__bolero_pulsar_message_metadata_preserves_every_field/corpus"
+domain_version = 1
+features = []
+id = "pulsar-message-metadata"
+invariant = "Every bounded current Pulsar message preserves its complete topic, message identity including partition and batch index, exact publish and optional event instants, nullable text and binary keys, producer name, sequence id, protocol redelivery count (omission means zero), ordered repeated properties, payload and acknowledgement position through its production metadata owner and retained replay."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-connector-pulsar"
+random_iterations = 256
+source = "crates/connectors/pulsar/src/topic/ingestor_metadata_tests.rs"
+test = "topic::ingestor::metadata_tests::bolero_pulsar_message_metadata_preserves_every_field"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/sentry/src/event/__fuzz__/event__envelope_properties__bolero_prepared_envelopes_preserve_complete_events_across_attempts/corpus"
 domain_version = 2
 features = []

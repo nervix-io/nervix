@@ -377,6 +377,7 @@ class InventoryTests(unittest.TestCase):
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "kafka-record-metadata",
+            "pulsar-message-metadata",
             "ingestor-describe-envelope",
             "dns-operation-budget",
         })

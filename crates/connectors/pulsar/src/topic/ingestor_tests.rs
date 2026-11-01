@@ -11,6 +11,7 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerIngestorConnector, IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError,
     IngestorMessage, IngestorReadCancellation, IngestorResume,
@@ -135,6 +136,47 @@ struct Observed {
     subscriptions: mpsc::UnboundedSender<SubscriptionCommand>,
 }
 
+/// The message a loopback delivery carries before a real consumer id is selected.
+struct Delivery {
+    entry_id: u64,
+    redelivery_count: Option<u32>,
+    metadata: MessageMetadata,
+}
+
+impl Delivery {
+    fn standard(entry_id: u64) -> Self {
+        Self {
+            entry_id,
+            redelivery_count: Some(0),
+            metadata: MessageMetadata {
+                producer_name: "loopback-producer".to_owned(),
+                sequence_id: entry_id,
+                publish_time: 1,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn frame(&self, consumer_id: u64) -> PulsarFrame {
+        PulsarFrame {
+            command: BaseCommand {
+                r#type: i32::from(CommandType::Message),
+                message: Some(CommandMessage {
+                    consumer_id,
+                    message_id: message_id(self.entry_id),
+                    redelivery_count: self.redelivery_count,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            payload: Some(PulsarPayload {
+                metadata: self.metadata.clone(),
+                data: format!("{{\"user_id\":{}}}", self.entry_id).into_bytes(),
+            }),
+        }
+    }
+}
+
 /// A Pulsar broker on loopback that serves shared-subscription consumers: it delivers `messages`
 /// once the first durable consumer asks for them, answers acknowledgements with `answer` and
 /// subscription commands with `subscriptions`, and reports what it receives.
@@ -151,6 +193,15 @@ impl LoopbackBroker {
 
     async fn start_with(
         messages: u64,
+        answer: AckAnswer,
+        subscriptions: SubscriptionAnswers,
+    ) -> Self {
+        let deliveries = (0..messages).map(Delivery::standard).collect();
+        Self::start_deliveries(deliveries, answer, subscriptions).await
+    }
+
+    async fn start_deliveries(
+        deliveries: Vec<Delivery>,
         answer: AckAnswer,
         subscriptions: SubscriptionAnswers,
     ) -> Self {
@@ -175,7 +226,7 @@ impl LoopbackBroker {
             nervix_primitives::task::spawn(Self::serve(
                 Framed::new(first, PulsarCodec),
                 lookup_url,
-                messages,
+                deliveries,
                 answer,
                 subscriptions,
                 observed,
@@ -201,7 +252,7 @@ impl LoopbackBroker {
     async fn serve(
         mut connection: Framed<TcpStream, PulsarCodec>,
         service_url: String,
-        messages: u64,
+        deliveries: Vec<Delivery>,
         answer: AckAnswer,
         subscriptions: SubscriptionAnswers,
         observed: Observed,
@@ -247,8 +298,11 @@ impl LoopbackBroker {
             } else if let Some(flow) = command.flow {
                 if !delivered && durable_consumers.contains(&flow.consumer_id) {
                     delivered = true;
-                    replies
-                        .extend((0..messages).map(|entry| Self::message(flow.consumer_id, entry)));
+                    replies.extend(
+                        deliveries
+                            .iter()
+                            .map(|delivery| delivery.frame(flow.consumer_id)),
+                    );
                 }
             } else if let Some(ack) = command.ack {
                 let acknowledged = Received::Ack {
@@ -383,30 +437,6 @@ impl LoopbackBroker {
             }),
             ..Default::default()
         })
-    }
-
-    fn message(consumer_id: u64, entry_id: u64) -> PulsarFrame {
-        PulsarFrame {
-            command: BaseCommand {
-                r#type: i32::from(CommandType::Message),
-                message: Some(CommandMessage {
-                    consumer_id,
-                    message_id: message_id(entry_id),
-                    redelivery_count: Some(0),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            payload: Some(PulsarPayload {
-                metadata: MessageMetadata {
-                    producer_name: "loopback-producer".to_string(),
-                    sequence_id: entry_id,
-                    publish_time: 1,
-                    ..Default::default()
-                },
-                data: format!("{{\"user_id\":{entry_id}}}").into_bytes(),
-            }),
-        }
     }
 
     fn ack_confirmation(consumer_id: u64, request_id: u64) -> PulsarFrame {
@@ -584,6 +614,119 @@ async fn read(source: &mut PulsarTopicIngestor, count: usize) -> Vec<PulsarTopic
 
 /// How long a test lets the consumer receive before it reads again.
 const RECEIVE_INTERVAL: Duration = Duration::from_millis(10);
+
+#[nervix_primitives::test]
+async fn broker_redelivery_counts_reach_the_message_metadata_with_the_protocol_default() {
+    use nervix_connector::{RetainedIngestMetadata, RetainedIngestMetadataValue as Value};
+
+    let counts = [None, Some(0), Some(1), Some(u32::MAX)];
+    let mut deliveries = Vec::new();
+    for (index, count) in counts.into_iter().enumerate() {
+        let entry = u64::try_from(index).assured("the four fixture deliveries fit u64");
+        let mut delivery = Delivery::standard(entry);
+        delivery.redelivery_count = count;
+        deliveries.push(delivery);
+    }
+    let broker = LoopbackBroker::start_deliveries(
+        deliveries,
+        AckAnswer::Confirm,
+        SubscriptionAnswers::ABSENT,
+    )
+    .await;
+    let mut source = open(&broker).await;
+    for count in counts {
+        nervix_primitives::task::consume_budget().await;
+        let batch = timeout(
+            DEADLINE,
+            source.next_batch(
+                IngestorBatchRequest {
+                    max_messages: std::num::NonZeroUsize::MIN,
+                    batch_timeout: None,
+                },
+                &IngestorReadCancellation::new(),
+            ),
+        )
+        .await
+        .assured("the loopback broker delivers the selected packet")
+        .assured("each selected packet has representable metadata");
+        let IngestorBatch::Messages(messages) = batch else {
+            panic!("the packet must reach its message owner");
+        };
+        assert_eq!(messages.len(), 1);
+        let captured = RetainedIngestMetadata::capture(messages[0].metadata().fields);
+        let expected = match count {
+            Some(count) => Value::I64(i64::from(count)),
+            None => Value::I64(0),
+        };
+        assert_eq!(captured.values().get(8), Some(&expected));
+    }
+}
+
+#[nervix_primitives::test]
+async fn metadata_failure_returns_the_gathered_prefix_and_survives_a_cancelled_read() {
+    let mut invalid = Delivery::standard(1);
+    invalid.metadata.publish_time = u64::MAX;
+    let deliveries = vec![Delivery::standard(0), invalid, Delivery::standard(2)];
+    let broker = LoopbackBroker::start_deliveries(
+        deliveries,
+        AckAnswer::Confirm,
+        SubscriptionAnswers::ABSENT,
+    )
+    .await;
+    let mut source = open(&broker).await;
+    let request = IngestorBatchRequest {
+        max_messages: std::num::NonZeroUsize::new(3).assured("three is nonzero"),
+        batch_timeout: Some(Duration::from_secs(1)),
+    };
+    let first = timeout(
+        DEADLINE,
+        source.next_batch(request, &IngestorReadCancellation::new()),
+    )
+    .await
+    .assured("the broker sends the entire fixture")
+    .assured("the valid prefix must be returned before the metadata failure");
+    let IngestorBatch::Messages(messages) = first else {
+        panic!("the first read must return its prefix");
+    };
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].payload(), br#"{"user_id":0}"#);
+    let cancelled = IngestorReadCancellation::new();
+    cancelled.cancel();
+    let interrupted = source
+        .next_batch(request, &cancelled)
+        .await
+        .assured("cancellation keeps the deferred failure");
+    assert!(matches!(interrupted, IngestorBatch::Interrupted { gathered } if gathered.is_empty()));
+    let Err(error) = source
+        .next_batch(request, &IngestorReadCancellation::new())
+        .await
+    else {
+        panic!("the exact metadata failure must remain pending after cancellation");
+    };
+    assert!(error.contains::<nervix_models::TimestampError>());
+    assert!(matches!(
+        error.current_context(),
+        IngestorError::Read { .. }
+    ));
+    let next = timeout(
+        DEADLINE,
+        source.next_batch(
+            IngestorBatchRequest {
+                max_messages: std::num::NonZeroUsize::MIN,
+                batch_timeout: None,
+            },
+            &IngestorReadCancellation::new(),
+        ),
+    )
+    .await
+    .assured("the next current packet remains readable")
+    .assured("the metadata failure is reported exactly once");
+    let IngestorBatch::Messages(messages) = next else {
+        panic!("the next packet must remain a message");
+    };
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].payload(), br#"{"user_id":2}"#);
+}
 
 #[nervix_primitives::test]
 async fn a_cancelled_parallel_read_returns_every_message_it_gathered() {

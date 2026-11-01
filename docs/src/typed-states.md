@@ -294,6 +294,14 @@ replacement. A failed preceding configuration supplies no preservation proof: th
 replacement must prepare all of its sessions. An absent `client_id` selects the domain-qualified
 default, with an instance suffix when needed.
 
+**Pulsar received messages.** The driver message crosses one conversion boundary into checked
+publish and optional event `Timestamp` values and an `I64` sequence. The admitted message retains
+those typed values rather than raw time or sequence alternatives. Optional event time, partition
+key and ordering key preserve absence independently of present zero or empty values. The broker
+protocol explicitly defaults an omitted redelivery count to zero; that external default is applied
+once into a lossless `I64`. Failed conversion is a typed read failure, held separately from any
+valid gathered prefix. The full broker position remains the settlement identity.
+
 **Pulsar input retirement.** The same optional replacement plan distinguishes dropping an input
 from replacing it. A changed owned source requires a comparison of resolved broker address,
 qualified topic and subscription name; ownership and consumer policy are not subscription

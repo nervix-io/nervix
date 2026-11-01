@@ -498,7 +498,8 @@ General notes:
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
   `metadata.topic`, `metadata.partition`, `metadata.offset`, `metadata.key`, `metadata.timestamp`,
-  `metadata.timestamp_type`, and `metadata.tombstone`, `SYSLOG LISTENER` declares
+  `metadata.timestamp_type`, and `metadata.tombstone`, `PULSAR TOPIC` declares the
+  [message identity, times, keys and delivery fields](#pulsar), `SYSLOG LISTENER` declares
   `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
   `metadata.remote_addr`, and `metadata.host`, `WEBSOCKETS CONNECTION` declares
@@ -1245,7 +1246,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | Not offered: The current topic declaration exposes properties as headers but no separate typed broker metadata namespace. |
+| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.publish_time: DATETIME OPTIONAL<br>metadata.event_time: DATETIME OPTIONAL<br>metadata.key: STRING OPTIONAL<br>metadata.ordering_key: BYTES OPTIONAL<br>metadata.producer_name: STRING OPTIONAL<br>metadata.sequence_id: I64 OPTIONAL<br>metadata.redelivery_count: I64 OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
@@ -1256,6 +1257,34 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md#pulsar-topic-ingest).
 <!-- connector-matrix:ingest-pulsar-topic:end -->
+
+A Pulsar message exposes these nullable metadata fields to routing expressions:
+
+| Field | Type | Value |
+| --- | --- | --- |
+| `topic` | `STRING` | The qualified topic the consumer received from |
+| `message_id` | `STRING` | `ledger:entry:partition`, with `:batch_index` for a batched message |
+| `publish_time` | `DATETIME` | The broker message's publish time, in milliseconds |
+| `event_time` | `DATETIME` | The producer's optional event time, in milliseconds |
+| `key` | `STRING` | The partition key text stored in the message metadata |
+| `ordering_key` | `BYTES` | The optional binary ordering key |
+| `producer_name` | `STRING` | The producer name carried by the message |
+| `sequence_id` | `I64` | The producer sequence id |
+| `redelivery_count` | `I64` | The broker's count of prior redeliveries |
+
+Combine `topic` and `message_id` when identifying messages across topics. An absent partition
+renders as Pulsar's `-1`. The acknowledgement retains the complete broker id independently of
+this display. The key is the stored text, including base64 text when the producer marks it encoded;
+`ordering_key` preserves its bytes. Missing keys read as null, while present empty keys stay empty.
+Properties remain available through `read_header` and `read_headers` with their order and repeats.
+
+`TIMESTAMP AT metadata.publish_time` or `TIMESTAMP AT metadata.event_time` uses that message time
+for admission and windows. An absent event time is null; a present zero is the Unix epoch. Nervix
+does not substitute publish time for an absent event time. Times outside the signed Unix-nanosecond
+range and sequence ids above `I64::MAX` produce a typed read error identifying the topic, message
+and field. A valid prefix already gathered is delivered before that error. Pulsar's protocol defines
+an omitted redelivery count as zero, so the first delivery reports zero and a broker redelivery can
+report one. Every protocol `u32` count fits the declared `I64`.
 
 Pulsar ingestors read through a shared, durable subscription. The subscription name is required by
 Pulsar, but the subscription type is not exposed in Plexus. Every statement also declares who owns

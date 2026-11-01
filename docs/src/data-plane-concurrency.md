@@ -2199,6 +2199,14 @@ resume barriers use the existing async pause owner, whose ordering remains outsi
 observation; the public outcome and dependent mutation assert recovery under the original
 execution reference.
 
+The registered `@pulsar_message_metadata` workloads cover source metadata in all three delivery
+modes, branch-local event-time windows and broker redelivery. The source's checked metadata and
+single pending read failure are instance-owned. Cancellation returns any gathered prefix without
+consuming the pending failure. Borrowed visitors add no synchronization or concurrent map. Deloxide
+observes the existing host state; foreign Pulsar driver channels, borrowed visitors and asynchronous
+broker waits remain outside its tracked lock graph. The existing ingestor-host Shuttle checks
+retain responsibility for host acknowledgement and cancellation interleavings.
+
 The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
 
 The lane builds all selected executables and diagnostic drivers before starting its workload clock.
