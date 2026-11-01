@@ -25,11 +25,12 @@ use nervix_models::{
     MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor, NatsEmitter,
     NatsSubjectEmitter, OtelAggregationTemporality, OtelLogsEmitter, OtelMetric, OtelValueMapping,
     OutputBranch, PostgresEmitter, PostgresTableEmitter, ProcessorInputs, ProcessorOutputs,
-    PrometheusApiRootError, PulsarEmitter, PulsarEmitterEntity, PulsarTopicEmitter,
-    RabbitMqEmitter, RabbitMqEmitterEntity, RabbitMqQueueEmitter, RetryPolicy, SentryEmitter,
-    SentryEventEmitter, SignalingProtobufConfig, SqsEmitterEntity, SyslogCollectorEmitter,
-    SyslogEmitter, SyslogListenerIngestor, WireSchemaField, WireSchemaName, ZeroMqEmitter,
-    ZeroMqPushEmitter,
+    PrometheusApiRootError, PulsarEmitter, PulsarEmitterEntity, PulsarIngestMode, PulsarIngestor,
+    PulsarSubscription, PulsarSubscriptionOwnership, PulsarSubscriptionType, PulsarTopicEmitter,
+    PulsarTopicIngestor, RabbitMqEmitter, RabbitMqEmitterEntity, RabbitMqQueueEmitter, RetryPolicy,
+    SentryEmitter, SentryEventEmitter, SignalingProtobufConfig, SqsEmitterEntity,
+    SyslogCollectorEmitter, SyslogEmitter, SyslogListenerIngestor, WireSchemaField, WireSchemaName,
+    ZeroMqEmitter, ZeroMqPushEmitter,
 };
 use nonzero_ext::nonzero;
 
@@ -1560,6 +1561,54 @@ fn an_ingestor_source_says_why_its_reject_retry_delay_names_no_duration() {
         assert_invalid_model_reason(
             &error,
             &format!("invalid quiesce REJECT RETRY AFTER duration '{retry_after}': {why}"),
+        );
+    }
+}
+
+#[test]
+fn a_pulsar_subscription_type_that_reads_through_one_consumer_refuses_more_instances() {
+    let domain = DomainName::parse("default").expect("valid domain");
+    let mut ingestor = ingestor_statement("edge_in", "notifications", "event_codec", "kafka", &[]);
+    let identifier = ModelName::from(&ingestor.name);
+    for (kind, instances, refused) in [
+        (PulsarSubscriptionType::Shared, nonzero!(2u64), false),
+        (PulsarSubscriptionType::KeyShared, nonzero!(2u64), false),
+        (PulsarSubscriptionType::Failover, nonzero!(1u64), false),
+        (PulsarSubscriptionType::Exclusive, nonzero!(1u64), false),
+        (PulsarSubscriptionType::Failover, nonzero!(2u64), true),
+        (PulsarSubscriptionType::Exclusive, nonzero!(3u64), true),
+    ] {
+        let nervix_models::IngestorInput::Transport(input) = &mut ingestor.input else {
+            unreachable!("the fixture builds a transport ingestor")
+        };
+        input.source = IngestorEntity::Pulsar(PulsarIngestor::Topic(PulsarTopicIngestor {
+            client: ClientName::parse("pulsar_main").expect("valid identifier"),
+            topic: named("orders"),
+            subscription: PulsarSubscription {
+                name: named("readers"),
+                ownership: PulsarSubscriptionOwnership::Provisioned,
+                kind,
+            },
+            instances,
+            mode: PulsarIngestMode::NoAck,
+            quiesce: nervix_models::IngestQuiesceMode::Suspend,
+        }));
+        let validated = validate_ingestor_source(&domain, &identifier, &ingestor);
+        if !refused {
+            validated.expect("this type can serve these instances");
+            continue;
+        }
+        let error = validated.expect_err("this type reads through one consumer");
+        let RegistryError::InvalidConnectorDeclaration { issue, .. } = error.current_context()
+        else {
+            panic!("expected a declaration refusal: {error:?}");
+        };
+        assert_eq!(
+            issue.to_string(),
+            format!(
+                "PULSAR subscription TYPE {kind} reads through one consumer, so it refuses \
+                 INSTANCES {instances}"
+            )
         );
     }
 }

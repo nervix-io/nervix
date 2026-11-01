@@ -226,6 +226,7 @@ mod postgres_fixtures;
 mod process_cluster;
 mod pulsar_delivery;
 mod pulsar_readiness;
+mod pulsar_subscription_types;
 mod pulsar_subscriptions;
 mod restarted_voter;
 mod session_protocol;
@@ -610,6 +611,8 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// Consumers the scenario holds on Pulsar subscriptions beside its ingestors, by name.
+    held_pulsar_consumers: BTreeMap<String, BrokerObserver>,
     /// The Kafka broker this scenario owns, which it can make refuse writes without touching the
     /// shared test broker.
     kafka_mock_broker: Option<KafkaMockBroker>,
@@ -19429,8 +19432,8 @@ impl UnacknowledgedSourceFixture {
             }
             Self::Pulsar => {
                 "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
-          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST INSTANCES \
-                 1 MODE NO ACK
+          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE \
+                 SHARED INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::RedisPubSub => {

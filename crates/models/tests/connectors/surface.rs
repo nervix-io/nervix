@@ -111,7 +111,7 @@ fn source_surface(kind: IngestorEntityKind) -> IngestorSurface {
             delivery: EVERY_DELIVERY,
             quiesce: SUSPEND,
             locator: Some(("TOPIC", "pulsar_topic")),
-            options: &[("SUBSCRIPTION", true), ("INSTANCES", false)],
+            options: &[("SUBSCRIPTION", true), ("TYPE", true), ("INSTANCES", false)],
         },
         IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => IngestorSurface {
             delivery: &[

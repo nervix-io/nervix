@@ -86,6 +86,11 @@ the visual draft establish that choice before planning; the plan and connector r
 defaulting a missing position. The [connector contract](./connector-contract.md#pulsar-subscription-ownership)
 owns creation and cursor retention.
 
+A Pulsar subscription's type is a required typed field of the subscription, with no default: a
+statement writes one of its four variants, and neither a Model nor a plan can leave the choice to
+the driver. The registry, not the type, refuses a single-consumer variant with more than one
+instance, because that rule holds only until partitioning defines instances for these types.
+
 The Pulsar emitter's running publishing choice keeps related state together: the `NO ACK` variant
 owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
 confirmation settings. An empty receipt collection means there are no outstanding receipts,
@@ -236,11 +241,12 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX INGESTORS` archive signature identifies the current Model layout, including
-an owned Pulsar subscription's required start position, the required branch partition count,
+The registry's `NERVIX SUB TYPES` archive signature identifies the current Model layout, including
+a Pulsar subscription's required type, an owned subscription's required start position, the required
+branch partition count,
 Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's
 `SEND` request shape, and the session and quality of service an MQTT TOPIC ingestor writes beside
-its delivery mode. Consensus's `raft_ingestor_choices_` keyspaces and current state metadata
+its delivery mode. Consensus's `raft_subscription_types_` keyspaces and current state metadata
 encoding identify its stored shapes. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.
 

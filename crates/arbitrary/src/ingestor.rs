@@ -1,6 +1,6 @@
 //! Ingestors: the transport or client source they read, and the routes that build their records.
 
-use std::num::{NonZeroU16, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
@@ -204,7 +204,7 @@ impl Arbitrary<'_> {
     }
 
     /// A Pulsar topic read through a subscription that the ingestor owns or an operator
-    /// provisioned.
+    /// provisioned, in any type, by the instances that type can serve.
     pub fn pulsar_topic_source(&mut self) -> PulsarTopicIngestor {
         let client = self.name();
         let topic = self.pulsar_topic_name();
@@ -215,11 +215,21 @@ impl Arbitrary<'_> {
         } else {
             PulsarSubscriptionOwnership::Provisioned
         };
+        let kind = self.pulsar_subscription_type();
+        let instances = if kind.reads_through_one_consumer() {
+            NonZeroU64::MIN
+        } else {
+            self.positive_u64()
+        };
         let source = PulsarTopicIngestor {
             client,
             topic,
-            subscription: PulsarSubscription { name, ownership },
-            instances: self.positive_u64(),
+            subscription: PulsarSubscription {
+                name,
+                ownership,
+                kind,
+            },
+            instances,
             mode: self.pulsar_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
@@ -232,6 +242,16 @@ impl Arbitrary<'_> {
             nervix_models::PulsarStartPosition::Earliest
         } else {
             nervix_models::PulsarStartPosition::Latest
+        }
+    }
+
+    /// The declared type of a Pulsar subscription.
+    pub fn pulsar_subscription_type(&mut self) -> nervix_models::PulsarSubscriptionType {
+        match self.entropy.byte() % 4 {
+            0 => nervix_models::PulsarSubscriptionType::Shared,
+            1 => nervix_models::PulsarSubscriptionType::KeyShared,
+            2 => nervix_models::PulsarSubscriptionType::Failover,
+            _ => nervix_models::PulsarSubscriptionType::Exclusive,
         }
     }
 

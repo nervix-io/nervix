@@ -460,9 +460,12 @@ current connection, retry and deadline limits.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
   `OWNED BY INGESTOR START AT EARLIEST` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
-  the operator must create before the ingestor reads. Consumers register as
-  `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for missing subscriptions, removal
-  failures and which subscription `ALTER` retains or removes. Changing only consumer policy or
+  the operator must create before the ingestor reads. The owner is followed by a required
+  `TYPE SHARED|KEY_SHARED|FAILOVER|EXCLUSIVE`; `FAILOVER` and `EXCLUSIVE` read through one consumer,
+  so they refuse more than one instance. Consumers register as
+  `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for what each type delivers, missing
+  and held subscriptions, removal failures and which subscription `ALTER` retains or removes.
+  Changing only consumer policy, including `SET TYPE`, or
   handing the same subscription to `PROVISIONED` preserves its backlog; a changed broker, qualified
   topic or subscription name retires the preceding owned subscription best-effort.
 - A `PULSAR CLIENT`'s `namespace` is exactly `'tenant/namespace'` (default `public/default`), and

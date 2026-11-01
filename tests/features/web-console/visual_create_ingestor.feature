@@ -373,7 +373,7 @@ Feature: Web console visual ingestor creation
       | 3            |
 
   @visual_ingestor_pulsar
-  Scenario Outline: A visually created Pulsar ingestor declares its creation position and delivers
+  Scenario Outline: A visually created Pulsar ingestor declares its creation position and type and delivers
     Given Pulsar is running
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -416,7 +416,10 @@ Feature: Web console visual ingestor creation
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "owns the subscription"
     When selector ".create-ingestor-subscription-ownership [data-choice='OWNED BY INGESTOR START AT <start_position>']" is clicked
-    Then selector ".create-preview" contains "SUBSCRIPTION 'visual_{{test_id}}' OWNED BY INGESTOR START AT <start_position>"
+    And selector ".create-submit" is clicked
+    Then selector ".create-validation" contains "subscription's TYPE"
+    When selector ".create-ingestor-subscription-type [data-choice='<type>']" is clicked
+    Then selector ".create-preview" contains "SUBSCRIPTION 'visual_{{test_id}}' OWNED BY INGESTOR START AT <start_position> TYPE <type>"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
@@ -436,8 +439,8 @@ Feature: Web console visual ingestor creation
       """
 
     Examples:
-      | cluster_size | start_position |
-      | 1            | EARLIEST       |
-      | 3            | EARLIEST       |
-      | 1            | LATEST         |
-      | 3            | LATEST         |
+      | cluster_size | start_position | type       |
+      | 1            | EARLIEST       | SHARED     |
+      | 3            | EARLIEST       | EXCLUSIVE  |
+      | 1            | LATEST         | KEY_SHARED |
+      | 3            | LATEST         | FAILOVER   |

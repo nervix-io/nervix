@@ -21,10 +21,11 @@ Plexus properties preserve the metadata source distinctly from a payload field o
 and the same signature and namespace fence that shape.
 
 Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
-`LATEST`, and provisioned subscriptions without a position. Statement generators mix typed
-`SET START AT` with shared ingestor operations. The Model, registry and consensus properties
-preserve those complete values. The `NERVIX INGESTORS` registry signature and
-`raft_ingestor_choices_` consensus namespace identify this current Model layout before decoding.
+`LATEST`, provisioned subscriptions without a position, and all four subscription types, with one
+instance for a type that reads through one consumer. Statement generators mix typed `SET START AT`
+and `SET TYPE` with shared ingestor operations. The Model, registry and consensus properties
+preserve those complete values. The `NERVIX SUB TYPES` registry signature and
+`raft_subscription_types_` consensus namespace identify this current Model layout before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
 persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration
