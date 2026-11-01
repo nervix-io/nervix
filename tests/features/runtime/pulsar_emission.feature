@@ -561,7 +561,9 @@ Feature: Pulsar emission
       | 3            |
 
   # A paced domain's execution time can stand so late that adding the delay leaves the signed
-  # Unix-nanosecond range, which no Nervix timestamp holds, so that record is rejected.
+  # Unix-nanosecond range, which no Nervix timestamp holds, so that record is rejected. No delay a
+  # statement can write reaches past that range from an unpaced domain's actual time. A SKEW of at
+  # least the PERIOD admits every delivery, so the record reaches its emitter whenever it arrives.
   @pulsar_emitter_envelope
   Scenario Outline: A delivery time past the last Nervix timestamp rejects its record
     Given Pulsar is running
@@ -569,7 +571,7 @@ Feature: Pulsar emission
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
-      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
     And Pulsar topic "last_time_{{test_id}}" is observed
     When these Plexus commands are executed on the leader node
@@ -602,7 +604,7 @@ Feature: Pulsar emission
         TO pulsar_main TOPIC 'last_time_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING event_codec
-          DELIVER AFTER 1h
+          DELIVER AFTER 876000h
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
@@ -612,7 +614,7 @@ Feature: Pulsar emission
               error_message = error.message
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
-      START AT '2262-04-11T23:00:00Z' TIME RATE 1.0;
+      START AT '2200-01-01T00:00:00Z' TIME RATE 1.0;
       """
     And http payload is posted to host "last-time-{{test_id}}.example.com" path "/events"
       """
@@ -620,7 +622,7 @@ Feature: Pulsar emission
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "seq":1 | "error_code":"external" | "operation":"publish" | "error_message":"PULSAR rejected record: DELIVER AFTER 3600s
+      "seq":1 | "error_code":"external" | "operation":"publish" | "error_message":"PULSAR rejected record: DELIVER AFTER 3153600000s
       """
 
     Examples:
