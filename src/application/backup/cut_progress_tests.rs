@@ -147,3 +147,35 @@ fn a_pause_failure_keeps_its_cause_and_failure_class() {
     };
     assert_eq!(domain, &progress.domain);
 }
+
+#[test]
+fn a_pause_application_the_deadline_ended_is_the_cut_timeout_and_keeps_the_wait_it_ended() {
+    let mut progress = progress_at(Instant::now());
+    progress.enter(CutPhase::Drain);
+    let wait = crate::runtime::ApplicationWait::Readiness { revision: 115 };
+    let report = Report::new(crate::runtime::RuntimeError::ApplicationDeadline { wait })
+        .change_context(DomainAlterError::BackupPauseTimeout {
+            domain: progress.domain.clone(),
+        });
+    let report = progress.drain_failure(report);
+    let BackupError::CaptureTimeout { phase, .. } = report.current_context() else {
+        panic!("a pause application the cut's deadline ended is attributed to its drain phase");
+    };
+    assert_eq!(*phase, CutPhase::Drain);
+    let Some(DomainAlterError::BackupPauseTimeout { domain }) =
+        report.downcast_ref::<DomainAlterError>()
+    else {
+        panic!("the typed pause application report remains beneath the cut timeout");
+    };
+    assert_eq!(domain, &progress.domain);
+    let Some(crate::runtime::RuntimeError::ApplicationDeadline { wait: ended }) =
+        report.downcast_ref::<crate::runtime::RuntimeError>()
+    else {
+        panic!("the wait the deadline ended remains beneath the pause application");
+    };
+    assert_eq!(*ended, wait);
+    assert!(
+        format!("{report:#}").contains("every live node to ready runtime revision 115"),
+        "the rendered refusal names the wait the deadline ended: {report:#}"
+    );
+}

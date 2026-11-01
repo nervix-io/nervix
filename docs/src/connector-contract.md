@@ -13,6 +13,103 @@ ingestor and emitter plans to the host.
 [HTTP Emitter Architecture](./http-emitter-architecture.md) follows this boundary for one
 outbound request, from Arrow preparation to response and recovery.
 
+## Connector and entity kinds
+
+The vocabulary owns two related identities. `ConnectorKind` names the integration or Nervix-served
+boundary, such as Kafka, HTTP or application sessions. `IngestorEntityKind` and `EmitterEntityKind`
+name a connector together with one entity it reads or writes. HTTP request and HTTP endpoint
+ingestors therefore have distinct kinds, as do OTEL logs, traces and metrics emitters. A connector
+that serves one entity still names that entity explicitly.
+
+### Statement heads and references
+
+Plexus selects these identities in the statement head:
+
+| Statement family | Head examples |
+| --- | --- |
+| Client | `CREATE KAFKA CLIENT`, `CREATE HTTP CLIENT` |
+| Ingestor | `CREATE KAFKA TOPIC INGESTOR`, `CREATE HTTP ENDPOINT INGESTOR`, `CREATE CLIENT PRODUCER INGESTOR` |
+| Emitter | `CREATE KAFKA TOPIC EMITTER`, `CREATE OTEL METRICS EMITTER`, `CREATE CLIENT CONSUMER EMITTER` |
+| Boundary alteration | `ALTER KAFKA TOPIC INGESTOR`, `ALTER OTEL METRICS EMITTER` |
+
+Each connector/entity pair owns its grammar body. Shared combinators compose its keyword head and
+the patterns its body shares with other entities; completion offers the composed head as one item.
+The selected entity's declaration supplies the reference kind, locator, options, modes and
+capabilities. A `TOPIC`, `TABLE` or other locator in the body names the external object; it does not
+select another connector or entity. Nervix references remain typed identifiers, while external
+locators preserve the text admitted by their entity's name rule.
+
+An ingestor or emitter alteration repeats its stored connector and entity. `SET FROM` or `SET TO`
+is parsed as that entity's complete replacement body, and applying the alteration validates the
+stored kind before publishing any operation. Changing the connector/entity pair requires dropping
+and creating the boundary node. Addressing uses the node's ordinary identity instead:
+`DESCRIBE INGESTOR`, `DROP EMITTER`, `SHOW CREATE CLIENT`, and placement selections name the Model
+kind and name without repeating a connector/entity head.
+
+The referenced client need not have the same connector kind as the entity: the entity declaration
+owns that relationship. An Iceberg table emitter names an object-store client and a catalog client;
+an endpoint ingestor names an endpoint; native client producers and consumers name a schema and
+use the session transport without a client Model. The registry validates these reference contracts
+before a graph becomes active.
+
+### Identity through Models and plans
+
+The semantic shape carries the selected kind through each boundary:
+
+| Stage | Owner and representation |
+| --- | --- |
+| Vocabulary | Each connector module declares its client Model, per-entity Models and modes, entity enums, external-name rules and capabilities. `IngestorEntity` and `EmitterEntity` nest connector then entity; the entity Model carries only that entity's fields. |
+| Language | The chosen head selects that entity's body parser and produces its structured Model once. Alterations retain the selected pair and its typed replacement operations. |
+| Decisions | Validation resolves the declared references and capabilities. `IngestorConnectorPlan` and `EmitterConnectorPlan` nest connector then entity, with a typed leaf for each implementation. |
+| Data plane | A per-connector composition module consumes the leaf plan and opens the matching concrete entity implementation. The host executes the plan without reading a Model. |
+
+The vocabulary's shared declaration macros derive kind accessors, metadata and conversions from
+the per-connector entity declarations. Their outer unions list connectors, so a second entity
+extends its connector's own enum. A kind is derived from the Model's variant rather than stored
+beside it as another selector. [Entity declarations](#entity-declarations) owns the complete
+capability contract, and [Typed States](./typed-states.md#validation-and-failure-boundaries) explains the
+validation boundary.
+
+### Implementation declarations and composition
+
+Each connector crate exposes one concrete implementation and configuration per entity in an entity
+module: for example `kafka::topic::KafkaTopicIngestor` and `KafkaTopicEmitter`, Redis `pubsub`,
+Syslog `listener` and `collector`, and ZeroMQ `pull` and `push`. An implementation does not select
+its entity with a mode flag. OTEL exposes `OtelLogsEmitter`, `OtelTracesEmitter` and
+`OtelMetricsEmitter` with distinct configurations; only their private OTLP encoder shares
+signal-dependent encoding and transport.
+
+`IngestorConnector::KIND` is the concrete ingestor's compile-time vocabulary declaration.
+`EmitterLifecycle::kind()` returns the emitter's declaration through the object-safe lifecycle
+contract; concrete emitters expose the same declaration as `KIND`. The server's external-connector
+composition arms contain constant assertions matching each concrete `KIND` to the entity its plan
+arm constructs.
+A mismatched declaration fails compilation. Exhaustive plan matches select the constructor; the
+assertion checks its declared identity, while owner tests and public scenarios verify its behavior.
+
+HTTP request and WebSockets connection ingestors live in their connector crates. Their endpoint
+entities are concrete host-owned ingestors over a shared private intake binding mechanism. The
+binding ends its exact intake lifetime before withdrawal, including when an ingestor drops. Native
+client producer and consumer entities also remain host-owned. Shared implementation mechanisms
+preserve these distinct entity types and declarations.
+
+### Public names and adding an entity
+
+Canonical Plexus, completion and console previews render the selected connector/entity head from
+the vocabulary. `Model::connector_kind()` identifies a configured connector, and entity-kind
+metadata supplies each boundary's composed name. Inspection, diagnostics, logs and metric labels
+derive the connector or entity identity they report from those same declarations. A running task
+resolves its label once outside batch publication. There is no separate server spelling or case
+table.
+
+Adding a second entity keeps this ownership: extend the connector's vocabulary declaration and
+typed union, add its own grammar body, plan leaf, implementation and composition assertion, and
+extend the entity-based generators, conformance tests and runtime capability inventory. Console
+choices and previews consume the declared pair. Shared encoders stay private, and neither a body
+selector nor an implementation mode substitutes for the new entity. The
+[integration checklist](#adding-an-integration) applies to an additional entity as well as a new
+connector crate.
+
 ## Ownership and dependency direction
 
 | Layer | Responsibility |
@@ -112,31 +209,6 @@ before file inspection. Its declared header-pair decoder validates configuration
 the decoded values to both OTLP transports; each export uses the same once-decoded values.
 An invalid alteration leaves the accepted graph intact. Driver configuration checks and external
 availability retain their own boundaries; these declaration checks perform no transport I/O.
-
-### Entity implementations and composition
-
-The vocabulary owns `IngestorEntityKind` and `EmitterEntityKind`. Each connector crate exposes one
-concrete implementation and configuration per entity in an entity module: for example
-`kafka::topic::KafkaTopicIngestor` and `KafkaTopicEmitter`, Redis `pubsub`, Syslog `listener` and
-`collector`, and ZeroMQ `pull` and `push`. An implementation does not select its entity with a mode
-flag. OTEL exposes `OtelLogsEmitter`, `OtelTracesEmitter` and `OtelMetricsEmitter` with distinct
-configurations; only their private OTLP encoder shares signal-dependent encoding and transport.
-
-`IngestorConnector::KIND` is the concrete ingestor's compile-time vocabulary declaration.
-`EmitterLifecycle::kind()` returns the emitter's declaration through the object-safe lifecycle
-contract; concrete emitters expose the same declaration as `KIND`. The server composition modules
-assert each concrete declaration against the entity their plan arm constructs. Plans nest connector
-then entity, such as `IngestorConnectorPlan::Redis(RedisIngestorStartPlan::PubSub(...))` and
-`EmitterConnectorPlan::Otel(OtelEmitterPlan::Logs(...))`. Matching is exhaustive at each boundary.
-Per-connector modules compose these plans; they preserve constructor parameters and transport,
-acknowledgement, retry and finish behavior.
-
-HTTP request and WebSockets connection ingestors live in their connector crates. Their endpoint
-entities are concrete host-owned ingestors over the shared private intake binding mechanism. The
-binding still ends its exact intake lifetime before withdrawal, including when an ingestor drops.
-Native client producer and consumer entities also remain host-owned. Connector labels derive from
-the vocabulary declaration and are resolved once for the running task, outside batch publication.
-No server table defines another spelling or case for a connector.
 
 ### Connector hygiene standard
 
@@ -547,17 +619,25 @@ Answers](./name-resolution.md#dialling-the-answers), and applies the URL's port 
 default. The required positive `timeout_ms` bounds the send and the response of an insert, and the
 connection and its lookup run inside that response wait.
 
-An SQS client installs a Smithy HTTP client whose connector resolves through the node resolver with
-`build_with_resolver`. Without `tls_ca_file` the client is the SDK's default HTTPS client with that
-resolver: AWS-LC, the platform's native roots, and a proxy taken from `HTTP_PROXY`, `HTTPS_PROXY`,
-`ALL_PROXY` and `NO_PROXY` or their lowercase forms, whose host the node resolver resolves while the
-proxy resolves the service. With `tls_ca_file` it trusts that CA alone and uses no proxy, as before.
-The SDK signs each request with SigV4 for the configured endpoint before the connector resolves its
-host, so the signature, the `Host` header and the certificate check all name that host, whichever
-address accepted the connection. The SDK's default 3.1-second connect timeout, and the operation and
-attempt timeouts an emitter's `timeout_ms` sets, include the lookup. The client names static credentials
-and its region, so `aws-config` never consults the default credential or region chains that could
-reach IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS never asks for
+An SQS ingestor and an SQS emitter build their client the same way, from the keys the client
+declares, and install a Smithy HTTP client whose connector resolves through the node resolver with
+Smithy's public `build_with_resolver`: AWS-LC, the platform's native roots without `tls_ca_file` or
+that CA alone with it, and no proxy. The client declares no proxy key, so it never reads
+`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` or their lowercase forms, with or without a
+custom CA. Smithy parses a CA chain only when it builds a connector, and panics on a section that is
+not base64 or on a certificate rustls does not take as a trust anchor, so the connector parses
+`tls_ca_file` first, with the same parser and root store. A section it cannot parse is
+`TlsClientConfigError::ParseCaCertificate`, a certificate rustls refuses is `AddCaCertificate`, and
+a file without a certificate, which would trust no service, is `EmptyCaFile`, each beneath
+`InvalidSqsClientKey` naming `tls_ca_file`. The same parse runs offline when `CREATE SQS CLIENT`
+admits the client. The SDK signs each request with SigV4 for the configured endpoint before the
+connector resolves its host, so the signature, the `Host` header and the certificate check all name
+that host, whichever address accepted the connection. The SDK's default 3.1-second connect timeout,
+and the operation and attempt timeouts `timeout_ms` sets for every request of both directions,
+include the lookup; a receive's start after the one-second long poll it asks the service to hold it
+for. The client names static credentials, with `session_token` where they are temporary ones, and its
+region, so `aws-config` never consults the default credential or region chains that could reach
+IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS never asks for
 a token because it signs with SigV4; the loader receives the same HTTP client, so that chain would
 use the node resolver too.
 
@@ -576,12 +656,12 @@ query-compatible code `AWS.SimpleQueueService.NonExistentQueue` or, as ElasticMQ
 JSON protocol's error type `QueueDoesNotExist`. Any other failure to reach the service, including a
 certificate that does not name the configured host, is described by every cause of the driver's
 connection error, which describes the connection and never a record; a service's own response keeps
-its existing description. None of these failures rejects a record or acknowledges input. The host
-retries each on its declared backoff. An SQS emitter keeps the SDK's own retries disabled, while an SQS
-source keeps the SDK's standard retry mode, which makes up to three attempts at a request whose
-connection failed, lookup failures included, before the source reports the failure. Pooled
-connections stay open when their host's answer changes or expires; the next connection resolves
-again.
+its existing description. None of these failures rejects a record or acknowledges input. Both
+directions keep the SDK's own retries disabled, so the SDK makes each request once and the host
+retries a failed one on the entity's declared backoff alone. A request that runs out of `timeout_ms`
+keeps the contract's `DeadlineElapsed` as its innermost cause, naming the request and the key.
+Pooled connections stay open when their host's answer changes or expires; the next connection
+resolves again.
 
 SQS unit checks retain a bound, non-listening socket for each refused endpoint until the request
 finishes. The socket keeps another parallel fixture from listening on that address while still
@@ -849,7 +929,8 @@ can become an active graph. Kafka properties and object-store/catalog properties
 driver-delegated; database, Redis, RabbitMQ and NATS address query options belong to their driver.
 Undeclared delegated values are confidential in public inspection. Drivers retain their existing
 trust policy: HTTPS without a custom CA uses their built-in roots, while MQTT's `mqtts` address
-requires its declared `tls_ca_file` before commit. Conditional presence belongs to the key declaration.
+requires its declared `tls_ca_file` before commit and a plaintext `mqtt` address refuses it, as it
+refuses the client certificate pair. Conditional presence belongs to the key declaration.
 Configured CA replacement or augmentation follows the connector's documented policy. A Nervix-owned custom file must be readable; it does
 not disable verification or silently fall back when unavailable.
 
@@ -939,10 +1020,11 @@ since the queue keeps a message until the source deletes it, and `SINGLE` or `BA
 where a `.fifo` queue requires `FIFO GROUP` and a standard queue refuses it. Message attributes are
 its headers in both directions, as `last_wins` exact names; the emitter declares no envelope and
 optional batching up to the 256 KiB SQS admits in one message. An SQS client declares only the keys
-its connections read: `endpoint`, `region`, `access_key_id`, `secret_access_key` and `tls_ca_file`
-in both directions, and `timeout_ms`, which bounds an emitter's send. An SQS connection trusts
-`tls_ca_file`, or the platform's roots without it, and presents no client certificate, so the
-client declares neither client-identity key.
+its connections read, each in both directions: the required `endpoint`, `region`, `access_key_id`
+and `secret_access_key`, and the optional `session_token`, `timeout_ms`, which bounds every request,
+and `tls_ca_file`. An SQS connection trusts `tls_ca_file`, or the platform's roots without it, takes
+no proxy and presents no client certificate, so the client declares neither a proxy nor a
+client-identity key.
 The SQS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 
@@ -960,6 +1042,24 @@ unpooled client's Nervix-owned keys are the address, `timeout_ms` and the TLS fi
 address's userinfo and query options belong to the driver and are masked in inspection. The
 NATS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
+
+`MQTT TOPIC` keeps a subscription's topic filter and a publication's topic exactly as written,
+letter case included, within MQTT's 65,535-byte string. A filter may write `+` for one level and
+`#` for every remaining level, each only as a whole level and `#` only last, but its first level
+is not `$share`: every instance subscribes through the shared subscription
+`$share/<domain>~<ingestor>/<filter>` that Nervix forms, so a filter naming its own would match
+nothing. A publication topic admits neither wildcard. The ingestor declares `NO ACK`, and
+`ACK SEQUENTIAL`, `ACK PARALLEL` and `SUSPEND` only with `SESSION PERSISTENT` and `QOS 1`, the
+session a broker keeps messages for and redelivers after a lost connection; `BUFFER` and `DROP`
+stay connected under any session. Neither direction carries transport headers, and the ingestor
+projects no typed metadata field. The emitter declares QoS as its publishing mode, `QOS 0`,
+`QOS 1 ACK` or `QOS 2 ACK`, with codec payloads, no envelope clause and optional batching up to the
+Maximum Packet Size each broker declares when the client connects. The unpooled client's keys are
+all Nervix-owned: `addr` names the broker by `mqtt` or `mqtts`, a host and a nonzero port, and
+nothing else, since a connection reads no credentials, path, query or fragment from it;
+`client_id`; and the TLS files, of which `tls_ca_file` is required exactly with `mqtts` and the
+client certificate pair is permitted only with it. The MQTT-specific declaration tests, generated
+grammar conformance and one-/three-node public declaration scenarios qualify these facts together.
 
 `KAFKA TOPIC` shares one topic-name rule between ingestion and emission: 1 to 249 ASCII letters,
 digits, `.`, `_` and `-`, other than `.` and `..`, passed through exactly as written. Its ingestor
@@ -1220,6 +1320,12 @@ WebSocket frame keeps its connection's exact header snapshot by reference rather
 endpoint and polling headers, WebSocket upgrade headers, Kafka record headers, NATS headers, Pulsar
 properties, RabbitMQ AMQP headers, and SQS attributes keep their transport's own semantics; other
 connector and entity pairs carry no transport headers.
+An HTTP poll retains every response-header value whose bytes are valid UTF-8, including non-ASCII
+characters, as the same UTF-8 bytes and in each field's repeat order. It drops an invalid UTF-8
+value alone while retaining the response body and other headers, and hands the drop count to the
+host for
+`nervix_ingestor_header_values_dropped_total`. An HTTP request emitter sends every admitted
+`write_header` value as its exact UTF-8 bytes.
 `read_header` and `read_headers` are validated against that declaration, and header values do not
 travel through relays unless an ingestor writes them into schema-backed fields. See
 [Header Context](./ingestors.md#header-context) for the exact expression behavior. The session
@@ -1449,7 +1555,7 @@ in one of these ways:
 | `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the connection had already read when the read stopped waiting stays in the connection's read-ahead, which hands it to the next read first. |
 | `RABBITMQ QUEUE` | Ends at once while waiting for the first delivery or between deliveries of a parallel batch, returning every gathered delivery. A transport failure found after gathering is retained and reported on the next read, after the gathered deliveries reach the host. |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
-| `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
+| `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation, or within the receive's `timeout_ms` after its long poll when that ends sooner, ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
 
 An MQTT read takes its publishes from its connection's read-ahead, which the connection's driver
 task fills while it polls the client's event loop; see
@@ -2154,8 +2260,9 @@ rows and every later request's unresolved for the host to retry, so a retry pack
 the same requests again.
 
 The database emitters divide the whole run. ClickHouse measures the `JSONEachRow` body of an insert,
-each row's line encoded once and sent as a slice of one buffer. Postgres measures the one `unnest`
-statement every insert of the write executes and the text arrays it binds, exactly as the driver
+each row's line encoded once and sent as a slice of one buffer, before its driver compresses the body
+with LZ4. Postgres measures the one `unnest` statement every insert of the write executes and the
+text arrays it binds, exactly as the driver
 encodes them; its declared batch maximum, which `CREATE` holds `MAX SIZE` to, is the largest
 protocol message the server reads, so the measure also bounds the Bind message that carries the
 arrays. MySQL measures each multi-row statement and every
@@ -2837,16 +2944,24 @@ drain boundary. This chapter does not redefine those output formats.
    confirmation as its transport gives them, and every other fact a statement can say about it,
    and a typed name, checked by the entity's own rule, for each external name its statement
    writes. The connector and entity together name the statement's head, such as
-   `KAFKA TOPIC INGESTOR`. Then add the connector's grammar module, which owns each entity's body,
-   and its completion; the generated conformance tests hold both to the declaration. Keep external
-   driver configuration raw only where pass-through is its intentional contract.
+   `KAFKA TOPIC INGESTOR`, including when it is the connector's only entity. Add its typed entity
+   variant inside that connector's union; add a `ConnectorKind` and outer union arm only for a new
+   connector. Declare a client's connector and CONFIG schema in the same vocabulary. Then add the
+   entity's grammar body in its connector module and compose its CREATE and ALTER heads from the
+   shared tokens and declared kind. The generated conformance tests hold parsing and completion
+   to the declaration. Keep external driver configuration raw only where pass-through is its
+   intentional contract.
 2. Validate schema, reference, branch, header, quiesce, delivery, and external contract rules in
    the registry. Convert the validated Model into one typed start-plan variant before execution;
    an ingestor's variant belongs to the registry's ingestor planner and nests connector then entity.
-3. Add one crate under `crates/connectors/` with its ownership header, driver dependencies, and
-   ingestor or emitter contract implementation, with one entity module, concrete type and named
-   configuration per entity. Declare `IngestorConnector::KIND` or `EmitterLifecycle::kind()`, and
-   add the plan-to-implementation compile-time witness in its server composition module. A brokered emitter that awaits its broker's answers in
+3. For a new integration, add one crate under `crates/connectors/` with its ownership header,
+   driver dependencies, and ingestor or emitter contract implementation, with one entity module,
+   concrete type and named
+   configuration per entity. An additional entity extends that crate; host-owned endpoint and
+   native-client entities retain their declared host boundary. Declare `IngestorConnector::KIND`
+   or the emitter's `KIND` and `EmitterLifecycle::kind()`, and add the plan-to-implementation
+   compile-time assertion in its server composition module. Derive labels from the vocabulary
+   declaration. A brokered emitter that awaits its broker's answers in
    `MODE ACK` does so through the contract's `ConfirmationWindow`, never a window of its own. An
    emitter answers `finish` for what its client can still hold once a publish returns, as
    [Finishing an emitter](#finishing-an-emitter) describes, and adds its row to that table. A broker
@@ -2855,11 +2970,16 @@ drain boundary. This chapter does not redefine those output formats.
    `acknowledge` returns at the confirmation its entity declares. The
    [connector delivery standard](#connector-delivery-standard) lists the remaining rules. Add its
    composition mapping in the server; do not teach the contract or registry about the driver.
-4. Add unit coverage for transport behavior and feature scenarios through Plexus, including
+4. Extend entity-based Model, statement and plan generators and their registered Bolero
+   properties, preserving every field and the selected pair. Update domain versions and corpora
+   when their generated shapes change. Add unit coverage for transport behavior and feature
+   scenarios through Plexus, including
    three-node execution and failure paths, and register the scenarios that observe each declared
    capability in the [capability inventory](#capability-inventory). Confirm the crate boundary and
    run the repository's validation and connector tests.
-5. Update the [Ingestors](./ingestors.md) or [Emitters](./emitters.md) manual, relevant client and
+5. Extend the console's declared entity choices and canonical previews, and verify kind-qualified
+   completion, inspection and diagnostics. Update the [Ingestors](./ingestors.md) or
+   [Emitters](./emitters.md) manual, relevant client and
    metric documentation, and the [Plexus skill](https://github.com/nervix-io/nervix/blob/main/.agents/skills/plexus/SKILL.md) routing when its
    user-facing guidance changes. Regenerate the book.
 
