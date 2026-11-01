@@ -54,7 +54,7 @@ were known durable before the kill.
 | 5. Snapshot interruption and recovered runtime state | `cluster/raft_replication.feature` reopens after an interrupted snapshot install. `runtime/deduplicator_replication.feature` restores branch-local suppression after one- and three-node restarts. The real-process crash scenario restores two branch checkpoints from the same database. The direct consensus and runtime recovery tests below cover each storage boundary and schedule rebuild. |
 | 6. Unique identities, two branches and external delivery contracts | The real-process scenario sends monotonically unique load IDs through `alpha` and `beta` branch keys from an HTTP `NO ACK` source to an acknowledging Postgres emitter. The last-schedulable-node scenario uses an externally acknowledged Kafka source, two interleaved branches and a committed consumer-group offset. |
 | 7. Isolated former-owner restart fence from Shutdown 11 | `cluster/runtime_startup_admission.feature` restarts the former owner with consensus blocked, proves that its public listener and interconnect can be live while stale persisted ownership cannot route a record, then restores consensus and proves routing through the current owner. |
-| 8. Reproducible validation | The tag command above selects the complete public matrix. The direct commands and observed results are recorded below. No scenario waits without a timeout; fault-injection pauses are reached and released through explicit barriers, and teardown releases every armed pause or load task. |
+| 8. Reproducible validation | The tag command above selects the complete public matrix. The owning task retains the direct commands and observed results. No scenario waits without a timeout; fault-injection pauses are reached and released through explicit barriers, and teardown releases every armed pause or load task. |
 
 ## Real-process crash probe
 
@@ -106,16 +106,4 @@ In the scenario, node 2 restarts while its consensus path is blocked after owner
 restored, node 2 observes the current schedule and forwards later traffic to node 1. This is the
 fence that prevents crash recovery from reviving an obsolete owner.
 
-## Validation record
-
-Recorded on 15 September 2026 from the task worktree. Cucumber retries were disabled.
-
-| Command | Result |
-| --- | --- |
-| `just test-scenarios --input tests/features/cluster/process_crash_recovery.feature --concurrency 1 --retry 0` | Pass: 1 scenario and all 38 steps. The process died from signal 9 under live two-branch traffic, reopened twice, retained exact durable-key counts and exited cleanly afterward. The same scenario also passed in the complete tagged run. |
-| `just test-scenarios --tags @shutdown_qualification --concurrency 4 --retry 0` | Pass: 8 features, 36 scenarios and all 494 steps, with no skipped or retried failure. |
-| `cargo test -p nervix-consensus an_interrupted_installation_finishes_on_the_next_start -- --nocapture` | Pass: the one regression exercised and passed all six operation/boundary reopen cases. |
-| `cargo test --features testing --lib forced_recovery_completion_survives_runtime_restart_and_schedule_rebuild -- --nocapture` | Pass: recovered owner and domain rebuild. |
-| `cargo test --features testing --lib forced_recovery_replay_preserves_source_offsets_and_branch_processor_state -- --nocapture` | Pass: Kafka and both branch checkpoint classifications. |
-| `just validate` | Pass: formatting, all-target all-feature Clippy with warnings denied, protocol lint, web console build, skill publication dry run, documented Plexus parsing and clock-boundary checks. |
-| `just ratchet` | Pass: every tracked architecture-debt count remained at or below its baseline. |
+Historical run results and audit findings are retained on [Shutdown 12](https://app.clickup.com/t/86bc00fhb).

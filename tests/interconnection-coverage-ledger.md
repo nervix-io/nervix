@@ -2,13 +2,12 @@
 
 This ledger is the acceptance record for
 [Interconnect 11](https://app.clickup.com/t/86bbw87b7) under the
-[bounded HTTP/2 interconnection epic](https://app.clickup.com/t/86bapbmj6). It lists every audit
-finding the proposal covers, the step that owns it, and the scenario or test that proves it on the
-current source. A finding is closed here only when its owning step is complete and the evidence
-named beside it passes through the repository's standard commands.
+[bounded HTTP/2 interconnection epic](https://app.clickup.com/t/86bapbmj6). It maps the transport guarantees to their owning steps and executable evidence.
+Historical run results and audit findings are retained on [Interconnect 11](https://app.clickup.com/t/86bbw87b7).
+Clock-progress run observations belong to [Domain clocks 12](https://app.clickup.com/t/86bbwct04).
 
 Run the named Cucumber evidence with `just test-scenarios --input <feature>`, a named crate test
-with `cargo test -p <crate> <name>`, and the whole suite with `just test`.
+with `just test-package-lib <package> <name>`, and the whole suite with `just test`.
 
 ## Transport shape
 
@@ -29,9 +28,9 @@ stream and memory capacity that saturated relay or bulk work cannot consume. A c
 retains one latest report per domain and ready peer while the progress subquota bounds attempts
 across all of them.
 
-## Finding coverage
+## Contract coverage
 
-| Audit finding or required invariant | Owning steps | Evidence |
+| Required invariant | Owning steps | Evidence |
 | --- | --- | --- |
 | Partial-frame cancellation and restart | 1, 2, 4 | `cluster/interconnect_lifetime.feature`: *Peer churn and silent handshakes leave the node responsive*; `nervix-interconnect`: `confirmed_cancellation_fences_attempt_before_grant_arrives`, `same_epoch_retry_of_admitted_relay_does_not_enqueue_twice` |
 | Global relay FIFO and cross-domain/branch blocking | 4, 5 | `runtime/interconnect_admission.feature`: *A waiting relay admission leaves another domain runnable*, *A waiting relay admission leaves another branch runnable* |
@@ -104,8 +103,8 @@ converge after a node rejoins the cluster*.
 
 ## Domain-clock qualification
 
-[Domain clocks 12](https://app.clickup.com/t/86bbwct04) closes the clock prerequisite for this
-ledger. Clock mappings and authority fences remain committed semantic state. Only replaceable
+[Domain clocks 12](https://app.clickup.com/t/86bbwct04) owns the clock-progress evidence for this
+map. Clock mappings and authority fences remain committed semantic state. Only replaceable
 progress crosses the interconnection, as the typed `domain_clock_progress` request in the
 management progress subquota. Each domain-peer delivery owner holds one latest pending report and
 one attempt, while the transport's shared progress ceiling bounds the complete node.
@@ -120,39 +119,3 @@ one attempt, while the transport's shared progress ceiling bounds the complete n
 | Relay admission remains physical for historical slow and fast domains | `runtime/interconnect_admission.feature`: *A waiting historical slow-domain relay admission leaves a fast domain runnable* |
 | Logical generation, admission, and branch expiry remain driven by the installed clock while physical cancellation, retry, timeout, and shutdown budgets remain wall based | `runtime/domain_clock_contract.feature`; `runtime/domain_ingestion_time.feature`; `runtime/branched_expiration.feature`; and the complete `runtime/physical_infrastructure_deadlines.feature` matrix, including its two-branch `REQUIRED WAIT` cases |
 | The progress wire contract contains typed domain, generation, authority, logical timestamp, and UTC observation fields, with no process-local monotonic instant | `DomainClockProgressRequest` is the sole transport shape and its request policy test fixes `Management/Progress`; the clock architecture source check owns monotonic and UTC boundary imports |
-
-The bulk-load scenario also recorded sequential node-local logical-clock samples through node 1 and
-node 3. In the final focused run, their separation was 10.434 microseconds at rate `0.0001` and
-10.469 seconds at rate `100.0`. Those values include the time between the two HTTP samples; they are
-a measured upper bound on host-clock skew plus sampling delay, not a claim that the hosts were read
-simultaneously or that their clocks are equal. Both nodes remained near the committed year-2000
-mapping while the authority's bulk workers were occupied.
-
-## Open qualification
-
-One acceptance item in Step 11 is not closed by this ledger. It is recorded here rather than
-omitted.
-
-**Shaped-link performance qualification.** The proposal's comparative measurement — a fixed
-three-node environment with shaped links, bulk offered load capped at 70% of link capacity, control
-p99 no worse than the greater of 100 ms or twice the idle baseline, no false management
-disconnects, bounded configured allocations, and progress on every eligible unsaturated relay
-channel — needs a three-node benchmark environment with link shaping. The repository's benchmark
-harness drives a single node through Kafka and has no shaping, so those numbers cannot be produced
-from it yet.
-
-Two of the four criteria are already proven here without timing, by deterministic barriers rather
-than by measurement. *No false management disconnects*: during a 48 MiB bulk replication, node-1
-keeps its management connections, refuses no liveness request, and records no management capacity
-failure. *Bounded configured allocations*: each class reports its ceiling and what it holds, and
-the reserved management budget stays at its configured capacity while every bulk worker is
-occupied. Control responsiveness under bulk load is bounded rather than measured: *Occupied bulk
-execution leaves management work responsive*, *Occupied bulk execution leaves the reserved
-management budget intact*, *Large resource replication preserves control responsiveness*, and *A
-silent peer does not delay peer health or control-plane work* each complete control work inside an
-explicit bound while the competing class is saturated.
-
-What the shaped environment adds is the distribution rather than the bound: a control p99 against
-a measured idle baseline, per-relay-channel progress under a sustained offered load, and the
-transport throughput comparison at identical record, admission and durability settings. The series
-above are what such a run would read.

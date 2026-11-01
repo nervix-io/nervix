@@ -415,6 +415,9 @@ current connection, retry and deadline limits.
   And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
   shared client outcome labels, and sender retry semantics. Check that a WebSocket endpoint's
   declared signaling format can encode its acknowledgements, including during `ACCEPT DATA`.
+  That response deadline is absolute on the physical clock, so keepalive cannot extend it and
+  retry can duplicate admitted effects. Use `BUFFER MAX SIZE <bytes>` only with `MODE NO ACK`,
+  without an overflow clause; an endpoint refuses new input when that buffer is full.
 - To route endpoint requests by their method, path, query, peer address or host, or WebSocket
   frames by their kind, read the metadata tables in that same section before writing a
   `metadata.<field>`. An endpoint admits only `POST` at its exact `PATH`, so route on
