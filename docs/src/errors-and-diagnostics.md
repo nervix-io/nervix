@@ -801,8 +801,11 @@ Syslog emission and WebSocket-client ingestion retain DNS failures from the node
 their existing infrastructure contexts: `EmitterOpenError::Initialize` while a Syslog sender opens
 and `IngestorError::Resume` while a WebSocket source connects or reconnects. The resolver's typed
 missing-name, no-address, timeout, invalid-name or transport cause stays in the error report.
-Address, TLS and WebSocket-upgrade failures remain connection outcomes. None is a record rejection,
-and a DNS result by itself never marks a Syslog record delivered.
+Address, TLS and WebSocket-upgrade failures remain connection outcomes. A WebSocket peer whose
+upgrade answer contradicts the request's subprotocol offer fails resume with the connector's typed
+refusal, which keeps the transport's refusal attached for typed inspection and prints no
+subprotocol, since an offer can carry a credential. None is a record rejection, and a DNS result
+by itself never marks a Syslog record delivered.
 
 Redis command connections receive the node resolver through the driver's DNS hook. A failed
 initial or later pool connection keeps the resolver's typed failure in
@@ -1232,6 +1235,9 @@ TLS keys on `ws`, and unpaired identity files are typed refusals naming their ke
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a ingestor cannot produce its validated header collection. Rendered client values are
 validated again by the connector before opening transport.
+Canonical upgrade fields that exceed committed HTTP caps produce the registry's typed
+`ClusterParameterLimit` at model admission or parameter transition, naming the parameter and
+ingestor. The subprotocol offer contributes its canonical field bytes to that check.
 An Iceberg emitter's location refusal names its domain, emitter and `LOCATION`, with the
 vocabulary's typed location failure beneath that context. A malformed URL retains its URL-parser
 cause; a storage-scheme mismatch names the found scheme and the schemes its declared client

@@ -3918,6 +3918,21 @@ selections = [
   "deloxide-stress-restore",
 ]
 
+[[workload]]
+coverage = "Committed header caps validate literal WebSocket upgrade headers at parameter transition and model admission. This configuration-only scenario opens no transport."
+examples = 4
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.websocket-header-cap"
+invariant = "A cluster header cap protects existing and newly admitted WebSocket connection ingestors."
+invocation = "cluster-parameters"
+scenario = "A lower WebSocket upgrade header <parameter> cap protects stored and new ingestors on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
 [[invocation]]
 bound_seconds = 900
 concurrency = 1

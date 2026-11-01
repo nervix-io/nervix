@@ -384,6 +384,12 @@ admission and a later parameter transition check the complete literal header req
 lower cap cannot invalidate an existing polling request and a raised cap governs new requests.
 Each literal name/value write must fit the byte cap, as must the complete retained envelope.
 
+WebSocket connection ingestors use the same committed caps for their literal upgrade headers.
+The subprotocol offer counts as one field, with its canonical comma-joined tokens contributing
+to the byte count. Model admission and parameter transitions both check these requirements;
+raising the caps permits new declarations above the defaults. Syntax and plan conversion retain
+the physical HTTP representation bounds independently of cluster policy.
+
 Each live node installs the committed record before reporting that revision ready. Runtime timing
 and resource-store owners publish a new immutable policy over the same storage. Snapshot tasks
 observe interval changes at their existing bounded replication-poll boundary; a changed interval

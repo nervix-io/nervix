@@ -232,6 +232,17 @@ pub struct HttpHeaderLimits {
 }
 
 impl HttpHeaderLimits {
+    /// The bounds of the request representation, for syntax validation without a cluster policy.
+    /// Model admission and parameter transitions enforce the captured committed limits separately.
+    pub fn representable() -> Self {
+        Self::new(
+            crate::Setting::resolve(Some(u64::MAX), &())
+                .assured("the largest positive header byte bound is valid"),
+            crate::Setting::resolve(Some(crate::HttpHeaderFields::MAXIMUM), &())
+                .assured("the application-field representation bound is valid"),
+        )
+    }
+
     pub fn new(
         maximum_bytes: crate::Setting<crate::HttpHeaderBytes>,
         maximum_fields: crate::Setting<crate::HttpHeaderFields>,
@@ -328,7 +339,7 @@ impl HttpApplicationHeaders {
     }
 }
 
-fn http_token_byte(byte: u8) -> bool {
+pub(crate) fn http_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric()
         || matches!(
             byte,

@@ -193,10 +193,12 @@ current connection, retry and deadline limits.
   membership because their listeners execute on every cluster node. Every other ingestor, a
   `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
   schedule recomputation.
-- For `WEBSOCKETS CONNECTION` literal upgrade headers, frame metadata, strict client CONFIG,
+- For `WEBSOCKETS CONNECTION` literal upgrade headers, subprotocol offers, frame metadata, strict client CONFIG,
   handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close, read `Ingestors` →
   `WEBSOCKETS CONNECTION` in the selected documentation index.
   A successful upgrade does not establish data delivery or reset repeated-failure backoff.
+  Committed `http-header-fields` and `http-header-bytes` caps govern literal upgrade headers,
+  including the canonical subprotocol offer, at admission and during parameter changes.
   Check the effective idle bound together with the ping cadence and the peer's inbound activity.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
   optionality match exactly. Declared wire formats are separate entity kinds even when their names

@@ -11,7 +11,7 @@
 )]
 
 use arch_into::ArchInto as _;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{ClusterParameterKey, ClusterParameterValues, DomainName, Model};
 
@@ -83,6 +83,44 @@ pub(crate) fn validate_model_parameters<'a>(
         };
         match model {
             Model::Ingestor(ingestor) => {
+                if let Some(nervix_models::IngestorEntity::Websockets(
+                    nervix_models::WebsocketsIngestor::Connection(source),
+                )) = ingestor.input.transport_entity()
+                {
+                    let headers =
+                        nervix_models::WebsocketsUpgradeHeaders::parse(&source.headers)
+                            .change_context(RegistryError::InvalidWebsocketsUpgradeHeaders {
+                                domain: domain.clone(),
+                                ingestor: ingestor.name.clone().into(),
+                            })?;
+                    check(
+                        ClusterParameterKey::HttpHeaderFields,
+                        headers.iter().count().arch_into(),
+                        parameters.http_header_fields(),
+                    )?;
+                    let mut total = 0_u64;
+                    for (name, value) in headers.iter() {
+                        let bytes = name
+                            .as_str()
+                            .len()
+                            .checked_add(value.as_str().len())
+                            .assured("literal header bytes fit the process address space");
+                        let bytes: u64 = bytes.arch_into();
+                        check(
+                            ClusterParameterKey::HttpHeaderBytes,
+                            bytes,
+                            parameters.http_header_bytes(),
+                        )?;
+                        total = total
+                            .checked_add(bytes)
+                            .assured("literal headers fit the process address space");
+                    }
+                    check(
+                        ClusterParameterKey::HttpHeaderBytes,
+                        total,
+                        parameters.http_header_bytes(),
+                    )?;
+                }
                 if let Some(nervix_models::IngestorEntity::Http(
                     nervix_models::HttpIngestor::Request(source),
                 )) = ingestor.input.transport_entity()
@@ -315,6 +353,87 @@ mod tests {
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,
         })
+    }
+
+    fn websocket_headers(headers: Vec<nervix_models::WebsocketsUpgradeHeader>) -> Model {
+        let Model::Ingestor(mut ingestor) = polling_headers(Vec::new()) else {
+            unreachable!("the fixture builds an ingestor");
+        };
+        ingestor.input =
+            nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
+                source: nervix_models::IngestorEntity::Websockets(
+                    nervix_models::WebsocketsIngestor::Connection(
+                        nervix_models::WebsocketsConnectionIngestor {
+                            client: ClientName::parse("api").assured("the fixture client is valid"),
+                            headers,
+                            mode: nervix_models::WebsocketsIngestMode::NoAck,
+                            quiesce: nervix_models::IngestQuiesceMode::Drop,
+                        },
+                    ),
+                ),
+                codec: nervix_models::CodecName::parse("events")
+                    .assured("the fixture codec is valid"),
+            });
+        Model::Ingestor(ingestor)
+    }
+
+    #[test]
+    fn websocket_header_requirements_use_committed_caps_and_the_canonical_offer() {
+        let domain = DomainName::parse("scope").assured("the fixture domain is valid");
+        let header = |name: &str, value: &str| nervix_models::WebsocketsUpgradeHeader {
+            name: name.to_string(),
+            value: value.to_string(),
+        };
+        let model = websocket_headers(vec![
+            header("x-key", "v"),
+            header("Sec-WebSocket-Protocol", "chat, events"),
+        ]);
+        validate_model_parameters(&domain, [&model], &parameters(2, 39))
+            .assured("canonical fields need exactly39bytes and two fields");
+        let fields = validate_model_parameters(&domain, [&model], &parameters(1, 39))
+            .expect_err("the offer is one of the two application fields");
+        assert!(matches!(
+            fields.current_context(),
+            RegistryError::ClusterParameterLimit {
+                parameter: ClusterParameterKey::HttpHeaderFields,
+                actual: 2,
+                maximum: 1,
+                ..
+            }
+        ));
+        let bytes = validate_model_parameters(&domain, [&model], &parameters(2, 38))
+            .expect_err("the complete canonical envelope needs39bytes");
+        assert!(matches!(
+            bytes.current_context(),
+            RegistryError::ClusterParameterLimit {
+                parameter: ClusterParameterKey::HttpHeaderBytes,
+                actual: 39,
+                maximum: 38,
+                ..
+            }
+        ));
+        let model = websocket_headers(
+            (0..129)
+                .map(|index| header(&format!("x-field-{index}"), "v"))
+                .collect(),
+        );
+        validate_model_parameters(&domain, [&model], &parameters(129, 4096))
+            .assured("a raised committed field cap admits the complete upgrade");
+        let value = "v".repeat(32 * 1024);
+        let model = websocket_headers(vec![header("x-key", &value)]);
+        validate_model_parameters(&domain, [&model], &parameters(1, 32773))
+            .assured("a raised committed byte cap admits the complete upgrade");
+        let bytes = validate_model_parameters(&domain, [&model], &parameters(1, 32772))
+            .expect_err("the individual field also keeps its captured byte cap");
+        assert!(matches!(
+            bytes.current_context(),
+            RegistryError::ClusterParameterLimit {
+                parameter: ClusterParameterKey::HttpHeaderBytes,
+                actual: 32773,
+                maximum: 32772,
+                ..
+            }
+        ));
     }
 
     #[test]

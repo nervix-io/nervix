@@ -69,6 +69,9 @@ The WebSockets connection plan carries a validated `WebsocketsUpgradeHeaders` co
 its resolved client and signaling reference. Validation and planning both preserve a typed refusal
 if literal fields violate HTTP bounds or protocol-owned names. Runtime composition passes the
 validated collection directly to the connector; it does not read or reinterpret the source Model.
+Registry admission and parameter transitions check the canonical collection against committed
+header caps. Plan conversion retains physical representation bounds without imposing fixed
+defaults on an already admitted model.
 
 Process startup has an earlier registry path: `RuntimeChanges` carries each recovered active graph
 inside the registry and application boundary. Before runtime application, it projects that graph

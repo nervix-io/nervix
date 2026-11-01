@@ -220,6 +220,7 @@ class InventoryTests(unittest.TestCase):
             "ingest-metadata-projection",
             "websocket-client-config",
             "websocket-upgrade-headers",
+            "websocket-subprotocol-offers",
             "models-timestamps",
             "models-timestamp-text",
             "models-domain-clock",
