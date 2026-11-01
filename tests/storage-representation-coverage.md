@@ -147,8 +147,11 @@ delegated configuration values through JSON/archive equality and public inspecti
 
 ## Client Configuration And Inspection
 
-`client-config-schema` includes omitted ClickHouse connection defaults and Redis command-pool
-lifetimes, and explicit typed TCP and pool intervals and lifetimes. JSON and archive equality
+`client-config-schema` includes omitted ClickHouse connection defaults, Redis command-pool
+lifetimes and MQTT keep-alive and publish admission bounds, explicit typed TCP and pool intervals
+and lifetimes, and MQTT credentials whose password public inspection redacts. `mqtt-client-config`
+separately converts every valid MQTT client configuration into its typed broker, transport,
+identity, credentials, keep-alive and admission bound. JSON and archive equality
 preserve the authored entries; the effective-default projection preserves those entries and is
 idempotent, and public inspection remains idempotent.
 Scheme-restricted driver addresses include RabbitMQ's `amqps` TLS-file configurations; the

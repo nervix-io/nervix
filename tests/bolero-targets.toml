@@ -3492,7 +3492,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 22
+domain_version = 23
 features = []
 id = "client-config-schema"
 invariant = "Bounded entries drawn from every current client key schema preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."
@@ -3592,4 +3592,19 @@ package = "nervix-plexus"
 random_iterations = 256
 source = "crates/plexus/src/emitter/envelope_tests.rs"
 test = "emitter::envelope::tests::bolero_envelope_sections_read_back_as_the_envelopes_they_render"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/src/connector/mqtt/__fuzz__/connector__mqtt__config_tests__bolero_mqtt_client_config_preserves_every_valid_connection_setting/corpus"
+domain_version = 1
+features = []
+id = "mqtt-client-config"
+invariant = "Every bounded valid mqtt/mqtts client configuration parses to exactly its broker host and port, transport and TLS files, identity, username and password, whole-second keep-alive and publish admission bound, taking the declared keep-alive and admission defaults where they are omitted."
+manifest = "Cargo.toml"
+max_input_bytes = 32
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/connector/mqtt/config_tests.rs"
+test = "connector::mqtt::config_tests::bolero_mqtt_client_config_preserves_every_valid_connection_setting"
 test_target = "lib"

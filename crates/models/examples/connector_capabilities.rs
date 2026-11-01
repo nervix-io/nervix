@@ -263,6 +263,7 @@ fn wait_bound(bound: WaitBound) -> String {
             format!("`{}`; {omitted}", key.key())
         }
         WaitBound::Clause(clause) => format!("`{clause}`"),
+        WaitBound::ClientKey { key, rule } => format!("client key `{key}`; {rule}"),
         WaitBound::Fixed(bound) => format!("fixed {}", humantime::format_duration(bound)),
         WaitBound::Driver(default) => format!("driver default, {default}"),
         WaitBound::Unbounded => "unbounded".to_owned(),

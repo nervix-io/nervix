@@ -17,6 +17,7 @@ pub(crate) mod iceberg_catalog_gate;
 pub(crate) mod kafka_group_member;
 pub(crate) mod kafka_mock_broker;
 pub(crate) mod materialized_state_diagnostics;
+pub(crate) mod mqtt_broker_clients;
 pub(crate) mod mqtt_publish_filter;
 pub(crate) mod nats_endpoint;
 pub(crate) mod nats_observer;

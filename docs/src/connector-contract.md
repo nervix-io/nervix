@@ -857,9 +857,12 @@ nor makes the host reconnect. UDP admission separately drops and counts a datagr
 intake queue holds at most 64 frames and applies backpressure; that queue does not limit the
 connection count or total connection-local retention.
 
-A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a fixed bound Nervix
-sets, or the driver's own default. A wait that only the host's stop ends is declared unbounded. The
-deadline keys mean the same thing for every connector:
+A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a protocol interval
+another client key sets, such as MQTT's `keep_alive_ms`, a fixed bound Nervix sets, or the driver's
+own default. A protocol interval is not a deadline key: it keeps its protocol's meaning, and the
+entity declares how its wait follows from the key and what applies where the client leaves the key
+out. A wait that only the host's stop ends is declared unbounded. The deadline keys mean the same
+thing for every connector:
 
 | Key | What it bounds |
 | --- | --- |
@@ -901,8 +904,8 @@ A change that adds or alters a connector's buffers or network waits checks that:
 
 - every buffer between the transport and the host is declared with its capacity and overflow, and
   only a buffer already declared unbounded stays so;
-- every network wait is bounded by a declared key, clause, fixed bound or driver default, and only
-  a wait already declared unbounded stays so;
+- every network wait is bounded by a declared deadline key, protocol interval key, clause, fixed
+  bound or driver default, and only a wait already declared unbounded stays so;
 - every deadline key it reads keeps the meaning above and is read through `ConfiguredDeadline`;
 - no driver call parks an asynchronous worker;
 - every deadline key its declaration names has its stalled-peer scenario in the inventory.
@@ -1663,17 +1666,18 @@ the broker would have to exceed the advertised Receive Maximum for acknowledged 
 When the connection ended first, it fails with the
 lost connection beneath `MqttTopicIngestorError::Acknowledge`. A connection whose broker stopped reading
 it holds the writes, and the client's flush has no deadline of its own, so the acknowledgement
-waits at most one keep-alive interval, 60 seconds unless the broker's `CONNACK` announced its own,
-and then fails with `MqttTopicIngestorError::AcknowledgementDeadline`; a broker that announces a
-keep-alive of zero leaves it unbounded, as it leaves a silent connection. Every such failure drops
+waits at most one keep-alive interval, the client's `keep_alive_ms` unless the broker's `CONNACK`
+announced its own, and then fails with `MqttTopicIngestorError::AcknowledgementDeadline`; a broker
+that announces a keep-alive of zero leaves it unbounded, as it leaves a silent connection. Every such failure drops
 the connection and the acknowledgements it never wrote: the host shows the failure as the ingestor's transient status and
 rejects the positions, a rejection fails once its publishes' connection is gone, and the broker
 delivers again every publish the lost connection did not acknowledge once the source resumes; see
 [Confirmed acknowledgements](#confirmed-acknowledgements).
 
 Every `CONNECT` advertises MQTT's full framing limit, 268,435,460 bytes: the maximum Remaining
-Length plus its fixed header. This transport bound is separate from the 10 KiB admission bound
-for each complete publish, including its topic and properties. Local admission drops an oversized
+Length plus its fixed header. This transport bound is separate from the admission bound for each
+complete publish, including its topic and properties: the client's `max_packet_size`, 10,240 bytes
+when omitted, which the source's plan carries to the task. Local admission drops an oversized
 publish's bytes before read-ahead and retains only its prepared acknowledgement, if required.
 At QoS 1 or 2 under manual acknowledgement the ingestor queues its `PUBACK` or `PUBREC` through the
 same request owner as ordinary acknowledgements and waits for its write before returning
@@ -1703,14 +1707,17 @@ with how many it dropped. The host counts them in `nervix_ingestor_oversized_pay
 `DESCRIBE INGESTOR` renders, and reads again at once; the drop is neither a read failure nor a
 decode rejection, because the payload never reached the codec. A `SYSLOG LISTENER` does this for a
 UDP datagram larger than `max_message_size`; an `MQTT TOPIC` does it for a complete publish above
-its 10 KiB admission bound, after acknowledging it when required. A stream source that cannot
+its client's `max_packet_size`, after acknowledging it when required. A stream source that cannot
 identify the next frame closes that connection instead and counts nothing.
 
 ### MQTT session retirement
 
 MQTT source identities default to `<domain>~<ingestor>` for one instance and
 `<domain>~<ingestor>~<instance>` for multiple instances. The emitter default is
-`<domain>~<emitter>`. An explicit multi-instance source identity contains `{{instance}}`.
+`<domain>~<emitter>`. An explicit identity is the client's `client_id` template, which the
+composition root renders once for each instance, an emitter as instance 0. The connector compares
+the rendered identities, so instances whose identities render alike carry the identity conflict,
+however the template spells its `{{instance}}` placeholder.
 
 Stopping an execution retains its persistent broker state. Retiring a declared input is a
 separate host operation after its exact source tasks stop. The host compares the previous and

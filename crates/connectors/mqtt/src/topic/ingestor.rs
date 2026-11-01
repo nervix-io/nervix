@@ -4,14 +4,15 @@
 //!
 //! - **Owns.** The MQTT client and event loop each ingestor instance subscribes through, its
 //!   session and quality-of-service settings, the Maximum Packet Size and the Receive Maximum every
-//!   connection advertises and local admission of bounded publishes, the shared subscription every
-//!   instance joins, the client identity each instance connects with, the batches a read gathers
+//!   connection advertises and local admission of publishes within the client's bound, the shared
+//!   subscription every instance joins, the client identity each instance connects with and the
+//!   conflict among identities its instances render alike, the batches a read gathers
 //!   from its connection's read-ahead and how a read ends when the host cancels it, manual
 //!   acknowledgement of publishes and its confirmation once written, the local replay of publishes
 //!   the host rejected, and retirement of obsolete broker sessions.
-//! - **Depends on.** The connector contract, the crate's broker connection through the node DNS
-//!   resolver, the driver task that keeps each connection's event loop polled, typed client
-//!   configuration entries, `error-stack`, Tokio, `rumqttc` and `url`.
+//! - **Depends on.** The connector contract, the crate's connection options and its broker
+//!   connection through the node DNS resolver, the driver task that keeps each connection's event
+//!   loop polled, the vocabulary's typed client configuration, `error-stack`, Tokio and `rumqttc`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
@@ -29,9 +30,9 @@
 mod driver;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
     future::Future,
-    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     time::Duration,
 };
 
@@ -43,25 +44,23 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestorBatch,
     IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
-    IngestorReadCancellation, IngestorResult, IngestorResume, NoIngestHeaders, client_config_value,
-    client_tls_paths, optional_client_config_value, read_tls_file,
+    IngestorReadCancellation, IngestorResult, IngestorResume, NoIngestHeaders,
+    optional_client_config_value,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
     ClientConfigEntry, ConnectorKind, MQTT_MAXIMUM_PACKET_BYTES, MQTT_SOURCE_READ_AHEAD_HEADROOM,
-    MqttQos, MqttSession,
+    MqttBroker, MqttClientConfig, MqttQos, MqttSession,
 };
 use nervix_primitives::time::{Instant, timeout, timeout_at};
 use rumqttc::{
     AckMode, AsyncClient, BrokerSessionResumePolicy, ConnectionError, DisconnectProperties,
-    DisconnectReasonCode, Event, EventLoop, Incoming, ManualAck, MqttOptions, Outgoing, PubAck,
-    PubRec, Publish, QoS, SessionMode, SubscribeReasonCode, TlsConfiguration,
-    Transport as MqttTransport, UnsubAckReason,
+    DisconnectReasonCode, Event, EventLoop, Incoming, ManualAck, Outgoing, PubAck, PubRec, Publish,
+    QoS, SessionMode, SubscribeReasonCode, UnsubAckReason,
 };
 use thiserror::Error;
-use url::{Host, Url};
 
-use crate::topic::connection::{MqttConnectionError, MqttDialer};
+use crate::topic::{client_options::MqttClientOptions, connection::MqttConnectionError};
 
 /// Admission releases or copies a packet's frame bytes before the client decodes another packet.
 #[cfg_attr(
@@ -75,29 +74,16 @@ use crate::topic::connection::{MqttConnectionError, MqttDialer};
 const DECODED_PACKET_BATCH: usize = 1;
 
 const MQTT: &str = "mqtt";
-/// The template a multi-instance client identity must contain, so that every instance connects
-/// under its own identity.
-const MQTT_INSTANCE_PLACEHOLDER: &str = "{{instance}}";
 
 /// Why an MQTT ingestor could not build its client, subscribe, receive, or acknowledge.
 #[derive(Debug, Error)]
 pub enum MqttTopicIngestorError {
+    /// The refusal of the instance's rendered configuration is beneath: the vocabulary's, or the
+    /// connection options' for a TLS file they cannot read.
     #[error("invalid MQTT client configuration")]
     ClientConfig,
-    #[error("MQTT TLS requires client config key 'tls_ca_file'")]
-    MissingTlsCa,
-    #[error("MQTT TLS client authentication requires both 'tls_cert_file' and 'tls_key_file'")]
-    IncompleteTlsIdentity,
     #[error("failed to build MQTT client")]
     BuildClient,
-    #[error("invalid MQTT service address")]
-    InvalidAddress,
-    #[error("unsupported MQTT service address scheme '{scheme}'")]
-    UnsupportedScheme { scheme: String },
-    #[error("MQTT service address has no host")]
-    MissingHost,
-    #[error("MQTT service address has no port")]
-    MissingPort,
     #[error("instance {instance} has no MQTT client configuration")]
     MissingInstance { instance: u64 },
     #[error("failed to connect MQTT source to its broker")]
@@ -162,7 +148,8 @@ impl MqttTopicIngestorError {
     }
 }
 
-/// Why the declared client identity cannot serve every instance of an ingestor.
+/// Why the declared client identity cannot serve every instance of an ingestor: the identity it
+/// renders for two or more of them is the same.
 ///
 /// An ingestor with this conflict stays declared but never subscribes: each instance reports it as
 /// the reason it cannot resume until the declaration changes.
@@ -178,17 +165,12 @@ pub enum MqttClientIdError {
     },
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct MqttTopicIngestorAddr {
-    host: String,
-    port: u16,
-    tls: bool,
-}
-
-/// A broker's session namespace and the client identity within it.
+/// A broker's session namespace, the broker and whether its connection runs TLS, and the client
+/// identity within it.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct MqttSessionIdentity {
-    broker: MqttTopicIngestorAddr,
+    broker: MqttBroker,
+    tls: bool,
     client_id: String,
 }
 
@@ -230,8 +212,6 @@ impl MqttTopicIngestorSessions<'_> {
 pub struct MqttTopicIngestorSettings {
     /// The client entries every instance connects with, rendered for that instance.
     pub instances: Vec<Vec<ClientConfigEntry>>,
-    /// Why the declared client identity cannot serve every instance, if it cannot.
-    pub client_id_conflict: Option<MqttClientIdError>,
     /// The default identity for one instance; multiple instances append their instance index.
     pub default_client_id: String,
     /// The shared subscription group every instance joins, so instances never duplicate messages.
@@ -338,10 +318,11 @@ pub struct MqttTopicIngestorPlan {
 
 /// One instance's client and the event loop that carries its session, before a driver owns the
 /// event loop: while the ingestor establishes its subscription, and while retirement releases the
-/// session.
+/// session. It keeps the largest complete publish its client configuration admits.
 struct UnstartedConnection {
     client: AsyncClient,
     eventloop: EventLoop,
+    admission: NonZeroU32,
 }
 
 /// The publishes an ingestor instance reads from its broker connection: the read-ahead its
@@ -385,7 +366,6 @@ impl MqttTopicIngestorPlan {
     pub fn new(settings: MqttTopicIngestorSettings) -> Self {
         let MqttTopicIngestorSettings {
             instances,
-            client_id_conflict,
             default_client_id,
             share_group,
             topic,
@@ -395,6 +375,7 @@ impl MqttTopicIngestorPlan {
             dns,
             read_ahead_dropped,
         } = settings;
+        let client_id_conflict = Self::identity_conflict(&instances);
         Self {
             instances,
             default_client_id,
@@ -415,23 +396,39 @@ impl MqttTopicIngestorPlan {
         }
     }
 
-    /// Several instances need distinct identities. An explicit shared identity contains the
-    /// instance template; an absent identity uses the instance-qualified default.
-    pub fn client_id_conflict(
-        declared: &[ClientConfigEntry],
-        instances: NonZeroU64,
-    ) -> Option<MqttClientIdError> {
-        if instances == NonZeroU64::MIN {
-            return None;
+    /// The first identity two or more of `instances` render alike, and how many render it.
+    ///
+    /// Each instance renders the client's identity template for its own index, so the rendered
+    /// identities decide, however the template spells its placeholder. An instance without a
+    /// declared identity takes the instance-qualified default, which no other instance shares.
+    fn identity_conflict(instances: &[Vec<ClientConfigEntry>]) -> Option<MqttClientIdError> {
+        let mut renderings: BTreeMap<&str, NonZeroU64> = BTreeMap::new();
+        for instance in instances {
+            let Some(client_id) = optional_client_config_value(instance, "client_id") else {
+                continue;
+            };
+            match renderings.entry(client_id) {
+                Entry::Vacant(place) => {
+                    place.insert(NonZeroU64::MIN);
+                }
+                Entry::Occupied(mut place) => {
+                    let sharing = place
+                        .get()
+                        .checked_add(1)
+                        .assured("an ingestor cannot declare 2^64 instances");
+                    place.insert(sharing);
+                }
+            }
         }
-        let client_id = optional_client_config_value(declared, "client_id")?;
-        if client_id.contains(MQTT_INSTANCE_PLACEHOLDER) {
-            return None;
+        for (client_id, instances) in renderings {
+            if instances > NonZeroU64::MIN {
+                return Some(MqttClientIdError::SharedIdentity {
+                    client_id: client_id.to_string(),
+                    instances,
+                });
+            }
         }
-        Some(MqttClientIdError::SharedIdentity {
-            client_id: client_id.to_string(),
-            instances,
-        })
+        None
     }
 
     fn client(&self, instance_index: u64) -> MqttTopicIngestorResult<UnstartedConnection> {
@@ -441,14 +438,13 @@ impl MqttTopicIngestorPlan {
             }));
         };
         let default_client_id = self.default_instance_client_id(instance_index);
-        let (client, eventloop) = Self::client_from_config(
+        Self::client_from_config(
             instance,
             &default_client_id,
             self.session,
             self.acknowledgement,
             self.dns.clone(),
-        )?;
-        Ok(UnstartedConnection { client, eventloop })
+        )
     }
 
     fn default_instance_client_id(&self, instance_index: u64) -> String {
@@ -468,14 +464,15 @@ impl MqttTopicIngestorPlan {
                 instance: instance_index,
             }));
         };
-        let address = client_config_value(instance, "addr", ConnectorKind::Mqtt.into())
+        let config = MqttClientConfig::parse(instance)
             .change_context(MqttTopicIngestorError::ClientConfig)?;
-        let client_id = match optional_client_config_value(instance, "client_id") {
+        let client_id = match config.client_id() {
             Some(client_id) => client_id.to_owned(),
             None => self.default_instance_client_id(instance_index),
         };
         Ok(MqttSessionIdentity {
-            broker: Self::parse_addr(&address)?,
+            broker: config.broker().clone(),
+            tls: config.transport().uses_tls(),
             client_id,
         })
     }
@@ -605,22 +602,20 @@ impl MqttTopicIngestorPlan {
         }
     }
 
+    /// The unstarted connection one instance's rendered `config` declares: the options it shares
+    /// with every emitter, completed with the session, packet bounds, Receive Maximum and
+    /// acknowledgement mode the ingestor subscribes with.
     fn client_from_config(
         config: &[ClientConfigEntry],
         default_client_id: &str,
         session: MqttSession,
         acknowledgement: IngestorAcknowledgement,
         dns: DnsResolver,
-    ) -> MqttTopicIngestorResult<(AsyncClient, EventLoop)> {
-        let addr = client_config_value(config, "addr", ConnectorKind::Mqtt.into())
+    ) -> MqttTopicIngestorResult<UnstartedConnection> {
+        let mut client = MqttClientOptions::from_config(config, default_client_id)
             .change_context(MqttTopicIngestorError::ClientConfig)?;
-        let client_id = match optional_client_config_value(config, "client_id") {
-            Some(client_id) => client_id.to_owned(),
-            None => default_client_id.to_string(),
-        };
-
-        let mqtt_addr = Self::parse_addr(&addr)?;
-        let mut options = MqttOptions::new(client_id, (mqtt_addr.host, mqtt_addr.port));
+        let admission = client.config().max_packet_size();
+        let options = client.options_mut();
         options.set_session_mode(match session {
             MqttSession::Clean => SessionMode::Clean,
             MqttSession::Persistent => SessionMode::Persistent,
@@ -643,65 +638,18 @@ impl MqttTopicIngestorPlan {
             // wait on theirs, so neither the read-ahead nor the client's requests fill with them.
             options.set_receive_maximum(Some(receive_maximum.get()));
         }
-        if mqtt_addr.tls {
-            let tls = client_tls_paths(config);
-            let ca = if let Some(ca_file) = tls.ca_file.as_ref() {
-                read_tls_file(ca_file, "TLS CA certificate")
-                    .change_context(MqttTopicIngestorError::ClientConfig)?
-            } else {
-                return Err(Report::new(MqttTopicIngestorError::MissingTlsCa));
-            };
-            let client_auth = match (&tls.cert_file, &tls.key_file) {
-                (Some(cert_file), Some(key_file)) => Some((
-                    read_tls_file(cert_file, "TLS certificate")
-                        .change_context(MqttTopicIngestorError::ClientConfig)?,
-                    read_tls_file(key_file, "TLS private key")
-                        .change_context(MqttTopicIngestorError::ClientConfig)?,
-                )),
-                (None, None) => None,
-                _ => {
-                    return Err(Report::new(MqttTopicIngestorError::IncompleteTlsIdentity));
-                }
-            };
-            options.set_transport(MqttTransport::Tls(TlsConfiguration::Simple {
-                ca,
-                alpn: None,
-                client_auth,
-            }));
-        }
-        MqttDialer::install(&mut options, dns);
-        AsyncClient::builder(options)
+        let options = client.dialing_through(dns);
+        let (client, eventloop) = AsyncClient::builder(options)
             .capacity(acknowledgement.request_capacity().get())
             .try_build()
-            .map_err(|error| Report::new(error).change_context(MqttTopicIngestorError::BuildClient))
-    }
-
-    fn parse_addr(addr: &str) -> MqttTopicIngestorResult<MqttTopicIngestorAddr> {
-        let url = Url::parse(addr).map_err(|source| {
-            Report::new(source).change_context(MqttTopicIngestorError::InvalidAddress)
-        })?;
-        let tls = if url.scheme() == "mqtt" {
-            false
-        } else if url.scheme() == "mqtts" {
-            true
-        } else {
-            return Err(Report::new(MqttTopicIngestorError::UnsupportedScheme {
-                scheme: url.scheme().to_string(),
-            }));
-        };
-        let host = match url.host() {
-            Some(Host::Domain(domain)) => domain.to_string(),
-            Some(Host::Ipv4(address)) => address.to_string(),
-            Some(Host::Ipv6(address)) => address.to_string(),
-            None => String::new(),
-        };
-        if host.is_empty() {
-            return Err(Report::new(MqttTopicIngestorError::MissingHost));
-        }
-        let Some(port) = url.port() else {
-            return Err(Report::new(MqttTopicIngestorError::MissingPort));
-        };
-        Ok(MqttTopicIngestorAddr { host, port, tls })
+            .map_err(|error| {
+                Report::new(error).change_context(MqttTopicIngestorError::BuildClient)
+            })?;
+        Ok(UnstartedConnection {
+            client,
+            eventloop,
+            admission,
+        })
     }
 
     /// Drives the event loop until the broker confirms the subscription.
@@ -971,7 +919,11 @@ impl IngestorConnector for MqttTopicIngestor {
                 .establish_subscription(&mut connection)
                 .await
                 .change_context(IngestorError::Resume { connector: MQTT })?;
-            let UnstartedConnection { client, eventloop } = connection;
+            let UnstartedConnection {
+                client,
+                eventloop,
+                admission,
+            } = connection;
             // The CONNACK has replaced the client's own keep-alive with the broker's, if it
             // announced one, and a keep-alive of zero is none.
             let keep_alive = eventloop.options.keep_alive();
@@ -985,6 +937,7 @@ impl IngestorConnector for MqttTopicIngestor {
                 eventloop,
                 self.plan.acknowledgement,
                 keep_alive,
+                admission,
                 self.plan.read_ahead_dropped.clone(),
             ));
         }
@@ -1109,7 +1062,7 @@ mod tests {
 
     async fn build_client(
         config: &[ClientConfigEntry],
-    ) -> MqttTopicIngestorResult<(AsyncClient, EventLoop)> {
+    ) -> MqttTopicIngestorResult<UnstartedConnection> {
         let fixture = DnsFixture::start().await;
         MqttTopicIngestorPlan::client_from_config(
             config,
@@ -1134,7 +1087,6 @@ mod tests {
     fn settings(addr: &str, session: MqttSession, dns: DnsResolver) -> MqttTopicIngestorSettings {
         MqttTopicIngestorSettings {
             instances: vec![vec![entry("addr", addr)]],
-            client_id_conflict: None,
             default_client_id: "client".to_string(),
             share_group: "default~ingestor".to_string(),
             topic: "events".to_string(),
@@ -1153,7 +1105,7 @@ mod tests {
             entry("client_id", "persistent-client"),
         ];
         let fixture = DnsFixture::start().await;
-        let (_, eventloop) = MqttTopicIngestorPlan::client_from_config(
+        let UnstartedConnection { eventloop, .. } = MqttTopicIngestorPlan::client_from_config(
             &config,
             "fallback",
             MqttSession::Persistent,
@@ -1174,7 +1126,7 @@ mod tests {
         for session in [MqttSession::Clean, MqttSession::Persistent] {
             nervix_primitives::task::consume_budget().await;
             let fixture = DnsFixture::start().await;
-            let (_, eventloop) = MqttTopicIngestorPlan::client_from_config(
+            let UnstartedConnection { eventloop, .. } = MqttTopicIngestorPlan::client_from_config(
                 &config,
                 "bounded",
                 session,
@@ -1204,7 +1156,7 @@ mod tests {
             (NonZeroU64::MAX, u16::MAX),
         ] {
             nervix_primitives::task::consume_budget().await;
-            let (_, eventloop) = MqttTopicIngestorPlan::client_from_config(
+            let UnstartedConnection { eventloop, .. } = MqttTopicIngestorPlan::client_from_config(
                 &config,
                 "windowed",
                 MqttSession::Persistent,
@@ -1219,7 +1171,7 @@ mod tests {
                 "a window of {window} is advertised with its headroom, as far as MQTT can carry"
             );
         }
-        let (_, eventloop) = MqttTopicIngestorPlan::client_from_config(
+        let UnstartedConnection { eventloop, .. } = MqttTopicIngestorPlan::client_from_config(
             &config,
             "on-receipt",
             MqttSession::Clean,
@@ -1276,31 +1228,40 @@ mod tests {
     }
 
     #[test]
-    fn explicit_multi_instance_client_id_uses_instance_template() {
+    fn instances_conflict_exactly_when_their_rendered_identities_repeat() {
+        let shared = vec![
+            config_with_client_id("fixed-client"),
+            config_with_client_id("fixed-client"),
+        ];
         assert_eq!(
-            MqttTopicIngestorPlan::client_id_conflict(
-                &config_with_client_id("fixed-client"),
-                nonzero!(2u64)
-            ),
+            MqttTopicIngestorPlan::identity_conflict(&shared),
             Some(MqttClientIdError::SharedIdentity {
                 client_id: "fixed-client".to_string(),
                 instances: nonzero!(2u64),
             })
         );
+        // However the template spelled its placeholder, each instance rendered its own identity.
+        let rendered = vec![
+            config_with_client_id("templated-0"),
+            config_with_client_id("templated-1"),
+        ];
+        assert_eq!(MqttTopicIngestorPlan::identity_conflict(&rendered), None);
+        let defaults = vec![Vec::new(), Vec::new()];
+        assert_eq!(MqttTopicIngestorPlan::identity_conflict(&defaults), None);
+        let single = vec![config_with_client_id("fixed-client")];
+        assert_eq!(MqttTopicIngestorPlan::identity_conflict(&single), None);
+        // Only the instances that render it alike share an identity.
+        let partly = vec![
+            config_with_client_id("orders-a"),
+            config_with_client_id("orders-b"),
+            config_with_client_id("orders-a"),
+        ];
         assert_eq!(
-            MqttTopicIngestorPlan::client_id_conflict(&[], nonzero!(2u64)),
-            None
-        );
-        assert_eq!(
-            MqttTopicIngestorPlan::client_id_conflict(
-                &config_with_client_id("templated-{{instance}}"),
-                nonzero!(2u64)
-            ),
-            None
-        );
-        assert_eq!(
-            MqttTopicIngestorPlan::client_id_conflict(&[], nonzero!(1u64)),
-            None
+            MqttTopicIngestorPlan::identity_conflict(&partly),
+            Some(MqttClientIdError::SharedIdentity {
+                client_id: "orders-a".to_string(),
+                instances: nonzero!(2u64),
+            })
         );
     }
 
@@ -1489,11 +1450,10 @@ mod tests {
     async fn a_shared_client_id_names_the_conflict_as_the_resume_failure() {
         let fixture = DnsFixture::start().await;
         let plan = MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
-            instances: vec![Vec::new(), Vec::new()],
-            client_id_conflict: MqttTopicIngestorPlan::client_id_conflict(
-                &config_with_client_id("fixed-client"),
-                nonzero!(2u64),
-            ),
+            instances: vec![
+                config_with_client_id("fixed-client"),
+                config_with_client_id("fixed-client"),
+            ],
             default_client_id: "fallback".to_string(),
             share_group: "default~mqtt_notifications".to_string(),
             topic: "notifications".to_string(),
@@ -1515,49 +1475,6 @@ mod tests {
                     .to_string()
             )
         );
-    }
-
-    #[test]
-    fn parse_addr_handles_valid_and_invalid_inputs() {
-        assert_eq!(
-            MqttTopicIngestorPlan::parse_addr("mqtt://user:pass@broker.example.com:1883/topic")
-                .expect("must parse"),
-            MqttTopicIngestorAddr {
-                host: "broker.example.com".to_string(),
-                port: 1883,
-                tls: false,
-            }
-        );
-        assert_eq!(
-            MqttTopicIngestorPlan::parse_addr("mqtts://broker.example.com:8883")
-                .expect("must parse"),
-            MqttTopicIngestorAddr {
-                host: "broker.example.com".to_string(),
-                port: 8883,
-                tls: true,
-            }
-        );
-        assert_eq!(
-            MqttTopicIngestorPlan::parse_addr("mqtt://[2001:db8::1]:1883/topic")
-                .expect("must parse"),
-            MqttTopicIngestorAddr {
-                host: "2001:db8::1".to_string(),
-                port: 1883,
-                tls: false,
-            }
-        );
-        assert_eq!(
-            MqttTopicIngestorPlan::parse_addr("mqtt://broker.example.com:1883?keep_alive=30")
-                .expect("must parse"),
-            MqttTopicIngestorAddr {
-                host: "broker.example.com".to_string(),
-                port: 1883,
-                tls: false,
-            }
-        );
-        assert!(MqttTopicIngestorPlan::parse_addr("http://broker.example.com:1883").is_err());
-        assert!(MqttTopicIngestorPlan::parse_addr("mqtt://broker.example.com").is_err());
-        assert!(MqttTopicIngestorPlan::parse_addr("mqtt://:1883").is_err());
     }
 
     #[nervix_primitives::test]
@@ -1582,18 +1499,49 @@ mod tests {
         ));
         assert!(
             matches!(
-                error.downcast_ref::<nervix_connector::ClientConfigError>(),
-                Some(nervix_connector::ClientConfigError::MissingRequired {
-                    connector: "MQTT",
-                    key,
-                }) if key == "addr"
+                error.downcast_ref::<nervix_models::ClientConfigSchemaError>(),
+                Some(nervix_models::ClientConfigSchemaError::MissingRequired { key: "addr" })
             ),
-            "missing MQTT address should preserve its typed client-config cause"
+            "missing MQTT address should preserve its typed schema cause: {error:#}"
         );
     }
 
     #[nervix_primitives::test]
-    async fn client_reports_typed_address_and_tls_configuration_errors() {
+    async fn a_connection_carries_its_clients_credentials_keep_alive_and_admission_bound() {
+        let connection = build_client(&[
+            entry("addr", "mqtt://broker.example.com:1883"),
+            entry("username", "nervix"),
+            entry("password", "s3cret"),
+            entry("keep_alive_ms", "7000"),
+            entry("max_packet_size", "32768"),
+        ])
+        .await
+        .expect("a client declaring every key builds");
+        assert_eq!(
+            connection.eventloop.options.auth(),
+            &rumqttc::ConnectAuth::UsernamePassword {
+                username: "nervix".to_string(),
+                password: bytes::Bytes::from_static(b"s3cret"),
+            }
+        );
+        assert_eq!(
+            connection.eventloop.options.keep_alive(),
+            Duration::from_secs(7)
+        );
+        assert_eq!(connection.admission.get(), 32_768);
+        assert_eq!(
+            connection
+                .eventloop
+                .options
+                .max_packet_size()
+                .map(u64::from),
+            Some(MQTT_MAXIMUM_PACKET_BYTES),
+            "the declared admission bound never replaces the advertised protocol bound"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn client_keeps_the_schemas_refusal_of_an_address_or_a_tls_configuration() {
         let error = build_client_error(
             &[entry("addr", "not a URL")],
             "an invalid MQTT address must fail",
@@ -1601,8 +1549,15 @@ mod tests {
         .await;
         assert!(matches!(
             error.current_context(),
-            MqttTopicIngestorError::InvalidAddress
+            MqttTopicIngestorError::ClientConfig
         ));
+        assert!(
+            matches!(
+                error.downcast_ref::<nervix_models::ClientConfigSchemaError>(),
+                Some(nervix_models::ClientConfigSchemaError::InvalidValue { key, .. }) if key == "addr"
+            ),
+            "{error:#}"
+        );
 
         let error = build_client_error(
             &[entry("addr", "mqtts://localhost:8883")],
@@ -1611,8 +1566,18 @@ mod tests {
         .await;
         assert!(matches!(
             error.current_context(),
-            MqttTopicIngestorError::MissingTlsCa
+            MqttTopicIngestorError::ClientConfig
         ));
+        assert!(
+            matches!(
+                error.downcast_ref::<nervix_models::ClientConfigSchemaError>(),
+                Some(nervix_models::ClientConfigSchemaError::RequiresKey {
+                    key: "addr",
+                    required: "tls_ca_file",
+                })
+            ),
+            "{error:#}"
+        );
 
         let root = tempfile::tempdir().expect("temporary MQTT TLS directory should open");
         let ca = root.path().join("ca.pem");
@@ -1631,8 +1596,18 @@ mod tests {
         .await;
         assert!(matches!(
             error.current_context(),
-            MqttTopicIngestorError::IncompleteTlsIdentity
+            MqttTopicIngestorError::ClientConfig
         ));
+        assert!(
+            matches!(
+                error.downcast_ref::<nervix_models::ClientConfigSchemaError>(),
+                Some(nervix_models::ClientConfigSchemaError::RequiresKey {
+                    key: "tls_cert_file",
+                    required: "tls_key_file",
+                })
+            ),
+            "{error:#}"
+        );
     }
 
     #[nervix_primitives::test]

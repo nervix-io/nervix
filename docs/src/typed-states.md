@@ -256,6 +256,15 @@ ordinary prefix; that original deadline then survives cancellation. The connecti
 most one discard and clears it only when it returns the size outcome after confirmation. See
 [MQTT source connections](./connector-contract.md#mqtt-source-connections).
 
+**MQTT client configuration.** The vocabulary converts one rendered MQTT client configuration into
+typed values once, at `CREATE MQTT CLIENT` and again when a connection is built. Its transport is
+plain TCP or TLS, and the TLS variant carries the trust file and the optional certificate and key
+pair, so a plain connection holds no TLS file and a TLS one cannot lack its trust root. An absent
+identity template, username or password is `None`, never an empty string, and an empty
+`client_id` is refused rather than read as absent. The keep-alive is a nonzero count of seconds and
+the admission bound a nonzero byte count, each taking the schema's one declared default where the
+client leaves it out. A password's debug rendering shows only the redaction marker.
+
 **Iceberg catalog identity.** The namespace is required configuration, represented by one shared
 validated name type from parsing through connector opening. Dot-separated levels are nonempty and
 retain case. No absent namespace is filled from the Nervix domain, and no layer invents another

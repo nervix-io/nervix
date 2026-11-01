@@ -219,6 +219,7 @@ class InventoryTests(unittest.TestCase):
             "ingest-metadata-projection",
             "endpoint-request-metadata",
             "websocket-client-config",
+            "mqtt-client-config",
             "websocket-upgrade-headers",
             "websocket-subprotocol-offers",
             "models-timestamps",

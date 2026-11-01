@@ -18,9 +18,22 @@ use strum::IntoEnumIterator as _;
 use super::*;
 use crate::{
     ClientConfigEntry, ClientConfigFile, ClientConfigOwner, ClientConfigPresence,
-    ClientConfigSchema, ClientConfigSchemaError, ClientConfigValue, ClientPooling,
-    EmitterEntityKind, EmitterPublishingModeKind, IngestDeliveryKind, IngestQuiesceKind,
-    IngestorEntityKind, IngestorEntityModel as _, WrittenChoice,
+    ClientConfigReaders, ClientConfigSchema, ClientConfigSchemaError, ClientConfigValue,
+    ClientPooling, EmitterEntityKind, EmitterPublishingModeKind, IngestDeliveryKind,
+    IngestQuiesceKind, IngestorEntityKind, IngestorEntityModel as _, WrittenChoice,
+};
+
+/// The bound of a wait for a write: one interval of the keep-alive the client asks for.
+const ONE_KEEP_ALIVE: WaitBound = WaitBound::ClientKey {
+    key: "keep_alive_ms",
+    rule: "one interval of it, or of the broker's Server Keep Alive; 60 s when omitted",
+};
+
+/// The bound of a silent connection: a ping after one keep-alive interval, unanswered for another.
+const TWO_KEEP_ALIVES: WaitBound = WaitBound::ClientKey {
+    key: "keep_alive_ms",
+    rule: "two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 \
+           s when omitted",
 };
 
 #[test]
@@ -342,8 +355,8 @@ fn topic_ingestion_bounds_its_connection_by_the_keep_alive_but_not_its_suback() 
         vec![
             WaitBound::Driver("5 s"),
             WaitBound::Unbounded,
-            WaitBound::Driver("one keep-alive interval of 60 s, or the broker's"),
-            WaitBound::Driver("keep-alive of 60 s, or the broker's"),
+            ONE_KEEP_ALIVE,
+            TWO_KEEP_ALIVES,
         ]
     );
     assert!(ingest.bounds.deadline_keys().is_empty());
@@ -377,7 +390,7 @@ fn topic_ingestion_bounds_its_connection_by_the_keep_alive_but_not_its_suback() 
     assert_eq!(
         ingest.bounds.buffers[1].bound,
         BufferBound::Bounded {
-            capacity: BufferCapacity::Bytes(MQTT_SOURCE_MAXIMUM_PACKET_BYTES),
+            capacity: BufferCapacity::Setting("max_packet_size, 10240 bytes when omitted"),
             overflow: BufferOverflow::DropAndCount,
         }
     );
@@ -403,6 +416,7 @@ fn topic_emission_bounds_broker_answers_by_its_ack_timeout_clause() {
             WaitBound::Driver("5 s"),
             WaitBound::Clause("ACK TIMEOUT"),
             WaitBound::Unbounded,
+            TWO_KEEP_ALIVES,
         ]
     );
     assert!(emit.bounds.deadline_keys().is_empty());
@@ -424,7 +438,51 @@ fn client_schema() -> ClientConfigSchema {
 }
 
 #[test]
-fn client_declaration_names_the_broker_and_binds_tls_files_to_mqtts() {
+fn every_keep_alive_bound_names_the_client_key_and_the_default_it_states() {
+    let ingest = IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic).capabilities();
+    let emit = EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic).capabilities();
+    let mut named = 0_usize;
+    for wait in ingest.bounds.waits.iter().chain(emit.bounds.waits) {
+        let WaitBound::ClientKey { key, rule } = wait.bound else {
+            continue;
+        };
+        let declared = client_schema()
+            .key(key)
+            .assured("a wait names only a key the MQTT client declares");
+        assert_eq!(declared.presence, ClientConfigPresence::Defaulted("60000"));
+        assert!(rule.ends_with("60 s when omitted"), "{rule}");
+        named += 1;
+    }
+    assert_eq!(
+        named, 3,
+        "two source waits and the emitter's silent connection"
+    );
+}
+
+#[test]
+fn the_admitted_publish_buffer_names_the_client_key_and_the_default_it_states() {
+    let ingest = IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic).capabilities();
+    let BufferBound::Bounded {
+        capacity: BufferCapacity::Setting(setting),
+        ..
+    } = ingest.bounds.buffers[1].bound
+    else {
+        panic!("the admitted publish buffer is bounded by a client key");
+    };
+    let declared = client_schema()
+        .key("max_packet_size")
+        .assured("the MQTT client declares the admission bound");
+    let ClientConfigPresence::Defaulted(default) = declared.presence else {
+        panic!("max_packet_size has a declared default");
+    };
+    assert_eq!(
+        setting,
+        format!("max_packet_size, {default} bytes when omitted")
+    );
+}
+
+#[test]
+fn client_declaration_names_every_key_a_connection_reads() {
     let declaration = CreateClientMqtt::<u64>::DECLARATION;
     assert_eq!(CreateClientMqtt::<u64>::CONNECTOR, ConnectorKind::Mqtt);
     assert_eq!(declaration.pooling, ClientPooling::Unpooled);
@@ -437,14 +495,24 @@ fn client_declaration_names_the_broker_and_binds_tls_files_to_mqtts() {
         vec![
             "addr",
             "client_id",
+            "keep_alive_ms",
+            "max_packet_size",
+            "password",
             "tls_ca_file",
             "tls_cert_file",
-            "tls_key_file"
+            "tls_key_file",
+            "username"
         ]
     );
     for key in config.keys() {
         assert_eq!(key.owner, ClientConfigOwner::Nervix, "{}", key.name);
-        assert!(!key.confidential, "{}", key.name);
+        assert_eq!(key.confidential, key.name == "password", "{}", key.name);
+        let readers = if key.name == "max_packet_size" {
+            ClientConfigReaders::Ingestors
+        } else {
+            ClientConfigReaders::Every
+        };
+        assert_eq!(key.readers, readers, "{}", key.name);
     }
     let expected = [
         (
@@ -454,6 +522,21 @@ fn client_declaration_names_the_broker_and_binds_tls_files_to_mqtts() {
         ),
         (
             "client_id",
+            ClientConfigPresence::Optional,
+            ClientConfigValue::String,
+        ),
+        (
+            "keep_alive_ms",
+            ClientConfigPresence::Defaulted("60000"),
+            ClientConfigValue::Milliseconds,
+        ),
+        (
+            "max_packet_size",
+            ClientConfigPresence::Defaulted("10240"),
+            ClientConfigValue::PositiveInteger,
+        ),
+        (
+            "password",
             ClientConfigPresence::Optional,
             ClientConfigValue::String,
         ),
@@ -480,6 +563,11 @@ fn client_declaration_names_the_broker_and_binds_tls_files_to_mqtts() {
                 scheme: "mqtts",
             },
             ClientConfigValue::File(ClientConfigFile::PrivateKey),
+        ),
+        (
+            "username",
+            ClientConfigPresence::Optional,
+            ClientConfigValue::String,
         ),
     ];
     for (name, presence, value) in expected {
@@ -665,7 +753,7 @@ fn client_schema_refuses_a_missing_address_and_an_undeclared_key() {
         &ClientConfigSchemaError::MissingRequired { key: "addr" }
     );
 
-    for undeclared in ["keep_alive", "username", "password", "max_packet_size"] {
+    for undeclared in ["keep_alive", "keepalive", "user", "session_expiry_ms"] {
         let refusal = schema
             .validate(&[
                 config_entry("addr", "mqtt://broker.example.com:1883"),
