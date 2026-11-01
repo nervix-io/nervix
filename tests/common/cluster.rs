@@ -2472,6 +2472,16 @@ impl Cluster {
         publish_redis(&self.dependencies, channel, payload).await
     }
 
+    /// Publishes `payload` to `channel` exactly once and returns how many subscriptions Redis
+    /// delivered it to, which may be none.
+    pub(crate) async fn publish_redis_once(
+        &self,
+        channel: &str,
+        payload: &str,
+    ) -> io::Result<usize> {
+        publish_redis_once(&self.dependencies, channel, payload).await
+    }
+
     pub(crate) async fn publish_redis_burst(
         &self,
         channel: &str,
@@ -5633,6 +5643,19 @@ async fn publish_redis(
     publish_redis_to_subscriber(&mut connection, channel, payload).await?;
     sleep(POLL_INTERVAL).await;
     Ok(())
+}
+
+async fn publish_redis_once(
+    dependencies: &DependencyEndpoints,
+    channel: &str,
+    payload: &str,
+) -> io::Result<usize> {
+    let client = TestRedisClient::open(dependencies.get(REDIS_ADDR)?)?;
+    let mut connection = client.connect().await?;
+    connection
+        .publish(channel, payload)
+        .await
+        .map_err(io::Error::other)
 }
 
 async fn publish_redis_burst(

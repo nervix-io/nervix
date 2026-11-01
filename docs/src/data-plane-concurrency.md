@@ -2391,6 +2391,12 @@ and three-node clusters, including expiry before the second cut, in the active a
 selections, with stress twins in the restore-stress selection, and name the
 client request and exchange owners in the inventory. The detector observes their blocking
 reply-registration and cancellation locks.
+The first-domain lease-release recovery workload reaches those same client and storage lifetimes
+after a consensus proposal is refused by an unconfirmed leader lease. Its active, order and
+stressed-restore records require recovery under the original execution reference and a downloaded
+archive with both quiesced domain cuts. The refusal owner's asynchronous mutex and the command's
+retry waits remain outside the detector; the public scenario and typed response-boundary tests
+establish their recovery and definitive-timeout outcomes without claiming an interleaving model.
 Async command and reconnect mutexes, physical deadlines and network scheduling remain outside
 its observation; the public scenarios and client-session regressions assert their wait, expiry,
 leader-change and recovery outcomes directly. The bounded native-client case runs inside the

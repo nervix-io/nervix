@@ -1018,7 +1018,18 @@ only after its lease, its pause and its drain, which a loaded runner delays, and
 again reaches a later gate only after the earlier gates have held its cuts too. A 30-second bound
 failed on loaded runners, both before a backup's first cut arrived and before the second cut of a
 backup that had started again arrived. The wait ends as soon as a cut arrives, and the bound
-neither measures nor shortens any hold or cut budget.
+neither measures nor shortens any hold or cut budget. A failed backup attempt logs its execution
+reference and complete cause before the command finalization barrier can hold its result. A backup
+that ended before reaching the next domain's cut can therefore be distinguished from a capture
+observation that missed an arrival, even while the scenario is deliberately holding finalization.
+
+The first-domain lease-release recovery outline arms one refusal of the execution's mutation
+lease release at the consensus proposal boundary, as a leader whose lease lapsed while it keeps
+its term would refuse it. The public native client retries the same admitted reference, and the
+downloaded archive must contain both domains' quiesced cuts. It runs on one and three nodes; the
+ordinary, order and stressed-restore diagnostic selections retain the client, storage and cluster
+lifetimes around that recovery. Their tracked locks do not observe the asynchronous refusal or
+retry waits.
 
 A step waits up to 120 seconds, too, for a commit to reach the transaction commit pause a scenario
 armed on a node after its admission or after a statement. A commit reaches such a pause only after
