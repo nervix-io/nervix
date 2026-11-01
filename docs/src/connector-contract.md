@@ -2889,6 +2889,13 @@ sequenceDiagram
   Domain teardown removes only that domain's definitions and ends its bound lifetimes, preserving
   other domains publishing the same host and path. The host continues to own quiesce, buffering,
   decoding, routing, flush cadence, and error reporting.
+  Both entities execute on every live node, independently of leadership and placement. The host
+  captures HTTP method, path, raw query, TCP peer and routed host, or WebSocket data-frame kind,
+  upgrade path and TCP peer. Requested metadata columns are projected from this retained context,
+  including during signaling and after buffered replay. Header reads retain the request's
+  lowercase names and repeated values in their per-name order; WebSocket reads use upgrade headers.
+  The [endpoint manual](ingestors.md#http-endpoint-and-websockets-endpoint) owns the public fields
+  and exact value contracts.
   `MODE ACK MAX <n> ACK TIMEOUT <duration>` gives each node's intake an explicit 1–65,535-response
   window. Immediate permit admission holds one response through the payload's existing ACK root;
   codec or local route refusal yields HTTP 400, successful graph completion 200, and downstream
@@ -2903,7 +2910,10 @@ sequenceDiagram
   Shared YAML encoding uses JSON-compatible flow syntax with quoted strings, preserving their
   complete contents through signaling and codec round trips.
   The source remains request-scoped. HTTP body reads and the driver's frame limits retain their
-  separate bounds. `MODE NO ACK` still confirms admission with 202.
+  separate bounds. The absolute physical ACK deadline starts at payload admission and is not
+  extended by keepalive. `MODE NO ACK` confirms HTTP admission with 202 and sends no per-frame
+  graph acknowledgement on WebSockets. Only that mode accepts `BUFFER MAX SIZE <bytes>`, with no
+  overflow clause: capacity refuses new input instead of discarding accepted bodies.
 
 ## Failure and observation
 
