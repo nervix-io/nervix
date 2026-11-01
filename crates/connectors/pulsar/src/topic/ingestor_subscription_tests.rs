@@ -26,7 +26,9 @@ fn settings<'a>(
         subscription: PulsarSubscription {
             name: PulsarSubscriptionName::try_from("readers")
                 .assured("the fixture subscription name is valid"),
-            ownership: PulsarSubscriptionOwnership::Ingestor,
+            ownership: PulsarSubscriptionOwnership::Ingestor {
+                start_at: nervix_models::PulsarStartPosition::Earliest,
+            },
         },
         consumer_name: "domain~events".to_string(),
         ack_receipts: PulsarAckReceipts::Awaited,
@@ -45,6 +47,14 @@ fn equivalent_topics_and_changed_consumer_policies_keep_the_subscription() {
         .assured("the fully qualified topic is valid");
     let previous = settings(&config, &topic);
     let mut replacement = settings(&explicit_config, &qualified);
+    replacement.subscription.ownership = PulsarSubscriptionOwnership::Ingestor {
+        start_at: nervix_models::PulsarStartPosition::Latest,
+    };
+    assert!(
+        previous
+            .reads_same_subscription(&replacement)
+            .assured("changing a creation policy does not change a broker subscription")
+    );
     replacement.subscription.ownership = PulsarSubscriptionOwnership::Provisioned;
     replacement.consumer_name = "another~consumer".to_string();
     replacement.ack_receipts = PulsarAckReceipts::Unawaited;

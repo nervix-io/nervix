@@ -18,6 +18,8 @@
 
 use std::num::NonZeroU64;
 
+use error_stack::Report;
+use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -168,23 +170,128 @@ pub struct PulsarSubscription {
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
-    strum::EnumIter,
 )]
 pub enum PulsarSubscriptionOwnership {
-    /// `OWNED BY INGESTOR`: the ingestor owns the subscription. Joining it creates it when it is
-    /// absent, and dropping the ingestor or its domain removes it.
-    Ingestor,
+    /// `OWNED BY INGESTOR START AT EARLIEST|LATEST`: joining creates an absent subscription at
+    /// the declared position, and dropping the ingestor or its domain removes it.
+    Ingestor { start_at: PulsarStartPosition },
     /// `PROVISIONED`: an operator provisioned the subscription. Every open verifies that it exists,
     /// and Nervix never creates or removes it.
     Provisioned,
 }
 
 impl PulsarSubscriptionOwnership {
+    /// Every complete subscription choice the declaration and visual draft offer.
+    pub const CHOICES: [Self; 3] = [
+        Self::Ingestor {
+            start_at: PulsarStartPosition::Earliest,
+        },
+        Self::Ingestor {
+            start_at: PulsarStartPosition::Latest,
+        },
+        Self::Provisioned,
+    ];
+
+    pub const fn is_owned(self) -> bool {
+        matches!(self, Self::Ingestor { .. })
+    }
+
     /// The words a statement writes after the subscription's name to declare this ownership.
     pub const fn keywords(self) -> &'static str {
         match self {
-            Self::Ingestor => "OWNED BY INGESTOR",
+            Self::Ingestor {
+                start_at: PulsarStartPosition::Earliest,
+            } => "OWNED BY INGESTOR START AT EARLIEST",
+            Self::Ingestor {
+                start_at: PulsarStartPosition::Latest,
+            } => "OWNED BY INGESTOR START AT LATEST",
             Self::Provisioned => "PROVISIONED",
+        }
+    }
+}
+
+/// Where Pulsar places a newly created owned subscription's cursor. Existing cursors prevail.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    strum::EnumIter,
+    strum::Display,
+    strum::AsRefStr,
+)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum PulsarStartPosition {
+    Earliest,
+    Latest,
+}
+
+impl PulsarSubscription {
+    fn set_start_at(
+        &mut self,
+        position: PulsarStartPosition,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match &mut self.ownership {
+            PulsarSubscriptionOwnership::Ingestor { start_at } => *start_at = position,
+            PulsarSubscriptionOwnership::Provisioned => {
+                return Err(Report::new(
+                    crate::AlterIngestorError::ProvisionedPulsarStartPosition {
+                        subscription: self.name.clone(),
+                    },
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Operations of a Pulsar topic ingestor, retaining shared operations in their original order.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum PulsarTopicIngestorOperation {
+    Transport(crate::AlterTransportIngestorOperation<PulsarTopicIngestor>),
+    SetStartAt { position: PulsarStartPosition },
+}
+
+impl From<crate::AlterTransportIngestorOperation<PulsarTopicIngestor>>
+    for PulsarTopicIngestorOperation
+{
+    fn from(operation: crate::AlterTransportIngestorOperation<PulsarTopicIngestor>) -> Self {
+        Self::Transport(operation)
+    }
+}
+
+impl super::ingestor::TransportIngestorOperation for PulsarTopicIngestorOperation {
+    fn apply_to(
+        &self,
+        ingestor: &mut crate::CreateIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Transport(operation) => operation.apply_to(ingestor),
+            Self::SetStartAt { position } => {
+                let source = ingestor
+                    .input
+                    .transport_source_mut()
+                    .verified(super::entity_union::ALTERED_PAIR_CHECKED);
+                let crate::IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) = source else {
+                    unreachable!("{}", super::entity_union::ALTERED_PAIR_CHECKED);
+                };
+                source.subscription.set_start_at(*position)
+            }
+        }
+    }
+
+    fn to_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        match self {
+            Self::Transport(operation) => operation.to_plexus(),
+            Self::SetStartAt { position } => Ok(format!("SET START AT {position}")),
         }
     }
 }
@@ -345,9 +452,14 @@ impl IngestorDeclaration for PulsarTopicIngestor {
                 // example writes the option in full.
                 form: OptionForm::Choice(&[
                     OptionChoice {
-                        name: PulsarSubscriptionOwnership::Ingestor.keywords(),
+                        name: PulsarSubscriptionOwnership::CHOICES[0].keywords(),
                         value: Some(OptionValue::Name(PulsarSubscriptionName::DECLARATION)),
-                        example: "SUBSCRIPTION 'readers' OWNED BY INGESTOR",
+                        example: "SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST",
+                    },
+                    OptionChoice {
+                        name: PulsarSubscriptionOwnership::CHOICES[1].keywords(),
+                        value: Some(OptionValue::Name(PulsarSubscriptionName::DECLARATION)),
+                        example: "SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST",
                     },
                     OptionChoice {
                         name: PulsarSubscriptionOwnership::Provisioned.keywords(),
@@ -388,7 +500,7 @@ connector_ingestors! {
     pub enum PulsarTopicIngestorAlteration;
     /// The entities a Pulsar source reads.
     pub enum PulsarIngestorEntity {
-        Topic(PulsarTopicIngestor) = "TOPIC", "Pulsar";
+        Topic(PulsarTopicIngestor => PulsarTopicIngestorOperation) = "TOPIC", "Pulsar";
     }
 }
 

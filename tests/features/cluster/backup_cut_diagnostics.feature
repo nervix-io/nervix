@@ -1,6 +1,27 @@
 @backup_cut_diagnostics @deloxide_stress_restore
 Feature: Attributing a quiesced backup cut's timeout
 
+  Scenario Outline: A backup whose pause commits after its deadline refuses before installation
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the backup cut for domain "{{domain}}" will be held for 25 seconds after its pause commits
+    When the CLI backs up "domain {{domain}} --timeout 20s" from node "{{leader}}" into "elapsed-pause.nvxb" reporting JSON
+    Then the CLI backup failed with JSON error code "BACKUP_REFUSED"
+    And the CLI backup failure mentions "timed out applying the backup pause of domain"
+    And the CLI backup failure mentions "an installation slot"
+    And backup archive "elapsed-pause.nvxb" does not exist
+    And node "{{leader}}" eventually reports status containing "{{domain}} status=Running pace=UNPACED"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: A capture timeout reports its active phase and completed drain
     Given a <cluster_size> node nervix cluster is started
     When these Plexus commands are executed on the leader node
