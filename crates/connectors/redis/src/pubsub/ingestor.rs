@@ -2,9 +2,10 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The dedicated subscription connection each ingestor instance reads a channel
-//!   through, including DNS, TCP, TLS and protocol setup within `connect_timeout_ms`, the bounded
-//!   read-ahead handoff, and liveness probes within `idle_timeout_ms`.
+//! - **Owns.** The dedicated subscription connection each ingestor instance reads a channel or the
+//!   channels of a pattern through, including DNS, TCP, TLS and protocol setup within
+//!   `connect_timeout_ms`, the bounded read-ahead handoff, liveness probes within
+//!   `idle_timeout_ms`, and the channel and pattern each delivered message carries as metadata.
 //! - **Depends on.** The connector contract, node DNS resolver, typed client configuration
 //!   entries, `error-stack`, Tokio and `redis`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
@@ -28,21 +29,22 @@ use std::{io, num::NonZeroUsize};
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
-    BrokerIngestorConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMetadataRow,
-    IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
-    IngestorReadCancellation, IngestorResult, IngestorResume, NoIngestHeaders,
-    RustlsClientConfigProvider, client_config_value, optional_client_config_value,
+    BrokerIngestorConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMessageMetadata,
+    IngestMetadataRow, IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest,
+    IngestorConnector, IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult,
+    IngestorResume, NoIngestHeaders, RustlsClientConfigProvider, client_config_value,
+    optional_client_config_value,
 };
 use nervix_dns::{DnsLookupFailure, DnsResolver, LookupShare, OperationBudget};
-use nervix_models::{ClientConfigEntry, ConnectorKind, RedisChannelName};
+use nervix_models::{ClientConfigEntry, ConnectorKind, RedisSubscriptionTarget};
 use nervix_primitives::{
     net::TcpStream,
     sync::{Semaphore, StdArc},
     time::timeout,
 };
-use redis::{Client as RedisClient, ConnectionAddr, Msg};
+use redis::{Client as RedisClient, ConnectionAddr};
 use rustls_pki_types::ServerName;
-use subscription::RedisSubscription;
+use subscription::{DeliveredMessage, RedisSubscription};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsConnector;
@@ -80,8 +82,10 @@ pub enum RedisPubSubIngestorError {
     NotEstablished,
     #[error("unsupported Redis connection address")]
     UnsupportedAddress,
-    #[error("failed to subscribe to Redis channel '{channel}'")]
-    Subscribe { channel: String },
+    #[error("failed to subscribe to {connector} {subscription}", connector = ConnectorKind::Redis)]
+    Subscribe {
+        subscription: RedisSubscriptionTarget,
+    },
     #[error("failed to initialize the {connector} subscription protocol", connector = ConnectorKind::Redis)]
     SubscriptionSetup,
     #[error("failed to read the {connector} subscription", connector = ConnectorKind::Redis)]
@@ -98,14 +102,14 @@ pub enum RedisPubSubIngestorError {
 
 type RedisPubSubIngestorResult<T> = Result<T, Report<RedisPubSubIngestorError>>;
 
-/// What one Redis Pub/Sub source subscribes to: its configured client, node resolver, channel,
-/// and the deadline its subscription is established within.
+/// What one Redis Pub/Sub source subscribes to: its configured client, node resolver, channel or
+/// pattern, and the deadline its subscription is established within.
 #[derive(Debug, Clone)]
 pub struct RedisPubSubIngestorPlan {
     client: RedisClient,
     dns: DnsResolver,
     tls: Option<StdArc<rustls::ClientConfig>>,
-    channel: RedisChannelName,
+    subscription: RedisSubscriptionTarget,
     connect_timeout: ConfiguredDeadline,
     idle_timeout: ConfiguredDeadline,
     buffer_messages: NonZeroUsize,
@@ -118,7 +122,7 @@ type ConnectedStream = Box<dyn RedisStream + Send + Unpin>;
 impl RedisPubSubIngestorPlan {
     pub fn new(
         config: Vec<ClientConfigEntry>,
-        channel: RedisChannelName,
+        subscription: RedisSubscriptionTarget,
         dns: DnsResolver,
     ) -> RedisPubSubIngestorResult<Self> {
         let addr = client_config_value(&config, "addr", "Redis")
@@ -150,7 +154,7 @@ impl RedisPubSubIngestorPlan {
             client,
             dns,
             tls,
-            channel,
+            subscription,
             connect_timeout,
             idle_timeout,
             buffer_messages,
@@ -201,14 +205,14 @@ impl RedisPubSubIngestorPlan {
             RedisSubscription::open(
                 stream,
                 self.client.get_connection_info().redis_settings(),
-                self.channel.as_str(),
+                &self.subscription,
                 self.buffer_messages,
                 self.idle_timeout,
             ),
         )
         .await;
         let subscribe_failed = || RedisPubSubIngestorError::Subscribe {
-            channel: self.channel.as_str().to_string(),
+            subscription: self.subscription.clone(),
         };
         match subscribed {
             Ok(Ok(subscription)) => Ok(subscription),
@@ -318,9 +322,10 @@ impl RedisPubSubIngestorPlan {
     }
 }
 
-/// One received channel message. Redis Pub/Sub carries no headers.
+/// One received message, with the channel it was published to and the pattern that matched it.
+/// Redis Pub/Sub carries no headers.
 pub struct RedisPubSubIngestorMessage {
-    message: Msg,
+    message: DeliveredMessage,
     position: (),
     headers: NoIngestHeaders,
 }
@@ -329,7 +334,7 @@ impl IngestorMessage for RedisPubSubIngestorMessage {
     type Position = ();
 
     fn payload(&self) -> &[u8] {
-        self.message.get_payload_bytes()
+        self.message.payload()
     }
 
     fn position(&self) -> &Self::Position {
@@ -341,7 +346,31 @@ impl IngestorMessage for RedisPubSubIngestorMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::headers(&self.headers)
+        IngestMetadataRow {
+            fields: self,
+            headers: IngestRowHeaders::Borrowed(&self.headers),
+            position: None,
+        }
+    }
+}
+
+/// `metadata.channel`, then `metadata.pattern`, as the entity declares them. A channel whose bytes
+/// are not UTF-8 text has no `STRING` value and reads as null, and a channel subscription has no
+/// pattern.
+impl IngestMessageMetadata for RedisPubSubIngestorMessage {
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+        match std::str::from_utf8(self.message.channel()) {
+            Ok(channel) => values.string(channel),
+            Err(_) => values.absent(),
+        }
+        let Some(pattern) = self.message.pattern() else {
+            values.absent();
+            return;
+        };
+        match std::str::from_utf8(pattern) {
+            Ok(pattern) => values.string(pattern),
+            Err(_) => values.absent(),
+        }
     }
 }
 
@@ -460,6 +489,7 @@ mod tests {
     use nervix_models::DeadlineKey;
     use nervix_primitives::net::TcpListener;
     use nervix_test_environment::dns_authority::DnsAnswer;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
     use crate::pubsub::test_fixture::Fixture;
@@ -501,13 +531,22 @@ mod tests {
     }
 
     fn plan(addr: &str, dns: DnsResolver) -> RedisPubSubIngestorPlan {
+        plan_subscribing(addr, events(), dns)
+    }
+
+    /// A plan of `subscription` through the Redis server at `addr`.
+    fn plan_subscribing(
+        addr: &str,
+        subscription: RedisSubscriptionTarget,
+        dns: DnsResolver,
+    ) -> RedisPubSubIngestorPlan {
         RedisPubSubIngestorPlan::new(
             vec![
                 entry("addr", addr),
                 entry("subscription_buffer_messages", "1024"),
                 entry("idle_timeout_ms", "30000"),
             ],
-            RedisChannelName::parse("events").expect("a plain channel name parses"),
+            subscription,
             dns,
         )
         .expect("the Redis address is valid")
@@ -518,6 +557,139 @@ mod tests {
             key: key.to_string(),
             value: value.to_string(),
         }
+    }
+
+    /// The channel subscription the fixtures plan.
+    fn events() -> RedisSubscriptionTarget {
+        RedisSubscriptionTarget::Channel(
+            nervix_models::RedisChannelName::parse("events").expect("a plain channel name parses"),
+        )
+    }
+
+    /// The metadata values `delivery`, a reply Redis sent, hands the host.
+    fn handed_over(delivery: redis::Value) -> Vec<nervix_connector::RetainedIngestMetadataValue> {
+        let message = RedisPubSubIngestorMessage {
+            message: DeliveredMessage::from_value(delivery)
+                .assured("the fixture reply is a delivered message"),
+            position: (),
+            headers: NoIngestHeaders,
+        };
+        nervix_connector::RetainedIngestMetadata::capture(&message)
+            .values()
+            .to_vec()
+    }
+
+    /// One delivery Redis may send a subscription: its channel, the pattern that matched it for a
+    /// pattern subscription, its payload, and whether RESP3 pushes it rather than RESP2 framing it
+    /// as an array.
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct Delivery {
+        channel: Vec<u8>,
+        pattern: Option<Vec<u8>>,
+        payload: Vec<u8>,
+        pushed: bool,
+    }
+
+    impl Delivery {
+        /// The reply Redis sends for this delivery.
+        fn reply(&self) -> redis::Value {
+            let bulk = |bytes: &[u8]| redis::Value::BulkString(bytes.to_vec());
+            let mut parts = Vec::new();
+            if let Some(pattern) = &self.pattern {
+                parts.push(bulk(pattern));
+            }
+            parts.push(bulk(&self.channel));
+            parts.push(bulk(&self.payload));
+            let (kind, name): (redis::PushKind, &[u8]) = match self.pattern {
+                Some(_) => (redis::PushKind::PMessage, b"pmessage"),
+                None => (redis::PushKind::Message, b"message"),
+            };
+            if self.pushed {
+                return redis::Value::Push { kind, data: parts };
+            }
+            parts.insert(0, bulk(name));
+            redis::Value::Array(parts)
+        }
+
+        /// What the metadata visit hands over for `bytes`: their text, or null where they are not
+        /// UTF-8.
+        fn text_or_null(bytes: &[u8]) -> nervix_connector::RetainedIngestMetadataValue {
+            match std::str::from_utf8(bytes) {
+                Ok(text) => nervix_connector::RetainedIngestMetadataValue::String(text.to_owned()),
+                Err(_) => nervix_connector::RetainedIngestMetadataValue::Absent,
+            }
+        }
+
+        /// The source hands over exactly the delivered bytes, and the channel and pattern as the
+        /// declaration orders them.
+        fn check(&self) {
+            let message = RedisPubSubIngestorMessage {
+                message: DeliveredMessage::from_value(self.reply())
+                    .assured("every framed channel or pattern delivery is a delivered message"),
+                position: (),
+                headers: NoIngestHeaders,
+            };
+            assert_eq!(message.payload(), self.payload);
+            assert_eq!(message.message.channel(), self.channel);
+            assert_eq!(message.message.pattern(), self.pattern.as_deref());
+            let pattern = match &self.pattern {
+                Some(pattern) => Self::text_or_null(pattern),
+                None => nervix_connector::RetainedIngestMetadataValue::Absent,
+            };
+            assert_eq!(
+                nervix_connector::RetainedIngestMetadata::capture(&message).values(),
+                [Self::text_or_null(&self.channel), pattern]
+            );
+        }
+    }
+
+    #[test]
+    fn bolero_delivered_messages_keep_their_exact_bytes_and_metadata() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(512)
+            .with_type::<Delivery>()
+            .for_each(Delivery::check);
+    }
+
+    #[test]
+    fn a_delivered_message_hands_over_its_channel_then_its_pattern_as_declared() {
+        use nervix_connector::RetainedIngestMetadataValue::{Absent, String as Text};
+        let declared: Vec<_> = <RedisPubSubIngestor as IngestorConnector>::KIND
+            .capabilities()
+            .metadata
+            .fields()
+            .iter()
+            .map(|field| field.name())
+            .collect();
+        assert_eq!(declared, ["channel", "pattern"]);
+        let bulk = |bytes: &[u8]| redis::Value::BulkString(bytes.to_vec());
+        assert_eq!(
+            handed_over(redis::Value::Array(vec![
+                bulk(b"pmessage"),
+                bulk(b"orders.*"),
+                bulk(b"orders.eu"),
+                bulk(b"{}"),
+            ])),
+            [Text("orders.eu".to_string()), Text("orders.*".to_string())]
+        );
+        assert_eq!(
+            handed_over(redis::Value::Array(vec![
+                bulk(b"message"),
+                bulk(b"events"),
+                bulk(b"{}"),
+            ])),
+            [Text("events".to_string()), Absent]
+        );
+        assert_eq!(
+            handed_over(redis::Value::Array(vec![
+                bulk(b"pmessage"),
+                bulk(b"orders.*"),
+                bulk(b"orders.\xff"),
+                bulk(b"{}"),
+            ])),
+            [Absent, Text("orders.*".to_string())]
+        );
     }
 
     #[nervix_primitives::test]
@@ -531,7 +703,7 @@ mod tests {
                     entry("subscription_buffer_messages", "1024"),
                     entry("idle_timeout_ms", "30000"),
                 ],
-                RedisChannelName::parse("events").expect("a plain channel name parses"),
+                events(),
                 fixture.dns.clone(),
             )
             .expect_err("an invalid deadline cannot plan a subscription");
@@ -568,7 +740,7 @@ mod tests {
                 entry("subscription_buffer_messages", "1024"),
                 entry("idle_timeout_ms", "30000"),
             ],
-            RedisChannelName::parse("events").expect("a plain channel name parses"),
+            events(),
             fixture.dns,
         )
         .expect("the Redis address and deadline are valid");
@@ -591,10 +763,9 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn the_plan_requires_the_address_before_it_subscribes() {
-        let channel = RedisChannelName::parse("events").expect("a plain channel name parses");
         let fixture = Fixture::start().await;
         let dns = fixture.dns;
-        let error = RedisPubSubIngestorPlan::new(Vec::new(), channel, dns)
+        let error = RedisPubSubIngestorPlan::new(Vec::new(), events(), dns)
             .expect_err("a missing Redis address must fail");
         assert!(matches!(
             error.current_context(),
@@ -632,6 +803,62 @@ mod tests {
                 .expect("the listener accepts it");
         drop(stream);
         assert!(fixture.authority.questions_for(name) > 0);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_refused_pattern_subscription_names_its_pattern_above_the_servers_typed_cause() {
+        let fixture = Fixture::start().await;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .assured("a loopback listener can bind an ephemeral port");
+        let port = listener
+            .local_addr()
+            .assured("a bound listener has an address")
+            .port();
+        let server = nervix_primitives::task::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .assured("the source connects to its Redis server");
+            let command = b"*2\r\n$10\r\nPSUBSCRIBE\r\n$8\r\norders.*\r\n";
+            let mut received = vec![0; command.len()];
+            stream
+                .read_exact(&mut received)
+                .await
+                .assured("the source asks for its pattern subscription");
+            assert_eq!(received, command);
+            stream
+                .write_all(
+                    b"-NOPERM this user has no permissions to access one of the channels\r\n",
+                )
+                .await
+                .assured("the refusal reaches the source");
+        });
+        let subscription = RedisSubscriptionTarget::Pattern(
+            nervix_models::RedisChannelPattern::parse("orders.*")
+                .assured("a glob pattern is within the bound"),
+        );
+        let plan = plan_subscribing(
+            &format!("redis://127.0.0.1:{port}"),
+            subscription.clone(),
+            fixture.dns,
+        );
+        let error = match plan.subscribe().await {
+            Ok(_) => panic!("the server refused the pattern subscription"),
+            Err(error) => error,
+        };
+        let RedisPubSubIngestorError::Subscribe {
+            subscription: refused,
+        } = error.current_context()
+        else {
+            panic!("a refused subscription reports the subscription it asked for");
+        };
+        assert_eq!(refused, &subscription);
+        let cause = error
+            .downcast_ref::<redis::RedisError>()
+            .assured("the refusal retains the Redis driver's typed cause");
+        assert_eq!(cause.code(), Some("NOPERM"));
+        server.await.assured("the refusing server finishes");
     }
 
     #[nervix_primitives::test]
