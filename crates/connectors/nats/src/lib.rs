@@ -1,4 +1,4 @@
-//! NatsSubjectIngestor, NatsSubjectEmitter and NatsStreamIngestor connector entities.
+//! NATS subject and stream ingestor and emitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public subject and stream connector implementation surface.

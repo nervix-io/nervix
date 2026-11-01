@@ -3,10 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The NATS connection a client configures, its reconnect delay, the queue
-//!   subscription an ingestor reads through, core and JetStream publication, the bound the client's
-//!   `timeout_ms` sets on a core write and the records a core client still holds unflushed, the
-//!   JetStream answer each record's `PubAck` gives the confirmation window, header mapping in both
-//!   directions, and per-record rejection classification.
+//!   subscription an ingestor reads through, core publication, the bound the client's
+//!   `timeout_ms` sets on a core write and the records a core client still holds unflushed,
+//!   header mapping in both directions, and per-record rejection classification.
 //! - **Depends on.** The connector contract and its confirmation window, vocabulary values,
 //!   `error-stack`, Tokio and `async-nats`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -32,17 +31,11 @@ mod ingestor;
 )]
 pub(crate) mod scripted_server;
 
-use std::{future::Future, num::NonZeroU64, pin::Pin, time::Duration};
+use std::{num::NonZeroU64, time::Duration};
 
 use async_nats::{
     Client as NatsClient, PublishError as NatsPublishError,
-    PublishErrorKind as NatsPublishErrorKind, Subject,
-    jetstream::{
-        Context as NatsJetStream,
-        context::{PublishAckFuture, PublishError as JetStreamPublishError, PublishErrorKind},
-        publish::PublishAck,
-    },
-    message::OutboundMessage,
+    PublishErrorKind as NatsPublishErrorKind, Subject, message::OutboundMessage,
 };
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
@@ -54,11 +47,10 @@ pub use ingestor::{
 };
 use meticulous::OptionExt as _;
 use nervix_connector::{
-    AckConfirmation, BrokerAnswer, BrokerVerdict, ConfiguredDeadline, ConfirmationWindow,
-    EmitterFinish, EmitterFinishError, EmitterFinishResult, EmitterHost, EmitterLifecycle,
-    EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError,
-    ParsedRetryPolicy, PerRecordOutcome, RecordEmitter, RejectedEmitterMember, client_config_value,
-    client_tls_paths,
+    ConfiguredDeadline, EmitterFinish, EmitterFinishError, EmitterFinishResult, EmitterHost,
+    EmitterLifecycle, EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult,
+    EmitterWriteError, ParsedRetryPolicy, PerRecordOutcome, RecordEmitter, RejectedEmitterMember,
+    client_config_value, client_tls_paths,
 };
 use nervix_models::{ClientConfigEntry, NatsPublishSubjectName};
 use nervix_primitives::{
@@ -71,69 +63,22 @@ use nervix_primitives::{
 
 const NATS: &str = "nats";
 
-/// Whether a NATS emitter publishes through core NATS or waits for JetStream to store each record.
-///
-/// A NATS emitter publishes through its own client even without an acknowledgement, so `MODE NO ACK`
-/// decides [`NatsPublishingMode::Core`] rather than a broker mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NatsPublishingMode {
-    Core,
-    JetStream(AckConfirmation),
-}
-
-/// What one NATS emitter publishes through: its client entries, subject, delivery and reconnect
+/// What one NATS SUBJECT emitter publishes through: its client entries, subject and reconnect
 /// backoff.
 pub struct NatsSubjectEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub subject: NatsPublishSubjectName,
-    pub mode: NatsPublishingMode,
     pub retry_policy: ParsedRetryPolicy,
 }
 
 pub struct NatsSubjectEmitter {
     client: NatsClient,
-    delivery: NatsDelivery,
+    writes: CoreWrites,
     subject: Subject,
 }
 
-/// How this emitter publishes, together with whatever that way of publishing needs.
-///
-/// A JetStream context exists only for `MODE ACK`, and the bound and the unflushed records of a
-/// core write only for `MODE NO ACK`, so pairing each with the mode that requires it means the
-/// publish path reads one value instead of matching a mode and then hoping a separately stored
-/// value agrees with it.
-enum NatsDelivery {
-    Core(CoreWrites),
-    JetStream {
-        context: Box<NatsJetStream>,
-        confirmation: AckConfirmation,
-    },
-}
-
-/// JetStream's answer for one record, which resolves when the record's `PubAck` arrives or the
-/// client gives the record up.
-type NatsAnswer = Pin<Box<dyn Future<Output = BrokerAnswer> + Send>>;
-
 /// The wait the client's `timeout_ms` bounds, as a write that runs out of it names the wait.
 const CORE_WRITE: &str = "a core NATS publish and its flush";
-
-impl NatsDelivery {
-    /// JetStream publishing through `client`, with a context that awaits each record's `PubAck`
-    /// for at most the declared `ACK TIMEOUT` and holds at most `MAX` records awaiting one.
-    fn jetstream(confirmation: AckConfirmation, client: &NatsClient) -> Self {
-        Self::JetStream {
-            context: Box::new(
-                async_nats::jetstream::ContextBuilder::new()
-                    .timeout(confirmation.timeout)
-                    .ack_timeout(confirmation.timeout)
-                    .max_ack_inflight(confirmation.max_in_flight.get())
-                    .backpressure_on_inflight(true)
-                    .build(client.clone()),
-            ),
-            confirmation,
-        }
-    }
-}
 
 /// The core writes of one emitter: the bound the client's `timeout_ms` sets on each, and the records
 /// the client took whose flush has not completed on their connection.
@@ -404,21 +349,14 @@ impl NatsSubjectEmitter {
         // start as configuration whether or not the server answers.
         let write_timeout = Self::write_timeout(&config.config)?;
         let client = Self::client_from_config(&config.config, config.retry_policy).await?;
-        let delivery = match config.mode {
-            NatsPublishingMode::Core => NatsDelivery::Core(CoreWrites::new(write_timeout)),
-            NatsPublishingMode::JetStream(confirmation) => {
-                NatsDelivery::jetstream(confirmation, &client)
-            }
-        };
         Ok(Self {
             client,
-            delivery,
+            writes: CoreWrites::new(write_timeout),
             subject: Subject::from(config.subject.as_str().to_string()),
         })
     }
 
-    /// The bound the client's `timeout_ms` sets on each core write, where it sets one. JetStream
-    /// bounds its records by `ACK TIMEOUT` instead.
+    /// The bound the client's `timeout_ms` sets on each core write, where it sets one.
     fn write_timeout(
         config: &[ClientConfigEntry],
     ) -> EmitterStartResult<Option<ConfiguredDeadline>> {
@@ -426,7 +364,7 @@ impl NatsSubjectEmitter {
             .change_context(EmitterOpenError::InvalidConfiguration { connector: NATS })
     }
 
-    async fn client_from_config(
+    pub(crate) async fn client_from_config(
         config: &[ClientConfigEntry],
         retry_policy: ParsedRetryPolicy,
     ) -> EmitterStartResult<NatsClient> {
@@ -498,94 +436,7 @@ impl NatsSubjectEmitter {
         delay
     }
 
-    /// Publishes `records` to JetStream and awaits each record's `PubAck` through the
-    /// confirmation window `settings` declare.
-    ///
-    /// Every way the publish can fail ends it through the window, which first settles each answer
-    /// JetStream already gave, so the host's retry never resends a record the stream confirmed.
-    async fn publish_jetstream(
-        subject: &Subject,
-        jetstream: &NatsJetStream,
-        settings: AckConfirmation,
-        records: Vec<EmitterRecord>,
-    ) -> PerRecordOutcome<EmitterRecordId> {
-        let mut window: ConfirmationWindow<NatsAnswer> =
-            ConfirmationWindow::new(NATS, settings, records.len());
-        for record in records {
-            nervix_primitives::task::consume_budget().await;
-            let record_id = record.id;
-            let occurred_at = record.occurred_at;
-            let handed_over = if record.headers.is_empty() {
-                jetstream
-                    .publish(subject.clone(), record.payload.into())
-                    .await
-            } else {
-                jetstream
-                    .publish_with_headers(
-                        subject.clone(),
-                        Self::header_map(&record.headers),
-                        record.payload.into(),
-                    )
-                    .await
-            };
-            let pending = match handed_over {
-                Ok(pending) => pending,
-                Err(error) if Self::is_jetstream_record_rejection(&error) => {
-                    window.reject(RejectedEmitterMember::external(
-                        record_id,
-                        occurred_at,
-                        format!("nats JetStream rejected record: {error}"),
-                    ));
-                    continue;
-                }
-                Err(error) => return window.fail(Self::refused_hand_over(error)),
-            };
-            let answer: NatsAnswer = Box::pin(Self::await_answer(pending));
-            if let Err(failure) = window.admit(record_id, occurred_at, answer).await {
-                return window.fail(failure);
-            }
-        }
-        window.finish().await
-    }
-
-    /// Waits for the `PubAck` of the record `pending` tracks and reads JetStream's answer from it.
-    async fn await_answer(pending: PublishAckFuture) -> BrokerAnswer {
-        let acknowledgement = pending.await;
-        Self::broker_answer(acknowledgement)
-    }
-
-    /// JetStream's answer for a record whose wait for its `PubAck` ended as `acknowledgement`.
-    ///
-    /// A `PubAck` confirms the record, and a message above the server's `max_payload` is refused
-    /// for good. Any other ending leaves the record's outcome unknown: no stream captures the
-    /// subject, the `PubAck` did not arrive, or the client or its connection failed.
-    fn broker_answer(acknowledgement: Result<PublishAck, JetStreamPublishError>) -> BrokerAnswer {
-        match acknowledgement {
-            Ok(_ack) => Ok(BrokerVerdict::Confirmed),
-            Err(error) if Self::is_jetstream_record_rejection(&error) => {
-                Ok(BrokerVerdict::Rejected {
-                    message: format!("nats JetStream rejected record: {error}"),
-                })
-            }
-            Err(error) => {
-                let description = format!("nats JetStream publish failed: {error}");
-                Err(Report::new(error)
-                    .change_context(EmitterWriteError::Publish { connector: NATS })
-                    .attach_printable(description))
-            }
-        }
-    }
-
-    /// The failure that ends a publish whose record the client did not take for a reason that is
-    /// not the record's own, such as a client that could not queue it within `ACK TIMEOUT`.
-    fn refused_hand_over(error: JetStreamPublishError) -> Report<EmitterWriteError> {
-        let description = format!("nats JetStream client did not take the record: {error}");
-        Report::new(error)
-            .change_context(EmitterWriteError::Publish { connector: NATS })
-            .attach_printable(description)
-    }
-
-    fn header_map(headers: &[(String, String)]) -> async_nats::HeaderMap {
+    pub(crate) fn header_map(headers: &[(String, String)]) -> async_nats::HeaderMap {
         let mut header_map = async_nats::HeaderMap::new();
         for (name, value) in headers {
             header_map.append(name.as_str(), value.as_str());
@@ -595,15 +446,6 @@ impl NatsSubjectEmitter {
 
     fn is_core_record_rejection(error: &NatsPublishError) -> bool {
         matches!(error.kind(), NatsPublishErrorKind::MaxPayloadExceeded)
-    }
-
-    fn is_jetstream_record_rejection(error: &JetStreamPublishError) -> bool {
-        matches!(error.kind(), PublishErrorKind::MaxPayloadExceeded)
-    }
-
-    #[cfg(test)]
-    fn jetstream_error_is_missing_stream(error: &JetStreamPublishError) -> bool {
-        matches!(error.kind(), PublishErrorKind::StreamNotFound)
     }
 
     fn config_value(config: &[ClientConfigEntry], key: &str) -> EmitterStartResult<String> {
@@ -657,13 +499,9 @@ impl EmitterLifecycle for NatsSubjectEmitter {
 
     /// A failed or timed-out core write retains its count and connection expectation. Finishing
     /// validates that connection's flush by `deadline`; a replacement connection cannot certify
-    /// discarded bytes. JetStream answers each record, so its client holds nothing a publish
-    /// reported delivered.
+    /// discarded bytes.
     async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
-        match &mut self.delivery {
-            NatsDelivery::Core(writes) => writes.finish(&self.client, deadline).await,
-            NatsDelivery::JetStream { .. } => Ok(EmitterFinish::NothingHeld),
-        }
+        self.writes.finish(&self.client, deadline).await
     }
 
     /// A publish failure leaves the client connected: it reconnects on its own schedule, and
@@ -676,15 +514,9 @@ impl EmitterLifecycle for NatsSubjectEmitter {
 #[async_trait]
 impl RecordEmitter for NatsSubjectEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
-        match &mut self.delivery {
-            NatsDelivery::Core(writes) => {
-                writes.publish(&self.client, &self.subject, records).await
-            }
-            NatsDelivery::JetStream {
-                context,
-                confirmation,
-            } => Self::publish_jetstream(&self.subject, context, *confirmation, records).await,
-        }
+        self.writes
+            .publish(&self.client, &self.subject, records)
+            .await
     }
 }
 
@@ -694,7 +526,7 @@ impl RecordEmitter for NatsSubjectEmitter {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use std::num::NonZeroUsize;
+    use std::future::Future;
 
     use async_nats::connection::State;
     use meticulous::ResultExt as _;
@@ -748,7 +580,7 @@ mod tests {
             .await
             .expect("the emitter connects to the scripted server");
         NatsSubjectEmitter {
-            delivery: NatsDelivery::Core(CoreWrites::new(write_timeout)),
+            writes: CoreWrites::new(write_timeout),
             client,
             subject: Subject::from("events"),
         }
@@ -792,31 +624,6 @@ mod tests {
         );
     }
 
-    /// A JetStream emitter publishing to subject `events` through the server at `addr`, with at most
-    /// `max_in_flight` records awaiting their `PubAck` at once.
-    async fn jetstream_emitter(addr: &str, max_in_flight: usize) -> NatsSubjectEmitter {
-        let policy = ParsedRetryPolicy {
-            backoff: Duration::from_millis(100),
-            max_backoff: Duration::from_secs(1),
-        };
-        let config = [ClientConfigEntry {
-            key: "addr".to_string(),
-            value: addr.to_string(),
-        }];
-        let client = NatsSubjectEmitter::client_from_config(&config, policy)
-            .await
-            .expect("the emitter connects to the scripted server");
-        let confirmation = AckConfirmation {
-            max_in_flight: NonZeroUsize::new(max_in_flight).expect("a window holds a record"),
-            timeout: Duration::from_secs(30),
-        };
-        NatsSubjectEmitter {
-            delivery: NatsDelivery::jetstream(confirmation, &client),
-            client,
-            subject: Subject::from("events"),
-        }
-    }
-
     fn record(index: usize, payload: &[u8], headers: &[(&str, &str)]) -> EmitterRecord {
         let headers = headers
             .iter()
@@ -829,196 +636,6 @@ mod tests {
             headers,
             Timestamp::from_unix_nanos(0),
         )
-    }
-
-    const CONFIRMED: &str = r#"{"stream":"events","seq":1}"#;
-
-    #[nervix_primitives::test]
-    async fn jetstream_confirms_each_record_and_refuses_one_above_max_payload() {
-        let server = ScriptedServer::start().await;
-        let addr = server.addr();
-        let script = nervix_primitives::task::spawn(async move {
-            let mut connection = server.accept(64).await;
-            let plain = connection.expect_publish().await;
-            let tagged = connection.expect_publish().await;
-            connection.reply(&plain, CONFIRMED).await;
-            connection.reply(&tagged, CONFIRMED).await;
-            (plain.message, tagged.message, connection)
-        });
-        let mut connector = jetstream_emitter(&addr, 8).await;
-
-        let outcome = connector
-            .publish(vec![
-                record(0, b"plain", &[]),
-                record(1, &[b'x'; 128], &[]),
-                record(2, b"tagged", &[("trace", "a")]),
-            ])
-            .await
-            .into_parts();
-
-        assert_eq!(
-            outcome.delivered,
-            vec![EmitterRecordId::new(0), EmitterRecordId::new(2)]
-        );
-        let rejected = outcome
-            .rejected
-            .iter()
-            .map(|rejected| rejected.id)
-            .collect::<Vec<_>>();
-        assert_eq!(rejected, vec![EmitterRecordId::new(1)]);
-        assert!(outcome.infrastructure_error.is_none());
-        let (plain, tagged, _connection) = script.await.expect("the scripted server ran");
-        assert_eq!(plain, b"plain");
-        assert_eq!(tagged, b"NATS/1.0\r\ntrace: a\r\n\r\ntagged");
-    }
-
-    #[nervix_primitives::test]
-    async fn a_failed_pub_ack_ends_the_publish_after_settling_the_answers_already_given() {
-        let server = ScriptedServer::start().await;
-        let addr = server.addr();
-        let script = nervix_primitives::task::spawn(async move {
-            let mut connection = server.accept(1024 * 1024).await;
-            let mut publishes = Vec::new();
-            for _ in 0..4 {
-                publishes.push(connection.expect_publish().await);
-            }
-            // The fourth record's PubAck arrives before the third record's failure, so the
-            // window holds a given answer when the failure ends the publish.
-            for (index, reply) in [
-                (0, CONFIRMED),
-                (1, CONFIRMED),
-                (3, CONFIRMED),
-                (
-                    2,
-                    r#"{"error":{"code":500,"err_code":10049,"description":"stream store failed"}}"#,
-                ),
-            ] {
-                let publish = publishes
-                    .get(index)
-                    .expect("the client published four records");
-                connection.reply(publish, reply).await;
-            }
-            connection
-        });
-        let mut connector = jetstream_emitter(&addr, 8).await;
-
-        let outcome = connector
-            .publish((0..4).map(|index| record(index, b"event", &[])).collect())
-            .await
-            .into_parts();
-
-        assert_eq!(
-            outcome.delivered,
-            vec![
-                EmitterRecordId::new(0),
-                EmitterRecordId::new(1),
-                EmitterRecordId::new(3)
-            ],
-            "the publish settles every PubAck JetStream gave before the failure"
-        );
-        assert!(outcome.rejected.is_empty());
-        let failure = outcome
-            .infrastructure_error
-            .expect("the failed PubAck ends the publish");
-        let description = printable_description(&failure).expect("the failure describes itself");
-        assert!(
-            description.starts_with("nats JetStream publish failed: "),
-            "{description}"
-        );
-        let _connection = script.await.expect("the scripted server ran");
-    }
-
-    /// A window of one waits for each record's `PubAck` before it takes the next record, so a
-    /// failed `PubAck` ends the publish while the window admits its record.
-    #[nervix_primitives::test]
-    async fn a_window_of_one_ends_the_publish_on_a_failed_pub_ack() {
-        let server = ScriptedServer::start().await;
-        let addr = server.addr();
-        let script = nervix_primitives::task::spawn(async move {
-            let mut connection = server.accept(64).await;
-            let publish = connection.expect_publish().await;
-            connection
-                .reply(
-                    &publish,
-                    r#"{"error":{"code":500,"err_code":10049,"description":"stream store failed"}}"#,
-                )
-                .await;
-            connection
-        });
-        let mut connector = jetstream_emitter(&addr, 1).await;
-
-        let outcome = connector
-            .publish(vec![record(0, b"first", &[]), record(1, b"second", &[])])
-            .await
-            .into_parts();
-
-        assert!(outcome.delivered.is_empty());
-        assert!(outcome.rejected.is_empty());
-        let failure = outcome
-            .infrastructure_error
-            .expect("the failed PubAck ends the publish");
-        let description = printable_description(&failure).expect("the failure describes itself");
-        assert!(
-            description.starts_with("nats JetStream publish failed: "),
-            "{description}"
-        );
-        let _connection = script.await.expect("the scripted server ran");
-    }
-
-    /// JetStream answers every record but the oldest, then fails the oldest's `PubAck`: the
-    /// publish settles every `PubAck` it was given, more of them than one cooperative budget lets
-    /// a task read, so the host's retry resends none of the records the stream confirmed.
-    #[nervix_primitives::test]
-    async fn a_failure_settles_more_pub_acks_than_one_cooperative_budget() {
-        const RECORDS: usize = 300;
-        let server = ScriptedServer::start().await;
-        let addr = server.addr();
-        let script = nervix_primitives::task::spawn(async move {
-            let mut connection = server.accept(1024 * 1024).await;
-            let mut publishes = Vec::with_capacity(RECORDS);
-            for _ in 0..RECORDS {
-                nervix_primitives::task::consume_budget().await;
-                publishes.push(connection.expect_publish().await);
-            }
-            for publish in publishes.iter().skip(1) {
-                nervix_primitives::task::consume_budget().await;
-                connection.reply(publish, CONFIRMED).await;
-            }
-            let oldest = publishes
-                .first()
-                .expect("the client published every record");
-            connection
-                .reply(
-                    oldest,
-                    r#"{"error":{"code":500,"err_code":10049,"description":"stream store failed"}}"#,
-                )
-                .await;
-            connection
-        });
-        let mut connector = jetstream_emitter(&addr, 1024).await;
-
-        let outcome = connector
-            .publish(
-                (0..RECORDS)
-                    .map(|index| record(index, b"event", &[]))
-                    .collect(),
-            )
-            .await
-            .into_parts();
-
-        let confirmed = (1..RECORDS).map(EmitterRecordId::new).collect::<Vec<_>>();
-        assert_eq!(
-            outcome.delivered.len(),
-            confirmed.len(),
-            "every PubAck JetStream gave is settled"
-        );
-        assert_eq!(outcome.delivered, confirmed);
-        assert!(outcome.rejected.is_empty());
-        assert!(
-            outcome.infrastructure_error.is_some(),
-            "the oldest record's failed PubAck ends the publish"
-        );
-        let _connection = script.await.expect("the scripted server ran");
     }
 
     /// A core write whose client cannot flush, because its server went down and refuses every
@@ -1479,24 +1096,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn missing_jetstream_is_infrastructure_not_record_rejection() {
-        let error = JetStreamPublishError::new(PublishErrorKind::StreamNotFound);
-        assert!(NatsSubjectEmitter::jetstream_error_is_missing_stream(
-            &error
-        ));
-        assert!(!NatsSubjectEmitter::is_jetstream_record_rejection(&error));
-    }
-
-    #[test]
-    fn oversized_jetstream_payload_is_a_record_rejection() {
-        let error = JetStreamPublishError::new(PublishErrorKind::MaxPayloadExceeded);
-        assert!(NatsSubjectEmitter::is_jetstream_record_rejection(&error));
-        assert!(!NatsSubjectEmitter::jetstream_error_is_missing_stream(
-            &error
-        ));
-    }
-
     /// The first printable attachment of `failure`: the description an emitter shows as its
     /// transient error.
     fn printable_description(failure: &Report<EmitterWriteError>) -> Option<String> {
@@ -1509,69 +1108,6 @@ mod tests {
             }
         }
         None
-    }
-
-    #[test]
-    fn a_pub_ack_confirms_the_record() {
-        let ack = serde_json::from_str::<PublishAck>(r#"{"stream":"events","seq":7}"#)
-            .expect("a PubAck names its stream and sequence");
-        let answer = NatsSubjectEmitter::broker_answer(Ok(ack));
-        assert!(matches!(answer, Ok(BrokerVerdict::Confirmed)));
-    }
-
-    #[test]
-    fn an_oversized_message_is_refused_for_good() {
-        let error = JetStreamPublishError::new(PublishErrorKind::MaxPayloadExceeded);
-        let answer = NatsSubjectEmitter::broker_answer(Err(error));
-        let Ok(BrokerVerdict::Rejected { message }) = answer else {
-            panic!("a message above max_payload is refused for good");
-        };
-        assert_eq!(
-            message,
-            "nats JetStream rejected record: max payload size exceeded"
-        );
-    }
-
-    #[test]
-    fn a_failed_pub_ack_leaves_the_record_unresolved_with_its_typed_cause() {
-        let error = JetStreamPublishError::new(PublishErrorKind::StreamNotFound);
-        let Err(failure) = NatsSubjectEmitter::broker_answer(Err(error)) else {
-            panic!("a missing stream leaves the record's outcome unknown");
-        };
-        assert!(matches!(
-            failure.current_context(),
-            EmitterWriteError::Publish { connector: NATS }
-        ));
-        let cause = failure
-            .downcast_ref::<JetStreamPublishError>()
-            .expect("the failure keeps the driver's typed cause");
-        assert_eq!(cause.kind(), PublishErrorKind::StreamNotFound);
-        assert_eq!(
-            printable_description(&failure).as_deref(),
-            Some("nats JetStream publish failed: no stream found for given subject")
-        );
-    }
-
-    #[test]
-    fn a_refused_hand_over_describes_the_client_failure() {
-        let failure = NatsSubjectEmitter::refused_hand_over(JetStreamPublishError::new(
-            PublishErrorKind::TimedOut,
-        ));
-        assert!(matches!(
-            failure.current_context(),
-            EmitterWriteError::Publish { connector: NATS }
-        ));
-        let cause = failure
-            .downcast_ref::<JetStreamPublishError>()
-            .expect("the failure keeps the driver's typed cause");
-        assert_eq!(cause.kind(), PublishErrorKind::TimedOut);
-        assert_eq!(
-            printable_description(&failure).as_deref(),
-            Some(
-                "nats JetStream client did not take the record: timed out: didn't receive ack in \
-                 time"
-            )
-        );
     }
 
     #[test]

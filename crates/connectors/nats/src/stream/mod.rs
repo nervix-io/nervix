@@ -22,9 +22,11 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+mod emitter;
 mod ingestor;
 mod pull;
 
+pub use emitter::{NatsStreamEmitter, NatsStreamEmitterConfig};
 pub use ingestor::{
     NatsPullRefusal, NatsStreamIngestor, NatsStreamIngestorError, NatsStreamIngestorMessage,
     NatsStreamIngestorPlan, NatsStreamIngestorPosition,
