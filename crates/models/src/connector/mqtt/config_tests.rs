@@ -47,6 +47,7 @@ fn omitted_keys_take_their_declared_defaults_and_no_credentials() {
     assert_eq!(parsed.broker().host(), "broker.example.test");
     assert_eq!(parsed.broker().port().get(), 1883);
     assert_eq!(parsed.transport(), &MqttTransport::Tcp);
+    assert!(!parsed.transport().uses_tls());
     assert_eq!(parsed.client_id(), None);
     assert_eq!(parsed.username(), None);
     assert!(parsed.password().is_none());
@@ -86,6 +87,7 @@ fn supplied_values_convert_once_into_the_connection_they_describe() {
     .assured("every declared key is set once with a usable value");
     assert_eq!(parsed.broker().host(), "::1");
     assert_eq!(parsed.broker().port().get(), 8883);
+    assert!(parsed.transport().uses_tls());
     let MqttTransport::Tls(files) = parsed.transport() else {
         panic!("an mqtts address connects over TLS");
     };

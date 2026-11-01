@@ -6,7 +6,7 @@ use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::ClientConfigError;
 use nervix_models::{ClientConfigEntry, MqttClientConfigError};
-use rumqttc::{ConnectAuth, Transport as DriverTransport};
+use rumqttc::{ConnectAuth, TlsConfiguration, Transport as DriverTransport};
 
 use super::{MqttClientOptions, MqttClientOptionsError};
 
@@ -87,8 +87,61 @@ fn a_connection_asks_for_the_declared_keep_alive_or_its_default() {
 #[test]
 fn a_plain_address_connects_without_tls() {
     let plain = options(&[("addr", "mqtt://127.0.0.1:1883")]);
+    assert!(!plain.config().transport().uses_tls());
     assert!(matches!(plain.options.transport(), DriverTransport::Tcp));
     assert_eq!(plain.config().max_packet_size().get(), 10_240);
+}
+
+#[test]
+fn a_tls_address_carries_its_trust_root_and_the_identity_it_presents() {
+    let files = tempfile::tempdir().assured("a temporary directory can be created");
+    let ca = files.path().join("ca.pem");
+    let certificate = files.path().join("client.pem");
+    let private_key = files.path().join("client.key");
+    std::fs::write(&ca, b"test CA").assured("the CA fixture can be written");
+    std::fs::write(&certificate, b"test certificate")
+        .assured("the certificate fixture can be written");
+    std::fs::write(&private_key, b"test key").assured("the key fixture can be written");
+    let ca = ca.to_str().assured("a temporary path is UTF-8");
+    let certificate = certificate.to_str().assured("a temporary path is UTF-8");
+    let private_key = private_key.to_str().assured("a temporary path is UTF-8");
+
+    let presenting = options(&[
+        ("addr", "mqtts://broker.example.test:8883"),
+        ("tls_ca_file", ca),
+        ("tls_cert_file", certificate),
+        ("tls_key_file", private_key),
+    ]);
+    assert!(presenting.config().transport().uses_tls());
+    let DriverTransport::Tls(TlsConfiguration::Simple {
+        ca: trust_root,
+        alpn,
+        client_auth,
+    }) = presenting.options.transport()
+    else {
+        panic!("an mqtts address connects through TLS");
+    };
+    assert_eq!(trust_root, b"test CA".to_vec());
+    assert_eq!(alpn, None);
+    assert_eq!(
+        client_auth,
+        Some((b"test certificate".to_vec(), b"test key".to_vec()))
+    );
+
+    let trusting = options(&[
+        ("addr", "mqtts://broker.example.test:8883"),
+        ("tls_ca_file", ca),
+    ]);
+    let DriverTransport::Tls(TlsConfiguration::Simple {
+        ca: trust_root,
+        client_auth,
+        ..
+    }) = trusting.options.transport()
+    else {
+        panic!("an mqtts address connects through TLS");
+    };
+    assert_eq!(trust_root, b"test CA".to_vec());
+    assert_eq!(client_auth, None);
 }
 
 #[test]
