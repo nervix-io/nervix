@@ -26707,6 +26707,27 @@ async fn when_redis_message_is_published(
         .expect("failed to publish redis message");
 }
 
+/// Publishes once without waiting for a subscriber, and requires that Redis delivered the message
+/// to none: no subscription, the scenario's own included, matches the channel.
+#[when(expr = "Redis message is published to channel {string} that no subscription receives")]
+async fn when_redis_message_is_published_to_no_subscription(
+    world: &mut ScenarioWorld,
+    channel: String,
+    #[step] step: &Step,
+) {
+    let channel = expand_placeholders(world, &channel);
+    let payload = expand_placeholders(world, docstring(step));
+    let receivers = world
+        .cluster()
+        .publish_redis_once(&channel, &payload)
+        .await
+        .expect("Redis accepts the publication");
+    assert_eq!(
+        receivers, 0,
+        "no subscription may receive the message published to Redis channel '{channel}'"
+    );
+}
+
 #[when(expr = "{int} Redis messages are published to channel {string}")]
 async fn when_redis_messages_are_published(
     world: &mut ScenarioWorld,

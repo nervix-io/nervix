@@ -27,6 +27,8 @@ mod assembly;
 mod branch_state_sections;
 pub(in crate::application) mod cut_progress;
 pub(in crate::application) mod cut_reach;
+#[cfg(test)]
+mod failure_tests;
 pub(in crate::application) mod interconnect;
 mod materialized_sections;
 mod native_metadata_sections;
@@ -48,14 +50,16 @@ use nervix_backup::{
     ArchiveLayout, ArchivePiece, ArchiveScope, BackupManifest, DomainCapture, RaftLogPosition,
     SectionContent, SectionDigest, SectionDigester, SectionEntry, SectionPath,
 };
-use nervix_consensus::{CommandExecution, ConfigurationCapture};
+use nervix_consensus::{
+    CommandExecution, ConfigurationCapture, ConsensusError, LeadershipObservation,
+};
 use nervix_execution::{ChargedBytes, Executor, MemoryClass};
 use nervix_interconnect::InterconnectStreamRequest as _;
 use nervix_models::{
     ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupDomainSummary,
-    BackupQuiesceCounters, BackupResources, BackupScope, ClusterNodeName, CoordinationIdentity,
-    DomainName, DomainSchedule, DomainStatus, IngestorName, ModelKind, NodeRef,
-    PLEXUS_LANGUAGE_VERSION, ResourceId, ResourceName, Timestamp,
+    BackupQuiesceCounters, BackupResources, BackupScope, ClusterNodeName,
+    CommandExecutionReference, CoordinationIdentity, DomainName, DomainSchedule, DomainStatus,
+    IngestorName, ModelKind, NodeRef, PLEXUS_LANGUAGE_VERSION, ResourceId, ResourceName, Timestamp,
 };
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
@@ -72,9 +76,9 @@ use self::{
     retained::{ArchiveBytes, ArchiveReadFailure, RetainedArtifact, RetainedBackups},
 };
 use super::{
-    command_result::{CommandDiagnostic, CommandResult},
+    command_result::{CommandDiagnostic, CommandDisposition, CommandResult, OutcomeUnknownCause},
     domain_clock::current_timestamp,
-    domain_lifecycle::DomainDrainMode,
+    domain_lifecycle::{DomainAlterError, DomainDrainMode},
     model_mutation::{command_error, command_ok},
     session_service::SessionServiceImpl,
 };
@@ -320,12 +324,51 @@ impl SessionServiceImpl {
                 }
             }
             Err(report) => {
+                tracing::warn!(
+                    execution = %execution.reference,
+                    error = %format_args!("{report:#}"),
+                    "backup attempt failed"
+                );
+                self.backup_error_response(&execution.reference, report)
+                    .await
+            }
+        }
+    }
+
+    /// Authority lost during an admitted cut leaves its execution applying. A cut whose budget
+    /// expired remains a terminal refusal, including a lease wait that last met a lapsed lease.
+    async fn backup_error_response(
+        &self,
+        reference: &CommandExecutionReference,
+        report: Report<BackupError>,
+    ) -> CommandResult {
+        let message = match backup_failure_kind(&report) {
+            BackupFailureKind::Definitive => {
                 let message = format!("backup failed: {report:#}");
-                CommandResult {
+                return CommandResult {
                     diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
                     ..command_error(message)
-                }
+                };
             }
+            BackupFailureKind::LeadershipLost(observed) => {
+                let redirect = self.redirect_to_leader(observed.clone()).await;
+                format!(
+                    "{} while backup execution reference '{reference}' was applying: {report:#}; \
+                     retry it with the same reference to learn its outcome",
+                    redirect.leadership_change()
+                )
+            }
+            BackupFailureKind::CoordinatorChanged => format!(
+                "backup execution reference '{reference}' lost its coordinator: {report:#}; retry \
+                 it with the same reference to learn its outcome"
+            ),
+        };
+        CommandResult {
+            diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
+            ..CommandResult::new(
+                CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::LeadershipLost),
+                message,
+            )
         }
     }
 
@@ -679,8 +722,8 @@ impl SessionServiceImpl {
                         reason: "domain resume failed".to_string(),
                     })
                 });
-            let (capture, domain_captured_at, inventories, after) = cut_result??;
-            resumed?;
+            let (capture, domain_captured_at, inventories, after) =
+                finish_backup_cut(&execution.reference, cut_result.flatten(), resumed)?;
             if self.inner.consensus.current_leader_tenure().as_ref() != Some(&coordinator_tenure) {
                 return Err(Report::new(BackupError::CoordinatorChanged {
                     domain: domain.clone(),
@@ -711,7 +754,8 @@ impl SessionServiceImpl {
             ))
         }
         .await;
-        self.inner
+        let released = match self
+            .inner
             .consensus
             .release_command_domain_mutation(
                 execution.reference.clone(),
@@ -720,12 +764,14 @@ impl SessionServiceImpl {
                 domain.clone(),
             )
             .await
-            .map_err(|error| {
-                error.change_context(BackupError::CaptureDomain {
-                    domain: domain.clone(),
-                    reason: "mutation lease release failed".to_string(),
-                })
-            })?;
+        {
+            Ok(_) => Ok(()),
+            Err(error) => Err(error.change_context(BackupError::CaptureDomain {
+                domain: domain.clone(),
+                reason: "mutation lease release failed".to_string(),
+            })),
+        };
+        let captured = finish_backup_cut(&execution.reference, captured, released);
         if captured.is_ok()
             && self.inner.consensus.current_leader_tenure().as_ref() != Some(&coordinator_tenure)
         {
@@ -1250,6 +1296,65 @@ impl SessionServiceImpl {
     pub(in crate::application) fn sweep_retained_backups(&self) {
         self.inner.retained_backups.sweep(current_timestamp());
         self.sweep_captured_backup_sections();
+    }
+}
+
+enum BackupFailureKind<'a> {
+    Definitive,
+    LeadershipLost(&'a LeadershipObservation),
+    CoordinatorChanged,
+}
+
+fn backup_failure_kind(report: &Report<BackupError>) -> BackupFailureKind<'_> {
+    // A confirmed pause's application or drain already failed before an abandoned pause's
+    // resume failed. The cleanup's authority loss does not replace that definitive failure.
+    if matches!(report.current_context(), BackupError::CaptureTimeout { .. })
+        || matches!(
+            report.downcast_ref::<DomainAlterError>(),
+            Some(DomainAlterError::ResumeAfterAbandonedAlter { .. })
+        )
+    {
+        return BackupFailureKind::Definitive;
+    }
+    if let Some(ConsensusError::LeadershipLost { observed }) =
+        report.downcast_ref::<ConsensusError>()
+    {
+        return BackupFailureKind::LeadershipLost(observed);
+    }
+    if matches!(
+        report.current_context(),
+        BackupError::CoordinatorChanged { .. }
+    ) {
+        return BackupFailureKind::CoordinatorChanged;
+    }
+    BackupFailureKind::Definitive
+}
+
+/// A definitive cut failure takes precedence over cleanup; an uncertain cut yields to cleanup.
+fn finish_backup_cut<T>(
+    reference: &CommandExecutionReference,
+    captured: error_stack::Result<T, BackupError>,
+    cleanup: error_stack::Result<(), BackupError>,
+) -> error_stack::Result<T, BackupError> {
+    match (captured, cleanup) {
+        (Ok(captured), Ok(())) => Ok(captured),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(captured), Err(cleanup)) => {
+            tracing::warn!(
+                execution = %reference,
+                cut_error = %format_args!("{captured:#}"),
+                cleanup_error = %format_args!("{cleanup:#}"),
+                "backup cut and cleanup both failed"
+            );
+            if matches!(
+                backup_failure_kind(&captured),
+                BackupFailureKind::Definitive
+            ) {
+                Err(captured)
+            } else {
+                Err(cleanup)
+            }
+        }
     }
 }
 
