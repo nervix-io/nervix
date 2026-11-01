@@ -236,6 +236,13 @@ protocols. [Domain Clock](./domain-clock.md) owns the execution-time capability 
 installation. [Client Session Protocol](./client-session-protocol.md) owns how a client observes
 an installed domain and recovers a command outcome.
 
+An application bounded by its caller's deadline checks elapsed time before polling each wait,
+including every later poll of a pending wait. An elapsed deadline therefore takes precedence over
+an available installation slot even before the timer driver's next tick. It does not interrupt an
+installation or activation already begun; reconciliation continues applying the newest committed
+revision. [Backup And Restore Architecture](./backup-and-restore-architecture.md#the-quiesced-cut)
+owns a cut's refusal and resumption after its pause commits beyond that deadline.
+
 ## Incremental Changes And Rebuilds
 
 The decision layer compares the previous and desired schedules while both Model-bearing
