@@ -35,14 +35,19 @@ fence the archived union that holds it.
 Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
 `LATEST`, and provisioned subscriptions without a position. Statement generators mix typed
 `SET START AT` with shared ingestor operations. The Model, registry and consensus properties
-preserve those complete values. The `NERVIX MODEL NJS` registry signature and
-`raft_jetstream_` consensus namespace identify this current Model layout before decoding.
+preserve those complete values. The `NERVIX MODEL NSE` registry signature and
+`raft_stream_emit_` consensus namespace identify this current Model layout before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
 persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration
 admits is generated and none it refuses. The Model/archive, registry, consensus and canonical
 Plexus properties preserve the session, quality of service and mode as separate written values,
 and the archive signature and consensus keyspace namespace fence this shape before decoding.
+
+NATS emitter generators draw the Core subject and JetStream stream entities, including the stream
+name, publication subject, acknowledged window, and optional message ID. Model/archive, registry,
+consensus, canonical Plexus and presentation properties preserve the complete destination. The
+current archive signature and consensus keyspaces fence this expanded emitter union.
 
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions

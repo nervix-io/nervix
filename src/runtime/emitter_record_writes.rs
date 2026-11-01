@@ -1524,7 +1524,7 @@ mod tests {
     }
 
     fn envelope_variant(variant: u8) -> BatchEnvelope {
-        match variant % 4 {
+        match variant % 5 {
             0 => BatchEnvelope {
                 key: None,
                 headers: EmitterHeaders::Text(Vec::new()),
@@ -1543,7 +1543,7 @@ mod tests {
                 message_group: Some(format!("group-{variant}")),
                 clauses: None,
             },
-            _ => BatchEnvelope {
+            3 => BatchEnvelope {
                 key: None,
                 headers: EmitterHeaders::Typed(vec![
                     nervix_connector::TypedRecordHeader {
@@ -1557,6 +1557,18 @@ mod tests {
                 ]),
                 message_group: None,
                 clauses: None,
+            },
+            _ => BatchEnvelope {
+                key: None,
+                headers: EmitterHeaders::Text(Vec::new()),
+                message_group: None,
+                clauses: Some(
+                    RecordEnvelope {
+                        message_id: Some(format!("message-{variant}")),
+                        ..RecordEnvelope::default()
+                    }
+                    .into(),
+                ),
             },
         }
     }
@@ -1753,6 +1765,15 @@ mod tests {
                     }
                 }
                 assert_eq!(record.message_group, model.envelope.message_group);
+                assert_eq!(
+                    record.envelope,
+                    model
+                        .envelope
+                        .clauses
+                        .as_deref()
+                        .cloned()
+                        .unwrap_or_default()
+                );
             }
         }
 
