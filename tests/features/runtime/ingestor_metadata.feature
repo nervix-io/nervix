@@ -69,7 +69,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'pulsar_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PULSAR TOPIC ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'pulsar_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PULSAR TOPIC ingestors declare only metadata.topic, metadata.message_id, metadata.publish_time, metadata.event_time, metadata.key, metadata.ordering_key, metadata.producer_name, metadata.sequence_id and metadata.redelivery_count"
       """
       CREATE PULSAR TOPIC INGESTOR pulsar_source
         FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST

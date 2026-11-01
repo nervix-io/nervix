@@ -229,6 +229,7 @@ mod postgres_fixtures;
 mod process_cluster;
 mod pulsar_delivery;
 mod pulsar_emission;
+mod pulsar_metadata;
 mod pulsar_readiness;
 mod pulsar_subscriptions;
 mod restarted_voter;

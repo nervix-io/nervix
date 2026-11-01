@@ -383,6 +383,7 @@ class InventoryTests(unittest.TestCase):
             "kafka-partition-offsets",
             "kafka-record-create-times",
             "kafka-record-metadata",
+            "pulsar-message-metadata",
             "ingestor-describe-envelope",
             "dns-operation-budget",
         })

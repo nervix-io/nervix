@@ -77,6 +77,86 @@ invocation = "stress-scenarios"
 scenario = "Kafka broker event time makes historical windows due independently in two branches"
 selections = ["deloxide-stress"]
 
+[[workload]]
+coverage = "Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata.feature"
+id = "scenario.pulsar-message-topic"
+invariant = "A route reading only the topic admits its payload while the other typed metadata columns remain unread."
+invocation = "scenarios"
+scenario = "A Pulsar ingestor projects its message topic"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 6
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "scenario.pulsar-message-values"
+invariant = "Every delivered message keeps its exact nine-field metadata and properties in all three acknowledgement modes."
+invocation = "scenarios"
+scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "scenario.pulsar-message-event-time"
+invariant = "Each branch's historical duration window uses the broker message's event time and preserves its fields."
+invocation = "scenarios"
+scenario = "Pulsar event time flushes historical windows separately for two branches"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "scenario.pulsar-message-redelivery"
+invariant = "A rejected graph attempt redelivers the same message id with the broker's incremented count and eventually settles its subscription."
+invocation = "scenarios"
+scenario = "A Pulsar redelivery keeps its message identity and reports the broker's count"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata.feature"
+id = "stress.pulsar-message-topic"
+invariant = "A route reading only the topic admits its payload while the other typed metadata columns remain unread."
+invocation = "stress-scenarios"
+scenario = "A Pulsar ingestor projects its message topic"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 6
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "stress.pulsar-message-values"
+invariant = "Every delivered message keeps its exact nine-field metadata and properties in all three acknowledgement modes."
+invocation = "stress-scenarios"
+scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "stress.pulsar-message-event-time"
+invariant = "Each branch's historical duration window uses the broker message's event time and preserves its fields."
+invocation = "stress-scenarios"
+scenario = "Pulsar event time flushes historical windows separately for two branches"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "stress.pulsar-message-redelivery"
+invariant = "A rejected graph attempt redelivers the same message id with the broker's incremented count and eventually settles its subscription."
+invocation = "stress-scenarios"
+scenario = "A Pulsar redelivery keeps its message identity and reports the broker's count"
+selections = ["deloxide-stress"]
+
 [lane]
 # All diagnostic test and driver executables build before any workload starts, under their own
 # real-time budget. The measured cold stressed scenario build took 1988s on a loaded host; 80
@@ -170,6 +250,7 @@ package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
   "@kafka_record_metadata",
+  "@pulsar_message_metadata",
   "@restore_client_inspection",
   "@runtime_installation_retry",
   "@execution_class_drain",

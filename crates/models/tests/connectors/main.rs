@@ -293,10 +293,22 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             every_node: false,
             reference: IngestorReferenceKind::Client(ConnectorKind::Kafka),
         },
-        IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
-            ConnectorKind::Pulsar,
-        ),
+        IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            metadata: &[
+                ("topic", IngestorMetadataType::String),
+                ("message_id", IngestorMetadataType::String),
+                ("publish_time", IngestorMetadataType::Datetime),
+                ("event_time", IngestorMetadataType::Datetime),
+                ("key", IngestorMetadataType::String),
+                ("ordering_key", IngestorMetadataType::Bytes),
+                ("producer_name", IngestorMetadataType::String),
+                ("sequence_id", IngestorMetadataType::I64),
+                ("redelivery_count", IngestorMetadataType::I64),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Pulsar),
+        },
         IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => {
             headers_only(None, ConnectorKind::Mqtt)
         }
