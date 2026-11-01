@@ -222,7 +222,8 @@ impl Arbitrary<'_> {
         let topic = self.pulsar_topic_name();
         let name = self.pulsar_subscription_name();
         let ownership = if self.entropy.flag() {
-            PulsarSubscriptionOwnership::Ingestor
+            let start_at = self.pulsar_start_position();
+            PulsarSubscriptionOwnership::Ingestor { start_at }
         } else {
             PulsarSubscriptionOwnership::Provisioned
         };
@@ -235,6 +236,15 @@ impl Arbitrary<'_> {
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
+    }
+
+    /// The explicit position of a newly created owned Pulsar subscription.
+    pub fn pulsar_start_position(&mut self) -> nervix_models::PulsarStartPosition {
+        if self.entropy.flag() {
+            nervix_models::PulsarStartPosition::Earliest
+        } else {
+            nervix_models::PulsarStartPosition::Latest
+        }
     }
 
     /// An MQTT topic filter read in any session, quality of service and delivery mode a

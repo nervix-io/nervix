@@ -378,7 +378,7 @@ Feature: Web console visual ingestor creation
       | 3            |
 
   @visual_ingestor_pulsar
-  Scenario Outline: A visually created Pulsar ingestor declares who owns its subscription and delivers
+  Scenario Outline: A visually created Pulsar ingestor declares its creation position and delivers
     Given Pulsar is running
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -420,8 +420,8 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-general-error [data-error='log']" is clicked
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "owns the subscription"
-    When selector ".create-ingestor-subscription-ownership [data-ownership='ingestor']" is clicked
-    Then selector ".create-preview" contains "SUBSCRIPTION 'visual_{{test_id}}' OWNED BY INGESTOR"
+    When selector ".create-ingestor-subscription-ownership [data-choice='OWNED BY INGESTOR START AT <start_position>']" is clicked
+    Then selector ".create-preview" contains "SUBSCRIPTION 'visual_{{test_id}}' OWNED BY INGESTOR START AT <start_position>"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
@@ -430,7 +430,8 @@ Feature: Web console visual ingestor creation
       CREATE SUBSCRIPTION visual_pulsar_subscription TO visual_pulsar_relay;
       START;
       """
-    And Pulsar message is published to topic "visual_{{test_id}}"
+    Then within "30s" Pulsar subscription "visual_{{test_id}}" of topic "visual_{{test_id}}" has 1 consumer
+    When Pulsar message is published to topic "visual_{{test_id}}"
       """
       {"user_id":42}
       """
@@ -440,6 +441,8 @@ Feature: Web console visual ingestor creation
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | start_position |
+      | 1            | EARLIEST       |
+      | 3            | EARLIEST       |
+      | 1            | LATEST         |
+      | 3            | LATEST         |
