@@ -228,6 +228,9 @@ current connection, retry and deadline limits.
 - Write an envelope clause or `PROPERTIES` key only where the emitter's entity declares it, after
   the payload and before the construction, in the documented order; see
   [Emitters → Envelope clauses](../../../../docs/src/emitters.md#envelope-clauses).
+- For Pulsar subscription ownership and the required creation position of an owned subscription,
+  read [Ingestors → Pulsar](../../../../docs/src/ingestors.md#pulsar). Distinguish creation policy
+  from the existing broker cursor when explaining `ALTER` or recovery.
 - For Pulsar receipt deadlines and the final wait after `NO ACK` acceptance, read
   [Emitters → Pulsar](../../../../docs/src/emitters.md#pulsar) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
@@ -412,6 +415,9 @@ current connection, retry and deadline limits.
   And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
   shared client outcome labels, and sender retry semantics. Check that a WebSocket endpoint's
   declared signaling format can encode its acknowledgements, including during `ACCEPT DATA`.
+  That response deadline is absolute on the physical clock, so keepalive cannot extend it and
+  retry can duplicate admitted effects. Use `BUFFER MAX SIZE <bytes>` only with `MODE NO ACK`,
+  without an overflow clause; an endpoint refuses new input when that buffer is full.
 - To route endpoint requests by their method, path, query, peer address or host, or WebSocket
   frames by their kind, read the metadata tables in that same section before writing a
   `metadata.<field>`. An endpoint admits only `POST` at its exact `PATH`, so route on
@@ -455,7 +461,7 @@ current connection, retry and deadline limits.
   tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
   sections of `Ingestors` and `Emitters`.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
-  `OWNED BY INGESTOR` when Nervix may create it and should remove it when the ingestor or its
+  `OWNED BY INGESTOR START AT EARLIEST` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
   the operator must create before the ingestor reads. Consumers register as
   `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for missing subscriptions, removal

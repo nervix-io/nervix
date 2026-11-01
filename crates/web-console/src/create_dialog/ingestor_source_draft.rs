@@ -187,8 +187,9 @@ impl IngestorEntityDraft {
             }
             "QOS" => self.mqtt_qos = MqttQos::iter().find(|value| value.spelling() == choice),
             "SUBSCRIPTION" => {
-                self.subscription_ownership =
-                    PulsarSubscriptionOwnership::iter().find(|value| value.keywords() == choice)
+                self.subscription_ownership = PulsarSubscriptionOwnership::CHOICES
+                    .into_iter()
+                    .find(|value| value.keywords() == choice)
             }
             "OFFSET BY" => {
                 self.offset = match choice {
@@ -1148,11 +1149,8 @@ mod tests {
             error.current_context(),
             &super::IngestorEntityDraftError::SubscriptionOwnership
         );
-        for ownership in [
-            PulsarSubscriptionOwnership::Ingestor,
-            PulsarSubscriptionOwnership::Provisioned,
-        ] {
-            draft.subscription_ownership = Some(ownership);
+        for ownership in PulsarSubscriptionOwnership::CHOICES {
+            draft.choose_option("SUBSCRIPTION", ownership.keywords());
             let IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) =
                 draft.build().assured("a complete Pulsar draft builds")
             else {

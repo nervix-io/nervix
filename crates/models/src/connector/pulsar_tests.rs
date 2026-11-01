@@ -12,7 +12,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::ResultExt as _;
 use rstest::rstest;
 
 use super::*;
@@ -125,22 +125,17 @@ fn the_subscription_is_required_with_its_owner_and_instances_are_optional() {
 
     assert_eq!(subscription.keywords, "SUBSCRIPTION");
     assert_eq!(subscription.presence, OptionPresence::Required);
-    let OptionForm::Choice([owned, provisioned]) = subscription.form else {
-        panic!("SUBSCRIPTION names its subscription and then who owns it");
+    let OptionForm::Choice(choices) = subscription.form else {
+        panic!("SUBSCRIPTION names its subscription and complete creation policy");
     };
-    assert_eq!(owned.name, PulsarSubscriptionOwnership::Ingestor.keywords());
-    assert_eq!(
-        owned.value,
-        Some(OptionValue::Name(PulsarSubscriptionName::DECLARATION))
-    );
-    assert_eq!(
-        provisioned.name,
-        PulsarSubscriptionOwnership::Provisioned.keywords()
-    );
-    assert_eq!(
-        provisioned.value,
-        Some(OptionValue::Name(PulsarSubscriptionName::DECLARATION))
-    );
+    assert_eq!(choices.len(), PulsarSubscriptionOwnership::CHOICES.len());
+    for (choice, ownership) in choices.iter().zip(PulsarSubscriptionOwnership::CHOICES) {
+        assert_eq!(choice.name, ownership.keywords());
+        assert_eq!(
+            choice.value,
+            Some(OptionValue::Name(PulsarSubscriptionName::DECLARATION))
+        );
+    }
     assert_eq!(*instances, OptionDeclaration::INSTANCES);
 }
 
