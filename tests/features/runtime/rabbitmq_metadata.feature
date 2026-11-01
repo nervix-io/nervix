@@ -1,3 +1,4 @@
+@rabbitmq_metadata @deloxide_stress
 Feature: RabbitMQ delivery metadata
   A RABBITMQ QUEUE ingestor exposes each delivery's envelope and its AMQP basic properties as typed
   metadata.<field> values: exchange, routing_key, delivery_tag and redelivered from the delivery, and
@@ -6,7 +7,6 @@ Feature: RabbitMQ delivery metadata
   as null. TIMESTAMP AT metadata.timestamp admits a message at the instant its producer wrote, and a
   timestamp no DATETIME holds refuses the message wherever a program reads it.
 
-  @rabbitmq_metadata
   Scenario Outline: A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata
     Given RabbitMQ is running
     And a <cluster_size> node nervix cluster is started
@@ -110,7 +110,6 @@ Feature: RabbitMQ delivery metadata
       | 1            | NO ACK                                                           |
       | 3            | NO ACK                                                           |
 
-  @rabbitmq_metadata
   Scenario Outline: A RabbitMQ delivery the ingestor rejected reads metadata.redelivered as true when the broker delivers it again
     Given RabbitMQ is running
     And MQTT is running
@@ -175,7 +174,6 @@ Feature: RabbitMQ delivery metadata
       | 1            |
       | 3            |
 
-  @rabbitmq_metadata
   Scenario Outline: TIMESTAMP AT metadata.timestamp windows RabbitMQ messages at the instant their producer wrote
     Given RabbitMQ is running
     And a <cluster_size> node nervix cluster is started
@@ -226,7 +224,6 @@ Feature: RabbitMQ delivery metadata
       | 1            |
       | 3            |
 
-  @rabbitmq_metadata
   Scenario Outline: A RabbitMQ timestamp no DATETIME holds refuses its message only where metadata.timestamp is read
     Given RabbitMQ is running
     And a <cluster_size> node nervix cluster is started
