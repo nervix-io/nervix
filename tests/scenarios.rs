@@ -216,6 +216,7 @@ mod generated_http_payloads;
 mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
+mod kafka_metadata;
 mod mqtt_fixtures;
 mod mqtt_sessions;
 mod mysql_isolation;

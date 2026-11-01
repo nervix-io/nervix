@@ -1097,7 +1097,8 @@ and a required `OFFSET BY` choice between the domain's replicated offsets and a 
 group. Its emitter declares `NO ACK` and `ACK` with either window, optional batching with no
 protocol-fixed batch limit, since the producer's configurable `message.max.bytes` bounds each record
 it writes, and no envelope or properties. Headers are `ordered_repeats` exact names in both
-directions; the ingestor's metadata is the record's topic, partition and offset. A Kafka client
+directions; the ingestor's metadata is the record's topic, partition, offset, binary key, timestamp,
+timestamp kind and tombstone flag. A Kafka client
 requires `bootstrap.servers`, without which no consumer or producer reaches a broker. Every other
 property is librdkafka's, checked offline before commit, except the keys Nervix sets itself on the
 consumers and producers it runs, which the client refuses. librdkafka reads some properties under
@@ -1331,10 +1332,11 @@ Each source entity declares its typed metadata fields beside its other capabilit
 vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the response status and
 the poll's scheduled instant, `HTTP ENDPOINT` the request's method, path, query, peer address and
 routed host, `WEBSOCKETS CONNECTION` the frame kind, `WEBSOCKETS ENDPOINT` the frame kind, the
-connection's peer address and its path, `KAFKA TOPIC` the topic, partition and offset,
-`SYSLOG LISTENER` the peer address, and every other entity none. The endpoint entities are served by
-the host itself rather than a connector crate, so the server's endpoint intake hands their values
-over the same way a connector's message does. Registry
+connection's peer address and its path, `KAFKA TOPIC` the topic, partition, offset, binary key,
+timestamp, timestamp kind and tombstone flag, `SYSLOG LISTENER` the peer address, and every other
+entity none. The endpoint entities are served by the host itself rather than a connector crate,
+so the server's endpoint intake hands their values over the same way a connector's message does.
+Registry
 validation reads that declaration for the fields an ingestor's route programs and its
 `TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
 connector's message hands the host the value of every declared field in declared order, one typed
@@ -1352,6 +1354,18 @@ group of the ingestor builds Arrow columns for those fields and no others. A gro
 that reads none visits no metadata value at all. Transport headers keep their projection whatever
 the programs read, because an ingestor's error-route programs may call `read_header` and are
 compiled with the domain's routing, outside the source host.
+
+Kafka metadata borrows the record's key without allocating another byte sequence. Missing keys
+remain distinct from empty keys. Its timestamp is the exact instant of the driver's Unix
+milliseconds, with `create_time` or `log_append_time` as its kind; an unavailable timestamp has no
+instant or kind. A null value and an empty non-null value both lend an empty payload, but their
+tombstone flags differ. The codec decides whether an empty payload yields any rows. Every row
+that it yields shares the originating record's metadata and transport position. Kafka's
+`SUSPEND`-only quiesce declaration makes retained quiesce metadata unreachable for this entity.
+An unrepresentable present timestamp is a typed source read failure. If conversion fails after a
+valid prefix was gathered, the source returns that prefix and keeps one report for the next
+admitted read. A cancelled read leaves the report pending; no later record is taken while it is
+pending. The source declares this single-report bound beside its driver buffers.
 
 Beside its fields and headers, a message names the position its transport gives it, where the
 transport has one: a Kafka record's topic, partition and offset, or a syslog frame's peer. It is the
