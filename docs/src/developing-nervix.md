@@ -1061,6 +1061,9 @@ the pull request carries the `book` label. The book needs no image, so adding th
 at once, and each later push to the labeled pull request builds it again; a newer build of one pull
 request replaces an older one before it publishes. Label a pull request `book` only when its task
 requires the rendered book, such as a change to the book's build, theme, structure, screenshots or
-generated chapters, or a preview a reviewer needs. Every pull request's `checks` job runs
+generated chapters, or a preview a reviewer needs. The isolated book worker first removes unused
+preinstalled .NET, Android and Haskell tools and unused Docker images to leave room for its Rust
+builds and PDF dependencies; its preparation step and pre-build diagnostics report available space.
+Every pull request's `checks` job runs
 `just test-docs`, the script tests and docs worker tests that `just book` runs first, so a pull
 request without the label still checks the book's structure and its tooling.
