@@ -30,6 +30,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Resources, uploads, mounts, and TLS files | `Resources` |
 | Syslog wire schema, codec fields, UDP/TCP/TLS framing, per-connection versus total buffer bounds, clients, sources, and emitters | `Common` → `Syslog`, and `Connector Capabilities` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
+| Client, ingestor and emitter heads, their connector/entity choice, and kind-preserving ALTER | `Plexus Overview` → `Statement catalog`, then `Connector Capabilities` and the entity's manual section |
 | Kafka domain offsets across explicit starts, reconnects, instance changes and restored backups | `Ingestors` → `Kafka`, and `Backup And Restore` |
 | Plexus entity modes, ordered options, typed metadata, generated client CONFIG key/type/confidentiality tables and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
 | Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
@@ -39,7 +40,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
-| MySQL table path parts, exact value bindings, duplicate-key actions, operation deadlines and TLS identity file formats | `Emitters` → `MySQL`, and `Database Client Connection Pools` |
+| MySQL table path parts, exact value bindings, duplicate-key actions, placeholder and packet limits, operation deadlines, TLS verification and identity file formats, URL lifetime settings and maintained pool minimums | `Emitters` → `MySQL`, `Database Client Connection Pools`, then `Connector Capabilities` → `MYSQL client` |
 | Sentry platform options, event defaults and limit, batch transformations, strict DSN/timeout configuration, the inherited HTTP transport, rejected versus retried statuses and retry hints | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
@@ -155,7 +156,7 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 | Match records from left and right relay sets | `CORRELATOR` |
 | Change or remove branch grouping | `REINGESTOR` |
 | Produce timed records from one materialized relay | `GENERATOR` |
-| Publish records outside Nervix | `EMITTER` |
+| Publish records outside Nervix | `<CONNECTOR> <ENTITY> EMITTER`, selected from the declared pairs |
 | Deliver constructed Arrow batches to competing application consumers | `CLIENT CONSUMER EMITTER ... TO SCHEMA` |
 | Read a session-local filtered view | `CREATE SUBSCRIPTION` |
 | Follow the active domain's clock from a client session | `ATTACH DOMAIN CLOCK` |
@@ -164,6 +165,11 @@ Use materialized relay dependencies when a node needs the latest record from ano
 relay. Do not use them to scan across branches.
 
 ## Correctness checks
+
+Choose each ingestor or emitter's complete connector/entity head from the current catalog, and
+keep that pair in its ALTER head. A client head names its connector. Follow the selected entity's
+declared reference kind and body; inspection and addressing use the Model kind and name. Read
+`Plexus Overview` → `Statement catalog` for the forms.
 
 Client CONFIG keys follow the generated schema: lowercase, case-sensitive, present once, required keys supplied and TLS identity files paired. Only declared driver namespaces accept extra property names. Treat SHOW CREATE as a confidential inspection projection, and backups as complete secret-bearing configuration. Offline CREATE checks need no broker; runtime initialization still owns remote checks.
 
@@ -323,7 +329,10 @@ current connection, retry and deadline limits.
   transient error while the emitter retries.
 - Provision Iceberg table columns with names and types matching the emitter's `VALUES`. A
   required `NAMESPACE` names the catalog namespace independently of the Nervix domain; provision
-  each of its case-preserving dot-separated levels before starting the emitter. A
+  each of its case-preserving dot-separated levels before starting the emitter. Until the catalog
+  holds the namespace and the table, the emitter retries its open and `DESCRIBE EMITTER` names the
+  namespace or the table it lacks. Move an emitter to another namespace with `SET TO`, restating
+  its complete destination with the new `NAMESPACE` and that table's `LOCATION`. A
   `DATETIME`, at the top level or inside a `VEC` or `ARRAY`, is written at the containing
   microsecond and needs a `timestamptz` column, not `timestamptz_ns`. A commit writes each mapped
   column into the table column of its name, in any `VALUES` order, and a null into each optional
@@ -351,6 +360,12 @@ current connection, retry and deadline limits.
 - A Kafka client never sets `allow.auto.create.topics`; `CREATE KAFKA CLIENT` refuses it. Provision each
   topic a Kafka ingestor reads: an ingestor never creates its topic and reports it as missing until
   it exists.
+- Every Kafka client writes each librdkafka property under the Apache Kafka Java client's name,
+  such as `bootstrap.servers`, `linger.ms`, `acks`, `retries`, `compression.type` and
+  `delivery.timeout.ms`, and writes no `topic.` prefixed key other than librdkafka's own
+  `topic.metadata.*` and `topic.blacklist`. `CREATE KAFKA CLIENT` refuses librdkafka's other
+  name for a property, even alone, and a `topic.` prefixed key. Read `Connector Capabilities` →
+  `KAFKA client` for each refused name and the name to write.
 - For Kafka source control-call deadlines and bounded execution, follow `Ingestors` → `Client
   Deadlines`. Keep `socket.timeout.ms` distinct from the consumer-group commit caller deadline;
   an unanswered commit is retained before another can start.
@@ -394,6 +409,11 @@ current connection, retry and deadline limits.
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
   session lifetime, the separate raw-frame and admitted-publish bounds, oversized-payload counts
   and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
+- An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
+  path or query; its `tls_*` files belong only with `mqtts`. Write MQTT wildcards only in an
+  ingestor's `TOPIC`, as whole levels with `#` last and never a leading `$share` level, which
+  Nervix forms itself; an emitter's `TOPIC` is one literal topic. Check both against the MQTT
+  sections of `Ingestors` and `Emitters`.
 - Redis Pub/Sub separates message read-ahead from the byte-bound quiesce buffer. Check the client
   required capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the source's explicit
   `BUFFER` or `DROP` policy in generated Plexus.
@@ -401,7 +421,8 @@ current connection, retry and deadline limits.
   name and consult the Redis manual sections for its byte bound and unavailable header operations.
 - An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`, and an emitter
   `MODE SINGLE` or `MODE BATCH`. Treat `QUEUE` as a literal, case-preserving SQS name, and check
-  `SQS CLIENT` keys against `Ingestors` → `SQS`: it declares no client certificate keys.
+  `SQS CLIENT` keys against `Ingestors` → `SQS`: `endpoint`, `region`, `access_key_id` and
+  `secret_access_key` are required, and it declares no proxy or client certificate keys.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
@@ -452,9 +473,8 @@ current connection, retry and deadline limits.
   legitimately returns more. Samples enter the graph in batches of at most 1024.
 - Treat Kafka `NO ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
-  share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces any
-  `message.timeout.ms` or `delivery.timeout.ms` in the client's `CONFIG` as the producer's delivery
-  bound. The producer always reports every record, so `delivery.report.only.error` in a client's
+  share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces the
+  client's `delivery.timeout.ms` as the producer's delivery bound. The producer always reports every record, so `delivery.report.only.error` in a client's
   `CONFIG` has no effect.
 - Every Sentry emitter references a `SENTRY CLIENT` with a project DSN and a positive `timeout_ms`,
   encodes one event JSON object per record, or per batch through `ON EMITTING BATCH`, and has no

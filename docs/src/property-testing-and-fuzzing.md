@@ -33,7 +33,8 @@ Compile-time API restrictions use paired Rustdoc examples beside the owning API:
 example for the forbidden call and a compiling example with the current imports and supported
 signature. `just test` invokes `just test-capability-docs` for the capability owners;
 `just test-primitives-compile` exercises primitive doctests in their declared execution modes.
-Both recipes run in CI. An import
+CI runs the first for a pull request labeled `extra-doctests` and the second for one labeled
+`extra-primitives`. An import
 that no longer resolves cannot serve as evidence of the intended restriction. Nervix uses no
 `trybuild` dependency, harness, fixture source or diagnostic snapshot for these checks. Doctests
 prove only the build configuration in which they run; Cargo graph and target probes, compiler
@@ -95,7 +96,7 @@ records their scope without treating a passing qualification as a completed camp
 | `models-identities` | `nervix-models` execution reference, upload identity, endpoint and pool-bound equality | valid identities, v3 | 256 | 512 bytes |
 | `models-identity-validation` | `nervix-models` identity parsers and decoders accept exactly their rule | arbitrary identity text and bounds, v3 | 256 | 512 bytes |
 | `models-connector-declarations` | `nervix-models` a generated ingestor and emitter state only what their entity declares: a declared mode with its required option choices, an honored quiesce mode, the declared body form, admitted batching and a client of a declared connector | ingestors and emitters of every connector entity, v17 | 256 | 2048 bytes |
-| `client-config-schema` | `nervix-models` complete client configuration-entry equality through JSON and archive, retained schema acceptance idempotent effective defaults preserving authored entries, and idempotent public inspection | every current client schema with its declared keys, delegated driver namespaces, omitted defaults, scheme-restricted keys, percent-encoded headers and bounded type-valid TCP intervals, string, boolean, integer, URL, scheme-restricted driver address, driver URLs with Nervix-owned query options and the keys conditioned on them, choice, file and level-template values, v18 | 256 | 1024 bytes |
+| `client-config-schema` | `nervix-models` complete client configuration-entry equality through JSON and archive, retained schema acceptance idempotent effective defaults preserving authored entries, and idempotent public inspection | every current client schema with its declared keys, delegated driver namespaces, omitted defaults, scheme-restricted and scheme-bound keys, percent-encoded headers and bounded type-valid TCP intervals, string, boolean, integer, URL, host-and-port URL, scheme-restricted driver address, driver URLs with Nervix-owned query options and the keys conditioned on them, choice, file and level-template values, v21 | 256 | 1024 bytes |
 | `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, full-width counts included, v26 | 256 | 4096 bytes |
 | `models-archived-counts` | `nervix-models` count-bearing Model, statement, transaction identity and WASM inspection archive equality | zero where permitted, `u32::MAX + 1`, `u64::MAX` and generated native counts, v3 | 256 | 16 bytes |
 | `scheduled-units` | `nervix-models` complete domain schedule equality through archive encoding | current Single, Partition and Instance unit placements with generated primary and assigned nodes, v1 | 256 | 128 bytes |
@@ -211,7 +212,8 @@ records their scope without treating a passing qualification as a completed camp
 | `iceberg-nested-datetime-staging` | `nervix-connector-iceberg` staged nested-list schema and values against containing-microsecond division while preserving list boundaries | up to 16 generated UTC nanosecond timestamps in two list levels, including negative and boundary values, v1 | 256 | 160 bytes |
 | `iceberg-table-projection` | `nervix-connector-iceberg` staged batches laid out as the table's schema: refused exactly when a required column is left out or mapped from an expression that can produce a null, naming the first such column, and otherwise every staged value unchanged in the table column of its name and null in every column left out | one to six long, string, widened integer and binary columns, required or optional, mapped or left out, in any `VALUES` order, from nullable and never-null expressions, up to eight rows with nulls, v1 | 256 | 512 bytes |
 | `iceberg-staged-file-encoding` | `nervix-connector-iceberg` staged Arrow IPC rows read back unchanged and their complete measured Parquet encoding, including its footer, equals the written file size | one to eight mapped rows with generated string values and integer IDs, v1 | 256 | 512 bytes |
-| `http-emitter-requests` | `nervix-connector-http` requests handed to hyper against every prepared field, the target's origin or absolute form, the transport's fields, the proxy's credentials, the declared empty length and the exact body, and the tunnel request for each target | methods that define request content, methods that define none, their ASCII case variants and extension methods, named, IPv4 and IPv6 origins with and without default ports, plain targets, application headers with and without `Accept`, bodies up to 64 bytes, HTTP/1.1, HTTP/2 and forwarded routes with and without proxy credentials, v1 | 256 | 512 bytes |
+| `http-poll-response-headers` | `nervix-connector-http` retains every valid UTF-8 value with exact bytes and repeat order, drops each invalid value alone, and counts it | up to 32 generated visible UTF-8 characters, including non-ASCII, and one of three invalid byte sequences between valid repeated values, v1 | 256 | 128 bytes |
+| `http-emitter-requests` | `nervix-connector-http` requests handed to hyper against every prepared field, the target's origin or absolute form, the transport's fields, the proxy's credentials, the declared empty length and the exact body, and the tunnel request for each target | methods that define request content, methods that define none, their ASCII case variants and extension methods, named, IPv4 and IPv6 origins with and without default ports, plain targets, application headers with and without `Accept` and with ASCII or non-ASCII UTF-8 values, bodies up to 64 bytes, HTTP/1.1, HTTP/2 and forwarded routes with and without proxy credentials, v2 | 256 | 512 bytes |
 | `mqtt-publish-packets` | `nervix-connector-mqtt` measured PUBLISH sizes against the packet the client writes, the protocol's largest packet and the broker maximum | topics up to 128 bytes, every quality of service, payloads beside every Remaining Length width and the protocol limit, v1 | 256 | 512 bytes |
 | `postgres-insert-measures` | `nervix-connector-postgres` measured inserts against the statement and the arrays the driver encodes, and the Bind message bound | up to four text columns of up to eight rows with NULLs, quotes and multi-byte characters, every run of rows, v1 | 256 | 1024 bytes |
 | `mysql-insert-measures` | `nervix-connector-mysql` complete quoted SQL and parameter measure equals the driver's binary serializer | one-/two-part MySQL names, three nullable columns, one to eight rows, every conflict action and nonempty row range, v1 | 256 | 1024 bytes |
@@ -288,8 +290,8 @@ records their scope without treating a passing qualification as a completed camp
 | `websocket-upgrade-headers` | `nervix-models` Every bounded canonical upgrade-header collection preserves all names, values and order through the production validated representation; malformed and canonicalizing cases have separate owner tests. | bounded canonical header names and values in order, v1 | 256 | 32 bytes |
 | `node-settings-command-line` | `nervix-server` Current valid node settings of every group, with the Raft timings ordered in whole milliseconds, the drain shorter than the shutdown and the memory watermarks paired and ordered, render as the server's options and read back through the same options and validation unchanged; every duration and byte quantity help prints reads back as the same value. | valid settings across groups, ordered Raft timings and paired memory watermarks, v2 | 256 | 512 bytes |
 
-Each target declares its Cargo manifest. Product targets use the root workspace; the synchronization
-properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers declared tooling workspaces
+Each target declares its Cargo manifest. Product targets use the root workspace; the five `typed-*`
+compiler-tooling properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers declared tooling workspaces
 from root metadata and uses the selected manifest in ordinary, sanitizer, replay and qualification
 commands. Compiler executions are fixture checks, not work done in each fuzz iteration.
 
@@ -677,8 +679,10 @@ just combine-bolero-fuzz <shard-evidence> <output>
 Bolero, scans their property macros within each owning Cargo package, and queries compiled targets
 through filtered library and integration-test discovery with the inventory's declared features.
 Source scanning stops at nested Cargo manifests and excludes Cargo build output; an authored module
-named `target` remains part of its package. It rejects missing, unregistered, duplicate, ignored and
-zero-selected targets, plus
+named `target` remains part of its package. A property macro belongs to the innermost function
+whose body holds it, read without comments and literal contents, so a helper function nested
+before the macro is not taken for the property. It rejects missing, unregistered, duplicate,
+ignored and zero-selected targets, plus
 corpus paths different from Bolero's actual work directory. Discovery executes only
 `bolero_` tests of the registered library and integration-test targets under Bolero's selection
 mode; it cannot start the server's scenario harness. It reports discovered, selected, executed and
@@ -739,8 +743,10 @@ failure, sanitizer finding or property failure fails the job.
 `fuzz` is the preferred Bolero evidence in CI. Its shards discover the inventory, run a
 coverage-guided sanitizer campaign of every registered target from its checked-in corpus, measure
 the Rust source those campaigns execute and qualify the runner's failure paths. A pull request whose
-diff requires the ordinary suites runs each property there as an ordinary Rust test that replays its
-checked-in corpus, whatever its labels. The randomized job adds the run of each harness with its
+diff requires the ordinary suites runs each product property there as an ordinary Rust test that
+replays its checked-in corpus, whatever its labels; the five `typed-*` properties of the separate
+`tools/nervix-lint` workspace run as ordinary tests in `just test-typed-ratchet`, which CI runs for a
+pull request labeled `extra-compiler`. The randomized job adds the run of each harness with its
 exact declared features and the check that every property ran the inventory's case count and
 replayed its whole corpus. Label a pull request `bolero-random` only when its task requires
 that run, such as a change to the randomized run itself, its runner or its job, or a release
