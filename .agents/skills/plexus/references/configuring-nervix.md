@@ -194,8 +194,8 @@ current connection, retry and deadline limits.
   `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
   schedule recomputation.
 - For `WEBSOCKETS CONNECTION` literal upgrade headers, subprotocol offers, frame metadata, strict client CONFIG,
-  handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close, read `Ingestors` →
-  `WEBSOCKETS CONNECTION` in the selected documentation index.
+  TLS trust roots, handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close,
+  read `Ingestors` → `WEBSOCKETS CONNECTION` in the selected documentation index.
   A successful upgrade does not establish data delivery or reset repeated-failure backoff.
   Check the effective idle bound together with the ping cadence and the peer's inbound activity.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
@@ -251,7 +251,7 @@ current connection, retry and deadline limits.
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
   <bytes>` before `FLUSH`; other supported emitters may, with `MAX MESSAGES` from 1 to 65,536, a positive
-  whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
+  whole-unit `MAX SIZE`, at most `1MiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
   emitter's codec, and `BATCH MESSAGE` in a batching emitter's protobuf codec. A batching Kafka,
   Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, Sentry or Syslog emitter publishes each run of
   compatible records from successive Arrow carriers in one flush, one source relay and one exact
@@ -412,6 +412,12 @@ current connection, retry and deadline limits.
   And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
   shared client outcome labels, and sender retry semantics. Check that a WebSocket endpoint's
   declared signaling format can encode its acknowledgements, including during `ACCEPT DATA`.
+- To route endpoint requests by their method, path, query, peer address or host, or WebSocket
+  frames by their kind, read the metadata tables in that same section before writing a
+  `metadata.<field>`. An endpoint admits only `POST` at its exact `PATH`, so route on
+  `metadata.query`, `metadata.host` or `metadata.remote_addr` rather than expecting the method or
+  path to vary, and read a forwarding header such as `X-Forwarded-For` with `read_header`, because
+  `metadata.remote_addr` is the TCP peer.
 - Every external name an ingestor reads, such as a topic, consumer group, subscription, queue,
   channel, subject, queue group, or MQTT topic filter, is a string literal spelled exactly as the
   external system names it and within the rules of `Ingestors` → `External Names`.
@@ -434,10 +440,14 @@ current connection, retry and deadline limits.
   `BUFFER` or `DROP` policy in generated Plexus.
 - Redis Pub/Sub uses `NO ACK` in both directions. Treat `CHANNEL` as a literal, case-preserving
   name and consult the Redis manual sections for its byte bound and unavailable header operations.
-- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`, and an emitter
-  `MODE SINGLE` or `MODE BATCH`. Treat `QUEUE` as a literal, case-preserving SQS name, and check
-  `SQS CLIENT` keys against `Ingestors` → `SQS`: `endpoint`, `region`, `access_key_id` and
-  `secret_access_key` are required, and it declares no proxy or client certificate keys.
+- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`. An emitter writes
+  its request shape, `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat
+  `QUEUE` as a literal, case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` →
+  `SQS`: `endpoint`, `region`, `access_key_id` and `secret_access_key` are required, and it
+  declares no proxy or client certificate keys. After `ENCODE USING`, an emitter may write
+  `DELAY <whole seconds from 1s to 900s>` for a standard queue or `DEDUPLICATION ID <string_expression>`
+  for a `.fifo` queue. Its `write_header` values may be `STRING`, an integer type or `BYTES`, sent
+  as `String`, `Number` and `Binary` attributes; read `Emitters` → `SQS`.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
