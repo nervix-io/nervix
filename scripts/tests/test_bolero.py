@@ -398,6 +398,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-checkpoint-replication",
             "nervix-connector-syslog",
             "nervix-connector-rabbitmq",
+            "nervix-connector-nats",
             "nervix-connector-pulsar",
             "nervix-connector-kafka",
             "nervix-paced-simulation",
