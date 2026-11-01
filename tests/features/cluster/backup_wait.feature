@@ -1,6 +1,29 @@
 @backup_wait @deloxide_stress_restore
 Feature: Bounded multi-domain backup waits and exact recovery
 
+  Scenario Outline: A cluster backup recovers a first-domain lease release refused by a lapsed leader lease on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is saved as placeholder "backup_base"
+    And the active domain is "{{backup_base}}_a"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{backup_base}}_a;
+      START;
+      CREATE UNPACED DOMAIN {{backup_base}}_b;
+      """
+    Given the active domain is "{{backup_base}}_b"
+    When these Plexus commands are executed on the leader node
+      """
+      START;
+      """
+    And a cluster backup recovers its first cut's refused mutation lease release
+    Then backup archive "lease-release-recovered.nvxb" retains both native recovery cuts after a 0 second first cut
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   # The first cut's 12-second hold leaves 18 seconds of its 30-second cut budget for its lease,
   # pause, drain and capture, so only the held second cut expires, even while a leader whose raft
   # lease lapsed refuses the first cut's lease. A leader that cannot record the expired backup's

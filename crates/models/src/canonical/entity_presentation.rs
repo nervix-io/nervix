@@ -58,6 +58,14 @@ impl EntityBoundary {
         }
     }
 
+    /// Every locator the entity declares, its alternatives included.
+    fn locators(self) -> Vec<LocatorDeclaration> {
+        match self {
+            Self::Ingestor(kind) => kind.locators(),
+            Self::Emitter(kind) => kind.capabilities().locator.into_iter().collect(),
+        }
+    }
+
     fn options(self) -> &'static [OptionDeclaration] {
         match self {
             Self::Ingestor(kind) => kind.capabilities().options,
@@ -162,6 +170,20 @@ impl EntityPresentation {
             .locator()
             .assured("this concrete entity declares its external locator");
         self.locator = Some(format!("{} {}", declaration.keywords, string_literal(name)));
+    }
+
+    /// Writes `name` after the keywords of `locator`, the one of its entity's declared locators the
+    /// concrete Model holds.
+    fn declared_locator(&mut self, locator: LocatorDeclaration, name: &str) {
+        // An entity declares one locator and at most a handful of alternatives in its constant
+        // declaration, so the scan is bounded by that declaration.
+        let declared = self
+            .boundary
+            .locators()
+            .into_iter()
+            .find(|candidate| *candidate == locator)
+            .assured("the concrete Model names a locator its entity declares");
+        self.locator = Some(format!("{} {}", declared.keywords, string_literal(name)));
     }
 
     fn written_option(&mut self, keywords: &str, value: String) {
@@ -488,7 +510,7 @@ queue_ingestor_presentations!(RabbitMqQueueIngestor, SqsQueueIngestor);
 impl IngestorPresentationModel for RedisPubSubIngestor {
     fn entity_presentation(&self) -> EntityPresentation {
         let mut presentation = EntityPresentation::ingestor(self);
-        presentation.external_locator(self.channel.as_str());
+        presentation.declared_locator(self.subscription.locator(), self.subscription.as_str());
         presentation
     }
 }
