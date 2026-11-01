@@ -187,8 +187,9 @@ pub enum DeadlineKey {
     /// activity and whether cancellation or handoff backpressure retains the activity deadline.
     #[strum(serialize = "idle_timeout_ms")]
     IdleTimeout,
-    /// `pool_acquire_timeout_ms`: one checkout from a connection pool, including the wait for
-    /// capacity and opening or testing the connection it hands over.
+    /// `pool_acquire_timeout_ms`: one checkout from a connection pool: the wait for the pool, then
+    /// opening or testing the connection it hands over, with name resolution, TLS and
+    /// authentication. How long an accepted operation then runs is outside it.
     #[strum(serialize = "pool_acquire_timeout_ms")]
     PoolAcquireTimeout,
 }
@@ -256,6 +257,13 @@ mod tests {
                 },
             },
             DeclaredWait {
+                wait: "a pool checkout",
+                bound: WaitBound::Key {
+                    key: DeadlineKey::PoolAcquireTimeout,
+                    omitted: OmittedDeadline::Required,
+                },
+            },
+            DeclaredWait {
                 wait: "an acknowledgement",
                 bound: WaitBound::Clause("ACK TIMEOUT"),
             },
@@ -270,7 +278,8 @@ mod tests {
             vec![
                 DeadlineKey::Timeout,
                 DeadlineKey::ConnectTimeout,
-                DeadlineKey::IdleTimeout
+                DeadlineKey::IdleTimeout,
+                DeadlineKey::PoolAcquireTimeout
             ]
         );
     }
@@ -319,7 +328,8 @@ mod tests {
             vec![
                 "STALLED PEER timeout_ms".to_string(),
                 "STALLED PEER connect_timeout_ms".to_string(),
-                "STALLED PEER idle_timeout_ms".to_string()
+                "STALLED PEER idle_timeout_ms".to_string(),
+                "STALLED PEER pool_acquire_timeout_ms".to_string()
             ]
         );
     }

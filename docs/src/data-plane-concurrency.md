@@ -696,6 +696,15 @@ its existing wait for a place. Native broker waits, the destruction's included, 
 and Deloxide's lock detector; the ordinary connector and retirement regressions and the
 one-/three-node stalled-broker and retirement scenarios own that evidence.
 
+Kafka record metadata stays with its owning message until the host has projected the fields its
+programs read. Keys are borrowed, timestamps are typed at the transport boundary, and metadata
+visits add no lock or shared state. The `kafka-record-metadata` Bolero property holds the complete
+row and its retained replay to the source record. The registered `scenario.kafka-record-*` and
+`stress.kafka-record-*` workloads read all new fields in every ACK mode, distinguish tombstones
+from empty values, and drive event time through two branch windows beside tracked ingestion and
+lifecycle locks. Driver polling and metadata conversion remain outside Deloxide's lock detector;
+the ingestor-host Shuttle checks retain their existing intake and settlement scope.
+
 ### Kafka source rejection floors
 
 A Kafka source under `OFFSET BY CONSUMER GROUP` records the earliest rejected record of every
@@ -2383,6 +2392,12 @@ and three-node clusters, including expiry before the second cut, in the active a
 selections, with stress twins in the restore-stress selection, and name the
 client request and exchange owners in the inventory. The detector observes their blocking
 reply-registration and cancellation locks.
+The first-domain lease-release recovery workload reaches those same client and storage lifetimes
+after a consensus proposal is refused by an unconfirmed leader lease. Its active, order and
+stressed-restore records require recovery under the original execution reference and a downloaded
+archive with both quiesced domain cuts. The refusal owner's asynchronous mutex and the command's
+retry waits remain outside the detector; the public scenario and typed response-boundary tests
+establish their recovery and definitive-timeout outcomes without claiming an interleaving model.
 Async command and reconnect mutexes, physical deadlines and network scheduling remain outside
 its observation; the public scenarios and client-session regressions assert their wait, expiry,
 leader-change and recovery outcomes directly. The bounded native-client case runs inside the
