@@ -3,7 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Outbound transport requirements and configuration, DNS-backed resume within the
-//!   client's `connect_timeout_ms`, signaling before readiness, accepted-frame storage, payload
+//!   client's `connect_timeout_ms`, the typed refusal of an upgrade answer that contradicts the
+//!   request's subprotocol offer, signaling before readiness, accepted-frame storage, payload
 //!   delivery, and suspend and close operations.
 //! - **Depends on.** The ingestor contract, typed plans and host services, compiled signaling engine,
 //!   vocabulary values, execution primitives, TLS configuration, and WebSocket transport.
@@ -48,7 +49,12 @@ use nervix_primitives::{net::TcpStream, sync::Arc, time::timeout};
 use thiserror::Error;
 use tokio_tungstenite::{
     Connector, client_async_tls_with_config,
-    tungstenite::{Message, client::IntoClientRequest as _, protocol::WebSocketConfig},
+    tungstenite::{
+        Message,
+        client::IntoClientRequest as _,
+        error::{ProtocolError, SubProtocolError},
+        protocol::WebSocketConfig,
+    },
 };
 
 use crate::{
@@ -73,6 +79,25 @@ enum WebsocketsConnectionIngestorFailure {
     CloseTransport,
     #[error("WebSocket close handshake did not finish within {budget:?}")]
     CloseTimeout { budget: Duration },
+    #[error("WebSocket peer selected none of the subprotocols the upgrade offered")]
+    SubprotocolNotSelected,
+    #[error("WebSocket peer selected a subprotocol the upgrade did not offer")]
+    SubprotocolNotOffered,
+    #[error("WebSocket peer selected a subprotocol although the upgrade offered none")]
+    SubprotocolNotRequested,
+}
+
+/// The transport fails an upgrade whose answer contradicts the request's subprotocol offer (RFC
+/// 6455 section 4.1), and its refusal already distinguishes how. A refusal names no subprotocol:
+/// an offer can carry a credential.
+impl From<SubProtocolError> for WebsocketsConnectionIngestorFailure {
+    fn from(refusal: SubProtocolError) -> Self {
+        match refusal {
+            SubProtocolError::NoSubProtocol => Self::SubprotocolNotSelected,
+            SubProtocolError::InvalidSubProtocol => Self::SubprotocolNotOffered,
+            SubProtocolError::ServerSentSubProtocolNoneRequested => Self::SubprotocolNotRequested,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -419,6 +444,20 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
                 Ok(Ok(connection)) => {
                     connected = Some(connection);
                     break;
+                }
+                Ok(Err(tokio_tungstenite::tungstenite::Error::Protocol(
+                    ProtocolError::SecWebSocketSubProtocolError(refusal),
+                ))) => {
+                    // The endpoint answered the upgrade and refused its offer. Another address of
+                    // the same endpoint answers the same offer, so no further address is tried.
+                    return Err(
+                        Report::new(WebsocketsConnectionIngestorFailure::from(refusal))
+                            .attach(refusal)
+                            .attach_printable(attempt.address)
+                            .change_context(IngestorError::Resume {
+                                connector: WEBSOCKETS.keyword(),
+                            }),
+                    );
                 }
                 Ok(Err(error)) => failures.push(format!("{}: {error}", attempt.address)),
                 Err(_) => failures.push(format!(
@@ -1090,6 +1129,227 @@ mod tests {
         assert_eq!(authority, format!("websocket.nervix.test:{port}"));
         assert_eq!(path, "/socket/path?item=42");
         assert!(fixture.authority.questions_for("websocket.nervix.test") > 0);
+    }
+
+    /// Accepts one upgrade and answers its subprotocol offer with `answer`, reporting the offer
+    /// it read and the server side of the upgrade, which a refusing client ends at once.
+    async fn answer_subprotocol(
+        listener: &TcpListener,
+        answer: Option<&'static str>,
+    ) -> (
+        Option<String>,
+        Result<WebSocketStream<TcpStream>, tokio_tungstenite::tungstenite::Error>,
+    ) {
+        let (stream, _) = listener.accept().await.assured("the source connects");
+        let mut offer = None;
+        #[expect(
+            clippy::result_large_err,
+            reason = "tungstenite requires an unboxed HTTP rejection response in its handshake \
+                      callback"
+        )]
+        let answer_upgrade = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                              mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+            if let Some(value) = request.headers().get("sec-websocket-protocol") {
+                let value = value.to_str().assured("the validated offer is visible ASCII");
+                offer = Some(value.to_string());
+            }
+            if let Some(protocol) = answer {
+                response.headers_mut().insert(
+                    "sec-websocket-protocol",
+                    protocol.parse().assured("the scripted answer is a header value"),
+                );
+            }
+            Ok(response)
+        };
+        let upgraded = tokio_tungstenite::accept_hdr_async(stream, answer_upgrade).await;
+        (offer, upgraded)
+    }
+
+    fn offering(offer: &str) -> WebsocketsUpgradeHeaders {
+        WebsocketsUpgradeHeaders::parse(&[nervix_models::WebsocketsUpgradeHeader {
+            name: "Sec-WebSocket-Protocol".to_string(),
+            value: offer.to_string(),
+        }])
+        .assured("the offer lists unique subprotocol tokens")
+    }
+
+    #[nervix_primitives::test]
+    async fn the_selected_subprotocol_reaches_every_message_header_snapshot() {
+        use futures_util::SinkExt as _;
+
+        let fixture = DnsFixture::start().await;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .assured("a loopback TCP port is available");
+        let address = listener.local_addr().assured("the listener is bound");
+        let plan = WebsocketsConnectionIngestorPlan::new(
+            endpoint(format!("ws://{address}/socket")),
+            offering("v2.events, v1.events"),
+            None,
+            fixture.resolver,
+        )
+        .assured("the endpoint is valid");
+        let mut source = WebsocketsConnectionIngestor::open(&plan, 0)
+            .await
+            .assured("the source opens");
+        let (resumed, (offer, upgraded)) = tokio::join!(
+            source.resume(),
+            answer_subprotocol(&listener, Some("v1.events"))
+        );
+        assert_eq!(
+            resumed.assured("the peer selected an offered subprotocol"),
+            IngestorResume::Ready
+        );
+        // The offer is written as its tokens joined by commas alone.
+        assert_eq!(offer.as_deref(), Some("v2.events,v1.events"));
+        let mut peer = upgraded.assured("the upgrade succeeds");
+        peer.send(Message::Text("payload".to_string()))
+            .await
+            .assured("the peer sends a data frame");
+        let batch = source
+            .next_batch(
+                IngestorBatchRequest {
+                    max_messages: std::num::NonZeroUsize::MIN,
+                    batch_timeout: None,
+                },
+                &IngestorReadCancellation::new(),
+            )
+            .await
+            .assured("the data frame is read");
+        let IngestorBatch::Messages(messages) = batch else {
+            panic!("the peer delivered a data frame");
+        };
+        let message = messages.first().assured("the read returned the frame");
+        let mut selected = Vec::new();
+        message.headers().visit(&mut |name, value| {
+            if name == "sec-websocket-protocol" {
+                selected.push(value.to_string());
+            }
+        });
+        assert_eq!(selected, ["v1.events"]);
+    }
+
+    #[nervix_primitives::test]
+    async fn an_answer_that_contradicts_the_offer_fails_resume_with_its_typed_refusal() {
+        struct Case {
+            offer: Option<&'static str>,
+            answer: Option<&'static str>,
+            refusal: SubProtocolError,
+        }
+        for case in [
+            Case {
+                offer: Some("v2.events, v1.events"),
+                answer: Some("v3.events"),
+                refusal: SubProtocolError::InvalidSubProtocol,
+            },
+            Case {
+                offer: Some("v2.events, v1.events"),
+                answer: None,
+                refusal: SubProtocolError::NoSubProtocol,
+            },
+            Case {
+                offer: None,
+                answer: Some("v1.events"),
+                refusal: SubProtocolError::ServerSentSubProtocolNoneRequested,
+            },
+        ] {
+            let fixture = DnsFixture::start().await;
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .assured("a loopback TCP port is available");
+            let address = listener.local_addr().assured("the listener is bound");
+            let headers = match case.offer {
+                Some(offer) => offering(offer),
+                None => WebsocketsUpgradeHeaders::default(),
+            };
+            let plan = WebsocketsConnectionIngestorPlan::new(
+                endpoint(format!("ws://{address}/socket")),
+                headers,
+                None,
+                fixture.resolver,
+            )
+            .assured("the endpoint is valid");
+            let mut source = WebsocketsConnectionIngestor::open(&plan, 0)
+                .await
+                .assured("the source opens");
+            let (resumed, _) =
+                tokio::join!(source.resume(), answer_subprotocol(&listener, case.answer));
+            let failure = resumed
+                .err()
+                .assured("an answer that contradicts the request fails the connection");
+            assert!(matches!(
+                failure.current_context(),
+                IngestorError::Resume { .. }
+            ));
+            let reported = failure
+                .frames()
+                .find_map(|frame| frame.downcast_ref::<WebsocketsConnectionIngestorFailure>())
+                .assured("the typed refusal is the resume failure's cause");
+            let expected = WebsocketsConnectionIngestorFailure::from(case.refusal);
+            assert_eq!(
+                std::mem::discriminant(reported),
+                std::mem::discriminant(&expected)
+            );
+            assert_eq!(
+                failure
+                    .frames()
+                    .find_map(|frame| frame.downcast_ref::<SubProtocolError>()),
+                Some(&case.refusal),
+                "the transport's refusal stays attached for typed inspection"
+            );
+            // An offer can carry a credential, so the refusal never prints it.
+            assert!(!format!("{failure:#}").contains("events"));
+            assert!(
+                source.needs_resume(),
+                "a refused upgrade installs no connection"
+            );
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_refused_offer_tries_no_further_address() {
+        let fixture = DnsFixture::start().await;
+        let refusing = TcpListener::bind("127.0.8.3:0")
+            .await
+            .assured("a loopback TCP port is available");
+        let port = refusing
+            .local_addr()
+            .assured("the listener is bound")
+            .port();
+        // The second address would select an offered subprotocol, so dialling it would connect.
+        let accepting = TcpListener::bind(std::net::SocketAddr::from(([127, 0, 8, 4], port)))
+            .await
+            .assured("the same port is available on a second loopback address");
+        fixture.answer(vec![
+            "127.0.8.3".parse().assured("literal IPv4 address"),
+            "127.0.8.4".parse().assured("literal IPv4 address"),
+        ]);
+        let plan = WebsocketsConnectionIngestorPlan::new(
+            endpoint(format!("ws://websocket.nervix.test:{port}/socket")),
+            offering("v1.events"),
+            None,
+            fixture.resolver.clone(),
+        )
+        .assured("the WebSocket endpoint is valid");
+        let mut source = WebsocketsConnectionIngestor::open(&plan, 0)
+            .await
+            .assured("the source opens");
+        let (resumed, _) = tokio::join!(
+            source.resume(),
+            answer_subprotocol(&refusing, Some("v2.events"))
+        );
+        let failure = resumed.err().assured("the first address refused the offer");
+        assert!(matches!(
+            failure
+                .frames()
+                .find_map(|frame| frame.downcast_ref::<WebsocketsConnectionIngestorFailure>()),
+            Some(WebsocketsConnectionIngestorFailure::SubprotocolNotOffered)
+        ));
+        let dialled = timeout(Duration::from_millis(200), accepting.accept()).await;
+        assert!(
+            dialled.is_err(),
+            "the endpoint refused the offer, so the second address is never dialled"
+        );
     }
 
     #[nervix_primitives::test]

@@ -183,6 +183,7 @@ capability = "NAMESPACE"
 entity = "ICEBERG TABLE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/iceberg_declarations.feature", scenario = "An Iceberg emitter commits to a case-preserving multilevel catalog namespace" },
+  { feature = "tests/features/runtime/iceberg_declarations.feature", scenario = "ALTER ICEBERG TABLE EMITTER SET TO moves an emitter to a table in another catalog namespace" },
 ]
 
 [[capability]]
@@ -1124,6 +1125,7 @@ capability = "HEADERS"
 entity = "WEBSOCKETS CONNECTION INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection sends literal upgrade headers and exposes response headers and frame types" },
+  { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection offers subprotocols and reads the one its peer selects on <cluster_size> nodes" },
 ]
 
 [[capability]]

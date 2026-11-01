@@ -611,8 +611,10 @@ a released stream wakes a waiter of exactly its own class and subquota. A single
 every waiter could reach one that cannot use the released slot, while the waiter that can use it
 slept on until its deadline. The waiter registers for that wakeup, and for any change of the peer's
 connections, before it checks the pools a second time, so a release between its two checks still
-wakes it. The wakeups belong to the peer rather than to one of its targets, so a waiter of a target
-that was replaced meanwhile still hears a release of the replacement.
+wakes it. The wakeups belong to the endpoint's pool, which a new dial of the same endpoint keeps, so
+a waiter of a target replaced that way still hears a release of the replacement. An endpoint or
+credential replacement builds a new pool, and its connection-change notification wakes every
+waiter to check the pools again.
 
 A connection stops granting stream leases the moment it begins to drain, whether it is retiring or
 the transport is shutting down. A lease checks for the drain only after it holds its slot, so it

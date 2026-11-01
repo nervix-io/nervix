@@ -2,7 +2,7 @@
 //! driven through the emitter against Iceberg's in-memory catalog.
 
 use ::iceberg::{
-    MemoryCatalog, Namespace, TableCommit, TableCreation,
+    MemoryCatalog, Namespace, NamespaceIdent, TableCommit, TableCreation, TableIdent,
     memory::{MEMORY_CATALOG_WAREHOUSE, MemoryCatalogBuilder},
     spec::{NestedField, PrimitiveType, Schema, Type},
 };
