@@ -983,6 +983,13 @@ client accepts under one name, such as `metadata.broker.list` for `bootstrap.ser
 librdkafka's `topic.` prefix is `ClientConfigSchemaError::DriverPrefix`, naming the key and the
 prefix. Both refusals sit beneath the same client context and carry no configured value.
 
+A Kafka record timestamp outside the signed Unix-nanosecond range retains
+`TimestampError::ArithmeticOverflow` beneath `KafkaTopicIngestorError::RecordTimestamp`, naming
+the topic, partition and offset, beneath `IngestorError::Read`. It is a source read failure, not
+a codec rejection, and never becomes a wrapped or absent metadata instant. When a later record
+in a collected read fails that conversion, the source returns the valid gathered prefix first and
+keeps exactly one report for its next admitted read. A cancelled read leaves that report pending.
+
 A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaTopicIngestorError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
 does not answer within thirty seconds is `KafkaTopicIngestorError::CommitUnanswered`, and a blocking-pool

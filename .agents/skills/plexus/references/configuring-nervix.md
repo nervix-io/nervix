@@ -371,6 +371,8 @@ current connection, retry and deadline limits.
   Treat `TOPIC` as a literal, case-preserving Kafka topic name in both directions, and give every
   `KAFKA TOPIC` ingestor `OFFSET BY DOMAIN` or `OFFSET BY CONSUMER GROUP '<group>'` and
   `ON QUIESCE SUSPEND`.
+- For Kafka record metadata, nullable keys, tombstones and `TIMESTAMP AT metadata.timestamp`,
+  follow `Ingestors` → `Kafka`; convert a binary key explicitly before using it as text.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default. Under `OFFSET BY DOMAIN` in an unpaced domain the same policy places a
