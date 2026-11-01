@@ -963,11 +963,21 @@ refusal before either a PULL or PUSH socket opens; an omitted value selects conn
 The MySQL offline check also applies the vocabulary's pooled-client reserved-key declaration to
 URL query parameters. A pool override is a value-free refusal naming `POOL SIZE`, before storage
 or connection attempts; the host uses that same declaration for resolved configuration. MySQL's
-current client schema declares only the address and CA file its implementation consumes. Its
+current client schema declares `addr`, `timeout_ms`, `tls_ca_file`, `tls_cert_file` and
+`tls_key_file`, with paired certificate and key files. Its
 table declaration admits one or two nonempty, case-preserving identifier parts, and the connector
 quotes each part separately. Its declared placeholder bound is shared with the statement divider;
 the bound narrows rows by mapped column count. The [MySQL manual](emitters.md#mysql) gives its
 exact binary binding and conflict semantics.
+
+The insert measure counts SQL text and binary bound values, excluding packet headers, parameter
+types and the execute null bitmap. It does not narrow a write by the server's
+`max_allowed_packet`; operators leave protocol headroom below that setting. Mounted TLS files
+enable TLS. They preserve the URL's verification policy when `require_ssl=true` selected one,
+otherwise starting from the driver's TLS defaults. The node's shared pool validates
+one connection at open, then its minimum keeper waits one second before each pass and counts
+checked-out connections together with idle ones. Its `timeout_ms` is an operation bound, shared
+with that keeper, rather than a bound on the complete maintenance pass or emitter flush.
 
 The Postgres client schema declares its address as a driver URL whose scheme and `sslmode` Nervix
 owns: validation and the connector read the one TLS policy through the same declared option, and
@@ -2638,7 +2648,13 @@ sequenceDiagram
   arbitrary UTF-8 text and the exact key and reason of every refusal.
 - **Iceberg emitter.** It stages Arrow data locally on the node's filesystem storage workers, prepares
   data files, and publishes a catalog update once its `COMMIT EACH` cadence, which the host measures
-  from staging, ends or its staged files reach the maximum commit size. Open plans how its commits
+  from staging, ends or its staged files reach the maximum commit size. Open loads the declared
+  table from the REST catalog. A REST catalog answers a missing namespace and a missing table alike,
+  so a catalog that does not hold the table is asked for the table's namespace, and the open fails
+  with `EmitterOpenError::MissingExternalEntity` naming the namespace, or the table in a namespace
+  the catalog holds. The host retries that open on the emitter's backoff until an operator
+  provisions what it lacks. Any other catalog failure is `EmitterOpenError::Initialize`, with the
+  catalog's typed error beneath. Open then plans how its commits
   write the mapped columns into the loaded table, matching them to the table's columns by name and
   Iceberg type after recursively narrowing UTC nanosecond datetimes to microseconds in the staged
   schema, and refuses a table whose required column `VALUES` leaves out or maps from an expression
@@ -2807,10 +2823,13 @@ sequenceDiagram
 
 ## Failure and observation
 
-The compiler failure-contract gate reads exact source-owned semantic outcome classifications for
-SQL mapped-column refusals and MongoDB value/document refusals. Their callers produce definitive
-record rejections with the record position and safe field path. Infrastructure and batch failures
-return contextual reports. [Errors And Diagnostics](errors-and-diagnostics.md) owns the compiler
+The compiler failure-contract gate reads exact source-owned outcome classifications at the
+contract's payload preparation and Sentry's override of it, Kafka's `ACK TIMEOUT` conversion,
+Postgres's mapped-column refusal, and MongoDB's value and document refusals. A value BSON cannot
+hold is rejected with its record position and safe field path, and an oversized document with its
+record position. A mapped column type that MySQL, Postgres or MongoDB cannot bind, and field names
+no MongoDB document can hold, fail the whole publish. Infrastructure and batch failures return
+contextual reports. [Errors And Diagnostics](errors-and-diagnostics.md) owns the compiler
 classification contract; these annotations do not change acknowledgement or retry policy.
 
 An ingestor opens all source instances before registration, so a failed source start leaves no

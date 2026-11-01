@@ -234,7 +234,8 @@ const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
 const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
-static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<nervix_primitives::sync::Mutex<()>> = OnceLock::new();
+static ICEBERG_CATALOG_PROVISION_LOCK: OnceLock<nervix_primitives::sync::Mutex<()>> =
+    OnceLock::new();
 static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<BlockingMutex<BTreeMap<String, String>>> =
     OnceLock::new();
 const WEB_CONSOLE_ASSERTION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -25600,12 +25601,43 @@ async fn given_iceberg_table_in_namespace_exists(
     location: String,
     #[step] step: &Step,
 ) {
-    let mut fixture = IcebergTableFixture::from_step(world, table, location, docstring(step));
-    fixture.namespace = expand_placeholders(world, &namespace);
+    let fixture =
+        IcebergTableFixture::in_namespace(world, table, &namespace, location, docstring(step));
     fixture
         .ensure()
         .await
         .expect("failed to create Iceberg table in its explicit namespace");
+}
+
+#[when(expr = "the operator provisions Iceberg namespace {string}")]
+async fn when_the_operator_provisions_iceberg_namespace(
+    world: &mut ScenarioWorld,
+    namespace: String,
+) {
+    let fixture = IcebergNamespaceFixture::from_step(world, &namespace);
+    fixture
+        .ensure()
+        .await
+        .expect("failed to provision the Iceberg namespace");
+}
+
+#[when(
+    expr = "the operator provisions Iceberg table {string} in namespace {string} at {string} with \
+            columns"
+)]
+async fn when_the_operator_provisions_iceberg_table_in_namespace(
+    world: &mut ScenarioWorld,
+    table: String,
+    namespace: String,
+    location: String,
+    #[step] step: &Step,
+) {
+    let fixture =
+        IcebergTableFixture::in_namespace(world, table, &namespace, location, docstring(step));
+    fixture
+        .ensure()
+        .await
+        .expect("failed to provision the Iceberg table in its namespace");
 }
 
 #[given(expr = "Kafka topic {string} is observed")]
@@ -32520,22 +32552,129 @@ fn rustfs_iceberg_storage_factory() -> StdArc<dyn iceberg::io::StorageFactory> {
     })
 }
 
-struct IcebergTableFixture {
+/// What an operator provisions in the scenarios' shared REST catalog: one provisioning at a time,
+/// retried while the catalog's SQLite store reports a transient lock.
+struct IcebergCatalogProvisioning;
+
+const ICEBERG_CATALOG_PROVISION_TIMEOUT: Duration = Duration::from_secs(15);
+const ICEBERG_CATALOG_PROVISION_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+impl IcebergCatalogProvisioning {
+    /// Runs `attempt` until it provisions the catalog `entity` it names, retrying it while the
+    /// catalog reports a transient lock.
+    async fn run<Attempt, Provisioned>(entity: &str, attempt: Attempt) -> Result<(), String>
+    where
+        Attempt: Fn() -> Provisioned,
+        Provisioned: Future<Output = Result<(), String>>,
+    {
+        let _guard = ICEBERG_CATALOG_PROVISION_LOCK
+            .get_or_init(|| nervix_primitives::sync::Mutex::new(()))
+            .lock()
+            .await;
+        let deadline = Instant::now() + ICEBERG_CATALOG_PROVISION_TIMEOUT;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match attempt().await {
+                Ok(()) => return Ok(()),
+                Err(error) if Self::is_transient_catalog_lock(&error) => {
+                    if Instant::now() >= deadline {
+                        return Err(format!(
+                            "timed out retrying Iceberg {entity} setup after transient catalog \
+                             lock: {error}"
+                        ));
+                    }
+                    nervix_primitives::time::sleep(ICEBERG_CATALOG_PROVISION_RETRY_INTERVAL).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn is_transient_catalog_lock(error: &str) -> bool {
+        error.contains("SQLITE_BUSY") || error.contains("database is locked")
+    }
+}
+
+/// A catalog namespace a scenario provisions, as an operator does before a table can be created in
+/// it.
+struct IcebergNamespaceFixture {
     dependencies: DependencyEndpoints,
     namespace: String,
+}
+
+impl IcebergNamespaceFixture {
+    fn from_step(world: &ScenarioWorld, namespace: &str) -> Self {
+        Self {
+            dependencies: world.dependencies.endpoints().clone(),
+            namespace: expand_placeholders(world, namespace),
+        }
+    }
+
+    /// The namespace named after the scenario's Nervix domain.
+    fn of_domain(world: &ScenarioWorld) -> Self {
+        Self {
+            dependencies: world.dependencies.endpoints().clone(),
+            namespace: world.domain.clone(),
+        }
+    }
+
+    async fn ensure(&self) -> Result<(), String> {
+        IcebergCatalogProvisioning::run("namespace", || self.ensure_once()).await
+    }
+
+    async fn ensure_once(&self) -> Result<(), String> {
+        let catalog = rustfs_rest_catalog(&self.dependencies).await?;
+        self.ensure_in(&catalog).await?;
+        Ok(())
+    }
+
+    /// Creates the namespace in `catalog` unless the catalog already holds it, and returns its
+    /// identifier.
+    async fn ensure_in(&self, catalog: &RestCatalog) -> Result<NamespaceIdent, String> {
+        let namespace = NamespaceIdent::from_strs(self.namespace.split('.'))
+            .map_err(|source| format!("invalid catalog namespace: {source}"))?;
+        let exists = catalog
+            .namespace_exists(&namespace)
+            .await
+            .map_err(|source| format!("failed to check Iceberg namespace: {source}"))?;
+        if !exists {
+            catalog
+                .create_namespace(&namespace, Default::default())
+                .await
+                .map_err(|source| format!("failed to create Iceberg namespace: {source}"))?;
+        }
+        Ok(namespace)
+    }
+}
+
+struct IcebergTableFixture {
+    namespace: IcebergNamespaceFixture,
     table: String,
     location: String,
     fields: Vec<arrow_schema::Field>,
 }
 
-const ICEBERG_TABLE_PROVISION_TIMEOUT: Duration = Duration::from_secs(15);
-const ICEBERG_TABLE_PROVISION_RETRY_INTERVAL: Duration = Duration::from_millis(100);
-
 impl IcebergTableFixture {
+    /// The table in the namespace named after the scenario's Nervix domain.
     fn from_step(world: &ScenarioWorld, table: String, location: String, columns: &str) -> Self {
         Self {
-            dependencies: world.dependencies.endpoints().clone(),
-            namespace: world.domain.clone(),
+            namespace: IcebergNamespaceFixture::of_domain(world),
+            table: expand_placeholders(world, &table),
+            location: expand_placeholders(world, &location),
+            fields: Self::parse_fields(columns),
+        }
+    }
+
+    /// The table in the catalog namespace a step names.
+    fn in_namespace(
+        world: &ScenarioWorld,
+        table: String,
+        namespace: &str,
+        location: String,
+        columns: &str,
+    ) -> Self {
+        Self {
+            namespace: IcebergNamespaceFixture::from_step(world, namespace),
             table: expand_placeholders(world, &table),
             location: expand_placeholders(world, &location),
             fields: Self::parse_fields(columns),
@@ -32543,44 +32682,12 @@ impl IcebergTableFixture {
     }
 
     async fn ensure(&self) -> Result<(), String> {
-        let _guard = ICEBERG_TABLE_PROVISION_LOCK
-            .get_or_init(|| nervix_primitives::sync::Mutex::new(()))
-            .lock()
-            .await;
-        let deadline = Instant::now() + ICEBERG_TABLE_PROVISION_TIMEOUT;
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            match self.ensure_once().await {
-                Ok(()) => return Ok(()),
-                Err(error) if Self::is_transient_catalog_lock(&error) => {
-                    if Instant::now() >= deadline {
-                        return Err(format!(
-                            "timed out retrying Iceberg table setup after transient catalog lock: \
-                             {error}"
-                        ));
-                    }
-                    nervix_primitives::time::sleep(ICEBERG_TABLE_PROVISION_RETRY_INTERVAL).await;
-                }
-                Err(error) => return Err(error),
-            }
-        }
+        IcebergCatalogProvisioning::run("table", || self.ensure_once()).await
     }
 
     async fn ensure_once(&self) -> Result<(), String> {
-        let catalog = rustfs_rest_catalog(&self.dependencies).await?;
-        let namespace = NamespaceIdent::from_strs(self.namespace.split('.'))
-            .map_err(|source| format!("invalid catalog namespace: {source}"))?;
-        if !catalog
-            .namespace_exists(&namespace)
-            .await
-            .map_err(|source| format!("failed to check Iceberg namespace: {source}"))?
-        {
-            catalog
-                .create_namespace(&namespace, Default::default())
-                .await
-                .map_err(|source| format!("failed to create Iceberg namespace: {source}"))?;
-        }
-
+        let catalog = rustfs_rest_catalog(&self.namespace.dependencies).await?;
+        let namespace = self.namespace.ensure_in(&catalog).await?;
         let table_ident = TableIdent::new(namespace, self.table.clone());
         if catalog
             .table_exists(&table_ident)
@@ -32614,10 +32721,6 @@ impl IcebergTableFixture {
             .await
             .map_err(|source| format!("failed to create Iceberg table {table_ident}: {source}"))?;
         Ok(())
-    }
-
-    fn is_transient_catalog_lock(error: &str) -> bool {
-        error.contains("SQLITE_BUSY") || error.contains("database is locked")
     }
 
     fn parse_fields(columns: &str) -> Vec<arrow_schema::Field> {
