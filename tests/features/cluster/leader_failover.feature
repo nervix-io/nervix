@@ -15,6 +15,7 @@ Feature: Cluster leader failover
     And node "node-3" eventually reports a leader other than "node-1"
     And node "node-2" eventually reports raft voters "node-1,node-2,node-3"
 
+  @slots_6
   Scenario Outline: Dead scheduled node primary failover promotes a live replica
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "100ms"

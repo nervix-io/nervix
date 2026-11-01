@@ -103,6 +103,7 @@ Feature: Interconnect health coordination
     Then for "20s" healthy nodes "node-1,node-3" keep each other live and their scheduled work after node "node-2" stops
     And within "30s" node "node-1" reports no scheduled work on "node-2"
 
+  @slots_6
   Scenario: A silent peer does not delay peer health or control-plane work
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started

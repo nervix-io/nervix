@@ -377,7 +377,7 @@ Feature: Materialized backup and archived lifecycle resumption
       | 1            | 0             |
       | 3            | 1             |
 
-  @restore_installation @deloxide_stress_restore
+  @restore_installation @deloxide_stress_restore @slots_3
   Scenario Outline: Restored materialized branches measure idle lifetime from activation time
     Given branched relay expiration scan interval is configured as "1ms"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
@@ -419,7 +419,7 @@ Feature: Materialized backup and archived lifecycle resumption
       | 1            | 0             | executed       |
       | 3            | 1             | recovered      |
 
-  @restore_installation @deloxide_stress_restore @long_running
+  @restore_installation @deloxide_stress_restore @long_running @slots_6
   Scenario Outline: Materialized generations larger than the bulk budget resume on every assigned owner and replica
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -550,6 +550,7 @@ Feature: Materialized backup and archived lifecycle resumption
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup archives "large-before-stale.nvxb" and "large-after-stale.nvxb" have identical materialized generations
 
+  @slots_3
   Scenario Outline: A <failure> failure stays the restore outcome after its coordinator loses leadership before recording it
     Given runtime replication is configured with replica count 1 and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -596,7 +597,7 @@ Feature: Materialized backup and archived lifecycle resumption
       | materialized checkpoint staging | materialized checkpoint stagings |
 
 
-  @restore_installation @deloxide_stress_restore @long_running
+  @restore_installation @deloxide_stress_restore @long_running @slots_6
   Scenario Outline: A delayed coordinator cannot replace a resumed materialized generation larger than the bulk budget
     Given runtime replication is configured with replica count 1 and snapshot interval "10m"
     And the production sticky scheduler is configured

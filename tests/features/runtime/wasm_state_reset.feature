@@ -630,6 +630,7 @@ Feature: Coordinated WASM processor state reset
       | 1            | 0             |
       | 3            | 1             |
 
+  @slots_3
   Scenario Outline: Reset drains accepted buffered output once and cancels the old branch timer
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
