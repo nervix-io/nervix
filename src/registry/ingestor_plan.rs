@@ -202,7 +202,7 @@ client_plan!(RabbitMqQueueIngestorStartPlan {
     mode: RabbitMqIngestMode,
 });
 client_plan!(RedisPubSubIngestorStartPlan {
-    channel: nervix_models::RedisChannelName,
+    subscription: nervix_models::RedisSubscriptionTarget,
     mode: nervix_models::RedisPubSubIngestMode,
 });
 client_plan!(PrometheusQueryIngestorStartPlan {
@@ -1003,7 +1003,7 @@ impl IngestorConnectorPlan {
             (
                 IngestorEntity::Redis(RedisIngestor::PubSub(RedisPubSubIngestor {
                     client: expected,
-                    channel,
+                    subscription,
                     mode,
                     ..
                 })),
@@ -1017,7 +1017,7 @@ impl IngestorConnectorPlan {
                         resolved.mount.as_ref(),
                         &resolved.config,
                     )?,
-                    channel: channel.clone(),
+                    subscription: subscription.clone(),
                     mode: mode.clone(),
                 },
             ))),
@@ -1440,7 +1440,7 @@ mod tests {
         IngestorCase {
             source: IngestorEntity::Redis(RedisIngestor::PubSub(RedisPubSubIngestor {
                 client: named("upstream"),
-                channel: named("events"),
+                subscription: nervix_models::RedisSubscriptionTarget::Channel(named("events")),
                 mode: nervix_models::RedisPubSubIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Drop,
             })),
@@ -1453,7 +1453,7 @@ mod tests {
             plan: IngestorConnectorPlan::Redis(RedisIngestorStartPlan::PubSub(
                 RedisPubSubIngestorStartPlan {
                     client: client(),
-                    channel: named("events"),
+                    subscription: nervix_models::RedisSubscriptionTarget::Channel(named("events")),
                     mode: nervix_models::RedisPubSubIngestMode::NoAck,
                 },
             )),

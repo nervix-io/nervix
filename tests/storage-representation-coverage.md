@@ -15,6 +15,12 @@ the optional FIFO group. The Model/archive, registry, consensus and canonical Pl
 preserve the request shape, and the archive signature and consensus keyspace namespace fence the
 current SQS emitter shape before decoding.
 
+`REDIS PUBSUB` ingestor generators draw both subscriptions, a `CHANNEL` and a `PATTERN`, each from
+any text within its byte bound and the pattern from glob characters too. The Model/archive,
+registry, consensus and canonical Plexus properties preserve which subscription an ingestor holds
+and its exact text, and the archive signature and consensus keyspace namespace fence that shape
+before decoding.
+
 Ingestor generators draw every timestamp source, `TIMESTAMP AT metadata.<field>` included, in
 `CREATE` and in `ALTER ... SET TIMESTAMP`. The Model/archive, registry, consensus and canonical
 Plexus properties preserve the metadata source distinctly from a payload field of the same name,
@@ -23,8 +29,8 @@ and the same signature and namespace fence that shape.
 Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
 `LATEST`, and provisioned subscriptions without a position. Statement generators mix typed
 `SET START AT` with shared ingestor operations. The Model, registry and consensus properties
-preserve those complete values. The `NERVIX INGESTORS` registry signature and
-`raft_ingestor_choices_` consensus namespace identify this current Model layout before decoding.
+preserve those complete values. The `NERVIX REDIS SUB` registry signature and
+`raft_redis_subscription_` consensus namespace identify this current Model layout before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
 persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration
