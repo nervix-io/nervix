@@ -311,6 +311,14 @@ listening socket. The test-only fault channel enters through the source plan and
 request until its selected listener acknowledges it. Another arm cannot replace an unobserved
 request, and a cancelled accept leaves it available. No shared lock or map is reached per frame.
 
+The Syslog frame carries its immutable peer metadata through that same handoff. UDP and TCP keep
+their socket address inline; TLS frames share one connection-owned address and optional verified
+client subject, decoded once after the handshake. Retaining a quiesced payload copies the complete
+declared metadata row, so ending the source message cannot change its transport or TLS peer. The
+source's Shuttle check includes metadata preservation across the occupied-queue pause race. Its
+async channel and watch, and the immutable metadata itself, have no tracked blocking-lock
+acquisition for Deloxide to observe.
+
 Restore storage qualification includes the store's cancellation, corruption, snapshot, queued
 writer, active chunk liveness and many-key cleanup regressions in `just test-deloxide`,
 `just test-deloxide-order` and `just test-deloxide-stress`, plus the public one-node and three-node `@restore_installation`

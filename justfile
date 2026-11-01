@@ -1092,6 +1092,10 @@ test-consensus *args:
 test-models *args:
     cargo test --package nervix-models --all-targets -- {{ args }}
 
+# Run vocabulary tests with their declared Arrow schema boundary enabled.
+test-models-arrow *args:
+    cargo test --package nervix-models --all-targets --features arrow -- {{ args }}
+
 # Exact OTEL field contracts, their Arrow admission and the declaration-driven Plexus grammar.
 test-otel-declarations:
     cargo test --package nervix-models --lib --features arrow connector::otel::

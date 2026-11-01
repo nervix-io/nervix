@@ -294,14 +294,14 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SYSLOG LISTENER | Compare `SYSLOG COLLECTOR`: modes, ingest metadata. A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Entity | SYSLOG LISTENER | Compare `SYSLOG COLLECTOR`: modes, ingest metadata. A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
 | Reference | SYSLOG client |  |
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |  |
+| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
-| Metadata | metadata.peer_addr: STRING OPTIONAL |  |
+| Metadata | metadata.peer_addr: STRING OPTIONAL<br>metadata.transport: STRING OPTIONAL<br>metadata.tls_peer: STRING OPTIONAL |  |
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
@@ -568,12 +568,12 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SYSLOG COLLECTOR | Compare `SYSLOG LISTENER`: modes. A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Entity | SYSLOG COLLECTOR | Compare `SYSLOG LISTENER`: modes. A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
 | Reference | SYSLOG client |  |
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |  |
+| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
 | Protocol batch maximum | A batch is written as one frame within the frame limits below; general BATCH limits still apply. |  |

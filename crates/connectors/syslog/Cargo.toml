@@ -49,6 +49,7 @@ tokio = { workspace = true, features = [
 tokio-rustls = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+x509-parser = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }

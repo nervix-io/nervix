@@ -488,7 +488,8 @@ General notes:
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
   `metadata.topic`, `metadata.partition`, and `metadata.offset`, `SYSLOG LISTENER` declares
-  `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
+  `metadata.peer_addr`, `metadata.transport`, and `metadata.tls_peer`, `HTTP REQUEST` declares
+  `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
   `metadata.remote_addr`, and `metadata.host`, `WEBSOCKETS CONNECTION` declares
   `metadata.frame_type`, and `WEBSOCKETS ENDPOINT` declares `metadata.frame_type`,
@@ -1843,9 +1844,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | No entity-specific options. |
-| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | metadata.peer_addr: STRING OPTIONAL |
+| Metadata | metadata.peer_addr: STRING OPTIONAL<br>metadata.transport: STRING OPTIONAL<br>metadata.tls_peer: STRING OPTIONAL |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -1859,9 +1860,12 @@ See the [SYSLOG LISTENER capability and mirror reference](connector-capabilities
 
 The client binds a UDP, TCP, or TLS listener. UDP treats one datagram as one message; TCP detects
 RFC 6587 octet-counted or LF-terminated framing per frame; TLS uses RFC 5425 octet counting.
-Messages expose optional `metadata.peer_addr`. The source takes no `INSTANCES` clause and has no
-application acknowledgment. Every live cluster node runs the listener; it is independent of the
-leader and restarts or joins with its owning node. See [Syslog](syslog.md) for the client keys,
+Messages expose optional `STRING` fields `metadata.peer_addr`, `metadata.transport` (`udp`, `tcp`
+or `tls`) and `metadata.tls_peer` (the verified TLS client certificate's subject, null without a
+verified client identity). Routes may select a transport in `WHERE` and assign these values to
+schema fields; quiesce buffering retains the complete row. The source takes no `INSTANCES` clause
+and has no application acknowledgment. Every live cluster node runs the listener; it is independent
+of the leader and restarts or joins with its owning node. See [Syslog](syslog.md) for the client keys,
 cluster lifecycle, framing, TLS, limits, and failure semantics.
 An invalid client setting or unreadable TLS file fails listener startup with the Syslog key or
 file and its underlying cause. A frame or connection failure keeps its cause in the source

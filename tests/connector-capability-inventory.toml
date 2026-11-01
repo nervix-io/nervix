@@ -1136,6 +1136,24 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "metadata.transport"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog UDP frame carries its transport and has no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "Syslog TCP frames carry their transport and have no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog TLS frame exposes a peer only when the client certificate is verified" },
+]
+
+[[capability]]
+capability = "metadata.tls_peer"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog UDP frame carries its transport and has no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "Syslog TCP frames carry their transport and have no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog TLS frame exposes a peer only when the client certificate is verified" },
+]
+
+[[capability]]
 capability = "STALLED PEER connect_timeout_ms"
 entity = "SYSLOG LISTENER INGESTOR"
 scenarios = [
