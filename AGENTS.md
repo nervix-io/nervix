@@ -217,13 +217,14 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - [Data-Plane Concurrency](docs/src/data-plane-concurrency.md) is the authoritative architecture
   reference for synchronization on record, batch, remote-frame, and acknowledgement paths. Any
   change to hot-path state publication, task or branch ownership, delivery or assignment fences,
-  the data-plane lock ratchet, or a Shuttle check or Loom model must keep that chapter current in
-  the same change. Its scope includes the contentionless rule, published and pre-resolved state,
-  mutable execution state, bounded synchronization, review classification for new lock sites,
-  deterministic checks of data-plane concurrency protocols, memory-ordering models, and the
-  diagnostic mode's deadlock detection with its evidence and the locks it does not track. A change
-  that adds a concurrent map, or changes how often one is reached or what disposes of it, updates
-  the concurrent map inventory in `tests/concurrent-map-inventory-ledger.md` in the same change.
+  the typed ratchet's synchronization rule and its execution contracts, or a Shuttle check or Loom
+  model must keep that chapter current in the same change. Its scope includes the contentionless
+  rule, published and pre-resolved state, mutable execution state, bounded synchronization, review
+  classification for new lock sites, deterministic checks of data-plane concurrency protocols,
+  memory-ordering models, and the diagnostic mode's deadlock detection with its evidence and the
+  locks it does not track. A change that adds a concurrent map, or changes how often one is
+  reached or what disposes of it, updates the concurrent map inventory in
+  `tests/concurrent-map-inventory-ledger.md` in the same change.
 - [VM Functions](docs/src/vm-functions.md) is the authoritative architecture reference for the
   expression VM and its function catalog. Any change to expression lowering, the semantic catalog
   and function registration, type or sensitivity checking, constant folding or expression sharing,
@@ -1122,14 +1123,17 @@ build and the existing tests, and nothing in it changes behavior.
 - Use Rustdoc `compile_fail` doctests beside the owning API for compile-time rejection checks.
   Do not use `trybuild` or add its dependencies, harnesses, fixtures, or diagnostic snapshots.
   Pair rejection examples with compiling examples of the current imports and supported signatures,
-  and run the doctests in the normal test commands and CI.
+  and run the doctests in the normal test commands, and in CI for a pull request labeled
+  `extra-doctests`, which a change to such an API carries.
 - Keep verification claims with their evidence. Paired API doctests check one API in the build's
   selected configuration; Cargo graph, feature-conflict and target probes check the configurations
   they actually build; compiler fixtures qualify resolved diagnostics; primitive conformance checks
-  compare backend semantics. None executes a production-owner concurrency model by itself. Record
-  the invariant, selected inventory, completed exploration, weakening and replay evidence when
-  claiming model verification. Use the matching toolchain's declared `llvm-tools` for coverage and
-  preserve the configured kache wrapper in every build and probe.
+  compare backend semantics. None executes a production-owner concurrency model by itself, and
+  compiling under a mode is analysis, not execution evidence. A change confined to an exclusively
+  owned collection or to compiler analysis makes no concurrency claim and needs no invented model.
+  Record the invariant, selected inventory, completed exploration, weakening and replay evidence
+  when claiming model verification. Use the matching toolchain's declared `llvm-tools` for coverage
+  and preserve the configured kache wrapper in every build and probe.
 - Tests cover the current shape only. Never define a removed Model, stored shape, or wire form in a
   test fixture, including to assert that loading it fails. See
   [Alpha Stability and Compatibility](#alpha-stability-and-compatibility).
@@ -1411,7 +1415,10 @@ build and the existing tests, and nothing in it changes behavior.
   defaulting a failure to lower a finding is a workaround, and the owner it degraded keeps the
   repair. `just lint-audit` reports resolved candidates for such workarounds, attributed to the
   commits and counts that introduced them; its report is review input under `target/`, and review
-  dispositions and measurements belong on the owning task.
+  dispositions and measurements belong on the owning task. A claim that a workaround costs
+  performance, or that its repair saves it, needs that provenance and a same-host measurement of
+  the lookups, comparisons and allocations it changes over hit-heavy and miss-heavy keys; a lower
+  count or a shorter function is not a speedup.
 - Model consumption, language dependencies, recurring cluster awaits, declared node identities,
   installation state, synchronization, failure signatures, discarded outcomes, canonical panic APIs,
   integer/Duration clamped arithmetic and Option/Result adapter control flow use real Nervix
@@ -1424,13 +1431,15 @@ build and the existing tests, and nothing in it changes behavior.
   expectation widened to cover another operation fail. Generated reports are outputs under target,
   never enforcement inputs. Do not infer policy from filenames, sharing traits or method names.
 - [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md) owns the complete
-  sixteen-family contract matrix, source/compiler scope, qualification and review limits. A new
-  or changed semantic rule ships with allowed/rejected compiler fixtures distinguished by the
-  resolved fact, false-positive and false-negative controls, precise diagnostic/span assertions,
-  and invalid, unfulfilled and widened-expectation checks. Source rules also qualify inactive
-  configuration and authored macro fragments. Registered bounded Bolero properties qualify
-  changed source parsing and complete lossless tooling representations. Remove a replaced
-  detector and its numeric entry at the same cutover; a source expectation names one real
+  sixteen-family contract matrix, the components and the nine source-contract annotations,
+  source/compiler scope, report identity and reuse, the pinned analysis toolchain and its upgrade,
+  qualification and its CI selection, what each form of evidence establishes, the workaround audit
+  and review limits. A new or changed semantic rule ships with allowed/rejected compiler fixtures
+  distinguished by the resolved fact, false-positive and false-negative controls, precise
+  diagnostic/span assertions, and invalid, unfulfilled and widened-expectation checks. Source rules
+  also qualify inactive configuration and authored macro fragments. Registered bounded Bolero
+  properties qualify changed source parsing and complete lossless tooling representations. Remove a
+  replaced detector and its numeric entry at the same cutover; a source expectation names one real
   operation and cannot become a second allowance catalog.
 - Classify pure conversion refusals, cancellation signals, semantic row/record/wire outcomes and
   modeled library error contracts with reason-bearing `nervix::error_boundary(outcome|library, ...)`
@@ -1445,12 +1454,14 @@ build and the existing tests, and nothing in it changes behavior.
   [Data-Plane Concurrency](docs/src/data-plane-concurrency.md#source-contracts) owns the annotation,
   inheritance, exception and supported-effect contract; no universal ownership proof is claimed.
 - The synchronization driver and isolated artifacts use `nightly-2026-09-17`; product builds stay
-  stable. Its workspace wrapper composes beneath configured kache. Current source, annotations,
-  rule/dependency/configuration inputs and complete declared target evidence are required, including
-  zero findings. Missing evidence rebuilds only isolated authored artifacts in a supported cache
-  namespace. `just test-typed-ratchet` and `just qualify-typed-ratchet-cache` qualify diagnostics,
-  current paired API doctests and completion/cache behavior. Tooling Bolero targets use the shared
-  inventory and current ordinary/fuzz CI policy; native coverage uses matching LLVM tools.
+  stable. Bolero's sanitizer campaigns share that nightly, and an upgrade moves every declaration of
+  it in one change that keeps every compiler fixture's result. Its workspace wrapper composes
+  beneath configured kache. Current source, annotations, rule/dependency/configuration inputs and
+  complete declared target evidence are required, including zero findings. Missing evidence rebuilds
+  only isolated authored artifacts in a supported cache namespace. `just test-typed-ratchet` and
+  `just qualify-typed-ratchet-cache` qualify diagnostics, current paired API doctests and
+  completion/cache behavior. Tooling Bolero targets use the shared inventory and current
+  ordinary/fuzz CI policy; native coverage uses matching LLVM tools.
 - Every Rust build, check, lint, and test invocation must run through kache, the compiler wrapper
   the host configures with `RUSTC_WRAPPER` or Cargo's `build.rustc-wrapper`. The requirement has
   no exceptions: diagnostics, benchmarks, cache troubleshooting, and retries run through it too.

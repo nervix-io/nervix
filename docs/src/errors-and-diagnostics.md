@@ -2880,14 +2880,18 @@ The compiler architecture gate owns typed tooling failures for invalid source co
 conflicting findings and incomplete compiler passes. `ContractProblem` retains the specific
 argument, kind or missing contract coordinate inside an `error-stack` report until the Rust
 diagnostic boundary formats it. Reports preserve source location, resolved receiver/operation,
-owner and compiled configuration context. Missing or stale analysis fails rather than becoming a
-zero debt count. These are repository validation errors and add no runtime failure variants.
+owner and compiled configuration context. Missing, stale or incomplete compiler evidence fails the
+gate; compiler findings feed no debt count. These are repository validation errors and add no
+runtime failure variants.
 [Data-Plane Concurrency](data-plane-concurrency.md) owns the gate's coverage and synchronization policy.
 
-The isolated architecture compiler emits ordinary Rust tool diagnostics:
+The isolated architecture compiler emits sixteen ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and
-`nervix::invalid_contract`, together with the typed error diagnostics above. Source contracts and narrow reason-bearing expectations own the
-architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
+`nervix::invalid_contract`; the four failure diagnostics above; the six architecture diagnostics
+[Data-Plane Concurrency](./data-plane-concurrency.md#resolved-architecture-boundaries) describes;
+and `nervix::clamped_arithmetic` and `nervix::combinator_control_flow`. The
+[architecture rule matrix](./architecture-enforcement.md#rule-contracts) lists them by family.
+Source contracts and narrow reason-bearing expectations own the architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
 compiler reports and changed inputs fail the repository command; they are tooling failures, with
 no runtime error or public protocol disposition. The diagnostic gate rejects unresolved Nervix
 warnings too. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostics-and-reviewed-exceptions)
@@ -3034,8 +3038,9 @@ commands and the gate.
 Paired `compile_fail` and compiling doctests hold current APIs beside their failure paths. The DNS
 hook accepts `DnsLookupReport` as a standard error, and the recovery API classifies a real outcome.
 The VM's function injection receives the selected rows' earlier errors together with domain time.
-Resolved compiler fixtures hold the contextual-report, discarded-outcome and canonical panic rules;
-the source guard separately rejects textual string errors, including inactive code.
+Resolved compiler fixtures hold the contextual-report, discarded-outcome, informative-replacement
+and canonical panic rules; the source guard separately rejects textual string errors, including
+inactive code.
 
 ## Adding A Fallible Operation
 

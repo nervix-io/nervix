@@ -11,6 +11,26 @@ formatting is applied by the former and checked by the latter. The compiler emit
 may decrease and cannot increase. `just ratchet --update` records a decrease only after the
 complete gate passes. No numeric allowance controls a semantic rule.
 
+## Components
+
+| Part | Location | Responsibility |
+| --- | --- | --- |
+| Compiler driver | `tools/nervix-lint/driver` | Registers the `nervix` tool, validates source contracts and expectations, resolves definitions, normalized receivers, aliases, UFCS, trait selections and macro origins, emits the `nervix::` diagnostics and writes one side report per compilation, including its review candidates for the audit. |
+| Rule catalog and reports | `tools/nervix-lint/report` | The finite API recognition the driver applies (`report/src/rules.rs`), side-report validation and summaries, and the stable source parser behind the structural counts. |
+| Fixtures | `tools/nervix-lint/fixtures`, `tools/nervix-lint/fixture-macros` | The allowed and rejected compiler cases, authored-macro cases and paired doctests that qualify each rule. |
+| Declared matrix | `tools/nervix-lint/configurations.toml` | The configurations the gate analyzes and the memory admission of their compilations. |
+| Runner | `scripts/typed_ratchet.py` (`just typed-ratchet`) | Runs Cargo with the driver once per configuration, computes the report identity, reuses complete evidence and refuses missing, partial, stale or foreign reports. |
+| Workspace wrapper | `scripts/typed_lint_wrapper.py`, `scripts/analysis_admission.py` | Runs the driver as a child beneath the compiler wrapper the host configures, records every compilation and admits it against host memory. |
+| Gate | `scripts/ratchet.py` (`just ratchet`) | Requires the complete diagnostic gate and compares the five structural counts with `debt-baseline.json`. |
+| Complexity analyzer | `scripts/cargo_crap.py` | Pins and runs the analyzer behind `functions_over_complexity_30`. |
+| Audit | `scripts/lint_audit.py` (`just lint-audit`) | Attributes review candidates to the history that produced them. |
+
+Product source owns the policy: the [source contracts](#source-contracts) and the reason-bearing
+expectations at the operations they cover. The tooling owns recognition and evidence, and nothing it
+generates is read back as policy. `just validate-typed-errors` is a separate source rule without a
+count: it rejects `Result<_, String>` in product code outright, and
+[Errors And Diagnostics](errors-and-diagnostics.md) owns it.
+
 ## Rule Contracts
 
 The sixteen rule families below have one implementation each. The family name remains useful
@@ -51,6 +71,31 @@ grant it permission or make it a canonical API. Instant's saturating elapsed-tim
 query with a defined zero result, and pointer wrapping is pointer arithmetic. Neither is the
 integer/Duration overflow choice this family enforces.
 
+## Source Contracts
+
+What the compiler cannot infer is stated once, at its owner, in one of nine annotations. Each is
+gated as `#[cfg_attr(nervix_lint, nervix::...)]`: only the analysis driver registers the `nervix`
+tool and sets that cfg, so stable product and browser builds never see an annotation. Every
+annotation carries a reason. An unknown `nervix::` annotation, a duplicated or misplaced one, or a
+kind its annotation does not accept fails as `nervix::invalid_contract`.
+
+| Annotation | Placed on | States | Owner |
+| --- | --- | --- | --- |
+| `context(recurring\|lifecycle\|observer\|outside\|bounded)` | function, closure, trait, type, impl, module, crate, or a binding whose initializer owns one anonymous body | The execution context the synchronization and cluster-await rules judge; `bounded` also names its key and bound | [Source contracts](data-plane-concurrency.md#source-contracts) |
+| `dispatch` | callable | The external driver or callback boundary that recurring execution enters through generic, dynamic-trait or function-pointer dispatch | [Source contracts](data-plane-concurrency.md#source-contracts) |
+| `layer(primitives\|vocabulary\|language\|engine\|decisions\|data_plane\|control_plane\|edge\|harness)` | crate, module, type, trait, impl or callable | The layer that owns the code | [Resolved architecture boundaries](data-plane-concurrency.md#resolved-architecture-boundaries) |
+| `input(plans)` | crate, module, type, trait or callable | An engine that receives validated plans, which its layer alone does not grant | [Resolved architecture boundaries](data-plane-concurrency.md#resolved-architecture-boundaries) |
+| `value(model\|name\|cluster_access)` | type or trait | The configuration Model union, the shared name vocabulary and the cluster observation capability | [Resolved architecture boundaries](data-plane-concurrency.md#resolved-architecture-boundaries) |
+| `identity(node)` | vocabulary type, field, parameter, type alias or callable return | A node identity | [Typed States](typed-states.md#source-owned-identity-and-installation-contracts) |
+| `state(installed\|mutable)` | field | An installation-only field, or a genuinely replaceable one with its lifetime | [Typed States](typed-states.md#source-owned-identity-and-installation-contracts) |
+| `error_boundary(outcome\|library)` | exact error type or function return contract | An ordinary outcome or a modeled library error contract | [Errors And Diagnostics](errors-and-diagnostics.md) |
+| `constant(fixed)` | `const` item | A constant fixed by a wire format, RFC, persisted layout, ABI or invariant | [Hidden Tunables](#hidden-tunables) and [Node Settings](node-settings.md) |
+
+A contract is a reviewed assertion, not a proof. The compiler checks its placement, its kind and the
+effects it supports, and a contract moves with its source owner and crosses crate metadata. It does
+not prove that a lifecycle function never runs per record, that a bounded protocol's wait ends, that
+a fixed constant could not be a setting or that an outcome hides no failure; review owns those.
+
 ## Scope And Configuration
 
 Compiler coverage is precisely `tools/nervix-lint/configurations.toml`: the ordinary workspace's
@@ -75,6 +120,50 @@ failed, for example while publishing its report. A Cargo failure with no failed 
 outside them, in Cargo, a build script or the compiler wrapper. Records of an earlier run are
 discarded before Cargo starts. The kernel's out-of-memory killer ends a compilation with a signal and
 no message, which the gate reports as such instead of as a missing report.
+
+### Report Identity And Reuse
+
+A run's identity is a digest of everything that can change a finding: the analysis mode, the
+worktree root, the pinned compiler's `rustc -vV`, the driver and report validator binaries, the
+workspace wrapper script, every tracked or new unignored `.rs`, `.toml`, `.lock`, `.fbs`, `.proto`,
+`.json` and `.py` file, the Cargo configuration, and the compiler environment (`RUSTFLAGS` and
+`CARGO_ENCODED_RUSTFLAGS`, `RUSTC`, `RUSTC_WRAPPER`, `KACHE_KEY_SALT` and Cargo's build, target and
+profile variables). Every side report carries that identity and states whether it is complete. A
+partial report, a report of another identity, and so of another worktree or source state, or a
+declared target without its report fails the configuration; a configuration with zero sites still
+needs every report.
+
+Each configuration builds in a directory of its own and records its completion under
+`target/typed-ratchet/evidence/<identity>/<configuration>/`. A later run reuses that completion only
+while it is complete, its declared targets are unchanged, every file it recorded keeps its digest
+and its reports still validate against its Cargo log; `--fresh` runs Cargo regardless. A source
+change during the run fails it. The compiler wrapper's cache is keyed through `KACHE_KEY_SALT`
+extended with the identity, so cached outputs never cross identities. When the wrapper restores
+compiler outputs without their side reports, the runner removes that configuration's authored
+artifacts and analyzes again in a fresh cache namespace. `RUSTC_WRAPPER` stays configured
+throughout, and missing analysis never reads as zero findings.
+
+## Pinned Toolchain
+
+Product code builds with the stable toolchain `rust-toolchain.toml` declares. The analysis driver
+links rustc's internal crates, so the isolated `tools/nervix-lint` workspace builds and runs on one
+pinned nightly, `nightly-2026-09-17`, which its own `rust-toolchain.toml` declares with `rustc-dev`,
+`rust-src`, `rustfmt` and `llvm-tools`. `just toolchains-install` installs both toolchains. The
+driver refuses any other analysis compiler: it locates the pinned compiler through rustup and checks
+the commit that `rustc -vV` reports. Bolero's sanitizer campaigns use the same nightly, which the
+`[tool]` table of `tests/bolero-targets.toml` declares. Native coverage of the typed-ratchet
+qualification uses that toolchain's own LLVM tools, so profiles and exporters match the compiler
+that produced them.
+
+Upgrading the pinned nightly is one change that moves every declaration together: the tooling
+`rust-toolchain.toml`, the driver's compiler check, `scripts/typed_ratchet.py`, the justfile recipes
+that name the toolchain, `scripts/native_coverage.py`, the Bolero inventory and the sanitizer
+workflow's toolchain step, and the chapters and `AGENTS.md` that name it. It adapts the driver to
+rustc's changed internal APIs while every compiler fixture keeps its allowed and rejected result; a
+recognition the new compiler changes is a rule change and ships its fixtures. It qualifies with
+`just test-typed-ratchet`, `just qualify-typed-ratchet-cache`, the complete `just ratchet` gate and
+a `fuzz`-labeled run of the sanitizer campaigns. The new compiler identity re-establishes every
+report, so no evidence from the previous compiler is reused.
 
 Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The five
 counts retain their product-debt scope: directory components named `tests`, `benches` or
@@ -139,8 +228,10 @@ representations and every generated location in ordinary and sanitizer execution
 ## Host Memory Admission
 
 An analysis compilation needs about the memory of rustc's own check of its target, and the server
-library's dwarfs every other: it peaks between about 11 and 13.5 GiB in each of the ten declared
-configurations that compile it, while no other analysis compilation reaches 2 GiB. Every
+library's dwarfs every other. It peaks at about 12.3 GiB in the ordinary configuration and between
+about 11.7 and 15.5 GiB across the ten declared configurations that compile it, highest in the
+testing configuration and the six Deloxide ones, while no other analysis compilation reaches 2 GiB.
+Its 16 GiB reservation therefore leaves about half a GiB above the largest measured peak. Every
 configuration builds in a directory of its own, and up to four configurations analyze at once, a
 bound `--jobs` or `NERVIX_TYPED_RATCHET_JOBS` sets otherwise; the evidence keeps the declared order
 whatever order they end in, and once one analysis fails no configuration starts another.
@@ -287,6 +378,40 @@ The sanitizer compiler adapter preserves the source parser's span contract as de
 The [concurrency](data-plane-concurrency.md), [error](errors-and-diagnostics.md) and
 [state](typed-states.md) chapters retain those operational owners.
 
+CI runs the complete gate for every pull request: the `checks` job runs `just validate-ci 4`, which
+runs the source and lint checks four recipes at a time and `just ratchet` after them, through kache.
+The tooling's own qualification is selected by labels in the `extra-tests` job. A pull request
+labeled `extra-compiler` runs `just coverage-native-extras test-typed-ratchet`, which runs
+`just test-typed-ratchet` with its ordinary part under native coverage and its product doctests and
+modeled fixture configurations after it, then `just qualify-typed-ratchet-cache` and
+`just coverage-typed-ratchet-python`; one labeled `extra-doctests` runs `just test-capability-docs`.
+A pull request that changes a compiler rule or fixture carries `extra-compiler`, and one that changes
+an API with paired doctests carries `extra-doctests`.
+
+## What The Evidence Establishes
+
+Each form of evidence establishes its own claim, and none substitutes for another:
+
+| Evidence | Establishes | Does not establish |
+| --- | --- | --- |
+| Compiler fixtures and diagnostics | That a rule recognizes the resolved facts its allowed and rejected cases differ in | That analyzed code is free of races or deadlocks, or that no unrecognized route exists |
+| Paired API doctests | That one current API compiles and its rejected form does not, in the build's configuration | Execution of any model or runtime path |
+| Bolero properties | Serial semantics: round trips, operation sequences and reference models over bounded inputs | Interleavings or memory ordering |
+| Shuttle checks | Interleavings of a production owner's protocol under its declared exploration | Memory-ordering claims, which its sequentially consistent scheduler cannot establish, or network behavior |
+| Loom models | A memory-ordering claim of a synchronous production owner, with a registered weakening that must fail | Operations inside opaque dependencies |
+| Turmoil simulations | Network and distributed-recovery claims within the supported simulation | Real-process recovery |
+| Deloxide lanes | Active deadlocks and potential order cycles among tracked blocking locks in the runs they make | Untracked synchronization, or interleavings the runs did not take |
+| Cucumber scenarios | Public behavior through the product's interfaces | Interleavings the suite did not reach |
+| External Chaos | Runtime fault and recovery against immutable product images | Paths its scenarios do not reach |
+
+Compiling a configuration under a mode is analysis, not execution: a mode's evidence comes only from
+its own runner, which reports the checks it discovered, selected, executed and completed. A change
+confined to an exclusively owned collection, or to the compiler's analysis, makes no concurrency
+claim and needs no invented model; its owner's unit tests, properties and compiler fixtures verify
+it. A change that alters a protocol, a memory-ordering claim or a tracked lock brings that method's
+evidence over its production owner, as [Data-Plane Concurrency](data-plane-concurrency.md) and
+[Execution Primitives](execution-primitives.md) require.
+
 ## Auditing Lint Workarounds
 
 A rule that misjudges code invites code shaped around the rule. The textual counters this gate
@@ -356,3 +481,29 @@ less than building the entry, so the measurement covers hit-heavy and miss-heavy
 distributions. A performance claim needs measured lookup, comparison and allocation counts and
 same-host Criterion or `just benchmark-ab` evidence; a shorter function or a lower count is not a
 speedup.
+
+### Audit Results
+
+The audit ran over the complete gate at revision `cd03e1bc`, with squashed pull-request history, and
+review classified all 1,461 candidates: 26 confirmed lint-caused, 146 suspected, 1,026 unrelated, 202
+pre-existing and 61 intentional. Chronology alone confirmed none; the review read each squashed
+rewrite the audit associated with a candidate.
+
+- Four candidates in window pane-sketch admission were repaired: one `entry` per pane replaced a
+  lookup followed by an insertion. It is the only measured runtime improvement. New-pane admission
+  became 16 to 18 percent faster for the distinct, quantile and top-k sketches when every row opens
+  a new pane; at 16 and 1,024 rows per pane the difference stayed within run-to-run variance. A
+  realistic end-to-end comparison showed no difference the host's variance could resolve, and none
+  is attributed to the repair.
+- Two confirmed Kafka partition folds keep their lookup-then-insert shape. Measured, `entry` was
+  slower for the batches acknowledgements carry and faster only when every position named a new
+  partition.
+- The 411 sites that replaced or probed a failure and dropped its informative cause, and 33 rendered
+  backup causes, were repaired, and replacing a failure without keeping it beneath became the
+  compiler diagnostic `nervix::replaced_error`.
+- No forwarding wrapper, moved scope or relocated acquisition was lint-caused damage, and no rule
+  needed a semantic recalibration.
+
+The per-candidate record, the measurements and the raw reports are on
+[Typed Ratchet 09](https://app.clickup.com/t/86bc9etee) and
+[Typed Ratchet 09A](https://app.clickup.com/t/86bchy23u).

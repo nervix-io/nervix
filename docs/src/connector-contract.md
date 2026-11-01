@@ -2823,10 +2823,13 @@ sequenceDiagram
 
 ## Failure and observation
 
-The compiler failure-contract gate reads exact source-owned semantic outcome classifications for
-SQL mapped-column refusals and MongoDB value/document refusals. Their callers produce definitive
-record rejections with the record position and safe field path. Infrastructure and batch failures
-return contextual reports. [Errors And Diagnostics](errors-and-diagnostics.md) owns the compiler
+The compiler failure-contract gate reads exact source-owned outcome classifications at the
+contract's payload preparation and Sentry's override of it, Kafka's `ACK TIMEOUT` conversion,
+Postgres's mapped-column refusal, and MongoDB's value and document refusals. A value BSON cannot
+hold is rejected with its record position and safe field path, and an oversized document with its
+record position. A mapped column type that MySQL, Postgres or MongoDB cannot bind, and field names
+no MongoDB document can hold, fail the whole publish. Infrastructure and batch failures return
+contextual reports. [Errors And Diagnostics](errors-and-diagnostics.md) owns the compiler
 classification contract; these annotations do not change acknowledgement or retry policy.
 
 An ingestor opens all source instances before registration, so a failed source start leaves no
