@@ -3131,6 +3131,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/prometheus/src/query/__fuzz__/query__answer__tests__bolero_every_sample_is_exactly_the_declared_object/corpus"
+domain_version = 1
+features = []
+id = "prometheus-sample-encoding"
+invariant = "Every sample of a generated vector, read through the production answer reader, is byte for byte the declared object: its labels of any spelling under metric, an integer as that integer, a float as the shortest text of the same bits, NaN, +Inf and -Inf as the API's strings, and an instant of any nanosecond, written as a decimal or behind an exponent, as its exact RFC 3339 text; and the metadata of a poll holds the query and the evaluation instant in the entity's declared order and types."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-connector-prometheus"
+random_iterations = 256
+source = "crates/connectors/prometheus/src/query/answer.rs"
+test = "query::answer::tests::bolero_every_sample_is_exactly_the_declared_object"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/postgres/src/table/__fuzz__/table__tests__bolero_measured_inserts_are_the_statement_and_arrays_the_driver_encodes/corpus"
 domain_version = 1
 features = []

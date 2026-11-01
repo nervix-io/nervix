@@ -359,6 +359,7 @@ class InventoryTests(unittest.TestCase):
             "mqtt-publish-packets",
             "postgres-insert-measures",
             "mysql-insert-measures",
+            "prometheus-sample-encoding",
             "mongodb-write-answers",
             "mongodb-bson-mapping",
             "websocket-signaling-protobuf-values",

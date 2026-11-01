@@ -698,6 +698,21 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "metadata.evaluated_at"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_samples.feature", scenario = "A route reads the query a sample answers and the instant its poll evaluated it at" },
+  { feature = "tests/features/runtime/prometheus_samples.feature", scenario = "A window takes each sample's event time from metadata.evaluated_at" },
+]
+
+[[capability]]
+capability = "metadata.query"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_samples.feature", scenario = "A route reads the query a sample answers and the instant its poll evaluated it at" },
+]
+
+[[capability]]
 capability = "STALLED PEER timeout_ms"
 entity = "PROMETHEUS QUERY INGESTOR"
 scenarios = [

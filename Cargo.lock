@@ -7156,10 +7156,9 @@ name = "nervix-connector-prometheus"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
- "chrono",
+ "bolero",
  "error-stack",
  "meticulous",
- "nervix-approx-into",
  "nervix-connector",
  "nervix-dns",
  "nervix-models",

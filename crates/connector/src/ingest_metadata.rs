@@ -204,36 +204,46 @@ impl RetainedIngestMetadataValue {
 /// The metadata values of a message copied out of it, in its entity's declared order, so they
 /// outlive it: the quiesce buffer replays them long after the message was dropped, and a paced
 /// source returns its poll's messages owned.
+///
+/// A clone shares the values rather than copying them, so messages that carry the same values, such
+/// as the samples of one poll, hold them once however many there are. A declaration without fields
+/// holds nothing, so an entity that declares none allocates nothing per message.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RetainedIngestMetadata(Vec<RetainedIngestMetadataValue>);
+pub struct RetainedIngestMetadata(Option<Arc<[RetainedIngestMetadataValue]>>);
 
 impl RetainedIngestMetadata {
     /// Copies the values `metadata` hands over right now.
     pub fn capture(metadata: &dyn IngestMessageMetadata) -> Self {
         let mut values = Vec::new();
         metadata.visit_metadata(&mut RetainedIngestMetadataCapture(&mut values));
-        Self(values)
+        Self::from_values(values)
     }
 
     /// The metadata of a message whose entity declares no metadata field.
     pub fn none() -> Self {
-        Self(Vec::new())
+        Self(None)
     }
 
     /// The values, in declared order, of a message a connector already holds owned.
     pub fn from_values(values: Vec<RetainedIngestMetadataValue>) -> Self {
-        Self(values)
+        if values.is_empty() {
+            return Self::none();
+        }
+        Self(Some(Arc::from(values)))
     }
 
     /// The retained values in declared order.
     pub fn values(&self) -> &[RetainedIngestMetadataValue] {
-        &self.0
+        match &self.0 {
+            Some(values) => values,
+            None => &[],
+        }
     }
 }
 
 impl IngestMessageMetadata for RetainedIngestMetadata {
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
-        for value in &self.0 {
+        for value in self.values() {
             match value {
                 RetainedIngestMetadataValue::Absent => values.absent(),
                 RetainedIngestMetadataValue::String(value) => values.string(value),
@@ -391,6 +401,21 @@ mod tests {
             ]
         );
         assert_eq!(RetainedIngestMetadata::capture(&retained), retained);
+    }
+
+    /// The samples of one poll carry the same values, so a clone per sample must not cost a copy of
+    /// them.
+    #[test]
+    fn a_clone_shares_its_values_with_the_copy_it_came_from() {
+        let retained = RetainedIngestMetadata::from_values(vec![
+            RetainedIngestMetadataValue::String("up".to_string()),
+            RetainedIngestMetadataValue::Datetime(Timestamp::from_unix_nanos(1_234)),
+        ]);
+
+        let clone = retained.clone();
+
+        assert_eq!(clone, retained);
+        assert_eq!(clone.values().as_ptr(), retained.values().as_ptr());
     }
 
     #[test]

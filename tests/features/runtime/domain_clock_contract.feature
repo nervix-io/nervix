@@ -513,15 +513,10 @@ Feature: Domain clock contract regressions
         timestamp STRING,
         due STRING
       );
-      CREATE WIRE JSON SCHEMA cadence_sample_wire MODE STRICT (
-        source string,
-        value number,
-        timestamp string,
-        due string
-      );
       CREATE CODEC cadence_sample_codec
-        FROM WIRE JSON SCHEMA cadence_sample_wire
-        TO SCHEMA cadence_sample;
+        FROM JSON
+        TO SCHEMA cadence_sample
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, due: .metric.due, value, timestamp}';
       CREATE SCHEMA cadence_observation (
         due STRING,
         executed_at DATETIME
@@ -571,15 +566,10 @@ Feature: Domain clock contract regressions
         timestamp STRING,
         due STRING
       );
-      CREATE WIRE JSON SCHEMA rebound_sample_wire MODE STRICT (
-        source string,
-        value number,
-        timestamp string,
-        due string
-      );
       CREATE CODEC rebound_sample_codec
-        FROM WIRE JSON SCHEMA rebound_sample_wire
-        TO SCHEMA rebound_sample;
+        FROM JSON
+        TO SCHEMA rebound_sample
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, due: .metric.due, value, timestamp}';
       CREATE SCHEMA rebound_observation (
         due STRING,
         executed_at DATETIME

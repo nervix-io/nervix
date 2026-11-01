@@ -306,9 +306,15 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
         IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => {
             headers_only(None, ConnectorKind::Redis)
         }
-        IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => {
-            headers_only(None, ConnectorKind::Prometheus)
-        }
+        IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => IngestorDeclaration {
+            headers: None,
+            metadata: &[
+                ("query", IngestorMetadataType::String),
+                ("evaluated_at", IngestorMetadataType::Datetime),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Prometheus),
+        },
         IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull) => {
             headers_only(None, ConnectorKind::ZeroMq)
         }

@@ -492,7 +492,7 @@ Feature: Stalled peers
     When these Plexus commands are executed
       """
       CREATE SCHEMA sample (value F64);
-      CREATE WIRE JSON SCHEMA sample_wire MODE STRICT (value number);
+      CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE (value number);
       CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
       CREATE RELAY samples SCHEMA sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {

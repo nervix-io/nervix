@@ -349,7 +349,8 @@ Timestamp sources:
   between two windows, and a `SKEW` of at least `PERIOD` admits every delivery.
 - `TIMESTAMP AT <field>` preserves the decoded `DATETIME` field as the event time.
 - `TIMESTAMP AT metadata.<field>` preserves a `DATETIME` metadata field the source's entity
-  declares, such as an HTTP poll's scheduled `metadata.polled_at`, as the event time. It is admitted
+  declares, such as an HTTP poll's scheduled `metadata.polled_at` or a Prometheus sample's
+  `metadata.evaluated_at`, as the event time. It is admitted
   exactly as a payload field is, and a message that carries no value for the field is rejected as a
   null payload timestamp is.
 - Connector timestamps selected when the clause is omitted in an unpaced domain, and broker

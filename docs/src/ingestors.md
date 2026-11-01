@@ -488,7 +488,8 @@ General notes:
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
   `metadata.topic`, `metadata.partition`, and `metadata.offset`, `SYSLOG LISTENER` declares
-  `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`, and
+  `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
+  `PROMETHEUS QUERY` declares `metadata.query` and `metadata.evaluated_at`, and
   `WEBSOCKETS CONNECTION` declares `metadata.frame_type`; every field is optional and none is
   sensitive
 - a route expression may read any declared field; `CREATE` and `ALTER` refuse a route that reads a
@@ -1930,7 +1931,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `QUERY 'up'` (string literal); required<br>`MAX BODY SIZE 16MiB` (byte size); optional; default 16MiB<br>`EVERY 15s` (duration); required |
 | Headers | Not offered: The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
-| Metadata | Not offered: The current query result is decoded as payload; no separate typed query or evaluation-time metadata namespace is declared. |
+| Metadata | metadata.query: STRING OPTIONAL<br>metadata.evaluated_at: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -1942,7 +1943,44 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [PROMETHEUS QUERY capability and mirror reference](connector-capabilities.md#prometheus-query-ingest).
 <!-- connector-matrix:ingest-prometheus-query:end -->
 
-Prometheus samples are flattened into JSON before codec decoding.
+A query source reads the `vector` of float samples an instant query answers, and delivers one JSON
+object per sample, in the shape the API's own `vector` result holds it:
+
+```json
+{"metric":{"__name__":"up","instance":"node-1:9100","job":"node"},"value":1,"timestamp":"2026-04-07T00:00:00.123Z"}
+```
+
+- `metric` holds the series' labels in ascending name order, its `__name__` among them where the
+  series has one. A label named `value` or `timestamp` stays under `metric`, beside the sample's own.
+- `value` is a JSON number: an integer the API writes as an integer stays that integer, and any other
+  value is the shortest text of the same float. JSON has no number for `NaN`, `+Inf` or `-Inf`, so
+  each travels as the string the API writes it as, for the codec to judge per record. A `string`
+  wire field reads it, and a `number` wire field refuses that record as a
+  [decode rejection](#when-the-codec-refuses-a-payload), while the samples beside it are delivered.
+- `timestamp` is the sample's own instant as RFC 3339 text in UTC, read from the digits of the API's
+  decimal seconds so that no float rounds them. Prometheus reports it to the millisecond.
+
+`WIRE JSON` declares no nested object, so a codec that reads a label is a JAQ codec, and one that
+reads only the sample's own members can stay a `MODE LOOSE` wire schema, which drops `metric`:
+
+```plexus
+CREATE CODEC sample_codec FROM JSON TO SCHEMA sample
+  WITH JAQ TRANSFORMATIONS ON INGESTION '{job: .metric.job, value, timestamp}';
+```
+
+A route reads what the sample answers through its metadata. `metadata.query` is the statement's
+`QUERY` as written, and `metadata.evaluated_at` is the instant the poll asked the API to evaluate it
+at, the due instant of the ingestor's cadence, which `TIMESTAMP AT metadata.evaluated_at` takes as
+each sample's event time.
+
+A `matrix`, `scalar` or `string` result, and a `vector` that holds a native histogram, are not read.
+Each fails its poll before any sample of the answer is delivered, as a transient error that names
+it, such as `Prometheus query returned unsupported result type 'matrix'`, and the next poll queries
+again. A query the API refuses reports the API's own words, such as `Prometheus rejected the query
+with HTTP status 400 Bad Request: bad_data: invalid parameter "query": 1:5: parse error: unclosed
+left parenthesis`. A status whose body is not the API's error, such as a proxy's page, reports that
+status. No failure names the request's URL, which carries the PromQL and the instant.
+
 `MAX BODY SIZE <bytes>`, written between `QUERY` and `EVERY`, bounds how many bytes of one query
 response a poll reads; a statement that leaves it out reads at most `16MiB`. The size is a whole
 number greater than zero followed by `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`, and
