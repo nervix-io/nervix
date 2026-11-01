@@ -2640,7 +2640,13 @@ sequenceDiagram
   arbitrary UTF-8 text and the exact key and reason of every refusal.
 - **Iceberg emitter.** It stages Arrow data locally on the node's filesystem storage workers, prepares
   data files, and publishes a catalog update once its `COMMIT EACH` cadence, which the host measures
-  from staging, ends or its staged files reach the maximum commit size. Open plans how its commits
+  from staging, ends or its staged files reach the maximum commit size. Open loads the declared
+  table from the REST catalog. A REST catalog answers a missing namespace and a missing table alike,
+  so a catalog that does not hold the table is asked for the table's namespace, and the open fails
+  with `EmitterOpenError::MissingExternalEntity` naming the namespace, or the table in a namespace
+  the catalog holds. The host retries that open on the emitter's backoff until an operator
+  provisions what it lacks. Any other catalog failure is `EmitterOpenError::Initialize`, with the
+  catalog's typed error beneath. Open then plans how its commits
   write the mapped columns into the loaded table, matching them to the table's columns by name and
   Iceberg type after recursively narrowing UTC nanosecond datetimes to microseconds in the staged
   schema, and refuses a table whose required column `VALUES` leaves out or maps from an expression
