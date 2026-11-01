@@ -75,7 +75,7 @@ fn shuttle_first_binding_has_one_winner_and_routing_retirement_cancels_every_slo
         assert!(StdArc::ptr_eq(&a, &b));
         assert!(StdArc::ptr_eq(&first_slot, &second_slot));
         let writer_channels = channels.clone();
-        let writer = thread::spawn(move || writer_channels.replace_owner_of([Unit::Single]));
+        let writer = thread::spawn(move || writer_channels.replace_owner_of(&[Unit::Single]));
         let reader = thread::spawn(move || b.ingress());
         writer.join().assured(JOINS);
         let selected = reader.join().assured(JOINS);
@@ -93,7 +93,7 @@ fn shuttle_branch_retirement_racing_a_route_refresh_never_revives_a_retained_pro
     check_interleavings(|| {
         let channels = Arc::new(RelayChannels::default());
         let branch = channels.bind(&None, Unit::Single);
-        channels.replace_owner_of([Unit::Single]);
+        channels.replace_owner_of(&[Unit::Single]);
         let reader_branch = branch.clone();
         let reader = thread::spawn(move || reader_branch.ingress());
         let writer_channels = channels.clone();
@@ -170,7 +170,7 @@ fn shuttle_replacing_one_partition_owner_retires_only_that_partitions_channels()
         let moving_branch = moving.clone();
         let mover = thread::spawn(move || moving_branch.ingress());
         let writer_channels = channels.clone();
-        let writer = thread::spawn(move || writer_channels.replace_owner_of([Unit::Partition(0)]));
+        let writer = thread::spawn(move || writer_channels.replace_owner_of(&[Unit::Partition(0)]));
         let staying_racer = producer.join().assured(JOINS);
         let moving_racer = mover.join().assured(JOINS);
         writer.join().assured(JOINS);
@@ -208,14 +208,14 @@ fn shuttle_fencing_one_partition_holds_only_its_bindings_until_successor_publica
                 .ingress()
         });
         let fencing = channels.clone();
-        let fence = thread::spawn(move || fencing.fence_routing_of([Unit::Partition(0)]));
+        let fence = thread::spawn(move || fencing.fence_routing_of(&[Unit::Partition(0)]));
         let staying_slot = producer.join().assured(JOINS);
         fence.join().assured(JOINS);
 
         assert!(retained.cancellation().is_cancelled());
         assert!(moving.ingress().cancellation().is_cancelled());
         assert!(!staying_slot.cancellation().is_cancelled());
-        channels.replace_owner_of([Unit::Partition(0)]);
+        channels.replace_owner_of(&[Unit::Partition(0)]);
         assert!(!moving.ingress().cancellation().is_cancelled());
         assert!(
             !channels

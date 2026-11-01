@@ -20,8 +20,8 @@ use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_execution::{ChargedBytes, MemoryClass};
 use nervix_interconnect::{RelayDelivery, RelayPayload};
 use nervix_models::{
-    AckMode, BranchPartitions, ClusterNodeName, DomainName, RelayName, RemoteAckRegistration,
-    RemoteRuntimeField, RemoteRuntimeValue, Unit,
+    AckMode, ClusterNodeName, DomainName, RelayName, RemoteAckRegistration, RemoteRuntimeField,
+    RemoteRuntimeValue, Unit,
 };
 use nervix_primitives::sync::Arc;
 
@@ -41,9 +41,6 @@ use crate::{
 
 /// The bytes one case reads its batch, branch, watermarks and registrations from.
 const CASE_BYTES: usize = 2048;
-
-/// The most partitions the relay of a generated branched batch is divided into.
-const CASE_PARTITIONS: u64 = 4;
 
 /// One relay batch a node routes to a consumer on another node.
 struct RoutedCase {
@@ -67,13 +64,7 @@ impl RoutedCase {
         // A branched batch belongs to a relay of one through a few partitions; an unbranched one to
         // a relay with one owner.
         let partitioning = match key.as_ref() {
-            Some(_) => {
-                let count = arbitrary.entropy().boundary_biased(1..=CASE_PARTITIONS);
-                let count = u16::try_from(count).verified("the range above ends below u16::MAX");
-                let count =
-                    std::num::NonZeroU16::new(count).verified("the range above starts at one");
-                RelayPartitioning::of_partitions(BranchPartitions::Direct(count))
-            }
+            Some(_) => RelayPartitioning::of_partitions(arbitrary.scheduled_branch_partitions()),
             None => RelayPartitioning::Whole,
         };
         let unit = partitioning

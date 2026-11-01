@@ -64,18 +64,18 @@ impl RoutingGenerations {
     }
 
     /// Ends the current generation of each of `units` without publishing a successor.
-    fn fence(&self, units: impl IntoIterator<Item = Unit>) {
+    fn fence(&self, units: &[Unit]) {
         for unit in units {
-            if let Some(routing) = self.by_unit.get(&unit) {
+            if let Some(routing) = self.by_unit.get(unit) {
                 routing.load().cancel();
             }
         }
     }
 
     /// Ends the current generation of each of `units` and publishes its successor.
-    fn replace(&self, units: impl IntoIterator<Item = Unit>) {
+    fn replace(&self, units: &[Unit]) {
         for unit in units {
-            if let Some(routing) = self.by_unit.get(&unit) {
+            if let Some(routing) = self.by_unit.get(unit) {
                 routing.load().cancel();
                 routing.store(StdArc::new(CancellationToken::new()));
             }
@@ -206,7 +206,7 @@ impl RelayChannels {
         )
     )]
     pub(super) fn fence_routing(&self) {
-        self.routing.fence(self.routing.units());
+        self.routing.fence(&self.routing.units());
     }
 
     /// End the current routing generation of each of `units` without publishing a successor, as
@@ -218,7 +218,7 @@ impl RelayChannels {
             reason = "a committed forced move retires the preceding routes of the units it moved"
         )
     )]
-    pub(super) fn fence_routing_of(&self, units: impl IntoIterator<Item = Unit>) {
+    pub(super) fn fence_routing_of(&self, units: &[Unit]) {
         self.routing.fence(units);
     }
 
@@ -231,7 +231,7 @@ impl RelayChannels {
             reason = "schedule publication installs the successor routing generation"
         )
     )]
-    pub(super) fn replace_owner_of(&self, units: impl IntoIterator<Item = Unit>) {
+    pub(super) fn replace_owner_of(&self, units: &[Unit]) {
         if self.closed.is_cancelled() {
             return;
         }
@@ -246,12 +246,12 @@ impl RelayChannels {
         )
     )]
     pub(super) fn replace_destinations(&self) {
-        self.replace_owner_of(self.routing.units());
+        self.replace_owner_of(&self.routing.units());
     }
 
     pub(super) fn retire_all(&self) {
         self.closed.cancel();
-        self.routing.fence(self.routing.units());
+        self.routing.fence(&self.routing.units());
         for branch in self.branches.load().values() {
             branch.retire();
         }

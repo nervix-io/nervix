@@ -109,9 +109,9 @@ impl Arbitrary<'_> {
         ClusterNodeIdentity::new(node, incarnation)
     }
 
-    /// The partition count of a generated scheduled relay's branch, from one through
-    /// [`SCHEDULED_PARTITIONS`].
-    fn scheduled_branch_partitions(&mut self) -> nervix_models::BranchPartitions {
+    /// The partition count of a generated relay's branch, from one through
+    /// [`SCHEDULED_PARTITIONS`], for a scheduled relay or a relay whose batches a case routes.
+    pub fn scheduled_branch_partitions(&mut self) -> nervix_models::BranchPartitions {
         let count = self
             .entropy
             .boundary_biased(1..=u64::from(SCHEDULED_PARTITIONS));

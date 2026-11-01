@@ -498,7 +498,7 @@ impl RelayOwnerBuffers {
         Self { by_unit }
     }
 
-    fn buffers(&self) -> impl Iterator<Item = &StdArc<RelayOwnerBuffer>> {
+    fn buffers(&self) -> std::collections::btree_map::Values<'_, Unit, StdArc<RelayOwnerBuffer>> {
         self.by_unit.values()
     }
 }
@@ -1390,7 +1390,7 @@ impl RelayBoundaryServices {
         }
         // Only the branches of a unit whose owner moved retire their channels; every other unit's
         // producers keep delivering to the owner they already reach.
-        self.channels.replace_owner_of(changed);
+        self.channels.replace_owner_of(&changed);
         self.owners.store(StdArc::new(routes));
     }
 
@@ -1415,7 +1415,7 @@ impl RelayBoundaryServices {
         }
         let changed = self.owners.load().changed_units(routes);
         if !changed.is_empty() {
-            self.channels.fence_routing_of(changed);
+            self.channels.fence_routing_of(&changed);
         }
     }
 

@@ -36,7 +36,7 @@ fn retained_branches_follow_routes_but_never_follow_recreated_incarnations() {
     let outbound = branch.outbound(channel());
     assert!(StdArc::ptr_eq(&branch, &channels.bind(&key, Unit::Single)));
     assert!(StdArc::ptr_eq(&outbound, &branch.outbound(channel())));
-    channels.replace_owner_of([Unit::Single]);
+    channels.replace_owner_of(&[Unit::Single]);
     assert!(ingress.cancellation().is_cancelled());
     assert!(outbound.cancellation().is_cancelled());
     let current = branch.ingress();
@@ -94,7 +94,7 @@ fn bolero_relay_sequences_preserve_exact_lifetimes_and_order() {
                                 owner != unit && !slot.cancellation().is_cancelled()
                             })
                             .count();
-                        channels.replace_owner_of([*unit]);
+                        channels.replace_owner_of(&[*unit]);
                         for (_, owner, _, slot) in &retained {
                             if owner == unit {
                                 assert!(slot.cancellation().is_cancelled());
