@@ -468,8 +468,8 @@ impl PartitionDelivery {
 
 /// Two partitions of one relay deliver on their own channels: the receiver takes each payload
 /// with the partition it names, a reply lost after one partition's admission is reconciled on the
-/// reconnected link without a second enqueue, and the other partition's delivery is admitted on its
-/// own channel, each acknowledged once.
+/// reconnected link without a second enqueue, which resolves that partition's acknowledgement
+/// once, and the other partition's delivery is admitted on its own channel.
 fn exercise_partitioned_relay(run: ScenarioRun) -> Result<(), SimulationError> {
     let seed = run.seed();
     let server_trace = run.trace();
@@ -479,6 +479,7 @@ fn exercise_partitioned_relay(run: ScenarioRun) -> Result<(), SimulationError> {
     let client_credentials = authority.issue("client");
     let (ready_tx, ready_rx) = watch::channel(false);
     let (received_tx, received_rx) = watch::channel(false);
+    let (admitted_tx, admitted_rx) = watch::channel(false);
     let (done_tx, done_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = watch::channel(0_usize);
     run.simulate(move |simulation| {
@@ -487,6 +488,7 @@ fn exercise_partitioned_relay(run: ScenarioRun) -> Result<(), SimulationError> {
             let credentials = server_credentials.clone();
             let ready = ready_tx.clone();
             let received = received_tx.clone();
+            let admitted = admitted_tx.clone();
             let mut done = done_rx.clone();
             let finished = server_finished.clone();
             let trace = server_trace.clone();
@@ -545,6 +547,7 @@ fn exercise_partitioned_relay(run: ScenarioRun) -> Result<(), SimulationError> {
                         RelayAdmissionDecision::Admitted
                     );
                     trace.record("server", "partition 1 admitted on its own channel");
+                    admitted.send_replace(true);
 
                     wait_for(&mut done).await;
                     assert!(
@@ -566,6 +569,7 @@ fn exercise_partitioned_relay(run: ScenarioRun) -> Result<(), SimulationError> {
             let credentials = client_credentials.clone();
             let mut ready = ready_rx.clone();
             let mut received = received_rx.clone();
+            let mut admitted = admitted_rx.clone();
             let done = done_tx.clone();
             let finished = client_finished.clone();
             let trace = client_trace.clone();
@@ -632,32 +636,22 @@ fn exercise_partitioned_relay(run: ScenarioRun) -> Result<(), SimulationError> {
                         .await
                         .assured("partition 1 is admitted on its own channel");
 
-                    let mut acknowledged = BTreeSet::new();
-                    while acknowledged.len() < 2 {
-                        let outcome =
-                            nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
-                                .await
-                                .assured("each partition's semantic ACK arrives")
-                                .assured("sender queue remains open");
-                        let Envelope::Ack(RemoteAckResolution {
-                            registration: RemoteAckRegistration { ack_id, .. },
-                            outcome: RemoteAckOutcome::Ack,
-                        }) = outcome.envelope
-                        else {
-                            panic!("only the partitions' ACKs reach the sender");
-                        };
-                        assert!(
-                            acknowledged.insert(ack_id),
-                            "each partition's delivery is acknowledged once"
-                        );
-                    }
-                    assert_eq!(
-                        acknowledged,
-                        BTreeSet::from([
-                            PartitionDelivery::LOST_REPLY.ack_id,
-                            PartitionDelivery::AFTER_REPAIR.ack_id,
-                        ])
-                    );
+                    // The retry found partition 0 already admitted, so the sender resolved its
+                    // acknowledgement registration itself. A first delivery's acknowledgement is
+                    // the receiving runtime's to send, and this fixture runs none.
+                    let outcome = nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
+                        .await
+                        .assured("partition 0's semantic ACK arrives")
+                        .assured("sender queue remains open");
+                    let Envelope::Ack(RemoteAckResolution {
+                        registration: RemoteAckRegistration { ack_id, .. },
+                        outcome: RemoteAckOutcome::Ack,
+                    }) = outcome.envelope
+                    else {
+                        panic!("only partition 0's ACK reaches the sender");
+                    };
+                    assert_eq!(ack_id, PartitionDelivery::LOST_REPLY.ack_id);
+                    wait_for(&mut admitted).await;
                     for partition in [
                         PartitionDelivery::LOST_REPLY,
                         PartitionDelivery::AFTER_REPAIR,
@@ -672,7 +666,8 @@ fn exercise_partitioned_relay(run: ScenarioRun) -> Result<(), SimulationError> {
                     }
                     trace.record(
                         "client",
-                        "both partitions admitted and acknowledged once on their own channels",
+                        "partition 0 acknowledged once and both partitions admitted on their own \
+                         channels",
                     );
                     done.send_replace(true);
                     client.shutdown().await;
