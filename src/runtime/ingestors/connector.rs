@@ -566,7 +566,8 @@ pub(super) struct RuntimeIngestorHost {
     transport_redeliveries: prometheus::IntCounter,
     /// Counts the payloads this host's ingestor dropped because they exceed its client's size bound.
     oversized_payloads: prometheus::IntCounter,
-    /// Counts header values the connector skipped because their bytes are not valid UTF-8.
+    /// Counts header values the connector skipped because their bytes are not valid UTF-8, for
+    /// this host's polls and the endpoint bindings it hands out.
     header_values_dropped: prometheus::IntCounter,
     /// Consumes the payloads the ingestor's codec refuses, for this host and the endpoint bindings
     /// it hands out.
@@ -680,6 +681,7 @@ impl RuntimeIngestorHost {
             metrics: self.metrics.clone(),
             branched_senders: self.branched_senders.clone(),
             decode_rejections: self.decode_rejections.clone(),
+            header_values_dropped: self.header_values_dropped.clone(),
         }
     }
 
