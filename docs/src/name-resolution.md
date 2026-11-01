@@ -309,9 +309,10 @@ name again for every new connection it opens.
 | MQTT sources, emitters and input retirement | The connector's socket connector, installed with `MqttOptions::set_socket_connector`, for every connection the driver's event loop opens | The driver's five-second connect timeout; retirement also encloses its unsubscribe and disconnect within that budget | [DNS for MQTT](./connector-contract.md#dns-for-mqtt), [MQTT session retirement](./connector-contract.md#mqtt-session-retirement) |
 | Native CLI and SDK sessions | The client's resolver, as Hyper's resolver service under Tonic 0.13's connector, for the first connection, seeds, redirects and reconnects | The session's connect timeout, ten seconds by default, which encloses the lookup, the attempts and TLS | [Leader Discovery, Redirect, And Reconnect](./client-session-protocol.md#leader-discovery-redirect-and-reconnect) |
 
-Iceberg's Azure locations use the account's `blob` service for `wasb`/`wasbs` and its `dfs`
-service for `abfs`/`abfss`. Their OpenDAL operator uses the node resolver and the storage-client
-deadline from the table above for either service.
+Iceberg's Azure locations name the account's `blob` service for `wasb`/`wasbs` and its `dfs`
+service for `abfs`/`abfss`, but their OpenDAL operator reaches every one of them at the account's
+Data Lake host, `<account>.dfs.<suffix>`. It resolves that host through the node resolver, under the
+storage-client deadline from the table above.
 
 Two interconnect uses are resolved once, when the node starts: the address that identifies the
 node in gossip, which is the first answer for its own advertised endpoint, and its bootstrap seeds,
@@ -595,6 +596,12 @@ contracts.
 | Dependency graph checks | `just validate-dns-dependencies` | The feature selections of [Dependency Selection](#dependency-selection) in each affected crate's own graph | Runtime behavior |
 | The primitive boundary check | `just validate-primitive-boundary` | No Nervix-authored code calls the operating system's resolver through `tokio::net::lookup_host` or `ToSocketAddrs` | Resolution inside a dependency |
 | The external Chaos suite | `just chaos` | Three node containers that advertise and bootstrap by container name through Docker's embedded DNS with the production resolver, including a recovered voter whose stopped bootstrap container no longer resolves | Arbitrary DNS failures, changed answers beyond the stopped container, and connector names |
+
+The RabbitMQ stalled-AMQP unit check starts its 500 ms handshake budget after the fixture name has
+resolved and its TCP transport has connected. Lookup and dialling have a separate generous setup
+bound there, so their scheduling delays cannot consume the handshake check's budget. The product
+retains one `connect_timeout_ms` deadline across all connection phases; lookup and dialling expiry
+have their own connection checks.
 
 The scenario features are `cluster/dns_resolution.feature`, the `runtime/*_dns_resolution.feature`
 files for RabbitMQ, Redis, MQTT, Syslog, WebSocket, ClickHouse and SQS, the fixture-name scenarios

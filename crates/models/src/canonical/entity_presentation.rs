@@ -26,15 +26,15 @@ use crate::{
     HttpEmitter, HttpEndpointIngestor, HttpIngestor, HttpRequestIngestor, IcebergCatalog,
     IcebergEmitter, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntity,
     IngestorEntityBody, IngestorEntityKind, IngestorEntityModel, IngestorInput, KafkaEmitter,
-    KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, LocatorDeclaration, MongoDbConflictAction,
-    MongoDbEmitter, MqttEmitter, MqttIngestor, MqttTopicIngestor, MySqlConflictAction,
-    MySqlEmitter, NatsEmitter, NatsIngestor, NatsSubjectIngestor, OptionDeclaration,
-    OptionPresence, OtelEmitter, OtelMetric, OtelMetricKind, PostgresConflictAction,
-    PostgresEmitter, PrometheusIngestor, PrometheusQueryIngestor, PulsarEmitter, PulsarIngestor,
-    PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestor, RabbitMqQueueIngestor, RedisEmitter,
-    RedisIngestor, RedisPubSubIngestor, SentryEmitter, SqsEmitter, SqsFifoGroup, SqsIngestor,
-    SqsQueueIngestor, SyslogIngestor, SyslogListenerIngestor, WebsocketsConnectionIngestor,
-    WebsocketsEndpointIngestor, WebsocketsIngestor, ZeroMqIngestor, ZeroMqPullIngestor,
+    KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, LocatorDeclaration, MongoDbEmitter,
+    MqttEmitter, MqttIngestor, MqttTopicIngestor, MySqlEmitter, NatsEmitter, NatsIngestor,
+    NatsSubjectIngestor, OptionDeclaration, OptionPresence, OtelEmitter, OtelMetric,
+    OtelMetricKind, PostgresEmitter, PrometheusIngestor, PrometheusQueryIngestor, PulsarEmitter,
+    PulsarIngestor, PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestor, RabbitMqQueueIngestor,
+    RedisEmitter, RedisIngestor, RedisPubSubIngestor, SentryEmitter, SqsEmitter, SqsFifoGroup,
+    SqsIngestor, SqsQueueIngestor, SyslogIngestor, SyslogListenerIngestor,
+    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestor, ZeroMqIngestor,
+    ZeroMqPullIngestor,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -626,6 +626,11 @@ impl EmitterEntity {
             Self::RabbitMq(RabbitMqEmitter::Queue(entity)) => {
                 presentation.external_locator(entity.queue.as_str())
             }
+            Self::RabbitMq(RabbitMqEmitter::Exchange(entity)) => {
+                presentation.external_locator(entity.exchange.as_str());
+                presentation
+                    .written_option("ROUTING KEY", expression_to_plexus(&entity.routing_key)?);
+            }
             Self::Redis(RedisEmitter::PubSub(entity)) => {
                 presentation.external_locator(entity.channel.as_str())
             }
@@ -652,42 +657,15 @@ impl EmitterEntity {
             }
             Self::Postgres(PostgresEmitter::Table(entity)) => {
                 presentation.external_locator(entity.table.as_str());
-                match &entity.conflict_action {
-                    PostgresConflictAction::None => {}
-                    action => {
-                        presentation.conflict = Some(
-                            super::postgres_conflict_action_to_plexus(action)
-                                .trim()
-                                .to_owned(),
-                        )
-                    }
-                }
+                presentation.conflict = entity.conflict_action.conflict_clause();
             }
             Self::MySql(MySqlEmitter::Table(entity)) => {
                 presentation.external_locator(entity.table.as_str());
-                match &entity.conflict_action {
-                    MySqlConflictAction::None => {}
-                    action => {
-                        presentation.conflict = Some(
-                            super::mysql_conflict_action_to_plexus(action)
-                                .trim()
-                                .to_owned(),
-                        )
-                    }
-                }
+                presentation.conflict = entity.conflict_action.conflict_clause();
             }
             Self::MongoDb(MongoDbEmitter::Collection(entity)) => {
                 presentation.external_locator(entity.collection.as_str());
-                match &entity.conflict_action {
-                    MongoDbConflictAction::None => {}
-                    action => {
-                        presentation.conflict = Some(
-                            super::mongodb_conflict_action_to_plexus(action)
-                                .trim()
-                                .to_owned(),
-                        )
-                    }
-                }
+                presentation.conflict = entity.conflict_action.conflict_clause();
             }
             Self::Iceberg(IcebergEmitter::Table(entity)) => {
                 presentation.external_locator(entity.table.as_str());

@@ -53,10 +53,10 @@ use nervix_models::{
     KafkaEmitter, KafkaTopicEmitter, Literal, Model, MongoDbCollectionEmitter, MongoDbEmitter,
     MqttEmitter, MqttTopicEmitter, MySqlEmitter, MySqlTableEmitter, NatsEmitter,
     NatsSubjectEmitter, OtelEmitter, OtelMappings, OtelMetricsEmitter, PostgresEmitter,
-    PostgresTableEmitter, PulsarEmitter, PulsarTopicEmitter, RabbitMqEmitter, RabbitMqQueueEmitter,
-    RedisEmitter, RedisPubSubEmitter, RetryPolicy, RouteConstruction, SchemaName, SentryEmitter,
-    SqsEmitter, SqsQueueEmitter, SyslogCollectorEmitter, SyslogEmitter, ZeroMqEmitter,
-    ZeroMqPushEmitter, parse_duration_text,
+    PostgresTableEmitter, PulsarEmitter, PulsarTopicEmitter, RabbitMqEmitter,
+    RabbitMqExchangeEmitter, RabbitMqQueueEmitter, RedisEmitter, RedisPubSubEmitter, RetryPolicy,
+    RouteConstruction, SchemaName, SentryEmitter, SqsEmitter, SqsQueueEmitter,
+    SyslogCollectorEmitter, SyslogEmitter, ZeroMqEmitter, ZeroMqPushEmitter, parse_duration_text,
 };
 use nervix_vm::{
     SemanticScopePolicy, lower_route_construction,
@@ -547,10 +547,11 @@ pub(super) enum PulsarEmitterPlan<Config = ResolvedClientConfig> {
     Topic(PulsarTopicEmitterPlan<Config>),
 }
 
-/// The queue entity planned for RabbitMq execution.
+/// The queue and exchange entities planned for RabbitMq execution.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum RabbitMqEmitterPlan<Config = ResolvedClientConfig> {
     Queue(RabbitMqQueueEmitterPlan<Config>),
+    Exchange(RabbitMqExchangeEmitterPlan<Config>),
 }
 
 /// The pubsub entity planned for Redis execution.
@@ -660,6 +661,7 @@ impl<Config> EmitterConnectorPlan<Config> {
             Self::Kafka(KafkaEmitterPlan::Topic(plan)) => plan.batch,
             Self::Pulsar(PulsarEmitterPlan::Topic(plan)) => plan.batch,
             Self::RabbitMq(RabbitMqEmitterPlan::Queue(plan)) => plan.batch,
+            Self::RabbitMq(RabbitMqEmitterPlan::Exchange(plan)) => plan.batch,
             Self::Redis(RedisEmitterPlan::PubSub(plan)) => plan.batch,
             Self::Mqtt(MqttEmitterPlan::Topic(plan)) => plan.batch,
             Self::Nats(NatsEmitterPlan::Subject(plan)) => plan.batch,
@@ -694,6 +696,9 @@ impl<Config> EmitterConnectorPlan<Config> {
             }
             Self::RabbitMq(RabbitMqEmitterPlan::Queue(_)) => {
                 <nervix_models::RabbitMqQueueEmitter as EmitterEntityModel>::KIND
+            }
+            Self::RabbitMq(RabbitMqEmitterPlan::Exchange(_)) => {
+                <nervix_models::RabbitMqExchangeEmitter as EmitterEntityModel>::KIND
             }
             Self::Redis(RedisEmitterPlan::PubSub(_)) => {
                 <nervix_models::RedisPubSubEmitter as EmitterEntityModel>::KIND
@@ -766,6 +771,9 @@ impl EmitterConnectorPlan<DeclaredClientConfig> {
             ),
             Self::RabbitMq(RabbitMqEmitterPlan::Queue(plan)) => EmitterConnectorPlan::RabbitMq(
                 RabbitMqEmitterPlan::Queue(plan.resolve_clients(resolve)?),
+            ),
+            Self::RabbitMq(RabbitMqEmitterPlan::Exchange(plan)) => EmitterConnectorPlan::RabbitMq(
+                RabbitMqEmitterPlan::Exchange(plan.resolve_clients(resolve)?),
             ),
             Self::Redis(RedisEmitterPlan::PubSub(plan)) => EmitterConnectorPlan::Redis(
                 RedisEmitterPlan::PubSub(plan.resolve_clients(resolve)?),
@@ -968,6 +976,27 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     )?,
                     queue: queue.clone(),
                     mode: decide_rabbitmq_publication(mode)?,
+                },
+            )),
+            (
+                EmitterEntity::RabbitMq(RabbitMqEmitter::Exchange(RabbitMqExchangeEmitter {
+                    client: expected,
+                    exchange,
+                    mode,
+                    ..
+                })),
+                Model::ClientRabbitMq(client),
+            ) => EmitterConnectorPlan::RabbitMq(RabbitMqEmitterPlan::Exchange(
+                RabbitMqExchangeEmitterPlan {
+                    batch: emitter.batch,
+                    client: EmitterClientSpec::declared(
+                        expected,
+                        &client.name,
+                        client.mount.as_ref(),
+                        &client.config,
+                    )?,
+                    exchange: exchange.clone(),
+                    mode: decide_rabbitmq_exchange_publication(mode)?,
                 },
             )),
             (
@@ -1482,6 +1511,10 @@ macro_rules! broker_publication {
 broker_publication!(decide_kafka_publication, KafkaTopicPublishingMode);
 broker_publication!(decide_pulsar_publication, PulsarTopicPublishingMode);
 broker_publication!(decide_rabbitmq_publication, RabbitMqQueuePublishingMode);
+broker_publication!(
+    decide_rabbitmq_exchange_publication,
+    RabbitMqExchangePublishingMode
+);
 
 /// The quality of service `mode` declares for an MQTT `emitter`.
 fn decide_mqtt_publishing_mode(
