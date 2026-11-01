@@ -25,6 +25,8 @@ nervix-recovery = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
 bytes = { workspace = true }
+nervix-arbitrary = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util"] }

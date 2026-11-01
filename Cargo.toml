@@ -759,7 +759,9 @@ zeromq = "0.4"
 [patch.crates-io]
 # A flush must drain async-nats' queued bytes before flushing the transport. The connection
 # generation lets a Core NATS write reject a replacement connection's flush after buffer loss.
-async-nats = { git = "https://github.com/glebpom/nats.rs.git", rev = "d131b7bc954fc57b8447e0d402a896b4b67010b1" }
+# Header pairs retain their wire order, including interleaved names; JetStream metadata can be
+# parsed from an acknowledgement subject without constructing another client context.
+async-nats = { git = "https://github.com/glebpom/nats.rs.git", rev = "d8dced4222568fe3935fcbdb81d66b6f89bfbaca" }
 # rkyv 0.8.18 leaks partial allocations when semantic deserialization refuses
 # an element. Pin its 0.8.18 ownership fix until https://github.com/rkyv/rkyv/pull/710 ships.
 rkyv = { git = "https://github.com/glebpom/rkyv.git", rev = "868fa9c3c268560ad3459ddb95e271c7167bc097" }

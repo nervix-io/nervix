@@ -1054,8 +1054,8 @@ Each emitter that writes transport headers declares a
 | `PULSAR TOPIC` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ EXCHANGE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
-| `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
-| `NATS STREAM` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| `NATS SUBJECT` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `NATS STREAM` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `SQS QUEUE` | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
 
 `CLIENT CONSUMER`, `REDIS PUBSUB`, `MQTT TOPIC`, `ZEROMQ PUSH`, `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`, `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION`, `ICEBERG TABLE` write no transport headers and refuse `write_header`.
@@ -1718,6 +1718,7 @@ CREATE NATS SUBJECT EMITTER <name>
   TO <client> SUBJECT 'orders.Created'
     MODE <mode>
     ENCODE USING <codec>
+    [REPLY TO reply_queue]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1733,12 +1734,12 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | SUBJECT 'orders.Created' (nats_publish_subject) |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | `write_header`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
+| Envelope | REPLY TO reply_queue |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | commands queued for the connection: driver default, 2048 commands; when full, holds back what fills it |
 | Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>a core publish and its flush to the client's socket, not a server round trip: `timeout_ms`; unbounded when omitted |
@@ -1751,8 +1752,13 @@ See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md
 `SUBJECT` names one literal subject, published to exactly as written, letter case included. It
 follows the [ingestion subject rule](ingestors.md#external-names) without the `*` and `>`
 wildcards, so `SUBJECT 'orders.*'` is refused when the emitter is created. A message carries its
-subject, the written headers and the payload; the emitter sets no reply subject. `BATCH` is
-optional. The NATS protocol sets no message size of its own:
+subject, the written headers and the payload. Optional `REPLY TO <expression>` evaluates a
+`STRING` once for each outgoing record and sets its reply subject. It follows the publication
+subject rule. A literal is validated when the emitter is created or altered; an invalid computed
+name is rejected per record before any bytes are published.
+A retry retains that evaluated reply subject. Header writes retain their order, including
+interleaved repeated names, with exact name matching. `BATCH` is optional.
+The NATS protocol sets no message size of its own:
 each server announces its `max_payload`, and the client refuses a batch message above it before
 writing it, as [Broker and message emitters](#broker-and-message-emitters) describes.
 
@@ -1805,7 +1811,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | STREAM 'orders' (nats_stream) |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `SUBJECT 'orders.created'` (string literal checked by nats_publish_subject); required |
-| Headers | `write_header`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |

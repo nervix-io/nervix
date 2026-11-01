@@ -136,6 +136,8 @@ pub trait IngestMetadataValues {
     fn bool(&mut self, value: bool);
     /// The value of a `U16` field.
     fn u16(&mut self, value: u16);
+    /// The value of a `U64` field.
+    fn u64(&mut self, value: u64);
     /// The value of an `I32` field.
     fn i32(&mut self, value: i32);
     /// The value of an `I64` field.
@@ -184,6 +186,7 @@ pub enum RetainedIngestMetadataValue {
     Bytes(Vec<u8>),
     Bool(bool),
     U16(u16),
+    U64(u64),
     I32(i32),
     I64(i64),
     Datetime(Timestamp),
@@ -199,6 +202,7 @@ impl RetainedIngestMetadataValue {
             Self::Bytes(_) => Some(IngestorMetadataType::Bytes),
             Self::Bool(_) => Some(IngestorMetadataType::Bool),
             Self::U16(_) => Some(IngestorMetadataType::U16),
+            Self::U64(_) => Some(IngestorMetadataType::U64),
             Self::I32(_) => Some(IngestorMetadataType::I32),
             Self::I64(_) => Some(IngestorMetadataType::I64),
             Self::Datetime(_) => Some(IngestorMetadataType::Datetime),
@@ -245,6 +249,7 @@ impl IngestMessageMetadata for RetainedIngestMetadata {
                 RetainedIngestMetadataValue::Bytes(value) => values.bytes(value),
                 RetainedIngestMetadataValue::Bool(value) => values.bool(*value),
                 RetainedIngestMetadataValue::U16(value) => values.u16(*value),
+                RetainedIngestMetadataValue::U64(value) => values.u64(*value),
                 RetainedIngestMetadataValue::I32(value) => values.i32(*value),
                 RetainedIngestMetadataValue::I64(value) => values.i64(*value),
                 RetainedIngestMetadataValue::Datetime(value) => values.datetime(*value),
@@ -278,6 +283,10 @@ impl IngestMetadataValues for RetainedIngestMetadataCapture<'_> {
 
     fn u16(&mut self, value: u16) {
         self.0.push(RetainedIngestMetadataValue::U16(value));
+    }
+
+    fn u64(&mut self, value: u64) {
+        self.0.push(RetainedIngestMetadataValue::U64(value));
     }
 
     fn i32(&mut self, value: i32) {

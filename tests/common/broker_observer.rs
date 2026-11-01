@@ -81,10 +81,8 @@ impl BrokerMessage {
     fn from_nats(message: &NatsMessage) -> Self {
         let mut headers = Vec::new();
         if let Some(delivered) = message.headers.as_ref() {
-            for (name, values) in delivered.iter() {
-                for value in values {
-                    headers.push((name.to_string(), value.as_str().to_string()));
-                }
+            for (name, value) in delivered.iter_ordered() {
+                headers.push((name.to_string(), value.as_str().to_string()));
             }
         }
         Self::from_bytes(message.payload.as_ref(), headers)
@@ -133,6 +131,21 @@ impl BrokerObserver {
     pub(crate) fn nats(observer: NatsObserver) -> Self {
         Self {
             deliveries: ObservedDeliveries::Nats(observer),
+        }
+    }
+
+    pub(crate) async fn answer_nats_request(
+        &mut self,
+        expected_reply: &str,
+        payload: &str,
+    ) -> io::Result<()> {
+        match &mut self.deliveries {
+            ObservedDeliveries::Nats(observer) => {
+                observer.answer_next(expected_reply, payload).await
+            }
+            ObservedDeliveries::Forwarded { .. } => {
+                Err(io::Error::other("the observed destination is not NATS"))
+            }
         }
     }
 

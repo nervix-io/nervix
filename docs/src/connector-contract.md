@@ -1057,9 +1057,11 @@ written. A subscription may write `*` for one token and `>` for every remaining 
 as a whole token and `>` only last; a publication subject admits neither, since a message is
 published to one literal subject. The ingestor declares `NO ACK` with a required `QUEUE GROUP` and
 `INSTANCES`, and `BUFFER`/`DROP` for intake, because Core NATS keeps no backlog, position or
-acknowledgement for a subscriber. Both directions carry headers by name, and the ingestor projects
-no typed metadata field. The subject emitter declares Core `NO ACK` publication, codec
-payloads, no envelope clause, and optional batching without a protocol maximum: each server
+acknowledgement for a subscriber. Both directions retain every header pair in wire order, including
+interleaved repeated names, and match names exactly. The ingestor declares `metadata.subject` and
+`metadata.reply` as `STRING`; the subject is the concrete delivered subject and the reply is null
+when absent. The subject emitter declares Core `NO ACK` publication, codec payloads, the
+`REPLY TO` envelope clause, and optional batching without a protocol maximum: each server
 announces its `max_payload`, and the client refuses a message above it before writing it. The
 unpooled client's Nervix-owned keys are the address, `timeout_ms` and the TLS files, while the
 address's userinfo and query options belong to the driver and are masked in inspection. The
@@ -1070,8 +1072,14 @@ declaration scenarios qualify these facts together.
 pull consumer of it, both an operator's, each held to the server's own name rule of 1 to 255 bytes
 without whitespace, control characters, `.`, `*`, `>` or a path separator. It declares
 `ACK SEQUENTIAL` and `ACK PARALLEL`, `SUSPEND`, `BUFFER` and `DROP`, the `broker_redelivered`
-position class and the `answered` acknowledgement confirmation, headers by name, and no typed
-metadata field. Its connector looks the consumer up when an instance resumes, never creates it,
+position class and the `answered` acknowledgement confirmation, and ordered header pairs.
+Its metadata starts with the delivered subject and reply, then the stream and consumer names,
+the `U64` stream sequence, the server's publication timestamp as `DATETIME`, and the `U64` delivery
+count. The delivered reply is the `$JS.ACK` subject used for settlement. Delivery metadata is
+validated before admission: malformed metadata, a nonpositive sequence or delivery count, and a
+timestamp outside the signed Unix-nanosecond range end the source attempt with typed causes.
+The values are borrowed and projected only where programs read them; no metadata is persisted.
+Its connector looks the consumer up when an instance resumes, never creates it,
 and refuses a push consumer and one whose acknowledgement policy is not explicit. One pull request
 at a time asks for at most the host's window, and at most the consumer's `MaxRequestBatch`, and
 waits without expiry or for the consumer's `MaxRequestExpires`, so the deliveries it holds ahead of
@@ -1094,7 +1102,11 @@ carries the expected-stream header; a subject the stream does not capture is rej
 keeps the same ID and JetStream can deduplicate it. The emitter bounds in-flight publishes by the
 ACK window and each PubAck by `ACK TIMEOUT`, settling confirmed records through the shared
 confirmation window before retrying unresolved records. It never creates a stream or persists
-hot-path records.
+hot-path records. Core `REPLY TO` is evaluated through the shared envelope owner and retained with
+the payload across retry. The connector checks the reply against the publication-subject rule
+before handing it to the driver. Both NATS connection builders require TLS for a `tls://` address,
+including on subsequent connections. The pinned driver owns ordered header encoding and decoding;
+the connector visits those pairs directly rather than reconstructing their order from a map.
 
 `MQTT TOPIC` keeps a subscription's topic filter and a publication's topic exactly as written,
 letter case included, within MQTT's 65,535-byte string. A filter may write `+` for one level and
@@ -1258,7 +1270,7 @@ to fit one. The layouts are:
 - `ordered_repeats`: every header in the order it was written, a repeated name once for each of its
   values, such as Kafka record headers.
 - `repeats_by_name`: every value of a name, together and in the order written, while the order of
-  different names is not declared, such as a NATS header map.
+  different names is not declared, such as an HTTP response header map.
 - `last_wins`: one value per name, the last one written, while the order of names is not declared,
   such as SQS message attributes.
 - `sorted_by_name`: one value per name, the last one written, with names in ascending byte order,
@@ -1282,8 +1294,7 @@ the `write_header` calls of one record become on the published message.
 | --- | --- | --- | --- |
 | `last_wins`, exact names | `SQS QUEUE` | `PULSAR TOPIC` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | None | `SQS QUEUE` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
-| `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC` | `KAFKA TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
-| `repeats_by_name`, exact names | `NATS SUBJECT`, `NATS STREAM` | `NATS SUBJECT`, `NATS STREAM` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC`, `NATS SUBJECT`, `NATS STREAM` | `KAFKA TOPIC`, `NATS SUBJECT`, `NATS STREAM` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, lowercase names | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT` | None | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `sorted_by_name`, exact names | `RABBITMQ QUEUE` | `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE` | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `sorted_by_name`, lowercase names | None | `HTTP REQUEST` | one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
@@ -1355,12 +1366,13 @@ attach to. It declares no header model or metadata field and supports only `SUSP
 Each source entity declares its typed metadata fields beside its other capabilities in the
 vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the response status and
 the poll's scheduled instant, `WEBSOCKETS CONNECTION` the frame kind, `KAFKA TOPIC` the topic,
-partition and offset, `SYSLOG LISTENER` the peer address, and every other entity none. Registry
+partition and offset, `SYSLOG LISTENER` the peer address, and NATS the delivered subject and reply
+with the additional stream delivery fields above. Registry
 validation reads that declaration for the fields an ingestor's route programs and its
 `TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
 connector's message hands the host the value of every declared field in declared order, one typed
 call per field into the host's value sink, so the three cannot disagree. A value is a `STRING`,
-`BYTES`, `BOOL`, `U16`, `I32`, `I64` or `DATETIME`, or absent where the message carries none; a
+`BYTES`, `BOOL`, `U16`, `U64`, `I32`, `I64` or `DATETIME`, or absent where the message carries none; a
 `STRING` such as a socket address may be written into the column in place instead of being
 allocated per message. A message that hands over another number of values than its entity declares,
 or a value of another type than its field's, is a connector defect the host refuses as a typed

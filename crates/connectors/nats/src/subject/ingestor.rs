@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** The core NATS connection and queue subscription each ingestor instance reads
 //!   through, its TLS options, the end of that subscription when the connection is lost, and
-//!   message headers as ingest headers.
+//!   each message's borrowed headers, subject and reply metadata.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   the boundary's channels and `async-nats`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
@@ -26,10 +26,10 @@ use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use futures_util::StreamExt as _;
 use nervix_connector::{
-    BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestorBatch,
-    IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
-    IngestorReadCancellation, IngestorResult, IngestorResume, ServiceUrl, client_config_value,
-    client_tls_paths,
+    BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow,
+    IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest, IngestorConnector,
+    IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult, IngestorResume,
+    ServiceUrl, client_config_value, client_tls_paths,
 };
 use nervix_models::{ClientConfigEntry, NatsQueueGroupName, NatsSubjectName};
 use nervix_primitives::sync::mpsc::{self, error::TrySendError};
@@ -237,10 +237,18 @@ impl IngestMessageHeaders for NatsMessageHeaders {
         let Some(headers) = self.message.headers.as_ref() else {
             return;
         };
-        for (name, values) in headers.iter() {
-            for value in values {
-                visit(name.as_ref(), value.as_str());
-            }
+        for (name, value) in headers.iter_ordered() {
+            visit(name.as_ref(), value.as_str());
+        }
+    }
+}
+
+impl IngestMessageMetadata for NatsMessageHeaders {
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+        values.string(self.message.subject.as_str());
+        match self.message.reply.as_ref() {
+            Some(reply) => values.string(reply.as_str()),
+            None => values.absent(),
         }
     }
 }
@@ -266,7 +274,11 @@ impl IngestorMessage for NatsSubjectIngestorMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::headers(&self.headers)
+        IngestMetadataRow {
+            fields: &self.headers,
+            headers: IngestRowHeaders::Borrowed(&self.headers),
+            position: None,
+        }
     }
 }
 
@@ -382,6 +394,39 @@ mod tests {
         ClientConfigEntry {
             key: key.to_string(),
             value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_subject_message_projects_its_concrete_subject_and_reply() {
+        use nervix_connector::{RetainedIngestMetadata, RetainedIngestMetadataValue as Value};
+
+        for reply in [None, Some("response.inbox")] {
+            let reply_bytes = match reply {
+                Some(reply) => reply.len(),
+                None => 0,
+            };
+            let message = NatsSubjectIngestorMessage {
+                headers: NatsMessageHeaders::new(NatsMessage {
+                    subject: "orders.created".into(),
+                    reply: reply.map(|reply| reply.to_string().into()),
+                    payload: b"{}".as_slice().into(),
+                    headers: None,
+                    status: None,
+                    description: None,
+                    length: "orders.created".len() + 2 + reply_bytes,
+                }),
+                position: (),
+            };
+            let expected_reply = match reply {
+                Some(reply) => Value::String(reply.to_string()),
+                None => Value::Absent,
+            };
+            let retained = RetainedIngestMetadata::capture(message.metadata().fields);
+            assert_eq!(
+                retained.values(),
+                &[Value::String("orders.created".to_string()), expected_reply]
+            );
         }
     }
 
@@ -614,12 +659,9 @@ mod tests {
         assert_eq!(visited, vec!["trace=a", "trace=b"]);
     }
 
-    /// Both NATS entities declare repeats by name with exact names: the header map an emitter writes
-    /// keeps every value of a name together under it in write order, so a reader of the published
-    /// message finds each name's values together and in that order, while names that differ in
-    /// letter case stay two names.
+    /// Both NATS entities retain every pair in its written position and match names exactly.
     #[test]
-    fn written_headers_read_back_with_every_value_of_a_name_together_in_write_order() {
+    fn written_headers_read_back_in_their_complete_order() {
         let mut written = Vec::new();
         for (name, value) in [
             ("trace", "a"),
@@ -644,31 +686,6 @@ mod tests {
         let mut visited: Vec<(String, String)> = Vec::new();
         headers.visit(&mut |name, value| visited.push((name.to_string(), value.to_string())));
 
-        let mut finished = std::collections::BTreeSet::new();
-        let mut current: Option<&str> = None;
-        let mut values: std::collections::BTreeMap<&str, Vec<&str>> =
-            std::collections::BTreeMap::new();
-        for (name, value) in &visited {
-            if current != Some(name.as_str()) {
-                if let Some(previous) = current {
-                    finished.insert(previous);
-                }
-                assert!(
-                    !finished.contains(name.as_str()),
-                    "every value of {name} is visited together: {visited:?}"
-                );
-                current = Some(name);
-            }
-            values
-                .entry(name.as_str())
-                .or_default()
-                .push(value.as_str());
-        }
-        let expected = std::collections::BTreeMap::from([
-            ("Tenant", vec!["x"]),
-            ("tenant", vec!["y"]),
-            ("trace", vec!["a", "b", "c"]),
-        ]);
-        assert_eq!(values, expected);
+        assert_eq!(visited, written);
     }
 }

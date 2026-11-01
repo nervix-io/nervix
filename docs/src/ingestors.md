@@ -556,8 +556,8 @@ Each of these sources declares a [header model](./connector-contract.md#header-m
 | `HTTP ENDPOINT` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `KAFKA TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `PULSAR TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
-| `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
-| `NATS STREAM` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| `NATS SUBJECT` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `NATS STREAM` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `SQS QUEUE` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `WEBSOCKETS CONNECTION` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
@@ -1670,9 +1670,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | SUBJECT 'orders.created' (nats_subject) |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); required |
-| Headers | `read_header`, `read_headers`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: The current subject declaration exposes message headers but no typed subject or JetStream metadata namespace. |
+| Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -1687,8 +1687,10 @@ See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md
 `SUBJECT` and `QUEUE GROUP` are string literals Nervix subscribes with exactly as written, letter
 case included, within the [external name rules](#external-names). A subscription subject may use
 the NATS wildcards as whole tokens: `SUBJECT 'orders.*.EU'` matches one token in the middle, and
-`SUBJECT 'orders.>'` every remaining token, so `>` comes last. A message's subject and reply
-subject are not exposed as typed metadata; programs read its payload and headers.
+`SUBJECT 'orders.>'` every remaining token, so `>` comes last. `metadata.subject` is the concrete
+subject of the delivered message, including when the subscription uses a wildcard.
+`metadata.reply` is its reply subject, or `NULL` when absent. Both have type `STRING`.
+Header reads retain the wire order, including interleaved repeated names, with exact name matching.
 
 `NATS SUBJECT` ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
 are mandatory; use `INSTANCES 1` for a single queue member.
@@ -1730,9 +1732,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | STREAM 'orders' (nats_stream) |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `CONSUMER 'nervix'` (string literal checked by nats_consumer); required |
-| Headers | `read_header`, `read_headers`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: The current stream declaration exposes message headers but no typed stream, consumer, sequence, timestamp or delivery-count metadata namespace. |
+| Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL<br>metadata.stream: STRING OPTIONAL<br>metadata.consumer: STRING OPTIONAL<br>metadata.sequence: U64 OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.delivered: U64 OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | answered |
@@ -1780,7 +1782,16 @@ The consumer's position is the stream's: an instance that resumes, on its own no
 after its owner stopped, continues after the last delivery it acknowledged. A delivery an instance
 received and had not acknowledged when its connection was lost is delivered again once the
 consumer's `AckWait` passes. A delivery carries the headers it was published with; its stream and
-consumer sequences, its timestamp and how often it was delivered are not exposed as typed metadata.
+consumer identity, stream sequence, timestamp and delivery count are exposed as typed metadata.
+Stream messages expose `metadata.subject` and `metadata.reply` as well as `metadata.stream` and
+`metadata.consumer` (`STRING`), `metadata.sequence` and `metadata.delivered` (`U64`), and
+`metadata.timestamp` (`DATETIME`). The sequence is the stream sequence; the delivery count is the
+number of attempts to deliver this message. The timestamp is when the server accepted the
+publication and can supply `TIMESTAMP AT metadata.timestamp`. A stream delivery's reply subject
+is the server's `$JS.ACK` acknowledgement subject. Header reads preserve the received order.
+Malformed delivery metadata, a nonpositive sequence or delivery count, or a timestamp outside
+Nervix's signed Unix-nanosecond range fails the source attempt; none becomes a null or a zero.
+
 A lost connection ends the instance's pull as it ends a `NATS SUBJECT` instance's subscription, and
 `DESCRIBE INGESTOR` shows it as the transient error `NATS connection lost` until the instance has
 connected, looked the consumer up and pulled again on its `RETRY POLICY`.

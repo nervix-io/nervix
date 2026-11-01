@@ -36,9 +36,9 @@ use crate::{
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     EnvelopeClauseKind, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
     IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
-    IngestorMetadataDeclaration, IngestorReference, IngestorReferenceKind, LocatorDeclaration,
-    LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass,
-    RetryPolicy,
+    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm,
+    OptionPresence, OptionValue, PositionClass, RetryPolicy,
 };
 
 configured_client!(Nats: unpooled, config CLIENT_CONFIG, CreateClientNats => NatsConfigEntry);
@@ -262,12 +262,11 @@ const NATS_STREAM_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for NatsSubjectIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
-        // A NATS message's header map keeps every value of a name together under it, and its names
-        // in no order.
-        headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
-        // A message also carries the subject it was published to and its reply subject, but the
-        // declaration projects neither as a typed field, so programs read its payload and headers.
-        metadata: IngestorMetadataDeclaration::NONE,
+        headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+        metadata: IngestorMetadataDeclaration::new(&[
+            IngestorMetadataField::new("subject", IngestorMetadataType::String),
+            IngestorMetadataField::new("reply", IngestorMetadataType::String),
+        ]),
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Nats),
         // Core NATS hands each message to one member of the queue group and retains nothing for it,
@@ -383,13 +382,16 @@ const NATS_STREAM_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for NatsStreamIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
-        // A delivery carries the header map it was published with: every value of a name together
-        // under it, and its names in no order.
-        headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
-        // A delivery also carries its stream and consumer sequences, its timestamp and how often it
-        // was delivered, but the declaration projects none of them as a typed field, so programs
-        // read its payload and headers.
-        metadata: IngestorMetadataDeclaration::NONE,
+        headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+        metadata: IngestorMetadataDeclaration::new(&[
+            IngestorMetadataField::new("subject", IngestorMetadataType::String),
+            IngestorMetadataField::new("reply", IngestorMetadataType::String),
+            IngestorMetadataField::new("stream", IngestorMetadataType::String),
+            IngestorMetadataField::new("consumer", IngestorMetadataType::String),
+            IngestorMetadataField::new("sequence", IngestorMetadataType::U64),
+            IngestorMetadataField::new("timestamp", IngestorMetadataType::Datetime),
+            IngestorMetadataField::new("delivered", IngestorMetadataType::U64),
+        ]),
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Nats),
         // A delivery is acknowledged on a subject of its own, and the consumer delivers again what a
@@ -510,9 +512,7 @@ pub struct NatsSubjectEmitter {
 
 impl EmitterDeclaration for NatsSubjectEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
-        // A NATS message's header map keeps every value of a name together under it, and its names
-        // in no order.
-        headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
+        headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Nats),
         body: EmitterBodyForm::Codec,
         // The NATS protocol sets no message size of its own: each server announces its
@@ -524,9 +524,9 @@ impl EmitterDeclaration for NatsSubjectEmitter {
             keywords: "SUBJECT",
             name: LocatorName::External(NatsPublishSubjectName::DECLARATION),
         }),
-        // A core publication carries the subject, the written headers and the payload.
+        // A core publication can name the subject its receiver should reply to.
         options: &[],
-        envelope: &[],
+        envelope: &[EnvelopeClauseKind::ReplyTo],
         properties: &[],
         bounds: NATS_SUBJECT_EMITTER_BOUNDS,
     };
@@ -545,7 +545,7 @@ pub struct NatsStreamEmitter {
 
 impl EmitterDeclaration for NatsStreamEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
-        headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
+        headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Nats),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },

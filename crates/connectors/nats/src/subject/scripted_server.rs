@@ -54,7 +54,7 @@ pub(crate) struct Subscription {
 /// on, if any, and the bytes it carries, its header block first when it has one.
 pub(crate) struct Publish {
     pub(crate) subject: String,
-    reply: Option<String>,
+    pub(crate) reply: Option<String>,
     pub(crate) message: Vec<u8>,
 }
 

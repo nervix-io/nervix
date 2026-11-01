@@ -2617,6 +2617,24 @@ impl Cluster {
         publish_nats(&self.dependencies, subject, payload).await
     }
 
+    pub(crate) async fn publish_nats_with_reply(
+        &self,
+        subject: &str,
+        reply: &str,
+        payload: &str,
+    ) -> io::Result<()> {
+        let client = nats_client(&self.dependencies).await?;
+        client
+            .publish_with_reply(
+                subject.to_string(),
+                reply.to_string(),
+                payload.as_bytes().to_vec().into(),
+            )
+            .await
+            .map_err(io::Error::other)?;
+        client.flush().await.map_err(io::Error::other)
+    }
+
     pub(crate) async fn provision_nats_stream(
         &self,
         stream: &str,

@@ -284,9 +284,10 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
         EmitterEntityKind::Redis(RedisEmitterEntity::PubSub) => {
             located(ConnectorKind::Redis, "CHANNEL", "redis_channel", &[])
         }
-        EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => {
-            located(ConnectorKind::Nats, "SUBJECT", "nats_publish_subject", &[])
-        }
+        EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => EmitterSurface {
+            envelope: &[EnvelopeClauseKind::ReplyTo],
+            ..located(ConnectorKind::Nats, "SUBJECT", "nats_publish_subject", &[])
+        },
         EmitterEntityKind::Nats(NatsEmitterEntity::Stream) => EmitterSurface {
             envelope: message_id,
             ..located(

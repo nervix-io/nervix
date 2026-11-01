@@ -32,6 +32,15 @@ private socket and atomics remain outside Nervix's modeled primitives: scripted 
 and public reconnect/STOP scenarios qualify this boundary, while Deloxide qualifies the tracked
 lifecycle paths around it and cannot observe those driver internals.
 
+NATS delivery metadata borrows the immutable message and acknowledgement subject. Stream
+coordinates are validated before the delivery enters the host; projection retains only fields a
+program reads. Reply subjects stay in each retained emitter envelope across retries, and ordered
+headers stay with their message. These paths add no shared map, lock or publication protocol.
+The metadata, request/reply, header-order and TLS scenarios are registered for active, order and
+stressed lifecycle diagnostics around the ingest groups and emitters. Deloxide does not observe
+the driver, asynchronous waits or these message-local conversions; their production-owner tests
+and bounded retention properties qualify those boundaries.
+
 These paths may apply bounded backpressure and preserve required ordering. Their steady-state work
 must not acquire a `Mutex` or `RwLock`, including a read lock, merely to discover configuration,
 ownership, topology, a service, or a metric series. A read lock still changes shared lock state,

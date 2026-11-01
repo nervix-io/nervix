@@ -29,6 +29,7 @@ use nervix_primitives::{
 #[derive(Debug)]
 pub(crate) struct NatsObserver {
     subscription: Subscriber,
+    client: async_nats::Client,
     /// The observing client's counters. The client shares them through the standard library's
     /// shared ownership, which is the type its API returns.
     client_statistics: StdArc<Statistics>,
@@ -69,6 +70,7 @@ impl NatsObserver {
         Ok(Self {
             subscription,
             client_statistics: client.statistics(),
+            client,
             connection_events,
         })
     }
@@ -77,6 +79,31 @@ impl NatsObserver {
     /// has ended.
     pub(crate) async fn next(&mut self) -> Option<NatsMessage> {
         self.subscription.next().await
+    }
+
+    /// Answers one request on the reply subject the scenario expects the publisher to write.
+    pub(crate) async fn answer_next(
+        &mut self,
+        expected_reply: &str,
+        payload: &str,
+    ) -> io::Result<()> {
+        let message = self
+            .next()
+            .await
+            .ok_or_else(|| io::Error::other("NATS request subscription ended"))?;
+        let reply = message
+            .reply
+            .ok_or_else(|| io::Error::other("NATS request carries no reply subject"))?;
+        if reply.as_str() != expected_reply {
+            return Err(io::Error::other(format!(
+                "NATS request reply subject is '{reply}', expected '{expected_reply}'"
+            )));
+        }
+        self.client
+            .publish(reply, payload.as_bytes().to_vec().into())
+            .await
+            .map_err(io::Error::other)?;
+        self.client.flush().await.map_err(io::Error::other)
     }
 
     /// How many messages the observing client has received from the server.

@@ -791,6 +791,11 @@ execution or recovery. Connectors and the session edge validate external represe
 they decode or publish them. A caller does not compensate for a failed lookup, absent required
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
 
+NATS stream metadata crosses that boundary with nonzero stream sequence and delivery counts and
+a typed publication timestamp. The delivered acknowledgement subject is validated before those
+values are exposed. A Core message's absent reply subject remains absent, and is projected as a
+typed null; a stream metadata conversion failure never takes that absence path.
+
 The Iceberg emitter validates its configured location into a URL before creating its storage factory.
 The initialized operator belongs to that storage root: a later object path must match its scheme,
 host, port and container identity before its relative key reaches the operator. Table metadata

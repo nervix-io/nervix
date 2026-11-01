@@ -1247,3 +1247,73 @@ entity = "WEBSOCKETS CONNECTION INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection sends literal upgrade headers and exposes response headers and frame types" },
 ]
+
+[[capability]]
+capability = "metadata.subject"
+entity = "NATS SUBJECT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS wildcard messages project the concrete subject and optional reply" },
+]
+
+[[capability]]
+capability = "metadata.reply"
+entity = "NATS SUBJECT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS wildcard messages project the concrete subject and optional reply" },
+]
+
+[[capability]]
+capability = "metadata.subject"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+]
+
+[[capability]]
+capability = "metadata.reply"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+]
+
+[[capability]]
+capability = "metadata.stream"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+]
+
+[[capability]]
+capability = "metadata.consumer"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+]
+
+[[capability]]
+capability = "metadata.sequence"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+]
+
+[[capability]]
+capability = "metadata.timestamp"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+]
+
+[[capability]]
+capability = "metadata.delivered"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+]
+
+[[capability]]
+capability = "REPLY TO"
+entity = "NATS SUBJECT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "A NATS SUBJECT emitter sends a request with its evaluated reply subject" },
+]

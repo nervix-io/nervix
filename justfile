@@ -607,7 +607,7 @@ check-package-lib package *args:
 test-package-lib package *args:
     cargo test --package {{ package }} --lib -- {{ args }}
 
-# Qualify the pinned NATS driver's flush implementation through its own bounded stream tests.
+# Qualify the pinned NATS driver's flush, ordered headers and borrowed delivery metadata parser.
 test-nats-driver checkout *args:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/nats-driver") }} cargo test --manifest-path {{ quote(checkout + "/async-nats/Cargo.toml") }} --package async-nats --no-default-features --features aws-lc-rs,jetstream,server_2_10,server_2_11 --lib -- {{ args }}
 

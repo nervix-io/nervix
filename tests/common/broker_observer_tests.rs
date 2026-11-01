@@ -24,6 +24,25 @@ use crate::{
 
 const BURST: usize = 32_768;
 
+#[nervix_primitives::test(flavor = "current_thread")]
+async fn a_request_observer_refuses_a_delivery_without_a_reply_subject() {
+    let server = StandInNatsServer::start_sequence(1)
+        .await
+        .assured("the request fixture binds an ephemeral loopback port");
+    let observer = NatsObserver::connect(&server.address.to_string(), "observed")
+        .await
+        .assured("the real observing client subscribes");
+    let mut observer = BrokerObserver::nats(observer);
+    let error = timeout(
+        Duration::from_secs(60),
+        observer.answer_nats_request("response", "answer"),
+    )
+    .await
+    .assured("the delivered message is examined within the observation bound")
+    .expect_err("a message without a reply subject cannot be answered");
+    assert_eq!(error.to_string(), "NATS request carries no reply subject");
+}
+
 fn headers() -> Vec<(String, String)> {
     vec![
         ("route".to_string(), "primary".to_string()),
