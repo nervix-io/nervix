@@ -2734,9 +2734,9 @@ it to the column's declared type:
 | `DATETIME` | RFC 3339 timestamp text at UTC offset `+00:00` |
 | `ARRAY<T>`, `VEC<T>` | Recursive JSON text; `BYTES` elements are padded base64 and non-finite floats are `null` |
 
-A null binds as a `NULL` element. A mapping whose inferred type is none of these is refused at
-`CREATE`. A value the column's type cannot read from its text, such as `U64` above a `bigint`'s
-range, is a row Postgres rejects with its SQLSTATE.
+A typed null binds as a `NULL` element. A mapping without a supported concrete column type is
+refused at `CREATE` and `ALTER`; an untyped `NULL` cannot infer one. A value the column's type cannot
+read from its text, such as `U64` above a `bigint`'s range, is a row Postgres rejects with its SQLSTATE.
 
 Postgres emitters may include an insert conflict policy after `VALUES`:
 
@@ -2771,9 +2771,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>an insert and its metadata query: unbounded |
-| Driver limits | None declared. |
-| Stalled-peer checks | `STALLED PEER pool_acquire_timeout_ms` |
+| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>each catalog query and each insert: `timeout_ms`; unbounded when omitted<br>closing an interrupted query connection: driver default, SQLx close-on-drop timeout, 5 s |
+| Driver limits | timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout maximum.<br>Without timeout_ms, catalog queries and inserts have no Nervix response deadline. |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER pool_acquire_timeout_ms` |
 
 See the [POSTGRES TABLE capability and mirror reference](connector-capabilities.md#postgres-table-emit).
 <!-- connector-matrix:emit-postgres-table:end -->
@@ -2804,6 +2804,22 @@ CREATE POSTGRES CLIENT pg
     'addr' = 'postgresql://postgres:nervix@127.0.0.1:5432/postgres?sslmode=disable'
   };
 ```
+
+The optional client key `timeout_ms` bounds each catalog query and each INSERT separately. It is a
+positive whole number of milliseconds from `1` through `2147483647`, the maximum PostgreSQL accepts
+for `statement_timeout`; `CREATE CLIENT` refuses a value outside that range. Nervix sets that server
+option on every connection and also bounds the local wait for each query's response, so a peer
+that stops answering still ends the attempt. The key takes precedence over a `statement_timeout`
+in the URL's startup options, preserving its other driver options. Omitting the key sets no Nervix
+statement or response deadline.
+
+The independent `pool_acquire_timeout_ms` bounds checkout before a query starts. Each isolated
+row's INSERT gets its own statement bound; `timeout_ms` is not a deadline for the entire flush or
+its retries. A query timeout is a transient publish failure naming the key and its bound, and
+unresolved rows follow `RETRY POLICY`. After a local timeout the borrowed connection closes rather
+than returning a pending response to the idle pool; SQLx retains its pool permit through a graceful
+close of at most five seconds. A lost response does not prove an INSERT was not applied, so use a
+suitable idempotent conflict policy when retries must not duplicate rows.
 
 For TLS connections, use `sslmode=verify-full`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path. `'tls_cert_file'` and `'tls_key_file'` supply a client identity and must be given together. TLS files require `sslmode=verify-full`.
 

@@ -288,6 +288,40 @@ fn the_client_schema_declares_the_pool_keys_with_their_defaults() {
 }
 
 #[test]
+fn the_statement_deadline_is_optional_and_accepts_only_positive_whole_milliseconds() {
+    let schema = ConnectorKind::Postgres
+        .client()
+        .assured("Postgres declares a configured client")
+        .config;
+    let key = schema
+        .key("timeout_ms")
+        .assured("the client declares its statement deadline");
+    assert_eq!(key.presence, ClientConfigPresence::Optional);
+    assert_eq!(key.value, ClientConfigValue::Milliseconds);
+    let address = ("addr", "postgres://127.0.0.1/nervix?sslmode=disable");
+    for value in ["1", "1500", "2147483647"] {
+        schema
+            .validate(&entries(&[address, ("timeout_ms", value)]))
+            .assured("the deadline is a positive whole number of milliseconds");
+    }
+    for value in ["0", "-1", "1.5"] {
+        let report = schema
+            .validate(&entries(&[address, ("timeout_ms", value)]))
+            .expect_err("the deadline breaks the shared millisecond rule");
+        assert!(
+            matches!(report.current_context(), ClientConfigSchemaError::InvalidValue { key, .. } if key == "timeout_ms")
+        );
+    }
+    assert_eq!(
+        POSTGRES_BOUNDS.waits[1].bound,
+        WaitBound::Key {
+            key: DeadlineKey::Timeout,
+            omitted: OmittedDeadline::Unbounded
+        },
+    );
+}
+
+#[test]
 fn the_client_schema_refuses_a_pool_key_that_breaks_its_rule() {
     let schema = ConnectorKind::Postgres
         .client()
@@ -341,7 +375,7 @@ fn a_pool_checkout_is_bounded_by_its_key_with_the_default_the_schema_declares() 
     let declared = PostgresTableEmitter::CAPABILITIES.bounds;
     assert_eq!(
         declared.deadline_keys(),
-        vec![DeadlineKey::PoolAcquireTimeout]
+        vec![DeadlineKey::Timeout, DeadlineKey::PoolAcquireTimeout]
     );
     let bounds: Vec<WaitBound> = declared.waits.iter().map(|wait| wait.bound).collect();
     assert_eq!(

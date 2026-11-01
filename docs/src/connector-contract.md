@@ -2380,6 +2380,19 @@ its first insert's connection, and the lookup and the insert quote each declared
 identifier, so they name the same relation. Both release the connection before the next bounded
 insert or retry backoff. MongoDB answers per document, so it needs no isolation pass.
 
+A Postgres client's optional `timeout_ms` is validated as positive whole milliseconds within the
+server's `statement_timeout` range, at most `2147483647`. Its connection options and typed statement
+deadline are built together once: each new connection receives the server bound, after the URL's
+other startup options, and each borrowed connection retains the same bound for every catalog query
+and INSERT response. Each query has a separate budget, independent of pool checkout and of the
+whole flush or retry schedule. Omission sets no Nervix response deadline. A local timeout keeps
+`DeadlineElapsed` beneath the publish context and marks the interrupted connection to close instead
+of returning it idle. SQLx's five-second close-on-drop bound retains the pool permit through closing;
+the declaration names that driver-owned cleanup wait. SQLSTATE `57014` remains a transient canceled
+statement; when a deadline is configured the diagnostic names it without claiming that an operator
+cancellation proves it elapsed. An unanswered INSERT remains unresolved and can be retried even
+when its external outcome is unknown.
+
 Registered Bolero properties hold these rules against their owners, with measures that grow and
 shrink with a candidate: `connector-row-request-division` the division rule and both limits,
 `emitter-batch-subdivision` and `emitter-batch-packing` the candidates, seals, relay, branch and

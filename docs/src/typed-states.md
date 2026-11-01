@@ -478,6 +478,13 @@ option written twice, is refused rather than defaulted to a policy. A Postgres c
 rules belong to `PostgresConflictAction`, whose typed refusal names a missing `DO UPDATE` target, an
 empty target column or an update without a mapped column outside its target.
 
+Postgres connection options and their `Option<PostgresStatementDeadline>` are constructed together
+before the pool opens. Absence means the client omitted a Nervix statement bound; presence has
+passed both the shared positive-millisecond rule and PostgreSQL's signed integer range. Every
+borrow copies that immutable deadline, so the server option and local query wait consume the same
+validated value. A local elapsed wait and a server-canceled statement have distinct typed contexts:
+the latter may name the configured bound without asserting why the server canceled it.
+
 RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
 and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch
 timeout; both acknowledged variants own an ACK timeout and retry policy. Zero cannot accidentally

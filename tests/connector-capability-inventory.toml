@@ -755,6 +755,14 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "POSTGRES TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/postgres_timeouts.feature", scenario = "A Postgres emitter whose service stops answering is reported within timeout_ms on <nodes> nodes" },
+  { feature = "tests/features/runtime/postgres_timeouts.feature", scenario = "A Postgres insert blocked by a table lock times out and retries on <nodes> nodes" },
+]
+
+[[capability]]
 capability = "EVERY"
 entity = "PROMETHEUS QUERY INGESTOR"
 scenarios = [

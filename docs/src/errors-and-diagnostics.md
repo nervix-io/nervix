@@ -865,6 +865,19 @@ configuration failure, not a record rejection. A checkout that runs out of
 `EmitterOpenError::Initialize` while the pool opens and beneath `EmitterWriteError::NotInitialized`
 on a write, which the host retries on its policy.
 
+The Postgres statement key `timeout_ms` is optional and held to PostgreSQL's signed integer
+millisecond range at the offline configuration boundary. A range refusal keeps its typed integer
+conversion cause beneath `ClientConfigError::InvalidDeadline` and projects the `timeout_ms` key,
+rather than the address, into `OfflineClientConfigError`. The connection's private
+`PostgresStatementDeadline` applies both the server option and each catalog-query or INSERT response
+budget. A local timeout keeps `DeadlineElapsed`, its operation, key and bound beneath
+`PostgresWriteError::Deadline` and the host publish context; its printable description survives that
+projection. The interrupted connection closes instead of returning its pending response to the
+idle pool. A server `57014` becomes `PostgresWriteError::StatementCanceled` when the client has a
+configured deadline: it reports that safe SQLSTATE and configured bound without treating every
+operator cancellation as a proven timeout. Both remain transient publish failures, with no record
+rejection or exposed server response text.
+
 Redis subscription protocol and read failures retain their driver causes beneath
 `RedisPubSubIngestorError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
 the shared `DeadlineElapsed` with `idle_timeout_ms` and its configured bound beneath `IdleProbe`
