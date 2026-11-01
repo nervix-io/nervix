@@ -248,7 +248,8 @@ Feature: SQS ingestion
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT (marker string);
       CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
       CREATE CODEC held_event_codec_v2 FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
-      CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
+      CREATE SCHEMA held_metadata (marker STRING, receive_count U32 OPTIONAL, sent_at DATETIME OPTIONAL);
+      CREATE RELAY held_events SCHEMA held_metadata UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_held_endpoint}}',
         'region' = 'us-east-1',
@@ -261,6 +262,7 @@ Feature: SQS ingestion
         ON QUIESCE SUSPEND DECODE USING held_event_codec
         TO held_events
           INHERIT ALL
+          SET receive_count = metadata.receive_count, sent_at = metadata.sent_at
           UNBRANCHED
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
@@ -282,6 +284,14 @@ Feature: SQS ingestion
     Then within "60s" the relay subscription receives a payload
       """
       "marker":"held-
+      """
+    And the last relay subscription payload contains
+      """
+      "receive_count":1
+      """
+    And the last relay subscription payload contains
+      """
+      "sent_at":"
       """
     When the entity gate pause for domain "{{domain}}" is released
     Then the background Plexus execution succeeds

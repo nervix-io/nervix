@@ -323,10 +323,21 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
         IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull) => {
             headers_only(None, ConnectorKind::ZeroMq)
         }
-        IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::LastWins)),
-            ConnectorKind::Sqs,
-        ),
+        IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
+            metadata: &[
+                ("message_id", IngestorMetadataType::String),
+                ("sent_at", IngestorMetadataType::Datetime),
+                ("receive_count", IngestorMetadataType::U32),
+                ("first_received_at", IngestorMetadataType::Datetime),
+                ("group_id", IngestorMetadataType::String),
+                ("deduplication_id", IngestorMetadataType::String),
+                ("sequence_number", IngestorMetadataType::String),
+                ("sender_id", IngestorMetadataType::String),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Sqs),
+        },
         IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
             metadata: &[

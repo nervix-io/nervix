@@ -7166,7 +7166,7 @@ async fn nats_tls_client(dependencies: &DependencyEndpoints) -> io::Result<NatsC
         .map_err(io::Error::other)
 }
 
-async fn sqs_client(dependencies: &DependencyEndpoints) -> io::Result<SqsClient> {
+pub(super) async fn sqs_client(dependencies: &DependencyEndpoints) -> io::Result<SqsClient> {
     let sdk_config = aws_config::defaults(BehaviorVersion::latest())
         .region(aws_sdk_sqs::config::Region::new(SQS_REGION))
         .endpoint_url(dependencies.get(SQS_ENDPOINT)?)
@@ -7200,7 +7200,7 @@ async fn sqs_tls_client(dependencies: &DependencyEndpoints) -> io::Result<SqsCli
     Ok(SqsClient::new(&sdk_config))
 }
 
-async fn sqs_queue_url(client: &SqsClient, queue: &str) -> io::Result<String> {
+pub(super) async fn sqs_queue_url(client: &SqsClient, queue: &str) -> io::Result<String> {
     client
         .get_queue_url()
         .queue_name(queue)

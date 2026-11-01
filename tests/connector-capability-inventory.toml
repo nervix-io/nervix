@@ -1137,6 +1137,73 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "metadata.message_id"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+]
+
+[[capability]]
+capability = "metadata.sent_at"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "SQS sent time feeds independent branch duration windows" },
+  { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout" },
+]
+
+[[capability]]
+capability = "metadata.receive_count"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+  { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout" },
+]
+
+[[capability]]
+capability = "metadata.first_received_at"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+]
+
+[[capability]]
+capability = "metadata.group_id"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+]
+
+[[capability]]
+capability = "metadata.deduplication_id"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+]
+
+[[capability]]
+capability = "metadata.sequence_number"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+]
+
+[[capability]]
+capability = "metadata.sender_id"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+]
+
+[[capability]]
 capability = "STALLED PEER timeout_ms"
 entity = "SQS QUEUE INGESTOR"
 scenarios = [
