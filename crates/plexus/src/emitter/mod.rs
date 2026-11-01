@@ -599,6 +599,7 @@ fn declared_creation<'src>()
         creation::<RedisPubSubEmitter, _>(redis::pubsub_body(EmitterContext::Create)),
         creation::<MqttTopicEmitter, _>(mqtt::topic_body(EmitterContext::Create)),
         creation::<NatsSubjectEmitter, _>(nats::subject_body(EmitterContext::Create)),
+        creation::<NatsStreamEmitter, _>(nats::stream_body(EmitterContext::Create)),
         creation::<ZeroMqPushEmitter, _>(zeromq::push_body(EmitterContext::Create)),
         creation::<SqsQueueEmitter, _>(sqs::queue_body(EmitterContext::Create)),
         creation::<SentryEventEmitter, _>(sentry::event_body(EmitterContext::Create)),
@@ -647,7 +648,11 @@ fn declared_alteration<'src>()
         alteration::<MqttTopicEmitter, _, _>(mqtt::topic_body(EmitterContext::Alter), mqtt::mode()),
         alteration::<NatsSubjectEmitter, _, _>(
             nats::subject_body(EmitterContext::Alter),
-            nats::mode()
+            nats::subject_mode()
+        ),
+        alteration::<NatsStreamEmitter, _, _>(
+            nats::stream_body(EmitterContext::Alter),
+            nats::stream_mode()
         ),
         alteration::<ZeroMqPushEmitter, _, _>(
             zeromq::push_body(EmitterContext::Alter),

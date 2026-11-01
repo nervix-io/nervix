@@ -426,7 +426,7 @@ record rather than assumed.
 | RabbitMQ | `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | One AMQP message whose body is the batch payload | One message carrying the members |
 | Redis Pub/Sub | `NO ACK` | One `PUBLISH` message whose payload is the batch payload | One channel message carrying the members |
 | MQTT | `QOS 0`, `QOS 1`, `QOS 2` | One PUBLISH packet whose payload is the batch payload | One message on the topic carrying the members |
-| NATS | `NO ACK` (core), `JETSTREAM ACK SEQUENTIAL`, `JETSTREAM ACK PARALLEL` | One message on the subject whose payload is the batch payload | One core message or one stream message carrying the members |
+| NATS SUBJECT, NATS STREAM | `NO ACK` (subject), `ACK SEQUENTIAL`, `ACK PARALLEL` (stream) | One message on the subject whose payload is the batch payload | One core message or one stream message carrying the members |
 | ZeroMQ | `NO ACK` | One single-frame PUSH message whose frame is the batch payload | One message; the puller reads the first frame and decodes the members |
 | SQS | `SEND SINGLE`, `SEND BATCH`; standard and FIFO queues | One SQS message whose body is the batch payload, with the members' common attributes and FIFO group | One queue message carrying the members; `SEND BATCH` still packs up to ten such messages per request, and each stays an independent message |
 | Sentry | `ACK` | One envelope with one `event` item, whose event is the single value the codec's batch transformation produced | One Sentry event carrying the members in the field the transformation placed them in, typically `extra` |

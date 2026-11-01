@@ -606,7 +606,7 @@ fn every_publishing_mode_body_parses_and_canonical_round_trips() {
          ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
         "NATS SUBJECT EMITTER emit FROM p99 TO broker SUBJECT 'events' MODE NO ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s",
-        "NATS SUBJECT EMITTER emit FROM p99 TO broker SUBJECT 'events' MODE JETSTREAM ACK \
+        "NATS STREAM EMITTER emit FROM p99 TO broker STREAM 'orders' SUBJECT 'events' MODE ACK \
          SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
         "REDIS PUBSUB EMITTER emit FROM p99 TO broker CHANNEL 'events' MODE NO ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s",
@@ -696,18 +696,16 @@ fn publishing_mode_completion_stays_within_the_selected_emitter() {
     assert!(suggestions.contains(&"ACK".to_string()));
     assert!(suggestions.contains(&"NO ACK".to_string()));
     assert!(!suggestions.contains(&"QOS".to_string()));
-    assert!(!suggestions.contains(&"JETSTREAM".to_string()));
     assert!(!suggestions.contains(&"SINGLE".to_string()));
 }
 
 #[test]
-fn nats_jetstream_completion_uses_the_complete_mode_phrase() {
-    let input = "CREATE NATS SUBJECT EMITTER emit FROM p99 TO broker SUBJECT 'events' MODE ";
+fn nats_stream_completion_uses_the_ack_mode_phrase() {
+    let input =
+        "CREATE NATS STREAM EMITTER emit FROM p99 TO broker STREAM 'orders' SUBJECT 'events' MODE ";
     let suggestions = suggest_create_emitter(input, input.len());
 
-    assert!(suggestions.contains(&"NO ACK".to_string()));
-    assert!(suggestions.contains(&"JETSTREAM ACK".to_string()));
-    assert!(!suggestions.contains(&"JETSTREAM".to_string()));
+    assert!(suggestions.contains(&"ACK".to_string()));
     assert!(!suggestions.contains(&"QOS".to_string()));
     assert!(!suggestions.contains(&"SINGLE".to_string()));
 }

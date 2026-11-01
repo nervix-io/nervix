@@ -3042,10 +3042,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__emitter_record_writes__tests__bolero_retained_payloads_are_written_unchanged_until_answered/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "emitter-retained-payloads"
-invariant = "Across generated packing and write steps with delivered, rejected and unanswered records and failed writes, every write hands the emitter the retained payloads in packing order with exactly the bytes, key, text or typed headers and group they were prepared with; a delivery resolves every member, a rejection rejects every member with one error and leaves them awaiting it, and an unanswered payload stays retained unchanged."
+invariant = "Across generated packing and write steps with delivered, rejected and unanswered records and failed writes, every write hands the emitter the retained payloads in packing order with exactly the bytes, key, text or typed headers, group and message ID envelope they were prepared with; a delivery resolves every member, a rejection rejects every member with one error and leaves them awaiting it, and an unanswered payload stays retained unchanged."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-server"

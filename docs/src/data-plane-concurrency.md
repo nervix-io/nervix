@@ -2129,9 +2129,14 @@ scenarios tagged `@deloxide_stress_restore`: backup capture and restore of WASM 
 offsets, deduplicator keys and windows, materialized relays and native metadata, complete restore
 generations, staging quota and reclamation, delayed restore coordinators, bounded multi-domain
 backup waits and their recovery, and the drain of a large-state WASM owner through bulk checkpoint
-streams. Every stressed scenario runs one at a time under its own `stress.` identity, with the
-scenario, examples and invariant of its active-only counterpart and the owners that counterpart
-reaches.
+streams. Its serial scenario process has a 4,320-second bound, including a 360-second teardown
+reserve, so its 80 registered examples have a 3,960-second suite budget. Check 41311131846
+completed 78 examples at the former 3,840-second suite limit, including both added NATS STREAM
+lost-PubAck examples in 30.6 seconds; the final window example had passed its body and one was
+still queued. The revised bound accounts for those examples while preserving a fixed limit and
+the same teardown reserve. Every stressed scenario runs one at a time under its own `stress.`
+identity, with the scenario, examples and invariant of its active-only counterpart and the owners
+that counterpart reaches.
 `tests/deloxide-inventory.toml` is the lane's bounded inventory. It registers every workload a
 selection runs, each with a stable identity, the invariant it owns, the selections that must run it
 and the coverage it declares: the disposable-process probes of `nervix-deadlock`, the tracked

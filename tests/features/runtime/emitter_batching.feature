@@ -129,9 +129,9 @@ Feature: Emitter batching configuration
         INHERIT ALL
         BATCH MAX MESSAGES 100 MAX SIZE 256KB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE NATS SUBJECT EMITTER nats_batched FROM outgoing
-        TO nats_main SUBJECT 'nats_batched'
-          MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 10ms MAX 1s
+      CREATE NATS STREAM EMITTER nats_batched FROM outgoing
+        TO nats_main STREAM 'nats_batched' SUBJECT 'nats_batched'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
         BATCH MAX MESSAGES 100 MAX SIZE 1MiB

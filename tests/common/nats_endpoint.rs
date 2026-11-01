@@ -43,8 +43,17 @@ enum NatsEndpointMode {
     /// Each connection forwards what its client sends until it forwarded `publishes` publishes
     /// after the endpoint entered this mode, and then stops reading from its client.
     HoldingAfter { publishes: usize },
+    /// Forward each publish but discard server replies after the next one, until forwarding resumes.
+    DroppingRepliesAfterNextPublish,
     /// Every connection is ended and every new one refused.
     Down,
+}
+
+/// Observations of data publishes and the server replies this endpoint discards.
+#[derive(Clone)]
+struct NatsPublicationObservations {
+    forwarded: watch::Sender<u64>,
+    discarded: watch::Sender<u64>,
 }
 
 /// A listener that forwards every client connection to one NATS server unless the scenario holds
@@ -57,6 +66,10 @@ pub(crate) struct NatsEndpoint {
     refused: watch::Sender<u64>,
     /// Publishes this endpoint has read but is holding instead of forwarding.
     held: watch::Sender<u64>,
+    /// Data publishes forwarded to the server through this endpoint, excluding JetStream API requests.
+    forwarded: watch::Sender<u64>,
+    /// Server response chunks discarded after a data publish.
+    discarded: watch::Sender<u64>,
     /// Cancelled to end every connection the endpoint forwards, when the endpoint stops.
     connections: CancellationToken,
     listener: JoinHandle<()>,
@@ -70,6 +83,8 @@ impl NatsEndpoint {
         let (mode, observed) = watch::channel(NatsEndpointMode::Forwarding);
         let (refused, _) = watch::channel(0_u64);
         let (held, _) = watch::channel(0_u64);
+        let (forwarded, _) = watch::channel(0_u64);
+        let (discarded, _) = watch::channel(0_u64);
         let connections = CancellationToken::new();
         let listener = nervix_primitives::task::spawn(Self::accept(
             listener,
@@ -77,6 +92,10 @@ impl NatsEndpoint {
             observed,
             refused.clone(),
             held.clone(),
+            NatsPublicationObservations {
+                forwarded: forwarded.clone(),
+                discarded: discarded.clone(),
+            },
             connections.clone(),
         ));
         Ok(Self {
@@ -84,6 +103,8 @@ impl NatsEndpoint {
             mode,
             refused,
             held,
+            forwarded,
+            discarded,
             connections,
             listener,
         })
@@ -104,6 +125,28 @@ impl NatsEndpoint {
     pub(crate) fn hold_after(&self, publishes: usize) {
         self.mode
             .send_replace(NatsEndpointMode::HoldingAfter { publishes });
+    }
+
+    /// Lose the next publish's PubAck while still letting the stream store its message.
+    pub(crate) fn drop_replies_after_next_publish(&self) {
+        self.mode
+            .send_replace(NatsEndpointMode::DroppingRepliesAfterNextPublish);
+    }
+
+    pub(crate) async fn forwarded_publishes_at_least(&self, count: u64) {
+        let mut forwarded = self.forwarded.subscribe();
+        forwarded
+            .wait_for(|forwarded| *forwarded >= count)
+            .await
+            .discarded("the endpoint retains its forwarded-publish observation sender");
+    }
+
+    pub(crate) async fn discarded_reply(&self) {
+        let mut discarded = self.discarded.subscribe();
+        discarded
+            .wait_for(|discarded| *discarded > 0)
+            .await
+            .discarded("the endpoint retains its discarded-reply observation sender");
     }
 
     /// Ends every connection the endpoint forwards and refuses new ones until it forwards again.
@@ -166,6 +209,7 @@ impl NatsEndpoint {
         mode: watch::Receiver<NatsEndpointMode>,
         refused: watch::Sender<u64>,
         held: watch::Sender<u64>,
+        publication: NatsPublicationObservations,
         connections: CancellationToken,
     ) {
         loop {
@@ -189,6 +233,8 @@ impl NatsEndpoint {
                 server,
                 mode.clone(),
                 held.clone(),
+                publication.forwarded.clone(),
+                publication.discarded.clone(),
                 connections.clone(),
             ));
         }
@@ -202,6 +248,8 @@ impl NatsEndpoint {
         server: SocketAddr,
         mode: watch::Receiver<NatsEndpointMode>,
         held: watch::Sender<u64>,
+        forwarded: watch::Sender<u64>,
+        discarded: watch::Sender<u64>,
         stopped: CancellationToken,
     ) {
         let Ok(server) = TcpStream::connect(server).await else {
@@ -211,11 +259,40 @@ impl NatsEndpoint {
         let (mut server_read, mut server_write) = server.into_split();
         let mut client_read = BufReader::new(client_read);
         let mut down = mode.clone();
+        let (drop_replies, dropping) = watch::channel(false);
         nervix_primitives::select! {
             _ = stopped.cancelled() => {}
             _ = down.wait_for(|mode| *mode == NatsEndpointMode::Down) => {}
-            _ = Self::forward_client_frames(&mut client_read, &mut server_write, mode, held) => {}
-            _ = tokio::io::copy(&mut server_read, &mut client_write) => {}
+            _ = Self::forward_client_frames(&mut client_read, &mut server_write, mode.clone(), held, forwarded, drop_replies) => {}
+            _ = Self::forward_server_bytes(&mut server_read, &mut client_write, mode, dropping, discarded) => {}
+        }
+    }
+
+    /// Forward server bytes unless a publish was forwarded under the reply-loss mode.
+    async fn forward_server_bytes(
+        server: &mut (impl tokio::io::AsyncRead + Unpin),
+        client: &mut (impl AsyncWrite + Unpin),
+        mode: watch::Receiver<NatsEndpointMode>,
+        dropping: watch::Receiver<bool>,
+        discarded: watch::Sender<u64>,
+    ) -> io::Result<()> {
+        let mut bytes = [0_u8; 16 * 1024];
+        loop {
+            let read = server.read(&mut bytes).await?;
+            if read == 0 {
+                return client.shutdown().await;
+            }
+            if *mode.borrow() == NatsEndpointMode::DroppingRepliesAfterNextPublish
+                && *dropping.borrow()
+            {
+                discarded.send_modify(|count| {
+                    *count = count
+                        .checked_add(1)
+                        .assured("a scenario discards far fewer than 2^64 replies");
+                });
+                continue;
+            }
+            client.write_all(&bytes[..read]).await?;
         }
     }
 
@@ -227,6 +304,8 @@ impl NatsEndpoint {
         server: &mut (impl AsyncWrite + Unpin),
         mut mode: watch::Receiver<NatsEndpointMode>,
         held: watch::Sender<u64>,
+        forwarded: watch::Sender<u64>,
+        drop_replies: watch::Sender<bool>,
     ) -> io::Result<()> {
         let mut publishes_since_mode_change = 0_usize;
         loop {
@@ -247,6 +326,7 @@ impl NatsEndpoint {
                     NatsEndpointMode::HoldingAfter { publishes } => {
                         !frame.is_publish || publishes_since_mode_change < publishes
                     }
+                    NatsEndpointMode::DroppingRepliesAfterNextPublish => true,
                     // The connection's task ends the connection itself.
                     NatsEndpointMode::Down => false,
                 };
@@ -263,8 +343,20 @@ impl NatsEndpoint {
                 }
                 mode.changed().await.map_err(io::Error::other)?;
             }
+            if frame.is_data_publish()
+                && *mode.borrow() == NatsEndpointMode::DroppingRepliesAfterNextPublish
+            {
+                drop_replies.send_replace(true);
+            }
             server.write_all(&frame.bytes).await?;
             if frame.is_publish {
+                if frame.is_data_publish() {
+                    forwarded.send_modify(|count| {
+                        *count = count
+                            .checked_add(1)
+                            .assured("a scenario forwards far fewer than 2^64 publishes");
+                    });
+                }
                 publishes_since_mode_change =
                     publishes_since_mode_change.checked_add(1).ok_or_else(|| {
                         io::Error::other("a connection forwarded more publishes than usize counts")
@@ -286,9 +378,16 @@ impl Drop for NatsEndpoint {
 struct ClientFrame {
     bytes: Vec<u8>,
     is_publish: bool,
+    subject: Option<String>,
 }
 
 impl ClientFrame {
+    fn is_data_publish(&self) -> bool {
+        self.subject
+            .as_deref()
+            .is_some_and(|subject| !subject.starts_with("$JS.API."))
+    }
+
     /// Reads the next frame, or none when the stream ends before another one begins.
     async fn read(reader: &mut (impl AsyncBufRead + Unpin)) -> io::Result<Option<Self>> {
         let mut bytes = Vec::new();
@@ -311,6 +410,11 @@ impl ClientFrame {
         // `PUB <subject> [reply-to] <size>` and `HPUB <subject> [reply-to] <header size> <size>`
         // both end with the size of what follows the line, before its own line feed.
         let is_publish = matches!(operation.as_str(), "PUB" | "HPUB");
+        let subject = if is_publish {
+            tokens.next().map(str::to_owned)
+        } else {
+            None
+        };
         if is_publish {
             let Some(size) = tokens.last() else {
                 return Err(io::Error::new(
@@ -340,6 +444,10 @@ impl ClientFrame {
             bytes.resize(frame_bytes, 0);
             reader.read_exact(&mut bytes[line_end..]).await?;
         }
-        Ok(Some(Self { bytes, is_publish }))
+        Ok(Some(Self {
+            bytes,
+            is_publish,
+            subject,
+        }))
     }
 }

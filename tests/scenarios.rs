@@ -1356,6 +1356,34 @@ fn when_controlled_nats_endpoint_holds_after(world: &mut ScenarioWorld, publishe
     controlled_nats_endpoint(world).hold_after(publishes);
 }
 
+#[when("the controlled NATS endpoint drops replies after its next publish")]
+fn when_controlled_nats_endpoint_drops_replies_after_next_publish(world: &mut ScenarioWorld) {
+    controlled_nats_endpoint(world).drop_replies_after_next_publish();
+}
+
+#[then(expr = "within {string} the controlled NATS endpoint forwards at least {int} publishes")]
+async fn then_controlled_nats_endpoint_forwards_publishes(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: u64,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    nervix_primitives::time::timeout(
+        duration,
+        controlled_nats_endpoint(world).forwarded_publishes_at_least(count),
+    )
+    .await
+    .expect("the controlled NATS endpoint did not forward enough publishes");
+}
+
+#[then(expr = "within {string} the controlled NATS endpoint discards a server reply")]
+async fn then_controlled_nats_endpoint_discards_reply(world: &mut ScenarioWorld, duration: String) {
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    nervix_primitives::time::timeout(duration, controlled_nats_endpoint(world).discarded_reply())
+        .await
+        .expect("the controlled NATS endpoint did not discard a server reply");
+}
+
 /// Stands a forwarder in front of the MQTT broker that can drop chosen PUBLISH packets, and names
 /// its address `{{mqtt_filtered_addr}}`.
 #[given("an MQTT endpoint that drops chosen publishes is configured")]
@@ -27030,6 +27058,24 @@ async fn then_nats_jetstream_stream_eventually_contains_payload(
         .wait_for_nats_stream_payload(&stream, &subject, &expected)
         .await
         .expect("NATS JetStream stream did not receive expected payload");
+}
+
+#[then(expr = "NATS JetStream stream {string} holds exactly {int} messages")]
+async fn then_nats_jetstream_stream_holds_exactly_messages(
+    world: &mut ScenarioWorld,
+    stream: String,
+    count: u64,
+) {
+    let stream = expand_placeholders(world, &stream);
+    let held = world
+        .cluster()
+        .nats_stream_message_count(&stream)
+        .await
+        .unwrap_or_else(|error| panic!("failed to read NATS JetStream stream '{stream}': {error}"));
+    assert_eq!(
+        held, count,
+        "NATS JetStream stream '{stream}' holds {held} messages"
+    );
 }
 
 /// Publishes one NATS message whose payload is a JSON array of `count` records, the `n`th of which

@@ -1,4 +1,196 @@
 Feature: NATS emission
+  @nats_stream_pub_ack @nats_stream_message_id
+  Scenario Outline: A NATS STREAM emitter confirms publication and the stream deduplicates a repeated message ID
+    Given Kafka is running
+    And NATS is running
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "stream_in_{{test_id}}" exists with 1 partitions
+    And NATS JetStream stream "orders_{{test_id}}" exists for subject "orders_out_{{test_id}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA notification ( id STRING, user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( id string, user_id integer );
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_ingress TOPIC 'stream_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'stream_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE NATS CLIENT nats_main CONFIG { 'addr' = '{{nats_addr}}' };
+      CREATE NATS STREAM EMITTER stream_output FROM notifications
+        TO nats_main STREAM 'orders_{{test_id}}' SUBJECT 'orders_out_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 1s
+          ENCODE USING notification_codec MESSAGE ID input.id
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then Kafka consumer group "stream_group_{{test_id}}" eventually has 1 consumers
+    When Kafka message is published to topic "stream_in_{{test_id}}"
+      """
+      {"id":"same-order","user_id":42}
+      """
+    Then NATS JetStream stream "orders_{{test_id}}" eventually contains a payload on subject "orders_out_{{test_id}}"
+      """
+      {"id":"same-order","user_id":42}
+      """
+    And within "10s" Kafka consumer group "stream_group_{{test_id}}" next offset for topic "stream_in_{{test_id}}" partition 0 is "at least 1"
+    When Kafka message is published to topic "stream_in_{{test_id}}"
+      """
+      {"id":"same-order","user_id":43}
+      """
+    Then within "10s" Kafka consumer group "stream_group_{{test_id}}" next offset for topic "stream_in_{{test_id}}" partition 0 is "at least 2"
+    And NATS JetStream stream "orders_{{test_id}}" holds exactly 1 messages
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW CREATE EMITTER stream_output;
+      """
+    Then the last command output contains
+      """
+      STREAM 'orders_{{test_id}}' SUBJECT 'orders_out_{{test_id}}'
+      """
+    And the last command output contains
+      """
+      MODE ACK SEQUENTIAL
+      """
+    And the last command output contains
+      """
+      MESSAGE ID input.id
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @nats_stream_expected_stream
+  Scenario Outline: A NATS STREAM emitter rejects a subject its named stream does not capture
+    Given Kafka is running
+    And NATS is running
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "outside_in_{{test_id}}" exists with 1 partitions
+    And NATS JetStream stream "captured_{{test_id}}" exists for subject "inside_{{test_id}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA notification ( id STRING );
+      CREATE SCHEMA rejection ( error_code STRING, operation STRING, error_message STRING );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( id string );
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE RELAY rejections SCHEMA rejection UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_ingress TOPIC 'outside_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'outside_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE NATS CLIENT nats_main CONFIG { 'addr' = '{{nats_addr}}' };
+      CREATE NATS STREAM EMITTER stream_output FROM notifications
+        TO nats_main STREAM 'captured_{{test_id}}' SUBJECT 'outside_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 1s
+          ENCODE USING notification_codec
+        INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO rejections
+          SET error_code = error.code, operation = error.operation, error_message = error.message
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION rejections_output TO rejections;
+      START;
+      """
+    Then Kafka consumer group "outside_group_{{test_id}}" eventually has 1 consumers
+    When Kafka message is published to topic "outside_in_{{test_id}}"
+      """
+      {"id":"outside"}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      "error_code":"external" | "operation":"publish" | nats JetStream rejected record
+      """
+    And within "10s" Kafka consumer group "outside_group_{{test_id}}" next offset for topic "outside_in_{{test_id}}" partition 0 is "at least 1"
+    And NATS JetStream stream "captured_{{test_id}}" holds exactly 0 messages
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @nats_stream_lost_pub_ack @deloxide_stress @deloxide_stress_restore
+  Scenario Outline: A NATS STREAM emitter retries a lost PubAck with the same message ID
+    Given Kafka is running
+    And NATS is running
+    And a NATS endpoint the scenario controls is configured
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "lost_ack_in_{{test_id}}" exists with 1 partitions
+    And NATS JetStream stream "lost_ack_{{test_id}}" exists for subject "lost_ack_out_{{test_id}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA notification ( id STRING, user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( id string, user_id integer );
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_ingress TOPIC 'lost_ack_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'lost_ack_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE NATS CLIENT nats_main CONFIG { 'addr' = '{{nats_controlled_addr}}' };
+      CREATE NATS STREAM EMITTER stream_output FROM notifications
+        TO nats_main STREAM 'lost_ack_{{test_id}}' SUBJECT 'lost_ack_out_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 100ms MAX 1s
+          ENCODE USING notification_codec MESSAGE ID input.id
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then Kafka consumer group "lost_ack_group_{{test_id}}" eventually has 1 consumers
+    When the controlled NATS endpoint drops replies after its next publish
+    And Kafka message is published to topic "lost_ack_in_{{test_id}}"
+      """
+      {"id":"kept-id","user_id":42}
+      """
+    Then NATS JetStream stream "lost_ack_{{test_id}}" eventually contains a payload on subject "lost_ack_out_{{test_id}}"
+      """
+      {"id":"kept-id","user_id":42}
+      """
+    And within "10s" the controlled NATS endpoint discards a server reply
+    When the controlled NATS endpoint forwards everything
+    Then within "15s" the controlled NATS endpoint forwards at least 2 publishes
+    And within "15s" Kafka consumer group "lost_ack_group_{{test_id}}" next offset for topic "lost_ack_in_{{test_id}}" partition 0 is "at least 1"
+    And NATS JetStream stream "lost_ack_{{test_id}}" holds exactly 1 messages
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @nats_core_connection_loss @deloxide_stress
   Scenario Outline: A core NATS write retries every record through connection loss
     Given NATS is running
@@ -424,7 +616,7 @@ Feature: NATS emission
       | 3            | 32768         |
 
   @nats_jetstream_missing_stream
-  Scenario Outline: NATS JetStream emitter retries a missing stream until it is provisioned
+  Scenario Outline: NATS STREAM emitter waits for its named stream before publishing
     Given Kafka is running
     And NATS is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -462,9 +654,9 @@ Feature: NATS emission
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE NATS CLIENT nats_main CONFIG { 'addr' = '{{nats_addr}}' };
-      CREATE NATS SUBJECT EMITTER nats_jetstream FROM notifications
-        TO nats_main SUBJECT 'jetstream_out_{{test_id}}'
-          MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 1s
+      CREATE NATS STREAM EMITTER nats_jetstream FROM notifications
+        TO nats_main STREAM 'notifications_{{test_id}}' SUBJECT 'jetstream_out_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 1s
             RETRY POLICY BACKOFF 100ms MAX 500ms
           ENCODE USING notification_codec
         INHERIT ALL
@@ -482,7 +674,7 @@ Feature: NATS emission
     Then within "2s" Kafka consumer group "jetstream_boundary_group_{{test_id}}" next offset for topic "jetstream_in_{{test_id}}" partition 0 is "below 1"
     And within "10s" DESCRIBE EMITTER "nats_jetstream" on the leader node contains
       """
-      no stream found for given subject
+      NATS stream 'notifications_{{test_id}}' does not exist
       """
     And the last command output contains
       """
@@ -545,9 +737,9 @@ Feature: NATS emission
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE NATS CLIENT nats_out CONFIG { 'addr' = '{{nats_controlled_addr}}' };
-      CREATE NATS SUBJECT EMITTER window_out FROM window_records
-        TO nats_out SUBJECT 'window_out_{{test_id}}'
-          MODE JETSTREAM ACK PARALLEL MAX 16384 ACK TIMEOUT 3s
+      CREATE NATS STREAM EMITTER window_out FROM window_records
+        TO nats_out STREAM 'window_{{test_id}}' SUBJECT 'window_out_{{test_id}}'
+          MODE ACK PARALLEL MAX 16384 ACK TIMEOUT 3s
             RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING window_record_codec
         INHERIT ALL

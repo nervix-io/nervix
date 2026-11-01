@@ -156,6 +156,7 @@ tags = [
   "@shutdown_emitter_finish",
   "@emitter_finish_at_stop",
   "@nats_core_connection_loss",
+  "@nats_stream_lost_pub_ack",
   "@iceberg_commit_memory",
   "@iceberg_batch_bounds",
   "@zeromq_emitter_open_deadline",
@@ -264,8 +265,12 @@ target = "test:scenarios"
 
 # The capture, restore and checkpoint-transfer scenarios, tagged `@deloxide_stress_restore`, one at
 # a time in the restore selection's lane.
+# Check 41311131846 ran 78 of 80 examples within the former 3840s suite budget after the two
+# NATS STREAM lost-PubAck examples joined this serial selection. Both passed in 30.6s total;
+# the last window example finished its body at 3835s and another remained queued. The 72-minute
+# process bound gives all 80 examples 3960s while retaining the 360s suite teardown reserve.
 [[invocation]]
-bound_seconds = 4200
+bound_seconds = 4320
 concurrency = 1
 evidence = true
 id = "stress-restore-scenarios"
@@ -812,6 +817,16 @@ id = "scenario.nats-core-connection-loss-stop"
 invariant = "A lost connection during STOP produces the Core NATS pending-record uncertainty diagnostic rather than certifying that attempt through a replacement connection."
 invocation = "scenarios"
 scenario = "Nervix reports a core NATS connection change during STOP"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "On one and three nodes a NATS STREAM emitter publishes through a controlled endpoint that forwards its first message but drops the PubAck, then resumes replies. The confirmation timeout, retry and host acknowledgement traverse tracked graph lifecycle and cluster locks; the NATS driver and endpoint sockets are outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_emission.feature"
+id = "scenario.nats-stream-lost-pub-ack"
+invariant = "A stream emitter retries an unconfirmed publication with the same message ID and the stream stores it once."
+invocation = "scenarios"
+scenario = "A NATS STREAM emitter retries a lost PubAck with the same message ID"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -2379,6 +2394,26 @@ invariant = "A lost connection during STOP produces the Core NATS pending-record
 invocation = "stress-scenarios"
 scenario = "Nervix reports a core NATS connection change during STOP"
 selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: on one and three nodes a NATS STREAM emitter publishes through a controlled endpoint that forwards its first message but drops the PubAck, then resumes replies. The confirmation timeout, retry and host acknowledgement traverse tracked graph lifecycle and cluster locks; the NATS driver and endpoint sockets are outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_emission.feature"
+id = "stress.nats-stream-lost-pub-ack"
+invariant = "A stream emitter retries an unconfirmed publication with the same message ID and the stream stores it once."
+invocation = "stress-scenarios"
+scenario = "A NATS STREAM emitter retries a lost PubAck with the same message ID"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: in the restore lane, a NATS STREAM emitter's lost PubAck and retry on one and three nodes exercise tracked graph lifecycle and cluster locks while its driver and endpoint sockets remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_emission.feature"
+id = "stress.nats-stream-lost-pub-ack-restore"
+invariant = "A stream emitter retries an unconfirmed publication with the same message ID and the stream stores it once."
+invocation = "stress-restore-scenarios"
+scenario = "A NATS STREAM emitter retries a lost PubAck with the same message ID"
+selections = ["deloxide-stress-restore"]
 
 [[workload]]
 coverage = "Under scheduling stress: a connect-mode ZeroMQ emitter on one and three nodes whose sink open runs out of connect_timeout_ms against a port that refuses every connection, the emitter task's reopen on its retry policy, and the reopen that connects once a peer listens, beside the tracked locks of the Plexus commands, the HTTP endpoint intake and the cluster's teardown. The ZeroMQ driver's connection attempts, the connect deadline and the emitter's retry wait are untracked."

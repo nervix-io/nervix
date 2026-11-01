@@ -437,7 +437,7 @@ class InventoryTests(unittest.TestCase):
         for index, group in enumerate(identities):
             for other in identities[index + 1:]:
                 self.assertTrue(group.isdisjoint(other))
-        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [160, 10, 6])
+        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [162, 10, 6])
         for invocation, group in zip(phases, groups, strict=True):
             registered = inventory.workloads_of(invocation.id, "deloxide-stress")
             self.assertEqual(deloxide_lane.scenario_problems(invocation, registered, group), [])
@@ -513,6 +513,13 @@ class InventoryTests(unittest.TestCase):
         restore_identities = {
             (scenario.feature, scenario.name) for scenario in restore_scenarios
         }
+        baseline_invocation = inventory.invocations["stress-scenarios"]
+        baseline_identities = {
+            (scenario.feature, scenario.name)
+            for scenario in deloxide_lane.discover_scenarios(
+                REPOSITORY, baseline_invocation.inputs, baseline_invocation.tags
+            )
+        }
         endpoint_invocation = inventory.invocations["stress-endpoint-acknowledgement"]
         endpoint_identities = {
             (scenario.feature, scenario.name)
@@ -527,11 +534,10 @@ class InventoryTests(unittest.TestCase):
                 REPOSITORY, retention_invocation.inputs, retention_invocation.tags
             )
         }
-        stressed = {
-            (workload.feature, workload.scenario): workload
-            for workload in inventory.workloads.values()
-            if workload.invocation.startswith("stress-")
-        }
+        stressed = {}
+        for candidate in inventory.workloads.values():
+            if candidate.invocation.startswith("stress-"):
+                stressed.setdefault((candidate.feature, candidate.scenario), []).append(candidate)
         expected: set[tuple[str | None, str | None]] = set()
         for workload in inventory.workloads.values():
             if workload.invocation not in {"scenarios", "paced-simulation"}:
@@ -541,30 +547,41 @@ class InventoryTests(unittest.TestCase):
             with self.subTest(active=workload.id):
                 identity = (workload.feature, workload.scenario)
                 expected.add(identity)
-                counterpart = stressed.get(identity)
-                assert counterpart is not None, f"{workload.id} has no stressed counterpart"
+                counterparts = stressed.get(identity)
+                assert counterparts is not None, f"{workload.id} has no stressed counterpart"
                 if workload.invocation == "paced-simulation":
+                    self.assertEqual(len(counterparts), 1)
+                    counterpart = counterparts[0]
                     self.assertEqual(counterpart.id, f"stress.{workload.id}")
                     self.assertEqual(counterpart.invocation, "stress-paced-simulation")
                 else:
-                    self.assertEqual(counterpart.id, workload.id.replace("scenario.", "stress.", 1))
-                    if identity in restore_identities:
-                        self.assertEqual(counterpart.invocation, "stress-restore-scenarios")
-                    elif identity in endpoint_identities:
-                        self.assertEqual(counterpart.invocation, "stress-endpoint-acknowledgement")
-                    elif identity in retention_identities:
-                        self.assertEqual(counterpart.invocation, "stress-transaction-retention")
-                    else:
-                        self.assertEqual(counterpart.invocation, "stress-scenarios")
-                self.assertEqual(counterpart.examples, workload.examples)
-                self.assertEqual(counterpart.invariant, workload.invariant)
-                self.assertTrue(counterpart.coverage.startswith("Under scheduling stress: "))
+                    required = {
+                        invocation
+                        for identities, invocation in (
+                            (baseline_identities, "stress-scenarios"),
+                            (restore_identities, "stress-restore-scenarios"),
+                            (endpoint_identities, "stress-endpoint-acknowledgement"),
+                            (retention_identities, "stress-transaction-retention"),
+                        )
+                        if identity in identities
+                    }
+                    self.assertEqual({counterpart.invocation for counterpart in counterparts}, required)
+                    self.assertEqual(len(counterparts), len(required))
+                for counterpart in counterparts:
+                    if workload.invocation != "paced-simulation":
+                        expected_id = workload.id.replace("scenario.", "stress.", 1)
+                        if counterpart.invocation == "stress-restore-scenarios" and len(counterparts) > 1:
+                            expected_id += "-restore"
+                        self.assertEqual(counterpart.id, expected_id)
+                    self.assertEqual(counterpart.examples, workload.examples)
+                    self.assertEqual(counterpart.invariant, workload.invariant)
+                    self.assertTrue(counterpart.coverage.startswith("Under scheduling stress: "))
         self.assertEqual(set(stressed), expected)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 160)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 162)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-transaction-retention", "deloxide-stress")), 6)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-endpoint-acknowledgement", "deloxide-stress")), 10)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-paced-simulation", "deloxide-stress")), 36)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 78)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 80)
         stress_ids = {workload.id for workload in inventory.workloads.values() if workload.id.startswith("stress.")}
         for path, owner in inventory.owners.items():
             with self.subTest(owner=path):

@@ -36,6 +36,13 @@ For MQTT sources, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt)
 delivery during downstream stalls; it distinguishes QoS 0 overflow, acknowledged capacity and
 the counters that expose each outcome.
 
+For NATS publication, choose `NATS SUBJECT EMITTER` with `MODE NO ACK` for Core NATS, or
+`NATS STREAM EMITTER` with a provisioned `STREAM`, a literal `SUBJECT` captured by that stream,
+and `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>` for a JetStream PubAck. The stream
+emitter may set `MESSAGE ID <expression>` for server deduplication across retries. Read
+[Emitters → NATS](../../../docs/src/emitters.md#nats) for the complete clause order, failure
+outcomes and retry boundary.
+
 For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
 Parallel `MAX` is 1 through 65,535 and is the broker prefetch per instance. Each delivery settles

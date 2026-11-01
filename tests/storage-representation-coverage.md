@@ -26,6 +26,11 @@ Model/archive, registry, consensus, canonical Plexus, presentation and console-d
 preserve the complete stream source, and the advanced archive signature and keyspace namespace
 fence the archived union that holds it.
 
+NATS emitter generators draw the Core subject and JetStream stream entities, including the stream
+name, publication subject, acknowledged window, and optional message ID. Model/archive, registry,
+consensus, canonical Plexus and presentation properties preserve the complete destination. The
+current archive signature and consensus keyspaces fence this expanded emitter union.
+
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions
 run in both modes. A target writes through the storage engine its boundary owns when it has one:
