@@ -499,7 +499,8 @@ General notes:
 - public Models store structured expressions; the runtime never reparses Plexus
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
-  `metadata.topic`, `metadata.partition`, and `metadata.offset`, `SYSLOG LISTENER` declares
+  `metadata.topic`, `metadata.partition`, `metadata.offset`, `metadata.key`, `metadata.timestamp`,
+  `metadata.timestamp_type`, and `metadata.tombstone`, `SYSLOG LISTENER` declares
   `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
   `metadata.remote_addr`, and `metadata.host`, `WEBSOCKETS CONNECTION` declares
@@ -509,8 +510,8 @@ General notes:
   field its entity does not declare, naming the ingestor, the route's relay and the fields the
   entity does declare. `FILTER WHERE` reads headers but not `metadata.<field>`
 - an ingestor builds a metadata column only for the fields its route expressions or its
-  `TIMESTAMP AT metadata.<field>` read, so an ingestor that reads none spends nothing per message
-  on metadata
+  `TIMESTAMP AT metadata.<field>` read; an ingestor that reads none visits no metadata values and
+  builds no metadata columns
 - supported sources expose transport headers through `read_header(name)` and `read_headers(name)`;
   header names may be any `STRING` expression, and these functions may be used in both top-level
   `FILTER WHERE` and per-route expressions
@@ -1062,11 +1063,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers'` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL |
+| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
-| Buffers | messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
+| Buffers | a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
 | Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |
 | Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
@@ -1081,6 +1082,25 @@ a string literal of 1 to 255 bytes without control characters, passed to Kafka a
 ingestor names `ON QUIESCE SUSPEND`, the only quiesce mode it declares: the topic keeps its records
 after they are read, so a suspended ingestor resumes from its position, within the topic's
 retention. It reads a record's headers through `read_header` and `read_headers`.
+
+The record's metadata also exposes its key as `metadata.key` (`BYTES`), its broker timestamp as
+`metadata.timestamp` (`DATETIME`), its timestamp kind as `metadata.timestamp_type` (`STRING`), and
+whether its value is null as `metadata.tombstone` (`BOOL`). A missing key is null; an empty key is
+an empty byte sequence. `hex_encode(metadata.key)` or `bytes_to_utf8(metadata.key)` explicitly
+converts a key for a string field. Kafka timestamps count Unix milliseconds; Nervix preserves
+that instant exactly. The timestamp kind is `create_time` or `log_append_time`; a record without
+a timestamp has null timestamp and timestamp kind. `TIMESTAMP AT metadata.timestamp` uses that
+instant as the record's event time, while `TIMESTAMP NOW` uses the domain's execution time. An
+unavailable timestamp cannot satisfy `TIMESTAMP AT metadata.timestamp`; it never falls back to
+`NOW`. A present timestamp outside the signed Unix-nanosecond range fails the read with a typed
+conversion error.
+
+A null Kafka value is a tombstone and reaches the codec as an empty payload with
+`metadata.tombstone = true`. An empty non-null value has `metadata.tombstone = false`. The codec
+still determines how many rows the payload produces: an empty JSON payload produces none, while
+an empty TOML document can produce a row through its JAQ transformation. Metadata is available
+to each resulting row's route. Kafka declares only `SUSPEND` on quiesce, so it never copies these
+rows into a host quiesce buffer.
 
 Offset modes:
 

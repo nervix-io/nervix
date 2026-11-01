@@ -333,6 +333,35 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "metadata.key"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_metadata.feature", scenario = "A Kafka <mode_name> ingestor projects each record's key, timestamp and type" },
+]
+
+[[capability]]
+capability = "metadata.timestamp"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_metadata.feature", scenario = "A Kafka <mode_name> ingestor projects each record's key, timestamp and type" },
+  { feature = "tests/features/runtime/kafka_metadata.feature", scenario = "Kafka broker event time makes historical windows due independently in two branches" },
+]
+
+[[capability]]
+capability = "metadata.timestamp_type"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_metadata.feature", scenario = "A Kafka <mode_name> ingestor projects each record's key, timestamp and type" },
+]
+
+[[capability]]
+capability = "metadata.tombstone"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_metadata.feature", scenario = "A Kafka ingestor distinguishes a tombstone from an empty value" },
+]
+
+[[capability]]
 capability = "BATCH"
 entity = "MONGODB COLLECTION EMITTER"
 scenarios = [
@@ -738,6 +767,13 @@ capability = "ON CONFLICT DO UPDATE"
 entity = "POSTGRES TABLE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/postgres_emission.feature", scenario = "Postgres emitter handles insert conflicts with <conflict_action>" },
+]
+
+[[capability]]
+capability = "STALLED PEER pool_acquire_timeout_ms"
+entity = "POSTGRES TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Postgres emitter whose server never answers is reported within pool_acquire_timeout_ms" },
 ]
 
 [[capability]]

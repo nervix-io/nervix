@@ -61,7 +61,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'kafka_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but KAFKA TOPIC ingestors declare only metadata.topic, metadata.partition and metadata.offset"
+    When these Plexus statements fail with "ingestor 'kafka_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but KAFKA TOPIC ingestors declare only metadata.topic, metadata.partition, metadata.offset, metadata.key, metadata.timestamp, metadata.timestamp_type and metadata.tombstone"
       """
       CREATE KAFKA TOPIC INGESTOR kafka_source
         FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'
@@ -201,7 +201,7 @@ Feature: Typed ingestor metadata
         TIMESTAMP AT metadata.offset
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'kafka_missing_time' in domain '{{domain}}' takes its TIMESTAMP AT metadata.missing, but KAFKA TOPIC ingestors declare only metadata.topic, metadata.partition and metadata.offset"
+    When these Plexus statements fail with "ingestor 'kafka_missing_time' in domain '{{domain}}' takes its TIMESTAMP AT metadata.missing, but KAFKA TOPIC ingestors declare only metadata.topic, metadata.partition, metadata.offset, metadata.key, metadata.timestamp, metadata.timestamp_type and metadata.tombstone"
       """
       CREATE KAFKA TOPIC INGESTOR kafka_missing_time
         FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'

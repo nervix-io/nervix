@@ -657,6 +657,10 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
             "metadata.topic",
             "metadata.partition",
             "metadata.offset",
+            "metadata.key",
+            "metadata.timestamp",
+            "metadata.timestamp_type",
+            "metadata.tombstone",
         ]
     );
     assert_eq!(
