@@ -6,7 +6,7 @@ The tables describe the implemented surface. A connector Epic can extend a decla
 
 Ingest and emit are separate contracts: consuming a broker position and publishing a record need different acknowledgements. Each mirror column compares every declared entity of the same connector on the other side and explains transport differences. An absent capability requires reviewed explanatory prose; stale or missing explanations fail validation.
 
-Client CONFIG keys below come from the same declaration used by validation, completion and public inspection. Keys are lowercase and case-sensitive; every key occurs at most once. Required keys, Nervix-owned value types and TLS identity pairs validate before storage. Driver property namespaces and address query options remain intentional pass-through; undeclared driver properties are confidential in public inspection. Kafka properties and Postgres, MySQL, Redis, RabbitMQ and NATS addresses also pass network-free driver checks before commit. Authentication, connectivity and checks requiring a remote service wait for initialization. Nervix-owned file values accept resource mount templates and must resolve to readable files; driver-owned file properties retain their native interpretation. HTTPS retains the driver's built-in trust roots; MQTT requires tls_ca_file for mqtts, as its key's conditional presence declares. tls_ca_file follows the connector's documented augmentation or replacement policy, and a client certificate requires its private key.
+Client CONFIG keys below come from the same declaration used by validation, completion and public inspection. Keys are lowercase and case-sensitive; every key occurs at most once. Required keys, Nervix-owned value types and TLS identity pairs validate before storage. Driver property namespaces and address query options remain intentional pass-through; undeclared driver properties are confidential in public inspection. Kafka properties and Postgres, MySQL, Redis, RabbitMQ and NATS addresses also pass network-free driver checks before commit. Authentication, connectivity and checks requiring a remote service wait for initialization. Nervix-owned file values accept resource mount templates and must resolve to readable files; driver-owned file properties retain their native interpretation. HTTPS retains the driver's built-in trust roots; MQTT requires tls_ca_file exactly for mqtts and refuses its TLS files with a plaintext address, as its keys' conditional presence declares. tls_ca_file follows the connector's documented augmentation or replacement policy, and a client certificate requires its private key.
 
 ## Ingest
 
@@ -371,7 +371,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |  |
-| Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, message.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |  |
+| Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |  |
 | Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
@@ -806,14 +806,13 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `auto.offset.reset` | optional | string | driver; best effort | no | none |
 | `bootstrap.servers` | required | string | driver; best effort | no | none |
 | `client.id` | optional | string | driver; best effort | no | none |
+| `delivery.timeout.ms` | optional | unsigned integer | driver; best effort | no | none |
 | `fetch.wait.max.ms` | optional | unsigned integer | driver; best effort | no | none |
 | `heartbeat.interval.ms` | optional | positive integer | driver; best effort | no | none |
 | `linger.ms` | optional | unsigned integer | driver; best effort | no | none |
 | `message.max.bytes` | optional | positive integer | driver; best effort | no | none |
-| `message.timeout.ms` | optional | unsigned integer | driver; best effort | no | none |
 | `queue.buffering.max.messages` | optional | unsigned integer | driver; best effort | no | none |
 | `sasl.mechanism` | optional | string | driver; best effort | no | none |
-| `sasl.mechanisms` | optional | string | driver; best effort | no | none |
 | `sasl.oauthbearer.config` | optional | string | driver; best effort | yes | none |
 | `sasl.password` | optional | string | driver; best effort | yes | none |
 | `sasl.username` | optional | string | driver; best effort | yes | none |
@@ -827,6 +826,24 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `ssl.key.pem` | optional | string | driver; best effort | yes | none |
 
 Delegated property namespaces: all driver property names. Reserved keys: `allow.auto.create.topics`, `delivery.report.only.error`, `enable.auto.commit`, `enable.partition.eof`, `group.id`.
+
+A property the driver reads under more than one name is accepted under one; the client refuses the other.
+
+| Refused driver name | Accepted name |
+| --- | --- |
+| `compression.codec` | `compression.type` |
+| `fetch.message.max.bytes` | `max.partition.fetch.bytes` |
+| `max.in.flight` | `max.in.flight.requests.per.connection` |
+| `message.send.max.retries` | `retries` |
+| `message.timeout.ms` | `delivery.timeout.ms` |
+| `metadata.broker.list` | `bootstrap.servers` |
+| `queue.buffering.max.ms` | `linger.ms` |
+| `request.required.acks` | `acks` |
+| `sasl.mechanisms` | `sasl.mechanism` |
+| `sasl.oauthbearer.client.id` | `sasl.oauthbearer.client.credentials.client.id` |
+| `sasl.oauthbearer.client.secret` | `sasl.oauthbearer.client.credentials.client.secret` |
+
+The driver also strips its `topic.` prefix from a key that names none of its own properties and reads the rest as a property name, so the client refuses a key written under the prefix, except the driver's own properties whose names begin with it: `topic.blacklist`, `topic.metadata.propagation.max.ms`, `topic.metadata.refresh.fast.cnt`, `topic.metadata.refresh.fast.interval.ms`, `topic.metadata.refresh.interval.ms`, `topic.metadata.refresh.sparse`.
 
 ### PULSAR client
 
@@ -901,11 +918,11 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `addr` | required | URL (mqtt or mqtts) | Nervix; strict | no | none |
+| `addr` | required | URL naming only a host and a port (mqtt or mqtts) | Nervix; strict | no | none |
 | `client_id` | optional | string | Nervix; strict | no | none |
-| `tls_ca_file` | required when `addr` uses `mqtts` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
-| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
-| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+| `tls_ca_file` | required when `addr` uses `mqtts`; refused otherwise | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional; requires `addr` to use `mqtts` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional; requires `addr` to use `mqtts` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 

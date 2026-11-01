@@ -11,7 +11,7 @@ from scripts.backup_cut_cleanup import FAILURE, FEATURE, CleanupCase, scenario_e
 class CleanupVerdictTests(unittest.TestCase):
     def setUp(self) -> None:
         self.output = f"{FAILURE}\n6 scenarios (6 failed)\n"
-        self.summary = "Attempts: 6 completed, 0 active; retries: 0, holding 0.0 slot-seconds"
+        self.summary = "Attempts: 6 completed, 0 active; retries: 0.\nReservations: 0.0 slot-seconds beyond one slot per attempt."
         cases = [
             CleanupCase("Plexus", "capture", 1), CleanupCase("Plexus", "capture", 3),
             CleanupCase("command", "lease", 1), CleanupCase("command", "lease", 3),
@@ -59,7 +59,7 @@ class CleanupVerdictTests(unittest.TestCase):
 
     def test_active_or_retried_attempts_cannot_qualify(self) -> None:
         for summary in (self.summary.replace("0 active", "1 active"),
-                        self.summary.replace("retries: 0,", "retries: 1,")):
+                        self.summary.replace("retries: 0.", "retries: 1.")):
             with self.subTest(summary=summary), self.assertRaisesRegex(ValueError, "attempts"):
                 self.check(summary=summary)
 

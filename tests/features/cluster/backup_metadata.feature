@@ -184,6 +184,10 @@ Feature: Large native restore metadata
     Examples:
       | cluster_size | save_mib | branches | restored_inputs | restore_owners |
       | 1            | 1        | 2        | 4               | 1              |
+
+    @slots_4
+    Examples:
+      | cluster_size | save_mib | branches | restored_inputs | restore_owners |
       | 3            | 1        | 2        | 4               | 2              |
 
   @long_running

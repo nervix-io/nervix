@@ -2,7 +2,7 @@
 //!
 //! Layer: vocabulary.
 //! - **Owns.** Key names, presence, types, confidentiality, file roles, the entities that read each
-//!   key and delegated namespaces.
+//!   key, delegated namespaces and the other names a driver reads for one property.
 //! - **Depends on.** Configuration entries, the shared deadline contract and URL values.
 //! - **Must not know.** Driver implementations, resource installation or network operations.
 
@@ -49,6 +49,12 @@ pub enum ClientConfigPresence {
         scheme: &'static str,
     },
     OptionalForScheme {
+        address: &'static str,
+        scheme: &'static str,
+    },
+    /// The key is written exactly while the named address uses the declared scheme: required with
+    /// it and refused without it.
+    ExactlyForScheme {
         address: &'static str,
         scheme: &'static str,
     },
@@ -204,6 +210,9 @@ pub enum ClientConfigValue {
     Milliseconds,
     TcpKeepaliveMilliseconds,
     Url(&'static [&'static str]),
+    /// A URL with one of these schemes that names a host and a nonzero port and nothing else: no
+    /// credentials, path, query or fragment.
+    HostPortUrl(&'static [&'static str]),
     DriverAddress,
     DriverUrl(DriverUrl),
     Choice(&'static [&'static str]),
@@ -226,6 +235,7 @@ impl ClientConfigValue {
                 "whole seconds from 1000 through 32767000 milliseconds"
             }
             Self::Url(_) => "URL",
+            Self::HostPortUrl(_) => "URL naming only a host and a port",
             Self::DriverAddress => "driver address, including its delegated query options",
             Self::DriverUrl(_) => {
                 "driver URL with Nervix-owned query options, including its delegated query options"
@@ -299,9 +309,9 @@ impl ClientConfigValue {
                     return Err(Report::new(invalid()));
                 }
             }
-            Self::Url(schemes) => {
+            Self::Url(_) | Self::HostPortUrl(_) => {
                 let parsed = Url::parse(value).change_context(invalid())?;
-                if !schemes.contains(&parsed.scheme()) || parsed.host_str().is_none() {
+                if !self.admits_url(&parsed) {
                     return Err(Report::new(invalid()));
                 }
             }
@@ -328,6 +338,43 @@ impl ClientConfigValue {
         Ok(())
     }
 
+    /// Whether a parsed `address` has one of this kind's schemes and the parts the kind requires: a
+    /// host for a URL, and only a host and a nonzero port for a host-and-port URL. No other kind
+    /// admits a URL.
+    fn admits_url(self, address: &Url) -> bool {
+        match self {
+            Self::Url(schemes) => {
+                schemes.contains(&address.scheme()) && address.host_str().is_some()
+            }
+            Self::HostPortUrl(schemes) => {
+                schemes.contains(&address.scheme()) && Self::names_only_host_and_port(address)
+            }
+            Self::String
+            | Self::PercentEncodedHeaders
+            | Self::Boolean
+            | Self::UnsignedInteger
+            | Self::PositiveInteger
+            | Self::Milliseconds
+            | Self::TcpKeepaliveMilliseconds
+            | Self::DriverUrl(_)
+            | Self::DriverAddress
+            | Self::Choice(_)
+            | Self::File(_)
+            | Self::Levels(_) => false,
+        }
+    }
+
+    /// Whether `address` names a host and a nonzero port and nothing else: no credentials, no path
+    /// beyond the root, no query and no fragment.
+    fn names_only_host_and_port(address: &Url) -> bool {
+        let names_host = matches!(address.host_str(), Some(host) if !host.is_empty());
+        let names_port = matches!(address.port(), Some(port) if port != 0);
+        let names_root = matches!(address.path(), "" | "/");
+        let names_credentials = !address.username().is_empty() || address.password().is_some();
+        let names_query_or_fragment = address.query().is_some() || address.fragment().is_some();
+        names_host && names_port && names_root && !names_credentials && !names_query_or_fragment
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::error_boundary(
@@ -343,7 +390,7 @@ impl ClientConfigValue {
     fn address_is_confidential(self, value: &str) -> bool {
         if !matches!(
             self,
-            Self::Url(_) | Self::DriverAddress | Self::DriverUrl(_)
+            Self::Url(_) | Self::HostPortUrl(_) | Self::DriverAddress | Self::DriverUrl(_)
         ) {
             return false;
         }
@@ -446,6 +493,15 @@ impl ClientConfigKey {
         }
     }
 
+    /// Require this key when the named address uses the declared scheme, and refuse it otherwise,
+    /// for a key that only a connection over that scheme reads and that it cannot do without.
+    pub const fn exactly_for_scheme(self, address: &'static str, scheme: &'static str) -> Self {
+        Self {
+            presence: ClientConfigPresence::ExactlyForScheme { address, scheme },
+            ..self
+        }
+    }
+
     /// Permit this key only while the named driver URL sets its Nervix-owned `option` to `value`.
     pub const fn only_for_query(
         self,
@@ -487,6 +543,44 @@ impl ClientConfigKey {
     }
 }
 
+/// Another name a driver reads for one of its properties.
+///
+/// A driver that reads a property under two names applies the entry it is handed last, and a
+/// client's entries reach it in no fixed order, so two entries for one property would leave its
+/// value to that order. A schema accepts each such property under one name and refuses the other,
+/// even when the configuration writes it alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientConfigAlias {
+    /// The other name, which the client refuses.
+    pub alias: &'static str,
+    /// The one name the client accepts for the property.
+    pub accepted: &'static str,
+}
+
+/// A prefix a driver strips from a key that names none of its own properties, reading the rest of
+/// the key as a property name.
+///
+/// A schema refuses every key written under the prefix except the driver's own properties whose
+/// names begin with it, so a property the prefix would reach is written under its own name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientConfigStrippedPrefix {
+    /// The prefix the driver strips, including its separator.
+    pub prefix: &'static str,
+    /// The driver's own properties whose names begin with the prefix, sorted.
+    pub properties: &'static [&'static str],
+}
+
+impl ClientConfigStrippedPrefix {
+    /// Whether the driver strips this prefix from `key` before reading it: `key` is written under
+    /// the prefix and is not one of the driver's own properties whose names begin with it.
+    fn applies_to(self, key: &str) -> bool {
+        if !key.starts_with(self.prefix) {
+            return false;
+        }
+        self.properties.binary_search(&key).is_err()
+    }
+}
+
 /// A pass-through namespace, explicitly including the case where the driver reads every key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientConfigNamespace {
@@ -509,6 +603,9 @@ pub struct ClientConfigSchema {
     keys: &'static [ClientConfigKey],
     namespaces: &'static [ClientConfigNamespace],
     reserved: &'static [&'static str],
+    /// The other names the driver reads for its properties, sorted by the name each refuses.
+    aliases: &'static [ClientConfigAlias],
+    stripped_prefix: Option<ClientConfigStrippedPrefix>,
 }
 
 #[derive(Clone, Copy)]
@@ -563,6 +660,15 @@ pub enum ClientConfigSchemaError {
     },
     #[error("client config key '{key}' is reserved for Nervix")]
     Reserved { key: String },
+    #[error(
+        "client config key '{key}' is the driver's other name for '{accepted}'; write '{accepted}'"
+    )]
+    DriverAlias { key: String, accepted: &'static str },
+    #[error(
+        "client config key '{key}' is written under the driver's '{prefix}' prefix; write it \
+         without the prefix"
+    )]
+    DriverPrefix { key: String, prefix: &'static str },
 }
 
 impl ClientConfigSchema {
@@ -593,7 +699,140 @@ impl ClientConfigSchema {
             keys,
             namespaces,
             reserved,
+            aliases: &[],
+            stripped_prefix: None,
         }
+    }
+
+    /// Declares the other names the driver reads for its properties: `aliases`, sorted by the name
+    /// each refuses, and the prefix the driver strips from a key before reading it, if it strips
+    /// one.
+    pub const fn with_driver_aliases(
+        self,
+        aliases: &'static [ClientConfigAlias],
+        stripped_prefix: Option<ClientConfigStrippedPrefix>,
+    ) -> Self {
+        let mut index = 1;
+        while index < aliases.len() {
+            assert!(Self::name_precedes(
+                aliases[index - 1].alias,
+                aliases[index].alias
+            ));
+            index += 1;
+        }
+        let mut index = 0;
+        while index < aliases.len() {
+            let ClientConfigAlias { alias, accepted } = aliases[index];
+            // A refused name is no key this schema declares or reserves, and no pair refuses the
+            // name another accepts, so each property resolves to its accepted name in one step.
+            assert!(!Self::same_name(alias, accepted));
+            assert!(!Self::declares(self.keys, alias));
+            assert!(!Self::holds_name(self.reserved, alias));
+            assert!(!Self::refuses_alias(aliases, accepted));
+            index += 1;
+        }
+        if let Some(stripped) = stripped_prefix {
+            self.assert_stripped_prefix(aliases, stripped);
+        }
+        Self {
+            aliases,
+            stripped_prefix,
+            ..self
+        }
+    }
+
+    /// Holds a stripped prefix to its declaration: its own properties are sorted and written under
+    /// it, and no other name this schema declares, reserves, refuses or accepts is written under
+    /// it.
+    const fn assert_stripped_prefix(
+        self,
+        aliases: &[ClientConfigAlias],
+        stripped: ClientConfigStrippedPrefix,
+    ) {
+        let ClientConfigStrippedPrefix { prefix, properties } = stripped;
+        let mut index = 0;
+        while index < properties.len() {
+            assert!(Self::begins_with(properties[index], prefix));
+            if index > 0 {
+                assert!(Self::name_precedes(
+                    properties[index - 1],
+                    properties[index]
+                ));
+            }
+            index += 1;
+        }
+        let mut index = 0;
+        while index < self.keys.len() {
+            let name = self.keys[index].name;
+            assert!(!Self::begins_with(name, prefix) || Self::holds_name(properties, name));
+            index += 1;
+        }
+        let mut index = 0;
+        while index < self.reserved.len() {
+            let name = self.reserved[index];
+            assert!(!Self::begins_with(name, prefix) || Self::holds_name(properties, name));
+            index += 1;
+        }
+        let mut index = 0;
+        while index < aliases.len() {
+            let ClientConfigAlias { alias, accepted } = aliases[index];
+            assert!(!Self::begins_with(alias, prefix));
+            assert!(!Self::begins_with(accepted, prefix) || Self::holds_name(properties, accepted));
+            index += 1;
+        }
+    }
+
+    /// Whether `keys` declares `name`.
+    const fn declares(keys: &[ClientConfigKey], name: &str) -> bool {
+        let mut index = 0;
+        while index < keys.len() {
+            if Self::same_name(keys[index].name, name) {
+                return true;
+            }
+            index += 1;
+        }
+        false
+    }
+
+    /// Whether one of `aliases` refuses `name`.
+    const fn refuses_alias(aliases: &[ClientConfigAlias], name: &str) -> bool {
+        let mut index = 0;
+        while index < aliases.len() {
+            if Self::same_name(aliases[index].alias, name) {
+                return true;
+            }
+            index += 1;
+        }
+        false
+    }
+
+    /// Whether `names` holds `name`.
+    const fn holds_name(names: &[&str], name: &str) -> bool {
+        let mut index = 0;
+        while index < names.len() {
+            if Self::same_name(names[index], name) {
+                return true;
+            }
+            index += 1;
+        }
+        false
+    }
+
+    /// Whether `name` is written under `prefix`.
+    const fn begins_with(name: &str, prefix: &str) -> bool {
+        let name = name.as_bytes();
+        let prefix = prefix.as_bytes();
+        if name.len() < prefix.len() {
+            return false;
+        }
+        let mut index = 0;
+        while index < prefix.len() {
+            if name[index] != prefix[index] {
+                return false;
+            }
+            index += 1;
+        }
+        true
     }
 
     /// Whether `address` is a driver URL whose Nervix-owned `option` offers `value`, which a key
@@ -663,6 +902,47 @@ impl ClientConfigSchema {
 
     pub const fn reserved(self) -> &'static [&'static str] {
         self.reserved
+    }
+
+    pub const fn aliases(self) -> &'static [ClientConfigAlias] {
+        self.aliases
+    }
+
+    pub const fn stripped_prefix(self) -> Option<ClientConfigStrippedPrefix> {
+        self.stripped_prefix
+    }
+
+    /// The pair that refuses `name`, if the driver reads `name` as another name for a property this
+    /// schema accepts under one.
+    fn alias(self, name: &str) -> Option<&'static ClientConfigAlias> {
+        match self
+            .aliases
+            .binary_search_by_key(&name, |alias| alias.alias)
+        {
+            Ok(index) => Some(&self.aliases[index]),
+            Err(_) => None,
+        }
+    }
+
+    /// Refuses `key` when the driver reads it as another name for a property: a name a declared
+    /// pair refuses, or a key written under the prefix the driver strips.
+    fn refuse_driver_alias(self, key: &str) -> Result<(), Report<ClientConfigSchemaError>> {
+        if let Some(alias) = self.alias(key) {
+            return Err(Report::new(ClientConfigSchemaError::DriverAlias {
+                key: key.to_string(),
+                accepted: alias.accepted,
+            }));
+        }
+        let Some(stripped) = self.stripped_prefix else {
+            return Ok(());
+        };
+        if !stripped.applies_to(key) {
+            return Ok(());
+        }
+        Err(Report::new(ClientConfigSchemaError::DriverPrefix {
+            key: key.to_string(),
+            prefix: stripped.prefix,
+        }))
     }
 
     /// The summary is derived from the same per-key and namespace declarations as validation.
@@ -736,6 +1016,7 @@ impl ClientConfigSchema {
                     key: entry.key.clone(),
                 }));
             }
+            self.refuse_driver_alias(&entry.key)?;
             let Some(key) = self.key(&entry.key) else {
                 if self.delegates(&entry.key) {
                     continue;
@@ -829,7 +1110,8 @@ impl ClientConfigSchema {
         for key in self.keys {
             let (address, scheme) = match key.presence {
                 ClientConfigPresence::RequiredForScheme { address, scheme }
-                | ClientConfigPresence::OptionalForScheme { address, scheme } => (address, scheme),
+                | ClientConfigPresence::OptionalForScheme { address, scheme }
+                | ClientConfigPresence::ExactlyForScheme { address, scheme } => (address, scheme),
                 _ => continue,
             };
             let present = values.contains_key(key.name);
@@ -863,6 +1145,23 @@ impl ClientConfigSchema {
                         key: key.name,
                         address,
                         scheme,
+                    }));
+                }
+                ClientConfigPresence::ExactlyForScheme { .. }
+                    if present && parsed.scheme() != scheme =>
+                {
+                    return Err(Report::new(ClientConfigSchemaError::RequiresScheme {
+                        key: key.name,
+                        address,
+                        scheme,
+                    }));
+                }
+                ClientConfigPresence::ExactlyForScheme { .. }
+                    if !present && parsed.scheme() == scheme =>
+                {
+                    return Err(Report::new(ClientConfigSchemaError::RequiresKey {
+                        key: address,
+                        required: key.name,
                     }));
                 }
                 _ => {}

@@ -605,7 +605,7 @@ Transport-specific schemes and keys:
 - `HTTP`: use an `https://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
 - `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file` and `tls_key_file`, and the client requires `timeout_ms`; see [Prometheus](#prometheus) for every key it declares.
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS.
+- `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
@@ -912,7 +912,7 @@ where it has one:
 | `REDIS PUBSUB` | `CHANNEL` | 1 to 1,024 bytes of any text; a `*` is the character itself, and pattern subscriptions are not offered |
 | `NATS SUBJECT` | `SUBJECT` | At most 1,024 bytes of `.`-separated tokens, none empty, without whitespace or control characters; `*` stands for one token and `>` for the rest, each only as a whole token, and `>` only last |
 | `NATS SUBJECT` | `QUEUE GROUP` | 1 to 255 bytes without whitespace or control characters |
-| `MQTT TOPIC` | `TOPIC` | A topic filter of 1 to 65,535 bytes without NUL; `+` stands for one level and `#` for the rest, each only as a whole level, and `#` only last. Levels are joined by `/` and may be empty |
+| `MQTT TOPIC` | `TOPIC` | A topic filter of 1 to 65,535 bytes without NUL; `+` stands for one level and `#` for the rest, each only as a whole level, and `#` only last. Levels are joined by `/` and may be empty. The first level is not `$share`, since Nervix forms the shared subscription itself |
 
 A reference to a Nervix model, such as a client, endpoint, schema, codec, or relay, stays a bare
 identifier.
@@ -994,7 +994,9 @@ See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md
   transport failure but never the endpoint's path or query.
 - `metadata.status` is the successful response's `U16` status and `metadata.polled_at` is the
   scheduled `DATETIME` instant of that poll. `read_header` and `read_headers` read the response's
-  headers; `204 No Content` emits no row.
+  headers, including non-ASCII UTF-8 values. A header value with invalid UTF-8 bytes is omitted
+  without discarding the row and counted in `nervix_ingestor_header_values_dropped_total`;
+  `204 No Content` emits no row.
 - polls a configured HTTP endpoint periodically
 - issues the first request immediately, then follows an anchored domain-clock cadence; slow
   responses coalesce missed occurrences into one request at the newest due instant
@@ -1059,6 +1061,20 @@ the client contacts first, and refuses a client without it, which could reach no
 the Nervix-owned keys `group.id`, `enable.auto.commit`, `enable.partition.eof`,
 `allow.auto.create.topics` and `delivery.report.only.error`. Other property names and values are
 checked offline by librdkafka before commitment and passed through to it.
+
+librdkafka reads some properties under two names and applies whichever it is handed last, and a
+client's entries reach it in no fixed order. A Kafka client therefore accepts each such property
+under one name, the one the Apache Kafka Java client uses, and refuses the other even when it is
+written alone, naming both: write `bootstrap.servers`, not `metadata.broker.list`, and
+`delivery.timeout.ms`, not `message.timeout.ms`. The
+[Kafka client reference](./connector-capabilities.md#kafka-client) lists every refused name with
+the name to write. librdkafka also reads a default-topic property written under a `topic.`
+prefix, so the client refuses a key written that way, except librdkafka's own global properties
+whose names begin with `topic.`, such as `topic.metadata.refresh.interval.ms`. Write a
+default-topic property under its own name. The topic-level `auto.commit.interval.ms`,
+`auto.commit.enable` and `offset.store.method` serve only librdkafka's legacy consumer, which
+Nervix does not run, and the default topic takes `compression.type` from the client's global
+setting. Each property a client sets therefore has one name and one value on every node.
 
 The statement's offset mode supplies the consumer's `group.id`. Only `OFFSET BY CONSUMER GROUP`
 with `MODE NO ACK` enables `enable.auto.commit`. Every consumer disables `enable.partition.eof`
@@ -1517,6 +1533,11 @@ See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#m
 The topic filter is a string literal; see [External Names](#external-names) for the levels and
 wildcards it may hold.
 
+The client's `addr` names the broker by its scheme, host and port alone: `mqtt://` or `mqtts://`, a
+host, and a nonzero port, such as `mqtt://broker.example.com:1883`. A connection reads nothing else
+from it, so `CREATE MQTT CLIENT` refuses an address that leaves out its port or writes credentials,
+a path, a query or a fragment.
+
 Connections use the driver's 60-second keep-alive unless the broker supplies a Server Keep Alive
 in `CONNACK`. Plexus exposes no client setting for this interval. A broker-supplied zero disables
 the keep-alive and the acknowledgement-write deadline derived from it; it does not make a silent
@@ -1543,7 +1564,7 @@ Delivery constraints:
   acknowledgements, and a batch above 65,535 gathers at most 65,535 of them before its
   `BATCH TIMEOUT` ends it. The extra capacity lets the connection keep reading while the ingestor
   holds a batch
-- `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
+- `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages. Every instance subscribes to `$share/<domain>~<ingestor>/<filter>`, so the share group belongs to Nervix and a topic filter cannot begin with a `$share` level of its own
 
 In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for
 is written to the connection, within one keep-alive interval; the broker answers none. Its

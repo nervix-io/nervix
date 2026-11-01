@@ -347,7 +347,12 @@ uncharged. Its private charged-input trait exposes a byte borrow with an explici
 execution contract; both concrete carriers return their retained slice without synchronization.
 Deloxide does not observe the asynchronous semaphore waits. The worker FIFO uses a
 tracked lock, so `scenario.snapshot-receive-admission` and its stressed restore twin cover actual
-decode admission and completion in the diagnostic selections. Queued callback cancellation uses
+decode admission and completion in the diagnostic selections. The probe owns a fixed reservation
+of the node's Bulk capacity except its 4096-byte receive allowance. A prior reservation's release
+therefore cannot enlarge that allowance. Nonblocking attempts take the whole hold or none of it,
+so the probe never queues a partial grant that could stop earlier work from releasing its bytes.
+The fixture's quota acquisition is untracked; its focused owner regressions check prior-charge
+release, the unchanged allowance and complete release of its hold. Queued callback cancellation uses
 that existing FIFO owner without acquiring a new lock; the explicit cancellation interleaving
 is covered by Shuttle. Explicit-poll owner regressions and public snapshot receive scenarios
 cover refusal, release and complete-checkpoint recovery. The registered Shuttle check
@@ -1849,16 +1854,20 @@ map and watch remain outside tracked-lock detection; the public assertions estab
 took up the refused upload before the client's retry could supply the archive again.
 
 The backup cut diagnostics scenario exercises capture-budget expiry and resumption on one and
-three nodes in the active, order and stressed-restore Deloxide selections. The coordinator's phase
-measurements are task-owned administrative state and add no synchronization. The existing capture
-and cleanup paths retain their tracked-lock coverage; phase timing itself establishes no
-interleaving or memory-ordering guarantee. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
+three nodes in the active, order and stressed-restore Deloxide selections. Its pause-application
+outline holds every node's wait for the paused revision, so the cut's deadline ends the
+coordinator's own application of the pause and the resume runs through each node's runtime
+installation and reconciliation while those waits are still held; the deadline only drops a wait,
+and adds no lock. The coordinator's phase measurements are task-owned administrative state and add
+no synchronization. The existing capture and cleanup paths retain their tracked-lock coverage;
+phase timing itself establishes no interleaving or memory-ordering guarantee. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
 owns the diagnostic contract.
 
-The test-only backup cut registry releases its watch-held lease, drain and capture gates before
-clearing the map during scenario cleanup. Existing borrowers observe release; later cuts encounter
-no gate. Gate-owner tests with a paused clock cover waiting cuts, timed holds and later arrivals,
-and cleanup at every boundary. The supervised failed-body Cucumber fixture reaches the lease and
+The test-only backup cut registry releases its watch-held lease, pause-application, drain and
+capture gates before clearing the map during scenario cleanup. Existing borrowers observe release;
+later cuts encounter no gate. Gate-owner tests with a paused clock cover waiting cuts, timed holds
+and later arrivals, the pause-application gate holding only revisions that pause its domain, and
+cleanup at every boundary. The supervised failed-body Cucumber fixture reaches the lease and
 capture boundaries on one and three nodes and requires every node to stop while every body retains
 its failure. These watch channels and concurrent-map accesses are outside Deloxide's tracked locks.
 This harness cleanup adds no data-plane synchronization or memory-ordering claim; [Integration Test Lifecycle](./integration-test-lifecycle.md#what-cleanup-releases)

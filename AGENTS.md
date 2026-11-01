@@ -96,6 +96,11 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   executable Plexus that the runtime reparses.
 - Grammar keywords are case-insensitive language tokens. Original spelling may be retained for
   diagnostics, but unknown words are not a substitute for declaring language keywords.
+- Ingestor and emitter statement heads name the connector and entity, even when that connector
+  serves only one entity; client heads name the connector. An ingestor or emitter `ALTER` repeats
+  its stored connector and entity. The head selects the kind, while the body writes that entity's
+  declared reference, locator and options. Each pair owns its grammar body and semantic Model
+  variant; completion composes its head from the shared tokens and vocabulary declaration.
 - External connector configuration remains raw only where pass-through is the intentional public
   contract.
 
@@ -365,8 +370,17 @@ ingestor contract, the emitter contract, or both, from `nervix-connector` in `cr
 - The server is the composition root and the only crate that names every connector.
 - No connector crate reads a Model. The decision layer converts Models into a typed plan once, and
   the connector receives that plan.
+- Models, plans and runtime composition nest connector then entity. Each entity has its own plan
+  variant and concrete connector type, including a connector's second entity; a mode flag does not
+  select between entities. The type declares its vocabulary kind through `IngestorConnector::KIND`
+  or the emitter's `KIND` and object-safe `EmitterLifecycle::kind()`, and the composition root
+  asserts the plan-to-implementation kind at compile time. Shared private encoding and intake
+  mechanisms do not replace these entity boundaries.
 - Capabilities the registry validates live in the vocabulary. The registry names no connector crate,
-  so a capability declared only inside one could never be validated.
+  so a capability declared only inside one could never be validated. Each entity declares its
+  capabilities and body reference kind once there; grammar, validation, planning, completion and
+  presentation consume that declaration. [Connector and entity kinds](docs/src/connector-contract.md#connector-and-entity-kinds)
+  owns this contract and the checklist for adding an entity.
 - Connector names come from the vocabulary's `ConnectorKind` display and entity names from their
   declarations. Derive labels and prefixes from those sources across configuration errors,
   transports, metrics, logs, dataflow identifiers and `DESCRIBE`; do not maintain another spelling
@@ -1266,11 +1280,16 @@ build and the existing tests, and nothing in it changes behavior.
   parallelism, because the wait ends when the condition holds.
 - Every scenario runs beside the rest of the suite. Do not add a tag, lock, or harness mode that
   runs a scenario alone or stops other scenarios from starting while it runs, such as an @exclusive
-  tag. The one reservation is the retry's share: a retry holds a larger share of the run slots on
-  each attempt, never more than a quarter of them, as
-  [Integration Test Lifecycle](docs/src/integration-test-lifecycle.md) specifies. A scenario that
-  passes only on an idle machine, or only once a retry's share quiets the machine, is a defect in
-  that scenario: fix its timing assumption, and rely on the suite’s retries for what load remains.
+  tag. Run-slot reservations are limited to declared scenario weights and retry shares, as
+  [Integration Test Lifecycle](docs/src/integration-test-lifecycle.md) specifies. A scenario may
+  declare its measured load with `@slots_N` on its feature, rule, scenario or outline's
+  examples. The largest inherited declaration applies. Each attempt holds the larger of that
+  weight and its retry share, capped at a quarter of the pool and at least one slot, including in
+  small local pools. Choose weights from measured load per attempt and compare complete sharded
+  runs for stalls, retries, utilization and suite length. A weight shapes admission capacity; it
+  never excuses a timing assumption. A scenario that passes only on an idle machine, or only
+  once a weight or retry share quiets the machine, is a defect in that scenario: fix its timing
+  assumption, and rely on the suite's retries for what load remains.
 - An assertion that something has **not** happened yet is the opposite, and no choice of window
   makes it reliable. Its window opens when the step starts, while the cadence it races started at
   the event before it, so the margin between them is consumed by whatever delayed the step
