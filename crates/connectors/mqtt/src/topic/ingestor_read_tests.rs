@@ -310,7 +310,7 @@ async fn a_batch_timeout_beyond_the_clock_fails_the_read() {
 /// One ACK-mode ingestor instance subscribing to `events` at QoS 1 through `addr` and `dns`, whose
 /// publishes wait on their acknowledgements `window` at a time.
 fn acknowledged_plan(addr: &str, dns: DnsResolver, window: NonZeroU64) -> MqttTopicIngestorPlan {
-    acknowledged_plan_at(addr, dns, window, MqttQos::AtLeastOnce)
+    acknowledged_plan_at(addr, dns, window, MqttQos::Qos1)
 }
 
 /// One ACK-mode ingestor instance subscribing to `events` at `qos` through `addr` and `dns`, whose
@@ -675,12 +675,7 @@ async fn an_acknowledged_exactly_once_batch_has_written_every_pubrec_and_complet
     let fixture = DnsFixture::start().await;
     let broker = ScriptedBroker::start().await;
     let window = NonZeroU64::new(3).assured("three is non-zero");
-    let plan = acknowledged_plan_at(
-        &broker.addr(),
-        fixture.dns.clone(),
-        window,
-        MqttQos::ExactlyOnce,
-    );
+    let plan = acknowledged_plan_at(&broker.addr(), fixture.dns.clone(), window, MqttQos::Qos2);
     let (mut source, mut connection) = subscribed_at(&plan, &broker, 2).await;
     for packet_id in 1..=3_u16 {
         connection.write_publish_exactly_once(packet_id, b"x").await;
@@ -717,7 +712,7 @@ async fn a_rejected_exactly_once_publish_is_read_again_and_recorded_once_it_is_a
         &broker.addr(),
         fixture.dns.clone(),
         NonZeroU64::MIN,
-        MqttQos::ExactlyOnce,
+        MqttQos::Qos2,
     );
     let (mut source, mut connection) = subscribed_at(&plan, &broker, 2).await;
     connection.write_publish_exactly_once(7, b"retried").await;

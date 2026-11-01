@@ -119,10 +119,7 @@ const BROKER_KEPT_SESSION: &[ChoiceRequirement] = &[
     },
     ChoiceRequirement {
         option: QOS_OPTION,
-        choices: &[
-            MqttQos::AtLeastOnce.spelling(),
-            MqttQos::ExactlyOnce.spelling(),
-        ],
+        choices: &[MqttQos::Qos1.spelling(), MqttQos::Qos2.spelling()],
     },
 ];
 
@@ -354,17 +351,17 @@ impl IngestorDeclaration for MqttTopicIngestor {
                 presence: OptionPresence::Required,
                 form: OptionForm::Choice(&[
                     OptionChoice {
-                        name: MqttQos::AtMostOnce.spelling(),
+                        name: MqttQos::Qos0.spelling(),
                         value: None,
                         example: "QOS 0",
                     },
                     OptionChoice {
-                        name: MqttQos::AtLeastOnce.spelling(),
+                        name: MqttQos::Qos1.spelling(),
                         value: None,
                         example: "QOS 1",
                     },
                     OptionChoice {
-                        name: MqttQos::ExactlyOnce.spelling(),
+                        name: MqttQos::Qos2.spelling(),
                         value: None,
                         example: "QOS 2",
                     },
@@ -445,6 +442,8 @@ impl MqttSession {
     }
 }
 
+/// The quality of service an MQTT TOPIC ingestor subscribes with, named by its level as a statement
+/// writes it after `QOS`.
 #[derive(
     Debug,
     Clone,
@@ -459,26 +458,30 @@ impl MqttSession {
     strum::EnumIter,
 )]
 pub enum MqttQos {
-    AtMostOnce,
-    AtLeastOnce,
-    ExactlyOnce,
+    /// QoS 0: the broker delivers each message at most once.
+    Qos0,
+    /// QoS 1: the broker delivers each message at least once, until the subscriber's `PUBACK`.
+    Qos1,
+    /// QoS 2: the broker delivers each message exactly once, through the subscriber's `PUBREC` and
+    /// the `PUBREL` and `PUBCOMP` that complete it.
+    Qos2,
 }
 
 impl MqttQos {
     pub const fn level(self) -> u8 {
         match self {
-            Self::AtMostOnce => 0,
-            Self::AtLeastOnce => 1,
-            Self::ExactlyOnce => 2,
+            Self::Qos0 => 0,
+            Self::Qos1 => 1,
+            Self::Qos2 => 2,
         }
     }
 
     /// The literal a statement chooses this quality of service with after `QOS`.
     pub const fn spelling(self) -> &'static str {
         match self {
-            Self::AtMostOnce => "0",
-            Self::AtLeastOnce => "1",
-            Self::ExactlyOnce => "2",
+            Self::Qos0 => "0",
+            Self::Qos1 => "1",
+            Self::Qos2 => "2",
         }
     }
 }

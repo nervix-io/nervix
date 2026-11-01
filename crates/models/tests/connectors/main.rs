@@ -483,27 +483,23 @@ fn an_mqtt_source_suspends_only_a_persistent_session_delivered_at_least_once() {
     };
     let persistent = source(
         MqttSession::Persistent,
-        MqttQos::AtLeastOnce,
+        MqttQos::Qos1,
         MqttIngestMode::NoAck,
     );
     let exactly_once = source(
         MqttSession::Persistent,
-        MqttQos::ExactlyOnce,
+        MqttQos::Qos2,
         MqttIngestMode::NoAck,
     );
-    let clean = source(
-        MqttSession::Clean,
-        MqttQos::AtLeastOnce,
-        MqttIngestMode::NoAck,
-    );
+    let clean = source(MqttSession::Clean, MqttQos::Qos1, MqttIngestMode::NoAck);
     let at_most_once = source(
         MqttSession::Persistent,
-        MqttQos::AtMostOnce,
+        MqttQos::Qos0,
         MqttIngestMode::NoAck,
     );
     let acknowledged = source(
         MqttSession::Persistent,
-        MqttQos::AtLeastOnce,
+        MqttQos::Qos1,
         MqttIngestMode::AckSequential {
             timeout: "5s".to_owned(),
             retry_policy: retry_policy(),
@@ -518,7 +514,7 @@ fn an_mqtt_source_suspends_only_a_persistent_session_delivered_at_least_once() {
     assert_eq!(
         source(
             MqttSession::Clean,
-            MqttQos::AtLeastOnce,
+            MqttQos::Qos1,
             MqttIngestMode::AckSequential {
                 timeout: "5s".to_owned(),
                 retry_policy: retry_policy(),
@@ -1279,7 +1275,7 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
             topic: named("orders/#"),
             instances: std::num::NonZeroU64::MIN,
             session: MqttSession::Persistent,
-            qos: MqttQos::AtLeastOnce,
+            qos: MqttQos::Qos1,
             mode,
             quiesce: IngestQuiesceMode::Drop,
         });

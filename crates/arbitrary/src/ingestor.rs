@@ -241,14 +241,10 @@ impl Arbitrary<'_> {
                 .pick([MqttSession::Clean, MqttSession::Persistent])
         };
         let qos = if acknowledged {
-            self.entropy
-                .pick([MqttQos::AtLeastOnce, MqttQos::ExactlyOnce])
+            self.entropy.pick([MqttQos::Qos1, MqttQos::Qos2])
         } else {
-            self.entropy.pick([
-                MqttQos::AtMostOnce,
-                MqttQos::AtLeastOnce,
-                MqttQos::ExactlyOnce,
-            ])
+            self.entropy
+                .pick([MqttQos::Qos0, MqttQos::Qos1, MqttQos::Qos2])
         };
         let source = MqttTopicIngestor {
             client,

@@ -120,12 +120,12 @@ fn topic_ingestion_subscribes_a_filter_with_a_required_session_and_quality_of_se
 }
 
 #[rstest]
-#[case::clean_at_most_once(MqttSession::Clean, MqttQos::AtMostOnce)]
-#[case::clean_at_least_once(MqttSession::Clean, MqttQos::AtLeastOnce)]
-#[case::clean_exactly_once(MqttSession::Clean, MqttQos::ExactlyOnce)]
-#[case::kept_at_most_once(MqttSession::Persistent, MqttQos::AtMostOnce)]
-#[case::kept_at_least_once(MqttSession::Persistent, MqttQos::AtLeastOnce)]
-#[case::kept_exactly_once(MqttSession::Persistent, MqttQos::ExactlyOnce)]
+#[case::clean_at_most_once(MqttSession::Clean, MqttQos::Qos0)]
+#[case::clean_at_least_once(MqttSession::Clean, MqttQos::Qos1)]
+#[case::clean_exactly_once(MqttSession::Clean, MqttQos::Qos2)]
+#[case::kept_at_most_once(MqttSession::Persistent, MqttQos::Qos0)]
+#[case::kept_at_least_once(MqttSession::Persistent, MqttQos::Qos1)]
+#[case::kept_exactly_once(MqttSession::Persistent, MqttQos::Qos2)]
 fn an_unacknowledged_source_reports_the_session_and_quality_of_service_it_wrote(
     #[case] session: MqttSession,
     #[case] qos: MqttQos,
@@ -173,8 +173,8 @@ fn acknowledged_modes() -> [MqttIngestMode; 2] {
 }
 
 #[rstest]
-#[case::at_least_once(MqttQos::AtLeastOnce)]
-#[case::exactly_once(MqttQos::ExactlyOnce)]
+#[case::at_least_once(MqttQos::Qos1)]
+#[case::exactly_once(MqttQos::Qos2)]
 fn an_acknowledged_source_subscribes_through_a_persistent_session_at_qos_one_or_two(
     #[case] qos: MqttQos,
 ) {
@@ -196,10 +196,10 @@ fn an_acknowledged_source_subscribes_through_a_persistent_session_at_qos_one_or_
 }
 
 #[rstest]
-#[case::clean_at_most_once(MqttSession::Clean, MqttQos::AtMostOnce, "CLEAN", "0")]
-#[case::clean_at_least_once(MqttSession::Clean, MqttQos::AtLeastOnce, "CLEAN", "1")]
-#[case::clean_exactly_once(MqttSession::Clean, MqttQos::ExactlyOnce, "CLEAN", "2")]
-#[case::kept_at_most_once(MqttSession::Persistent, MqttQos::AtMostOnce, "PERSISTENT", "0")]
+#[case::clean_at_most_once(MqttSession::Clean, MqttQos::Qos0, "CLEAN", "0")]
+#[case::clean_at_least_once(MqttSession::Clean, MqttQos::Qos1, "CLEAN", "1")]
+#[case::clean_exactly_once(MqttSession::Clean, MqttQos::Qos2, "CLEAN", "2")]
+#[case::kept_at_most_once(MqttSession::Persistent, MqttQos::Qos0, "PERSISTENT", "0")]
 fn an_acknowledged_mode_outside_a_kept_session_names_both_written_values(
     #[case] session: MqttSession,
     #[case] qos: MqttQos,
@@ -238,6 +238,44 @@ fn an_acknowledged_mode_outside_a_kept_session_names_both_written_values(
         );
         assert!(!source.supports_quiesce(&IngestQuiesceMode::Suspend));
     }
+}
+
+#[test]
+fn an_acknowledged_mode_beside_options_a_statement_does_not_answer_names_them_unwritten() {
+    let ingest = IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic).capabilities();
+    let unmet = ingest
+        .unmet_delivery(
+            MqttTopicIngestor::KIND,
+            IngestDeliveryKind::AckSequential,
+            &|_| None,
+        )
+        .assured("a statement that answers no option makes none of the choices ACK requires");
+
+    assert_eq!(
+        unmet.written,
+        vec![
+            WrittenChoice {
+                option: "SESSION",
+                choice: None,
+            },
+            WrittenChoice {
+                option: "QOS",
+                choice: None,
+            },
+        ]
+    );
+    assert_eq!(
+        unmet.to_string(),
+        "MQTT TOPIC ingestors name MODE ACK SEQUENTIAL only with SESSION PERSISTENT and QOS 1 or \
+         2; the statement writes no SESSION and no QOS"
+    );
+    assert_eq!(
+        ingest.unmet_delivery(MqttTopicIngestor::KIND, IngestDeliveryKind::NoAck, &|_| {
+            None
+        }),
+        None,
+        "NO ACK requires no choice"
+    );
 }
 
 fn topic_source(session: MqttSession, qos: MqttQos, mode: MqttIngestMode) -> MqttTopicIngestor {

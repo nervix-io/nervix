@@ -1564,7 +1564,7 @@ mod tests {
                     .expect("valid topic filter"),
                 instances: nonzero!(1u64),
                 session: MqttSession::Clean,
-                qos: MqttQos::AtMostOnce,
+                qos: MqttQos::Qos0,
                 mode: MqttIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Drop,
             }))
@@ -1600,7 +1600,7 @@ mod tests {
         assert_eq!(topic.as_str(), "notifications");
         assert_eq!(*instances, nonzero!(1u64));
         assert_eq!(*session, MqttSession::Clean);
-        assert_eq!(*qos, MqttQos::AtLeastOnce);
+        assert_eq!(*qos, MqttQos::Qos1);
     }
 
     #[test]
@@ -1629,7 +1629,7 @@ mod tests {
                     .expect("valid topic filter"),
                 instances: nonzero!(3u64),
                 session: MqttSession::Persistent,
-                qos: MqttQos::AtLeastOnce,
+                qos: MqttQos::Qos1,
                 mode: MqttIngestMode::AckParallel {
                     max: nonzero!(8u64),
                     batch_timeout: "250ms".to_string(),

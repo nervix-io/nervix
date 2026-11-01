@@ -558,7 +558,7 @@ mod tests {
                         .expect("valid topic filter"),
                     instances: NonZeroU64::MIN,
                     session: MqttSession::Clean,
-                    qos: MqttQos::AtMostOnce,
+                    qos: MqttQos::Qos0,
                     mode: MqttIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Drop,
                 })),

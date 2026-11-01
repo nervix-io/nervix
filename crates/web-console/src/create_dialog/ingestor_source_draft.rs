@@ -986,7 +986,7 @@ mod tests {
         draft.retry_backoff = "200ms".into();
         draft.retry_max = "5s".into();
         draft.mqtt_session = Some(MqttSession::Clean);
-        draft.mqtt_qos = Some(MqttQos::AtMostOnce);
+        draft.mqtt_qos = Some(MqttQos::Qos0);
         draft.quiesce = Some(match kind {
             IngestorEntityKind::Http(HttpIngestorEntity::Endpoint)
             | IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => {
@@ -1070,7 +1070,7 @@ mod tests {
             refused.current_context().to_string(),
             "The selected mode requires QOS 1 or 2"
         );
-        for qos in [MqttQos::AtLeastOnce, MqttQos::ExactlyOnce] {
+        for qos in [MqttQos::Qos1, MqttQos::Qos2] {
             draft.mqtt_qos = Some(qos);
             assert!(draft.build().is_ok(), "{qos:?}");
         }
@@ -1099,12 +1099,12 @@ mod tests {
             refused.current_context(),
             IngestorEntityDraftError::MqttQos
         ));
-        draft.mqtt_qos = Some(MqttQos::ExactlyOnce);
+        draft.mqtt_qos = Some(MqttQos::Qos2);
         let Ok(IngestorEntity::Mqtt(MqttIngestor::Topic(entity))) = draft.build() else {
             panic!("a complete MQTT draft builds its topic source");
         };
         assert_eq!(entity.session, MqttSession::Clean);
-        assert_eq!(entity.qos, MqttQos::ExactlyOnce);
+        assert_eq!(entity.qos, MqttQos::Qos2);
         assert_eq!(entity.mode, MqttIngestMode::NoAck);
     }
 
@@ -1119,7 +1119,7 @@ mod tests {
                     && *choice == IngestQuiesceKind::Suspend
                 {
                     candidate.mqtt_session = Some(MqttSession::Persistent);
-                    candidate.mqtt_qos = Some(MqttQos::AtLeastOnce);
+                    candidate.mqtt_qos = Some(MqttQos::Qos1);
                 }
                 assert!(
                     candidate.build().is_ok(),

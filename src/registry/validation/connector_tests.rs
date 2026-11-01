@@ -1267,7 +1267,7 @@ fn mqtt_instances_greater_than_one_are_valid() {
                                 .expect("valid topic filter"),
                             instances: nonzero!(2u64),
                             session: MqttSession::Clean,
-                            qos: MqttQos::AtMostOnce,
+                            qos: MqttQos::Qos0,
                             mode: MqttIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Drop,
                         })),
@@ -1595,11 +1595,7 @@ fn an_mqtt_ack_mode_outside_a_kept_session_is_refused_naming_both_written_values
     let nervix_models::IngestorInput::Transport(input) = &mut ingestor.input else {
         unreachable!("the fixture builds a transport ingestor")
     };
-    input.source = mqtt_source(
-        MqttSession::Clean,
-        MqttQos::ExactlyOnce,
-        acknowledged_mqtt_mode(),
-    );
+    input.source = mqtt_source(MqttSession::Clean, MqttQos::Qos2, acknowledged_mqtt_mode());
 
     let refused = validate_ingestor_source(&domain, &identifier, &ingestor)
         .expect_err("an ACK mode needs the persistent session at QoS 1 or 2");
@@ -1638,7 +1634,7 @@ fn an_mqtt_ack_mode_in_a_persistent_session_at_qos_one_or_two_is_valid() {
     let domain: DomainName = named("validation");
     let mut ingestor = ingestor_statement("edge_in", "notifications", "event_codec", "kafka", &[]);
     let identifier = ModelName::from(&ingestor.name);
-    for qos in [MqttQos::AtLeastOnce, MqttQos::ExactlyOnce] {
+    for qos in [MqttQos::Qos1, MqttQos::Qos2] {
         let nervix_models::IngestorInput::Transport(input) = &mut ingestor.input else {
             unreachable!("the fixture builds a transport ingestor")
         };

@@ -88,9 +88,9 @@ fn qos_clause<'src>()
         select! { Token::NumberLiteral(raw) => raw }
             .labelled("mqtt_qos")
             .try_map(|raw, span| match raw.as_str() {
-                "0" => Ok(MqttQos::AtMostOnce),
-                "1" => Ok(MqttQos::AtLeastOnce),
-                "2" => Ok(MqttQos::ExactlyOnce),
+                "0" => Ok(MqttQos::Qos0),
+                "1" => Ok(MqttQos::Qos1),
+                "2" => Ok(MqttQos::Qos2),
                 _ => Err(Rich::custom(
                     span,
                     format!("MQTT ingestor QOS must be 0, 1 or 2, found {raw}"),
@@ -327,24 +327,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case("SESSION CLEAN QOS 0", MqttSession::Clean, MqttQos::AtMostOnce)]
-    #[case("SESSION CLEAN QOS 1", MqttSession::Clean, MqttQos::AtLeastOnce)]
-    #[case("SESSION CLEAN QOS 2", MqttSession::Clean, MqttQos::ExactlyOnce)]
-    #[case(
-        "SESSION PERSISTENT QOS 0",
-        MqttSession::Persistent,
-        MqttQos::AtMostOnce
-    )]
-    #[case(
-        "SESSION PERSISTENT QOS 1",
-        MqttSession::Persistent,
-        MqttQos::AtLeastOnce
-    )]
-    #[case(
-        "SESSION PERSISTENT QOS 2",
-        MqttSession::Persistent,
-        MqttQos::ExactlyOnce
-    )]
+    #[case("SESSION CLEAN QOS 0", MqttSession::Clean, MqttQos::Qos0)]
+    #[case("SESSION CLEAN QOS 1", MqttSession::Clean, MqttQos::Qos1)]
+    #[case("SESSION CLEAN QOS 2", MqttSession::Clean, MqttQos::Qos2)]
+    #[case("SESSION PERSISTENT QOS 0", MqttSession::Persistent, MqttQos::Qos0)]
+    #[case("SESSION PERSISTENT QOS 1", MqttSession::Persistent, MqttQos::Qos1)]
+    #[case("SESSION PERSISTENT QOS 2", MqttSession::Persistent, MqttQos::Qos2)]
     fn the_written_session_and_quality_of_service_reach_the_ingestor_model(
         #[case] written: &str,
         #[case] session: MqttSession,
@@ -361,8 +349,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case("SESSION PERSISTENT QOS 1", MqttQos::AtLeastOnce)]
-    #[case("SESSION PERSISTENT QOS 2", MqttQos::ExactlyOnce)]
+    #[case("SESSION PERSISTENT QOS 1", MqttQos::Qos1)]
+    #[case("SESSION PERSISTENT QOS 2", MqttQos::Qos2)]
     fn an_acknowledged_mode_keeps_its_window_beside_the_persistent_session(
         #[case] written: &str,
         #[case] qos: MqttQos,
