@@ -503,9 +503,10 @@ mod tests {
              POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND",
             "MQTT TOPIC INGESTOR i FROM c TOPIC 't' SESSION PERSISTENT QOS 1 MODE NO ACK ON \
              QUIESCE SUSPEND",
-            "MQTT TOPIC INGESTOR i FROM c TOPIC 't' MODE NO ACK ON QUIESCE BUFFER MAX SIZE 64MiB \
-             ON OVERFLOW DROP OLDEST",
-            "MQTT TOPIC INGESTOR i FROM c TOPIC 't' MODE NO ACK ON QUIESCE DROP",
+            "MQTT TOPIC INGESTOR i FROM c TOPIC 't' SESSION CLEAN QOS 0 MODE NO ACK ON QUIESCE \
+             BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST",
+            "MQTT TOPIC INGESTOR i FROM c TOPIC 't' SESSION CLEAN QOS 0 MODE NO ACK ON QUIESCE \
+             DROP",
             "NATS SUBJECT INGESTOR i FROM c SUBJECT 's' QUEUE GROUP 'g' INSTANCES 1 MODE NO ACK \
              ON QUIESCE BUFFER MAX SIZE 64MiB ON OVERFLOW DROP NEWEST",
             "NATS SUBJECT INGESTOR i FROM c SUBJECT 's' QUEUE GROUP 'g' INSTANCES 1 MODE NO ACK \
@@ -550,7 +551,8 @@ mod tests {
                  level",
             ),
             (
-                "MQTT TOPIC INGESTOR i FROM c TOPIC 'devices/#/orders' MODE NO ACK ON QUIESCE DROP",
+                "MQTT TOPIC INGESTOR i FROM c TOPIC 'devices/#/orders' SESSION CLEAN QOS 0 MODE \
+                 NO ACK ON QUIESCE DROP",
                 "invalid mqtt_topic_filter 'devices/#/orders': holds the wildcard '#' before its \
                  last level",
             ),
@@ -678,10 +680,13 @@ mod tests {
     }
 
     #[test]
-    fn mqtt_suspend_requires_a_persistent_qos_one_session() {
+    fn mqtt_suspend_requires_a_persistent_session_at_qos_one_or_two() {
         for source in [
-            "MQTT TOPIC INGESTOR i FROM c TOPIC 't' MODE NO ACK ON QUIESCE SUSPEND",
+            "MQTT TOPIC INGESTOR i FROM c TOPIC 't' SESSION CLEAN QOS 0 MODE NO ACK ON QUIESCE \
+             SUSPEND",
             "MQTT TOPIC INGESTOR i FROM c TOPIC 't' SESSION CLEAN QOS 1 MODE NO ACK ON QUIESCE \
+             SUSPEND",
+            "MQTT TOPIC INGESTOR i FROM c TOPIC 't' SESSION CLEAN QOS 2 MODE NO ACK ON QUIESCE \
              SUSPEND",
             "MQTT TOPIC INGESTOR i FROM c TOPIC 't' SESSION PERSISTENT QOS 0 MODE NO ACK ON \
              QUIESCE SUSPEND",
@@ -715,7 +720,8 @@ mod tests {
         assert!(!endpoint_suggestions.contains(&"DROP".to_string()));
         assert!(!endpoint_suggestions.contains(&"SUSPEND".to_string()));
 
-        let clean_mqtt = "CREATE MQTT TOPIC INGESTOR i FROM c TOPIC 't' MODE NO ACK ON QUIESCE ";
+        let clean_mqtt = "CREATE MQTT TOPIC INGESTOR i FROM c TOPIC 't' SESSION CLEAN QOS 0 MODE \
+                          NO ACK ON QUIESCE ";
         let clean_mqtt_suggestions = suggest_create_ingestor(clean_mqtt, clean_mqtt.len());
         assert!(clean_mqtt_suggestions.contains(&"BUFFER".to_string()));
         assert!(clean_mqtt_suggestions.contains(&"DROP".to_string()));
@@ -1540,7 +1546,7 @@ mod tests {
     fn parses_create_ingestor_mqtt_no_ack() {
         let input = r#"
             CREATE MQTT TOPIC INGESTOR mqtt_notifications
-              FROM mqtt_main TOPIC 'notifications' MODE NO ACK
+              FROM mqtt_main TOPIC 'notifications' SESSION CLEAN QOS 0 MODE NO ACK
               ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1559,10 +1565,9 @@ mod tests {
                 topic: nervix_models::MqttTopicFilter::try_from("notifications")
                     .expect("valid topic filter"),
                 instances: nonzero!(1u64),
-                mode: MqttIngestMode::NoAck {
-                    session: MqttSession::Clean,
-                    qos: MqttQos::AtMostOnce,
-                },
+                session: MqttSession::Clean,
+                qos: MqttQos::Qos0,
+                mode: MqttIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Drop,
             }))
         );
@@ -1572,7 +1577,7 @@ mod tests {
     fn parses_create_ingestor_mqtt_no_ack_with_qos1() {
         let input = r#"
             CREATE MQTT TOPIC INGESTOR mqtt_notifications
-              FROM mqtt_main TOPIC 'notifications' QOS 1 MODE NO ACK
+              FROM mqtt_main TOPIC 'notifications' SESSION CLEAN QOS 1 MODE NO ACK
               ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1585,7 +1590,9 @@ mod tests {
             client,
             topic,
             instances,
-            mode: MqttIngestMode::NoAck { session, qos, .. },
+            session,
+            qos,
+            mode: MqttIngestMode::NoAck,
             ..
         })) = &transport(&parsed).source
         else {
@@ -1595,7 +1602,7 @@ mod tests {
         assert_eq!(topic.as_str(), "notifications");
         assert_eq!(*instances, nonzero!(1u64));
         assert_eq!(*session, MqttSession::Clean);
-        assert_eq!(*qos, MqttQos::AtLeastOnce);
+        assert_eq!(*qos, MqttQos::Qos1);
     }
 
     #[test]
@@ -1623,6 +1630,8 @@ mod tests {
                 topic: nervix_models::MqttTopicFilter::try_from("devices/+/notifications")
                     .expect("valid topic filter"),
                 instances: nonzero!(3u64),
+                session: MqttSession::Persistent,
+                qos: MqttQos::Qos1,
                 mode: MqttIngestMode::AckParallel {
                     max: nonzero!(8u64),
                     batch_timeout: "250ms".to_string(),
@@ -1644,7 +1653,7 @@ mod tests {
               FROM mqtt_main
               TOPIC 'notifications'
               SUBSCRIPTION SHARED nervix_group
-              MODE NO ACK
+              SESSION CLEAN QOS 0 MODE NO ACK
               ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1690,7 +1699,7 @@ mod tests {
     fn rejects_create_ingestor_mqtt_ack_without_persistent_session() {
         let input = r#"
             CREATE MQTT TOPIC INGESTOR mqtt_notifications
-              FROM mqtt_main TOPIC 'notifications' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s
+              FROM mqtt_main TOPIC 'notifications' SESSION CLEAN QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s
               ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1702,24 +1711,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_create_ingestor_mqtt_ack_without_qos1() {
+    fn rejects_create_ingestor_mqtt_ack_at_qos_zero() {
         let input = r#"
             CREATE MQTT TOPIC INGESTOR mqtt_notifications
-              FROM mqtt_main TOPIC 'notifications' SESSION PERSISTENT MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s
+              FROM mqtt_main TOPIC 'notifications' SESSION PERSISTENT QOS 0 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s
               ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
         "#;
 
-        parse_create_ingestor_tokens(&to_tokens(input)).expect_err("ACK mode must require QOS 1");
+        parse_create_ingestor_tokens(&to_tokens(input))
+            .expect_err("ACK mode must require QOS 1 or 2");
     }
 
     #[test]
     fn rejects_create_ingestor_mqtt_no_ack_max() {
         let input = r#"
             CREATE MQTT TOPIC INGESTOR mqtt_notifications
-              FROM mqtt_main TOPIC 'notifications' MODE NO ACK MAX 4
+              FROM mqtt_main TOPIC 'notifications' SESSION CLEAN QOS 0 MODE NO ACK MAX 4
               ON QUIESCE DROP DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1809,7 +1819,8 @@ mod tests {
 
     #[test]
     fn mqtt_mode_context_offers_ack_and_no_ack() {
-        let input = "CREATE MQTT TOPIC INGESTOR i FROM t TOPIC 'top' MODE ";
+        let input =
+            "CREATE MQTT TOPIC INGESTOR i FROM t TOPIC 'top' SESSION PERSISTENT QOS 1 MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO ACK".to_string()));
@@ -1822,6 +1833,20 @@ mod tests {
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"CLEAN".to_string()));
         assert!(suggestions.contains(&"PERSISTENT".to_string()));
+        assert!(!suggestions.contains(&"MODE".to_string()));
+    }
+
+    #[test]
+    fn mqtt_subscription_context_requires_session_then_qos_before_mode() {
+        let topic = "CREATE MQTT TOPIC INGESTOR i FROM t TOPIC 'top' ";
+        let suggestions = suggest_create_ingestor(topic, topic.len());
+        assert!(suggestions.contains(&"SESSION".to_string()));
+        assert!(!suggestions.contains(&"QOS".to_string()));
+        assert!(!suggestions.contains(&"MODE".to_string()));
+
+        let session = "CREATE MQTT TOPIC INGESTOR i FROM t TOPIC 'top' SESSION CLEAN ";
+        let suggestions = suggest_create_ingestor(session, session.len());
+        assert!(suggestions.contains(&"QOS".to_string()));
         assert!(!suggestions.contains(&"MODE".to_string()));
     }
 

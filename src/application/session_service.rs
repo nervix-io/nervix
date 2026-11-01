@@ -2621,8 +2621,8 @@ mod tests {
         let mqtt = suggestion_values(
             &service,
             &subscriptions,
-            "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' MODE NO ACK ON QUIESCE \
-             SUSPEND DECODE USING codec TO outgoing SET value = read_",
+            "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' SESSION PERSISTENT QOS \
+             1 MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_",
         )
         .await;
         assert!(mqtt.is_empty(), "{mqtt:?}");

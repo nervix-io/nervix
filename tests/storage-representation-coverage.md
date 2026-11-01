@@ -26,6 +26,12 @@ Model/archive, registry, consensus, canonical Plexus, presentation and console-d
 preserve the complete stream source, and the advanced archive signature and keyspace namespace
 fence the archived union that holds it.
 
+MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
+persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration
+admits is generated and none it refuses. The Model/archive, registry, consensus and canonical
+Plexus properties preserve the session, quality of service and mode as separate written values,
+and the archive signature and consensus keyspace namespace fence this shape before decoding.
+
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions
 run in both modes. A target writes through the storage engine its boundary owns when it has one:
