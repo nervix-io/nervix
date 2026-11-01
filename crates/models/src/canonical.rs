@@ -3150,38 +3150,50 @@ impl EmitterEnvelope {
     }
 }
 
-fn postgres_conflict_action_to_plexus(action: &PostgresConflictAction) -> String {
-    match action {
-        PostgresConflictAction::None => String::new(),
-        PostgresConflictAction::DoNothing { target } => {
-            let target = conflict_target_to_plexus(target);
-            format!(" ON CONFLICT{target} DO NOTHING")
-        }
-        PostgresConflictAction::DoUpdate { target } => {
-            let target = conflict_target_to_plexus(target);
-            format!(" ON CONFLICT{target} DO UPDATE")
+impl PostgresConflictAction {
+    /// The `ON CONFLICT` clause the action writes after the emitter's `VALUES`, absent for an
+    /// emitter that writes none.
+    fn conflict_clause(&self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::DoNothing { target } => {
+                let target = conflict_target_to_plexus(target);
+                Some(format!("ON CONFLICT{target} DO NOTHING"))
+            }
+            Self::DoUpdate { target } => {
+                let target = conflict_target_to_plexus(target);
+                Some(format!("ON CONFLICT{target} DO UPDATE"))
+            }
         }
     }
 }
 
-fn mysql_conflict_action_to_plexus(action: &MySqlConflictAction) -> String {
-    match action {
-        MySqlConflictAction::None => String::new(),
-        MySqlConflictAction::DoNothing => " ON CONFLICT DO NOTHING".to_string(),
-        MySqlConflictAction::DoUpdate => " ON CONFLICT DO UPDATE".to_string(),
+impl MySqlConflictAction {
+    /// The `ON CONFLICT` clause the action writes after the emitter's `VALUES`, absent for an
+    /// emitter that writes none.
+    fn conflict_clause(&self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::DoNothing => Some("ON CONFLICT DO NOTHING".to_string()),
+            Self::DoUpdate => Some("ON CONFLICT DO UPDATE".to_string()),
+        }
     }
 }
 
-fn mongodb_conflict_action_to_plexus(action: &MongoDbConflictAction) -> String {
-    match action {
-        MongoDbConflictAction::None => String::new(),
-        MongoDbConflictAction::DoNothing { target } => {
-            let target = conflict_target_to_plexus(target);
-            format!(" ON CONFLICT{target} DO NOTHING")
-        }
-        MongoDbConflictAction::DoUpdate { target } => {
-            let target = conflict_target_to_plexus(target);
-            format!(" ON CONFLICT{target} DO UPDATE")
+impl MongoDbConflictAction {
+    /// The `ON CONFLICT` clause the action writes after the emitter's `VALUES`, absent for an
+    /// emitter that writes none.
+    fn conflict_clause(&self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::DoNothing { target } => {
+                let target = conflict_target_to_plexus(target);
+                Some(format!("ON CONFLICT{target} DO NOTHING"))
+            }
+            Self::DoUpdate { target } => {
+                let target = conflict_target_to_plexus(target);
+                Some(format!("ON CONFLICT{target} DO UPDATE"))
+            }
         }
     }
 }
@@ -3391,10 +3403,10 @@ mod tests {
         PostgresValueMapping, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
         PrometheusConfigEntry, PrometheusIngestMode, PrometheusQueryIngestor, PulsarEmitter,
         PulsarIngestMode, PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicEmitter,
-        PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestMode, RabbitMqQueueEmitter,
-        RabbitMqQueueIngestor, RedisEmitter, RedisPubSubEmitter, RedisPubSubIngestMode,
-        RedisPubSubIngestor, RelayBranching, RetryPolicy, RouteConstruction, SchemaField,
-        SentryConfigEntry, SentryEmitter, SentryEventEmitter, SignalingProtobufConfig,
+        PulsarTopicIngestor, RabbitMqEmitter, RabbitMqExchangeEmitter, RabbitMqIngestMode,
+        RabbitMqQueueEmitter, RabbitMqQueueIngestor, RedisEmitter, RedisPubSubEmitter,
+        RedisPubSubIngestMode, RedisPubSubIngestor, RelayBranching, RetryPolicy, RouteConstruction,
+        SchemaField, SentryConfigEntry, SentryEmitter, SentryEventEmitter, SignalingProtobufConfig,
         SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsEmitter, SqsIngestMode,
         SqsQueueEmitter, SqsQueueIngestor, SyslogCollectorEmitter, SyslogEmitter, SyslogIngestMode,
         SyslogListenerIngestor, UdfArgument, UdfLanguage, UdfReturn, WebsocketsConnectionIngestor,
@@ -4381,6 +4393,20 @@ mod tests {
                     queue: named("orders_q"),
                 })),
                 "rmq_main QUEUE 'orders_q'",
+            ),
+            (
+                EmitterEntity::RabbitMq(RabbitMqEmitter::Exchange(RabbitMqExchangeEmitter {
+                    mode: crate::RabbitMqExchangePublishingMode::NoAck {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
+                    client: named("rmq_main"),
+                    exchange: named("orders_x"),
+                    routing_key: scoped_field(FieldScope::Input, "category"),
+                })),
+                "rmq_main EXCHANGE 'orders_x' ROUTING KEY input.category",
             ),
             (
                 EmitterEntity::Redis(RedisEmitter::PubSub(RedisPubSubEmitter {

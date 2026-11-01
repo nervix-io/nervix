@@ -48,6 +48,8 @@ pub(in crate::runtime) enum EmitterEnvelopeError {
 /// Where an envelope computes a value, named as a statement writes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::runtime) enum EnvelopeSite {
+    /// The routing key the emitter's destination computes beside its envelope.
+    RoutingKey,
     Clause(EnvelopeClauseKind),
     Property(&'static str),
 }
@@ -55,18 +57,21 @@ pub(in crate::runtime) enum EnvelopeSite {
 impl From<EnvelopeTarget> for EnvelopeSite {
     fn from(target: EnvelopeTarget) -> Self {
         match target {
+            EnvelopeTarget::RoutingKey => Self::RoutingKey,
             EnvelopeTarget::Clause(kind) => Self::Clause(kind),
             EnvelopeTarget::Property(declaration) => Self::Property(declaration.name),
         }
     }
 }
 
-/// A site is written as its statement writes it: `TIMESTAMP`, or `PROPERTIES key 'priority'`.
+/// A site is written as its statement writes it: `envelope TIMESTAMP`, `envelope PROPERTIES key
+/// 'priority'`, or the destination's `ROUTING KEY`.
 impl std::fmt::Display for EnvelopeSite {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Clause(kind) => formatter.write_str(kind.keywords()),
-            Self::Property(name) => write!(formatter, "PROPERTIES key '{name}'"),
+            Self::RoutingKey => formatter.write_str("ROUTING KEY"),
+            Self::Clause(kind) => write!(formatter, "envelope {}", kind.keywords()),
+            Self::Property(name) => write!(formatter, "envelope PROPERTIES key '{name}'"),
         }
     }
 }
@@ -74,13 +79,13 @@ impl std::fmt::Display for EnvelopeSite {
 /// Why one row has no envelope. The emitter rejects that row when it publishes it.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(in crate::runtime) enum EnvelopeError {
-    #[error("envelope {site} expression failed with {} at {span}", .code.as_str())]
+    #[error("{site} expression failed with {} at {span}", .code.as_str())]
     ExpressionFailed {
         site: EnvelopeSite,
         code: nervix_vm::ErrorCode,
         span: VmSpan,
     },
-    #[error("envelope {site} expression produced NULL")]
+    #[error("{site} expression produced NULL")]
     Null { site: EnvelopeSite },
     #[error("envelope expressions omitted their input row")]
     OmittedInputRow,
@@ -454,6 +459,9 @@ impl EnvelopeTarget {
             }};
         }
         match self {
+            Self::RoutingKey => {
+                envelope.routing_key = Some(value!(as_utf8, "STRING").to_string());
+            }
             Self::Clause(EnvelopeClauseKind::Timestamp) => {
                 let nanos = value!(as_datetime, "DATETIME");
                 envelope.timestamp = Some(Timestamp::from_unix_nanos(nanos));
