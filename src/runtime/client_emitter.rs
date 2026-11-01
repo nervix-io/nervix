@@ -1513,11 +1513,7 @@ mod tests {
         // An ending endpoint removes itself from the registry under the shard's write side, so that
         // side stays free while an open waits for the owner.
         assert!(
-            runtime
-                .inner
-                .client_emitters
-                .try_get_mut(&key)
-                .is_present(),
+            runtime.inner.client_emitters.try_get_mut(&key).is_present(),
             "a waiting open holds no registry guard"
         );
 
