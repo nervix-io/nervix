@@ -416,7 +416,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "owns the subscription"
     When selector ".create-ingestor-subscription-ownership [data-ownership='ingestor']" is clicked
-    Then selector ".create-preview" contains "SUBSCRIPTION 'visual_{{test_id}}' OWNED BY INGESTOR"
+    Then selector ".create-preview" contains "SUBSCRIPTION 'visual_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked

@@ -1581,6 +1581,13 @@ The [ingestor manual](./ingestors.md#mqtt) owns the public behavior.
 ### Pulsar subscription ownership
 
 A Pulsar source's Model declares who owns its subscription, and its plan carries the declaration.
+The owned variant carries a required `EARLIEST` or `LATEST` start position; the provisioned variant
+has no creation position. Consumer options use the declared position each time an owned
+subscription is joined, so Pulsar applies it only when creating the subscription. Existing cursors
+remain authoritative, including after `SET START AT`. Subscription identity comparison ignores
+that creation policy, so changing it cannot retire a subscription or clear its backlog.
+The short-lived durable consumer used for removal uses the same declared position if its join
+creates an absent subscription before unsubscribing it.
 The plan of an input whose subscription its ingestor owns requires retirement when that source
 changes or disappears. The same retirement step as MQTT's runs on the node the installed revision
 assigned the ingestor to, once that ingestor's exact source tasks stopped, before its replacement

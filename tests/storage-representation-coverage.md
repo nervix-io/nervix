@@ -15,6 +15,12 @@ Ingestor generators draw every timestamp source, `TIMESTAMP AT metadata.<field>`
 Plexus properties preserve the metadata source distinctly from a payload field of the same name,
 and the same signature and namespace fence that shape.
 
+Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
+`LATEST`, and provisioned subscriptions without a position. Statement generators mix typed
+`SET START AT` with shared ingestor operations. The Model, registry and consensus properties
+preserve those complete values. The `NERVIX OWNED SUB` registry signature and
+`raft_pulsar_start_` consensus namespace identify this current Model layout before decoding.
+
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions
 run in both modes. A target writes through the storage engine its boundary owns when it has one:

@@ -590,6 +590,17 @@ pub(crate) trait AlteredIngestorEntity: IngestorEntityModel + Clone {
     ) -> error_stack::Result<(), AlterIngestorError>;
 }
 
+/// One typed operation of a transport ingestor, shared or owned by its entity.
+/// The enclosing alteration checks the entity pair before applying any operation to its copy.
+pub(crate) trait TransportIngestorOperation {
+    fn apply_to(
+        &self,
+        ingestor: &mut crate::CreateIngestor,
+    ) -> error_stack::Result<(), AlterIngestorError>;
+
+    fn to_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError>;
+}
+
 /// What the kind of one connector's source entities answers for each of them.
 pub trait IngestorEntityMetadata {
     fn connector(&self) -> ConnectorKind;
