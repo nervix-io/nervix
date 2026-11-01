@@ -615,9 +615,7 @@ pub trait IngestorEntityMetadata {
 
     /// The names a body may locate what it reads by instead of the declared locator, none for an
     /// entity that declares no alternative.
-    fn alternative_locators(&self) -> &'static [LocatorDeclaration] {
-        &[]
-    }
+    fn alternative_locators(&self) -> &'static [LocatorDeclaration];
 }
 
 entity_union! {
