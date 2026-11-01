@@ -1,7 +1,8 @@
 //! RabbitMQ's executable declaration contract.
 //!
 //! Layer: test harness.
-//! - **Owns.** Queue-name protocol boundaries and the current client, ingest and emit contracts.
+//! - **Owns.** Queue- and exchange-name protocol boundaries and the current client, ingest and emit
+//!   contracts.
 //! - **Depends on.** The RabbitMQ vocabulary and shared declaration types.
 //! - **Must not know.** The AMQP driver, graph execution or language grammar.
 
@@ -19,7 +20,8 @@ use rstest::rstest;
 use super::*;
 use crate::{
     ClientConfigEntry, ClientConfigPresence, ClientConfigSchemaError, ClientConfigValue,
-    ClientPooling, EmitterPublishingModeKind, ExternalNameError,
+    ClientPooling, EmitterEntityKind, EmitterPublishingModeKind, ExternalNameError,
+    RuntimeCapability,
 };
 
 #[rstest]
@@ -42,6 +44,32 @@ fn queue_names_report_the_protocol_byte_boundary(
     #[case] expected: ExternalNameError,
 ) {
     let failure = RabbitMqQueueName::parse(&text).expect_err("the case exceeds the name contract");
+    assert_eq!(failure.current_context(), &expected);
+}
+
+#[rstest]
+#[case::mixed_case("Events.Mixed-01".to_owned())]
+#[case::predeclared("amq.topic".to_owned())]
+#[case::ascii_limit("X".repeat(255))]
+#[case::utf8_limit(format!("{}Z", "é".repeat(127)))]
+fn exchange_names_preserve_the_complete_external_spelling(#[case] text: String) {
+    let exchange =
+        RabbitMqExchangeName::parse(&text).assured("the case is a valid AMQP exchange name");
+    assert_eq!(exchange.as_str(), text);
+}
+
+/// The default exchange's empty name is the one a QUEUE emitter publishes through, never one an
+/// EXCHANGE emitter names.
+#[rstest]
+#[case::default_exchange(String::new(), ExternalNameError::Empty)]
+#[case::ascii_over_limit("X".repeat(256), ExternalNameError::TooLong { max: 255, actual: 256 })]
+#[case::utf8_over_limit("é".repeat(128), ExternalNameError::TooLong { max: 255, actual: 256 })]
+fn exchange_names_report_the_protocol_byte_boundary(
+    #[case] text: String,
+    #[case] expected: ExternalNameError,
+) {
+    let failure =
+        RabbitMqExchangeName::parse(&text).expect_err("the case exceeds the name contract");
     assert_eq!(failure.current_context(), &expected);
 }
 
@@ -239,19 +267,124 @@ fn queue_emission_declares_codec_batches_and_broker_confirmation_modes() {
         RabbitMqQueueIngestor::CAPABILITIES.locator
     );
     assert_eq!(declaration.options, &[]);
-    assert_eq!(declaration.envelope, &[]);
+    assert_eq!(declaration.envelope, &[EnvelopeClauseKind::Mandatory]);
     assert_eq!(declaration.properties, &[]);
-    assert_eq!(declaration.bounds.buffers.len(), 2);
+    assert_emitter_buffers(declaration.bounds);
     assert_eq!(
-        declaration.bounds.buffers[0].bound,
+        declaration.bounds.deadline_keys(),
+        vec![DeadlineKey::Timeout, DeadlineKey::ConnectTimeout]
+    );
+}
+
+/// Both emitter entities hold the same two buffers: the confirmation window, and the messages the
+/// broker returns under MANDATORY, which a write reads before it ends.
+fn assert_emitter_buffers(bounds: DeclaredBounds) {
+    assert_eq!(bounds.buffers.len(), 2);
+    assert_eq!(
+        bounds.buffers[0].bound,
         BufferBound::Bounded {
             capacity: BufferCapacity::Setting("ACK PARALLEL MAX, 1 under ACK SEQUENTIAL"),
             overflow: BufferOverflow::Backpressure,
         }
     );
-    assert_eq!(declaration.bounds.buffers[1].bound, BufferBound::Unbounded);
+    assert_eq!(
+        bounds.buffers[1].bound,
+        BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("the messages of one write"),
+            overflow: BufferOverflow::Backpressure,
+        }
+    );
+}
+
+#[test]
+fn exchange_emission_declares_its_locator_routing_key_and_the_queue_emitters_contract() {
+    let declaration = RabbitMqExchangeEmitter::CAPABILITIES;
+    let queue = RabbitMqQueueEmitter::CAPABILITIES;
+    assert_eq!(declaration.reference, queue.reference);
+    assert_eq!(declaration.body, EmitterBodyForm::Codec);
+    assert_eq!(declaration.batch, queue.batch);
+    assert!(!declaration.requires_batch_transformation);
+    assert_eq!(declaration.publishing_modes, queue.publishing_modes);
+    assert_eq!(declaration.headers, queue.headers);
+    assert_eq!(
+        declaration.locator,
+        Some(LocatorDeclaration {
+            keywords: "EXCHANGE",
+            name: LocatorName::External(RabbitMqExchangeName::DECLARATION),
+        })
+    );
+    let [routing_key] = declaration.options else {
+        panic!("an exchange emitter declares one option");
+    };
+    assert_eq!(routing_key.keywords, "ROUTING KEY");
+    assert_eq!(routing_key.presence, OptionPresence::Required);
+    assert_eq!(
+        routing_key.form,
+        OptionForm::Value {
+            value: OptionValue::Expression,
+            example: "ROUTING KEY input.category",
+        }
+    );
+    assert_eq!(declaration.envelope, &[EnvelopeClauseKind::Mandatory]);
+    assert_eq!(declaration.properties, &[]);
+    assert_emitter_buffers(declaration.bounds);
+    assert_eq!(declaration.bounds.waits.len(), queue.bounds.waits.len());
+    assert!(
+        declaration.bounds.waits[0]
+            .wait
+            .ends_with("the exchange check"),
+        "{}",
+        declaration.bounds.waits[0].wait
+    );
     assert_eq!(
         declaration.bounds.deadline_keys(),
         vec![DeadlineKey::Timeout, DeadlineKey::ConnectTimeout]
     );
+    assert_eq!(
+        declaration.runtime_capabilities(),
+        vec![
+            RuntimeCapability::Publishing(EmitterPublishingModeKind::NoAck),
+            RuntimeCapability::Publishing(EmitterPublishingModeKind::BrokerAck),
+            RuntimeCapability::Option {
+                keywords: "ROUTING KEY"
+            },
+            RuntimeCapability::Batch,
+            RuntimeCapability::Envelope(EnvelopeClauseKind::Mandatory),
+            RuntimeCapability::StalledPeer(DeadlineKey::Timeout),
+            RuntimeCapability::StalledPeer(DeadlineKey::ConnectTimeout),
+        ]
+    );
+}
+
+#[test]
+fn only_an_exchange_emitter_computes_a_routing_key() {
+    let routing_key = crate::Expression::Literal(crate::Literal::String("orders".to_string()));
+    let exchange = crate::EmitterEntity::from(RabbitMqExchangeEmitter {
+        mode: RabbitMqExchangePublishingMode::NoAck {
+            retry_policy: RetryPolicy {
+                backoff: "1s".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+        client: ClientName::parse("broker").assured("broker is a client name"),
+        exchange: RabbitMqExchangeName::parse("events").assured("events is an exchange name"),
+        routing_key: routing_key.clone(),
+    });
+    assert_eq!(exchange.routing_key(), Some(&routing_key));
+    assert_eq!(
+        exchange.kind(),
+        EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Exchange)
+    );
+
+    let queue = crate::EmitterEntity::from(RabbitMqQueueEmitter {
+        mode: RabbitMqQueuePublishingMode::NoAck {
+            retry_policy: RetryPolicy {
+                backoff: "1s".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+        client: ClientName::parse("broker").assured("broker is a client name"),
+        queue: RabbitMqQueueName::parse("orders").assured("orders is a queue name"),
+    });
+    assert_eq!(queue.routing_key(), None);
 }

@@ -374,9 +374,12 @@ retain that table's `FileIO` and its initialized storage, so later object calls 
 an object URL for a different storage root is refused. OpenDAL's credential providers keep their
 own credential refresh. Storage calls make one attempt: the emitter host owns retry pacing, and
 neither an OpenDAL retry layer nor the HTTP client's retry policy multiplies that attempt.
-Azure locations select the Blob service with `wasb`/`wasbs` and the Data Lake service with
-`abfs`/`abfss`; their account hosts identify the corresponding `blob` or `dfs` service. Both use
-the same node resolver and storage-client operation deadline described here.
+An Azure location's host names the Blob service for `wasb`/`wasbs` and the Data Lake service for
+`abfs`/`abfss`, and the emitter checks that service and the container before `@` when it opens.
+Object requests for every Azure scheme go to the account's Data Lake endpoint, which the connector
+derives from the location's account and suffix, over HTTPS for `wasbs` and `abfss` and plain HTTP
+for `wasb` and `abfs`, with the location's container as the file system. They use the same node
+resolver and storage-client operation deadline described here.
 The standalone OpenDAL S3 `detect_region` helper constructs its own client, but
 Nervix does not call it; S3 operator construction requires its configured region or the driver's
 environment policy.
@@ -494,6 +497,13 @@ loop then fails every read and write, ends with its thread, and closes the socke
 opened lets the handle go. A connection that fails before its AMQP handshake has started no Lapin
 thread. An established connection is not closed because its host's answer changed or expired; the
 next connection uses the new answer.
+
+The stalled-AMQP unit check resolves and dials its loopback broker under a separate setup bound,
+then starts its unchanged 500 ms budget at the production handshake. It checks the handshake's
+error context, the typed `connect_timeout_ms` expiry and the socket closing. This isolates the
+phase under parallel test load; production still shares one deadline across resolution, dialling,
+TLS, the AMQP handshake and channel setup. The connection tests separately exercise lookup and
+address-attempt expiry.
 
 ### DNS for Redis
 
@@ -914,7 +924,7 @@ remain in their owning work records until that delivery.
 | Side | What the entity declares |
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
-| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
+| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which only the two RabbitMQ emitter entities declare one, the `MANDATORY` clause. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys, and the other names its driver reads for one property: each pair of names with the one the client accepts, and a prefix the driver strips from a key before reading it, with the driver's own properties that begin with it. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
@@ -1238,7 +1248,7 @@ the `write_header` calls of one record become on the published message.
 | `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC` | `KAFKA TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, exact names | `NATS SUBJECT` | `NATS SUBJECT` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, lowercase names | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT` | None | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
-| `sorted_by_name`, exact names | `RABBITMQ QUEUE` | `RABBITMQ QUEUE` | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| `sorted_by_name`, exact names | `RABBITMQ QUEUE` | `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE` | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `sorted_by_name`, lowercase names | None | `HTTP REQUEST` | one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 <!-- connector-matrix:headers:end -->
 
@@ -1932,10 +1942,13 @@ reaches the connector, which receives each remaining record's group already eval
 whose plan declares no group carries nothing beside its batches.
 
 An envelope exists only where the emitter's statement writes
-[envelope clauses](emitters.md#envelope-clauses) or properties, and the registry refuses any its
-entity does not declare. The plan fixes the flag and duration clauses and lowers the expression
-clauses and properties into one program that writes each value into a non-null field of its exact
-type. The host compiles that program once for the task, over the source record as `input`, the
+[envelope clauses](emitters.md#envelope-clauses) or properties, or where its destination computes a
+value for every record, and the registry refuses any clause or property its entity does not
+declare. Today the one destination value is a `RABBITMQ EXCHANGE` emitter's `ROUTING KEY`, which
+the envelope carries with the clauses because it is computed from the same record at the same
+point. The plan fixes the flag and duration clauses and lowers the routing key, the expression
+clauses and the properties, in that order, into one program that writes each value into a non-null
+field of its exact type. The host compiles that program once for the task, over the source record as `input`, the
 published record as `message` and, where the route constructs the published record, that output
 as `output`, with the materialized state and lookups the emitter reaches. It evaluates the program
 once per admitted batch, after the route, and carries each row's `RecordEnvelope` beside the batch:
@@ -1948,8 +1961,8 @@ batch they came from rather than copying it, and a retained payload keeps it wit
 emitter that writes no envelope carries nothing beside its batches or in its payloads.
 
 A record emitter reads its record's envelope from `EmitterRecord::envelope`: the three flags, the
-timestamp, the two durations, the reply target, the message and deduplication identities, and the
-properties in written order, each a `RecordProperty` under the name its entity declares with a
+timestamp, the two durations, the reply target, the message and deduplication identities, the
+routing key, and the properties in written order, each a `RecordProperty` under the name its entity declares with a
 `PropertyValue` of exactly the declared `PropertyType`. A property is never a float, so equal
 envelopes always compare equal. A connector receives only what its entity declares, and an entity
 that declares nothing always receives the empty envelope. Only an entity whose body is a codec,
@@ -2691,7 +2704,18 @@ sequenceDiagram
   began, so the retry of a failed append commits files staged since then in a commit of their own
   instead of acknowledging them unwritten.
   [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate limits.
-- **RabbitMQ emitter.** The broker answers no `NO ACK` message itself, so the emitter ends a `NO ACK`
+- **RabbitMQ emitter.** `RABBITMQ QUEUE` and `RABBITMQ EXCHANGE` share one publisher, which writes a
+  queue emitter's messages to the default exchange under the queue's name and an exchange emitter's
+  to its exchange under each record's evaluated routing key, and refuses a key longer than an AMQP
+  short string as a rejection of its record. Each checks its queue or exchange with a passive
+  declaration when it opens, and a missing exchange is `EmitterOpenError::MissingExternalEntity`.
+  A record whose envelope carries `MANDATORY` is published mandatory, and a message the broker
+  returns unrouted rejects its record in either mode: under `ACK` the return arrives with the
+  message's publisher confirm, and under `NO ACK` the emitter drains the channel's returns once the
+  round trip that ends the write is answered, attributing each to the first written message, in
+  order, with the same exchange, routing key, headers and body. A return never outlives the write
+  that published its message.
+  The broker answers no `NO ACK` message itself, so the emitter ends a `NO ACK`
   write with one round trip on its channel, which the broker answers only after it has taken every
   message written before it, and the answer delivers the write; a write costs that one round trip,
   not one per message. When the client sets `timeout_ms`, a round trip the broker does not answer

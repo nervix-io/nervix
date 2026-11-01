@@ -14,7 +14,9 @@ Feature: RabbitMQ delivery metadata
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    And RabbitMQ exchange "orders_{{test_id}}" routes "orders.created" to queue "orders_{{test_id}}"
+    And RabbitMQ exchange "orders_{{test_id}}" of type direct exists
+    And RabbitMQ queue "orders_{{test_id}}" exists
+    And RabbitMQ queue "orders_{{test_id}}" is bound to exchange "orders_{{test_id}}" with routing key "orders.created"
     When these Plexus commands are executed
       """
       CREATE SCHEMA order_event ( user_id I64 );
@@ -232,7 +234,11 @@ Feature: RabbitMQ delivery metadata
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    And RabbitMQ fanout exchange "stamps_{{test_id}}" delivers to queues "stamped_{{test_id}}" and "unstamped_{{test_id}}"
+    And RabbitMQ exchange "stamps_{{test_id}}" of type fanout exists
+    And RabbitMQ queue "stamped_{{test_id}}" exists
+    And RabbitMQ queue "unstamped_{{test_id}}" exists
+    And RabbitMQ queue "stamped_{{test_id}}" is bound to exchange "stamps_{{test_id}}" with routing key ""
+    And RabbitMQ queue "unstamped_{{test_id}}" is bound to exchange "stamps_{{test_id}}" with routing key ""
     When these Plexus commands are executed
       """
       CREATE SCHEMA reading ( value I64 );

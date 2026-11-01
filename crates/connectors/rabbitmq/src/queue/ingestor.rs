@@ -44,14 +44,14 @@ use nervix_models::{ClientConfigEntry, IngestorMetadataType, RabbitMqQueueName, 
 use reader::RabbitMqBatchReader;
 use thiserror::Error;
 
-use crate::queue::connection::RabbitMqBroker;
+use crate::connection::RabbitMqBroker;
 
 const RABBITMQ: &str = "rabbitmq";
 
 /// Why a RabbitMQ ingestor could not connect, consume, or settle a delivery.
 #[derive(Debug, Error)]
 pub enum RabbitMqQueueIngestorError {
-    /// The ingestor could not open a connection; the [`crate::queue::RabbitMqConnectError`] beneath it
+    /// The ingestor could not open a connection; the [`crate::RabbitMqConnectError`] beneath it
     /// says why.
     #[error("failed to connect RabbitMQ client")]
     Connect,
@@ -737,7 +737,7 @@ mod tests {
                 Some(RabbitMqQueueIngestorError::Connect)
             ));
             let cause = error
-                .downcast_ref::<crate::queue::RabbitMqConnectError>()
+                .downcast_ref::<crate::RabbitMqConnectError>()
                 .expect("the connection failure stays beneath the ingestor failure");
             assert_eq!(cause.is_configuration(), configuration, "{addr}");
             assert!(source.needs_resume(), "{addr}");
@@ -810,7 +810,7 @@ mod tests {
             written.push((name.to_string(), value.to_string()));
         }
         let mut delivery = Delivery::mock(0, "".into(), "orders".into(), false, Vec::new());
-        delivery.properties = crate::queue::RabbitMqQueueEmitter::properties(&written);
+        delivery.properties = crate::publisher::RabbitMqPublisher::properties(&written);
         let headers = RabbitMqDeliveryHeaders { delivery };
         let mut visited = Vec::new();
         headers.visit(&mut |name, value| visited.push(format!("{name}={value}")));
