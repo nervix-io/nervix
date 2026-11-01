@@ -137,6 +137,14 @@ impl ConnectorKind {
         self.into()
     }
 
+    /// Whether a client of this connector renders the `{{instance}}` placeholder into its
+    /// configuration: an MQTT client's identity template names the ingestor instance that
+    /// connects, and an emitter connects as instance 0. Every other client's templates name only
+    /// its resource mounts.
+    pub const fn renders_client_instance(self) -> bool {
+        matches!(self, Self::Mqtt)
+    }
+
     /// What every client of this connector declares. Application sessions reach the `CLIENT`
     /// connector without a client Model, and an Iceberg emitter writes through an object-store
     /// client and commits through a catalog client, so neither has a client of its own.

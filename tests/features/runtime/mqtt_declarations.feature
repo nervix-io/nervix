@@ -269,3 +269,78 @@ Feature: MQTT TOPIC declarations
       | 3            | 'addr' = 'mqtt://127.0.0.1:1883', 'tls_cert_file' = 'client.pem', 'tls_key_file' = 'client.key'    | client config key 'tls_cert_file' requires 'addr' to use mqtts               |
       | 1            | 'addr' = 'mqtts://127.0.0.1:8883', 'tls_ca_file' = 'authority.pem', 'tls_cert_file' = 'client.pem' | client config key 'tls_cert_file' requires 'tls_key_file'                    |
       | 3            | 'addr' = 'mqtts://127.0.0.1:8883', 'tls_ca_file' = 'authority.pem', 'tls_cert_file' = 'client.pem' | client config key 'tls_cert_file' requires 'tls_key_file'                    |
+
+  Scenario Outline: MQTT client declarations show the declared defaults and redact the password
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE MQTT CLIENT checked CONFIG {
+        'addr' = 'mqtt://127.0.0.1:1883',
+        'username' = 'nervix-reader',
+        'password' = 'private-mqtt-password'
+      };
+      DESCRIBE CLIENT checked;
+      """
+    Then the last command output contains
+      """
+      keep_alive_ms: 60000 (default)
+      """
+    And the last command output contains
+      """
+      max_packet_size: 10240 (default)
+      """
+    And the last command output contains
+      """
+      username: nervix-reader
+      """
+    And the last command output contains
+      """
+      password: ********
+      """
+    And the last command output does not contain
+      """
+      private-mqtt-password
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: MQTT client declarations refuse a keep-alive, a publish size or an identity no connection can use at CREATE
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands fail
+      """
+      CREATE MQTT CLIENT refused_client CONFIG {
+        'addr' = 'mqtt://127.0.0.1:1883', <config>
+      };
+      """
+    Then the last command error contains
+      """
+      <error>
+      """
+
+    Examples:
+      | cluster_size | config                          | error                                                                                        |
+      | 1            | 'keep_alive_ms' = '1500'        | 'keep_alive_ms' must be whole seconds from 1 s through 65535 s                               |
+      | 3            | 'keep_alive_ms' = '1500'        | 'keep_alive_ms' must be whole seconds from 1 s through 65535 s                               |
+      | 1            | 'keep_alive_ms' = '65536000'    | 'keep_alive_ms' must be whole seconds from 1 s through 65535 s                               |
+      | 3            | 'keep_alive_ms' = '65536000'    | 'keep_alive_ms' must be whole seconds from 1 s through 65535 s                               |
+      | 1            | 'keep_alive_ms' = '0'           | invalid client config key 'keep_alive_ms': expected positive, schedulable whole milliseconds |
+      | 3            | 'keep_alive_ms' = '0'           | invalid client config key 'keep_alive_ms': expected positive, schedulable whole milliseconds |
+      | 1            | 'max_packet_size' = '0'         | invalid client config key 'max_packet_size': expected positive integer                       |
+      | 3            | 'max_packet_size' = '0'         | invalid client config key 'max_packet_size': expected positive integer                       |
+      | 1            | 'max_packet_size' = '268435461' | 'max_packet_size' must be at most 268435460                                                  |
+      | 3            | 'max_packet_size' = '268435461' | 'max_packet_size' must be at most 268435460                                                  |
+      | 1            | 'client_id' = ''                | 'client_id' must not be empty                                                                |
+      | 3            | 'client_id' = ''                | 'client_id' must not be empty                                                                |
+      | 1            | 'keepalive' = '30'              | unknown client config key 'keepalive'                                                        |
+      | 3            | 'keepalive' = '30'              | unknown client config key 'keepalive'                                                        |

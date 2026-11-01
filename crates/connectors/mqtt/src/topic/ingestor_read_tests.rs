@@ -15,7 +15,7 @@ use nervix_connector::{
     IngestorError, IngestorMessage as _, IngestorReadCancellation,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, MQTT_SOURCE_MAXIMUM_PACKET_BYTES, MqttQos, MqttSession};
+use nervix_models::{ClientConfigEntry, MqttClientConfig, MqttQos, MqttSession};
 use nervix_primitives::{
     sync::mpsc,
     time::{Instant, sleep, timeout},
@@ -307,6 +307,18 @@ async fn a_batch_timeout_beyond_the_clock_fails_the_read() {
     ));
 }
 
+/// The largest complete publish, in bytes, a client that leaves `max_packet_size` out admits.
+fn default_admission_bytes() -> usize {
+    let client = [ClientConfigEntry {
+        key: "addr".to_string(),
+        value: "mqtt://127.0.0.1:1883".to_string(),
+    }];
+    let admission = MqttClientConfig::parse(&client)
+        .assured("an address alone is a valid MQTT client configuration")
+        .max_packet_size();
+    usize::try_from(admission.get()).assured("the declared admission bound fits the address space")
+}
+
 /// One ACK-mode ingestor instance subscribing to `events` through `addr` and `dns`, whose publishes
 /// wait on their acknowledgements `window` at a time.
 fn acknowledged_plan(addr: &str, dns: DnsResolver, window: NonZeroU64) -> MqttTopicIngestorPlan {
@@ -315,7 +327,6 @@ fn acknowledged_plan(addr: &str, dns: DnsResolver, window: NonZeroU64) -> MqttTo
             key: "addr".to_string(),
             value: addr.to_string(),
         }]],
-        client_id_conflict: None,
         default_client_id: "client".to_string(),
         share_group: "default~ingestor".to_string(),
         topic: "events".to_string(),
@@ -407,8 +418,7 @@ async fn oversized_publishes_are_counted_and_acknowledged_before_the_next_publis
             plan.acknowledgement = super::IngestorAcknowledgement::OnReceipt;
         }
         let (mut source, mut connection) = subscribed(&plan, &broker).await;
-        let maximum = usize::try_from(MQTT_SOURCE_MAXIMUM_PACKET_BYTES)
-            .assured("the declared admission bound fits the address space");
+        let maximum = default_admission_bytes();
         // The payload fills the admission bound, so its complete packet exceeds it.
         connection.write_publish(1, &vec![b'x'; maximum]).await;
         connection.write_publish(2, b"2").await;
@@ -444,6 +454,38 @@ async fn oversized_publishes_are_counted_and_acknowledged_before_the_next_publis
 }
 
 #[nervix_primitives::test]
+async fn a_declared_max_packet_size_admits_a_publish_above_the_default_bound() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let mut plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
+    plan.instances = vec![vec![
+        ClientConfigEntry {
+            key: "addr".to_string(),
+            value: broker.addr(),
+        },
+        ClientConfigEntry {
+            key: "max_packet_size".to_string(),
+            value: "32768".to_string(),
+        },
+    ]];
+    let (mut source, mut connection) = subscribed(&plan, &broker).await;
+    // The payload alone fills the default bound, so only the declared one admits its packet.
+    let payload = vec![b'x'; default_admission_bytes()];
+    connection.write_publish(1, &payload).await;
+
+    let messages = read_whole_batch(&mut source, 1).await;
+    assert_eq!(messages[0].payload(), payload.as_slice());
+    source
+        .acknowledge(&positions(&messages))
+        .await
+        .assured("the connected source writes the admitted publish's acknowledgement");
+    let Ok(packet_id) = timeout(OBSERVATION_BUDGET, connection.read_puback()).await else {
+        panic!("the admitted publish's PUBACK was not written within {OBSERVATION_BUDGET:?}");
+    };
+    assert_eq!(packet_id, 1);
+}
+
+#[nervix_primitives::test]
 async fn an_oversized_publish_splits_a_parallel_batch_without_losing_its_neighbours() {
     let fixture = DnsFixture::start().await;
     let broker = ScriptedBroker::start().await;
@@ -453,8 +495,7 @@ async fn an_oversized_publish_splits_a_parallel_batch_without_losing_its_neighbo
         nonzero_ext::nonzero!(3_u64),
     );
     let (mut source, mut connection) = subscribed(&plan, &broker).await;
-    let maximum = usize::try_from(MQTT_SOURCE_MAXIMUM_PACKET_BYTES)
-        .assured("the declared admission bound fits the address space");
+    let maximum = default_admission_bytes();
     connection.write_publish(1, b"1").await;
     connection.write_publish(2, &vec![b'x'; maximum]).await;
     connection.write_publish(3, b"3").await;

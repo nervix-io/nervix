@@ -869,6 +869,17 @@ transient error. A Syslog client that sets a deadline key its direction and prot
 is refused as `SyslogConfigError::InapplicableDeadlineKey`, naming the key and the clients it
 applies to.
 
+An MQTT client configuration the vocabulary cannot carry is refused as an
+`MqttClientConfigError`, which names the key without its value: an empty or NUL-bearing identity, a
+string longer than MQTT's 65,535 bytes, a keep-alive that is not whole seconds within MQTT's range,
+or a `max_packet_size` above MQTT's largest packet; a schema refusal stays beneath its `Schema`
+variant. `CREATE MQTT CLIENT` reports it after rendering the configuration for instance 0. A source
+or emitter whose rendered configuration the vocabulary refuses at connection keeps it beneath the
+connector's `MqttClientOptionsError::Configuration`, and a TLS file it cannot read keeps the
+connector contract's `ClientConfigError` beneath `MqttClientOptionsError::TlsFile`, naming the
+file. A source keeps either beneath `MqttTopicIngestorError::ClientConfig`, and an emitter beneath
+`EmitterOpenError::InvalidConfiguration`.
+
 An MQTT client's event loop reports a failed or lost broker connection as an
 `MqttConnectionError`, owned by the connector's connection module. The socket connector hands the
 driver the resolver's `DnsLookupError` as the failure of a lookup, and the driver keeps it as the
@@ -902,9 +913,9 @@ emitter's transient error. A missed `ACK TIMEOUT` is the confirmation window's
 MQTT input retirement reports `RuntimeError::RetireIngestorEntity`, naming its domain and
 ingestor, above the connector's `MqttTopicIngestorError::RetireInstance` and instance index. The report
 keeps typed client and connection causes, an unsubscribe refusal's reason codes, or the cleanup
-deadline's budget. Invalid endpoint URLs retain their parse cause, and client construction keeps
-its driver cause. Cleanup failures at the preceding endpoint are rendered once into runtime error
-events and do not fail a drop or prevent moving to another reachable endpoint. Failure to prepare
+deadline's budget. An invalid client configuration keeps the vocabulary's refusal, and client
+construction keeps its driver cause. Cleanup failures at the preceding endpoint are rendered once
+into runtime error events and do not fail a drop or prevent moving to another reachable endpoint. Failure to prepare
 the replacement's changed sessions remains an installation failure. Neither path rejects a record
 or confirms payload delivery.
 

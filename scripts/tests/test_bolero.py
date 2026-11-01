@@ -218,6 +218,7 @@ class InventoryTests(unittest.TestCase):
             "websocket-retained-metadata",
             "ingest-metadata-projection",
             "websocket-client-config",
+            "mqtt-client-config",
             "websocket-upgrade-headers",
             "websocket-subprotocol-offers",
             "models-timestamps",

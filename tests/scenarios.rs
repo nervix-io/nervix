@@ -154,6 +154,7 @@ use crate::common::{
     iceberg_catalog_gate::IcebergCatalogGate,
     kafka_group_member::ExternalKafkaGroupMember,
     kafka_mock_broker::KafkaMockBroker,
+    mqtt_broker_clients::{MqttBrokerClient, mqtt_broker_client},
     mqtt_publish_filter::MqttPublishFilter,
     nats_endpoint::NatsEndpoint,
     node_bound_address::{NodeBoundAddress, NodeBoundListener, bind_as_its_node},
@@ -26575,6 +26576,79 @@ async fn when_sized_mqtt_qos1_messages_are_published(
         .publish_mqtt_qos1_burst(&topic, &payload, count)
         .await
         .expect("failed to publish the sized MQTT QoS 1 messages");
+}
+
+/// Waits until the test broker records the client whose identity is `client_id` as connected, and
+/// returns that record.
+async fn connected_mqtt_broker_client(
+    world: &ScenarioWorld,
+    duration: &str,
+    client_id: &str,
+) -> MqttBrokerClient {
+    let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
+    let client_id = expand_placeholders(world, client_id);
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let record = mqtt_broker_client(world.dependencies.endpoints(), &client_id)
+            .await
+            .expect("the MQTT broker's management API must answer");
+        if let Some(record) = record.as_ref()
+            && record.connected
+        {
+            return record.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the MQTT broker to report client '{client_id}' connected; its \
+             last record: {record:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(expr = "within {string} the MQTT broker reports client {string} connected")]
+async fn then_mqtt_broker_reports_client_connected(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_id: String,
+) {
+    connected_mqtt_broker_client(world, &duration, &client_id).await;
+}
+
+#[then(expr = "within {string} the MQTT broker reports client {string} connected as user {string}")]
+async fn then_mqtt_broker_reports_client_connected_as_user(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_id: String,
+    username: String,
+) {
+    let username = expand_placeholders(world, &username);
+    let record = connected_mqtt_broker_client(world, &duration, &client_id).await;
+    assert_eq!(
+        record.username.as_deref(),
+        Some(username.as_str()),
+        "the MQTT broker reports client '{}' connected under another username",
+        record.client_id
+    );
+}
+
+#[then(
+    expr = "within {string} the MQTT broker reports client {string} connected with a keep-alive \
+            of {int} seconds"
+)]
+async fn then_mqtt_broker_reports_client_connected_with_keep_alive(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_id: String,
+    keep_alive_seconds: u64,
+) {
+    let record = connected_mqtt_broker_client(world, &duration, &client_id).await;
+    assert_eq!(
+        record.keep_alive_seconds, keep_alive_seconds,
+        "the MQTT broker holds client '{}' to another keep-alive",
+        record.client_id
+    );
 }
 
 #[when(expr = "RabbitMQ message is published to queue {string}")]

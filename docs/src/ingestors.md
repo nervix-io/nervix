@@ -1522,8 +1522,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
-| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
-| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
+| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: set by max_packet_size, 10240 bytes when omitted; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: client key `keep_alive_ms`; one interval of it, or of the broker's Server Keep Alive; 60 s when omitted<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
 | Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound.<br>ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow only. NO ACK retains backpressure. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1536,12 +1536,29 @@ wildcards it may hold.
 The client's `addr` names the broker by its scheme, host and port alone: `mqtt://` or `mqtts://`, a
 host, and a nonzero port, such as `mqtt://broker.example.com:1883`. A connection reads nothing else
 from it, so `CREATE MQTT CLIENT` refuses an address that leaves out its port or writes credentials,
-a path, a query or a fragment.
+a path, a query or a fragment. Credentials, the keep-alive and the admitted publish size are keys
+of their own, and `CREATE MQTT CLIENT` refuses any key it does not declare:
 
-Connections use the driver's 60-second keep-alive unless the broker supplies a Server Keep Alive
-in `CONNACK`. Plexus exposes no client setting for this interval. A broker-supplied zero disables
-the keep-alive and the acknowledgement-write deadline derived from it; it does not make a silent
-connection fail within a fixed time.
+| Key | What it sets |
+| --- | --- |
+| `addr` | The broker: `mqtt://` or `mqtts://`, a host and a nonzero port. Required. |
+| `client_id` | The identity template every connection renders, at most 65,535 bytes, not empty and without NUL; see the identities below. Omitted, each connection uses its entity's default identity. |
+| `username`, `password` | The credentials every `CONNECT` carries, each at most 65,535 bytes. MQTT 5 lets a client write either alone. `DESCRIBE CLIENT` and `SHOW CREATE CLIENT` redact the password. |
+| `keep_alive_ms` | The keep-alive every `CONNECT` asks for: whole seconds from 1 s through 65,535 s, written in milliseconds. `60000` when omitted. |
+| `max_packet_size` | The largest complete publish, in bytes, a source admits; see the oversized publishes below. From 1 through 268,435,460, `10240` when omitted. Emitters do not read it. |
+| `tls_ca_file`, `tls_cert_file`, `tls_key_file` | The TLS files of an `mqtts` connection, refused with `mqtt`. An `mqtts` client requires `tls_ca_file`, its only trust root, and writes the certificate and key together. |
+
+A broker that refuses a client's credentials, or a client that writes none to a broker requiring
+them, refuses its connection. The source reports the broker's reason as its transient error, such
+as ``Connection refused, return code: `BadUserNamePassword` ``, and connects again on its declared
+`RETRY POLICY`, or on the host's reconnect cadence in `MODE NO ACK`; it never subscribes meanwhile.
+
+Every `CONNECT` asks the broker for the client's `keep_alive_ms`. A broker that supplies a Server
+Keep Alive in `CONNACK` replaces it for that connection. The connection pings its broker after one
+interval without traffic and ends when the following interval passes without an answer, and one
+interval bounds each acknowledgement write. A broker-supplied zero disables the keep-alive and the
+acknowledgement-write deadline derived from it; it does not make a silent connection fail within a
+fixed time.
 
 `SESSION CLEAN` starts a fresh broker session on every connection and retains no session after
 disconnect. `SESSION PERSISTENT` resumes the broker session for the same client identity and
@@ -1584,14 +1601,15 @@ ingestor reads again. See
 [MQTT source connections](connector-contract.md#mqtt-source-connections).
 
 Every MQTT connection advertises the full protocol framing limit of 268,435,460 bytes in its
-`CONNECT`. Nervix separately admits complete publishes of at most 10 KiB, including their topic,
-properties and framing, so the payload must leave room for that overhead. It drops larger
-publishes locally, acknowledges them when their QoS
+`CONNECT`. Nervix separately admits complete publishes of at most the client's `max_packet_size`
+bytes, 10,240 when omitted, including their topic, properties and framing, so the payload must
+leave room for that overhead. It drops larger publishes locally, acknowledges them when their QoS
 requires it, then counts them in `nervix_ingestor_oversized_payloads_total`, visible in
 `DESCRIBE INGESTOR`. They never reach the codec and do not count as decode rejections. Releasing
 their broker inflight slots lets a persistent session continue delivering ordinary messages even
-after many oversized publishes. Raw framing may therefore use substantially more memory than an
-admitted publish; the two bounds are declared separately above.
+after many oversized publishes; a broker told the smaller bound in `CONNECT` could instead keep a
+larger publish in its inflight window and stall the session. Raw framing may therefore use
+substantially more memory than an admitted publish; the two bounds are declared separately above.
 
 Cancellation retains any discard acknowledgement and its original keep-alive deadline for the
 next read. An ordinary partial batch ahead of a discard is returned and acknowledged first,
@@ -1600,10 +1618,15 @@ deadline and reports its size exactly once after that acknowledgement has been w
 
 Without a `client_id` in the client configuration, one instance connects as
 `<domain>~<ingestor>`. Multiple instances connect as `<domain>~<ingestor>~<instance>`, with
-zero-based instance indices. An explicit identity shared by multiple instances must contain
-`{{instance}}`. An explicit identity replaces the whole default, including its domain prefix:
-choose identities unique to each live connection on the same broker, across domains too.
-Identities remain stable across node ownership changes.
+zero-based instance indices. A `client_id` is a template: its `{{instance}}` placeholder, however
+its braces are spaced, renders the zero-based index of the instance that connects, and an emitter
+that shares the client connects as instance 0. Each instance must render an identity of its own, so
+an ingestor with more than one instance names `{{instance}}` in its `client_id`. Instances whose
+identities render alike never subscribe: each reports
+`MQTT client_id '<identity>' is shared by <count> instances` as its transient error. An explicit
+identity replaces the whole default, including its domain prefix: choose identities unique to each
+live connection on the same broker, across domains too. Identities remain stable across node
+ownership changes.
 
 `DROP INGESTOR` releases the broker sessions, including after `STOP`. Nervix stops the source,
 opens a clean cleanup connection for each distinct identity, sends `UNSUBSCRIBE` for its filter,

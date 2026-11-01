@@ -164,6 +164,7 @@ tags = [
   "@websocket_source_lifecycle",
   "@websocket_declaration_lifecycle",
   "@mqtt_source_retirement",
+  "@mqtt_client_credentials_refused",
   "@pulsar_source_retirement",
   "@forced_failover_delivery",
   "@mqtt_parallel_gather_at_quiesce",
@@ -820,6 +821,16 @@ id = "scenario.mqtt-finish-at-stop"
 invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
 invocation = "scenarios"
 scenario = "STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "MQTT sources and emitters on one and three nodes whose broker listener refuses a client that writes no credentials: each source resume and emitter connection fails with the broker's refusal, the source connects again on the host's reconnect cadence and the emitter on its retry policy, beside the tracked locks of the Plexus commands, the ingestor and emitter status publication and the cluster's teardown. The client's event loop, the broker's refusal and the reconnect waits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_client_keys.feature"
+id = "scenario.mqtt-client-credentials-refused"
+invariant = "An MQTT client that writes no credentials to a broker requiring them never subscribes or publishes, and its source and emitter keep reporting the broker's refusal while they connect again."
+invocation = "scenarios"
+scenario = "The broker refuses an MQTT client without credentials, and its source and emitter report the refusal"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -2306,6 +2317,16 @@ id = "stress.mqtt-finish-at-stop"
 invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
 invocation = "stress-scenarios"
 scenario = "STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: MQTT sources and emitters on one and three nodes whose broker listener refuses a client that writes no credentials: each source resume and emitter connection fails with the broker's refusal, the source connects again on the host's reconnect cadence and the emitter on its retry policy, beside the tracked locks of the Plexus commands, the ingestor and emitter status publication and the cluster's teardown. The client's event loop, the broker's refusal and the reconnect waits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_client_keys.feature"
+id = "stress.mqtt-client-credentials-refused"
+invariant = "An MQTT client that writes no credentials to a broker requiring them never subscribes or publishes, and its source and emitter keep reporting the broker's refusal while they connect again."
+invocation = "stress-scenarios"
+scenario = "The broker refuses an MQTT client without credentials, and its source and emitter report the refusal"
 selections = ["deloxide-stress"]
 
 [[workload]]

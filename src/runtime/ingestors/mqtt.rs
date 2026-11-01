@@ -122,10 +122,6 @@ impl MqttTopicIngestorStartPlan {
         );
         let connector = MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
             instances: instance_configs,
-            client_id_conflict: MqttTopicIngestorPlan::client_id_conflict(
-                &self.client.config,
-                self.instances,
-            ),
             share_group: default_client_id.clone(),
             default_client_id,
             topic: self.topic.as_str().to_string(),

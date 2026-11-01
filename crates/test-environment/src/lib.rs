@@ -175,6 +175,25 @@ pub const MQTT_SHORT_KEEPALIVE_ADDR: &str = "mqtt_short_keepalive_addr";
 /// The keep-alive the listener at [`MQTT_SHORT_KEEPALIVE_ADDR`] holds its clients to. The broker
 /// closes a connection that sends nothing for one and a half of it.
 pub const MQTT_SHORT_KEEPALIVE: Duration = Duration::from_secs(10);
+/// A listener of the same MQTT broker that authenticates every client: it accepts only the user
+/// named by [`MQTT_AUTH_USERNAME`] with the password named by [`MQTT_AUTH_PASSWORD`], and refuses a
+/// client that writes no credentials or other ones. Every other listener admits clients without
+/// credentials, and the broker routes publishes across all of them.
+pub const MQTT_AUTH_ADDR: &str = "mqtt_auth_addr";
+/// The username the listener at [`MQTT_AUTH_ADDR`] accepts.
+pub const MQTT_AUTH_USERNAME: &str = "mqtt_auth_username";
+/// The password the listener at [`MQTT_AUTH_ADDR`] accepts with [`MQTT_AUTH_USERNAME`].
+pub const MQTT_AUTH_PASSWORD: &str = "mqtt_auth_password";
+/// The broker's HTTP management API, which reports each connected client's identity, username and
+/// negotiated keep-alive. A request authenticates with [`MQTT_API_KEY`] and [`MQTT_API_SECRET`].
+pub const MQTT_API_ADDR: &str = "mqtt_api_addr";
+/// The key of the management API credential the broker is started with.
+pub const MQTT_API_KEY: &str = "nervix-scenarios";
+/// The secret of the management API credential the broker is started with.
+pub const MQTT_API_SECRET: &str = "nervix-scenarios-api-secret";
+/// The values behind [`MQTT_AUTH_USERNAME`] and [`MQTT_AUTH_PASSWORD`].
+const MQTT_AUTH_USERNAME_VALUE: &str = "nervix-mqtt-user";
+const MQTT_AUTH_PASSWORD_VALUE: &str = "nervix-mqtt-password";
 pub const NATS_ADDR: &str = "nats_addr";
 pub const NATS_TLS_ADDR: &str = "nats_tls_addr";
 pub const SQS_ENDPOINT: &str = "sqs_endpoint";
@@ -660,13 +679,49 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         }
         let tls = self.ensure_tls()?.clone();
         let short_keepalive = MQTT_SHORT_KEEPALIVE.as_secs().to_string();
+        let users = format!(
+            "user_id,password,is_superuser\n{MQTT_AUTH_USERNAME_VALUE},{MQTT_AUTH_PASSWORD_VALUE},\
+             false\n"
+        );
+        let api_keys = format!("{MQTT_API_KEY}:{MQTT_API_SECRET}\n");
         let container = self
             .start_container("mqtt", 1883.tcp(), "MQTT", || {
                 GenericImage::new("emqx/emqx", "5.8.4")
                     .with_exposed_port(1883.tcp())
                     .with_exposed_port(1884.tcp())
+                    .with_exposed_port(1885.tcp())
                     .with_exposed_port(8883.tcp())
+                    .with_exposed_port(18083.tcp())
                     .with_wait_for(WaitFor::message_on_either_std("EMQX 5.8.4 is running now"))
+                    // One password authenticator holds the users of the authenticating listener.
+                    // Every other listener skips it and admits a client without credentials.
+                    .with_env_var("EMQX_AUTHENTICATION__1__MECHANISM", "password_based")
+                    .with_env_var("EMQX_AUTHENTICATION__1__BACKEND", "built_in_database")
+                    .with_env_var("EMQX_AUTHENTICATION__1__USER_ID_TYPE", "username")
+                    .with_env_var(
+                        "EMQX_AUTHENTICATION__1__PASSWORD_HASH_ALGORITHM__NAME",
+                        "plain",
+                    )
+                    .with_env_var(
+                        "EMQX_AUTHENTICATION__1__PASSWORD_HASH_ALGORITHM__SALT_POSITION",
+                        "disable",
+                    )
+                    .with_env_var("EMQX_AUTHENTICATION__1__BOOTSTRAP_TYPE", "plain")
+                    .with_env_var(
+                        "EMQX_AUTHENTICATION__1__BOOTSTRAP_FILE",
+                        "/nervix/mqtt-users.csv",
+                    )
+                    .with_copy_to("/nervix/mqtt-users.csv", users.clone().into_bytes())
+                    .with_env_var("EMQX_API_KEY__BOOTSTRAP_FILE", "/nervix/api-keys.txt")
+                    .with_copy_to("/nervix/api-keys.txt", api_keys.clone().into_bytes())
+                    .with_env_var("EMQX_LISTENERS__TCP__AUTH__BIND", "0.0.0.0:1885")
+                    .with_env_var("EMQX_LISTENERS__TCP__AUTH__ENABLE_AUTHN", "true")
+                    .with_env_var("EMQX_LISTENERS__TCP__DEFAULT__ENABLE_AUTHN", "false")
+                    .with_env_var(
+                        "EMQX_LISTENERS__TCP__SHORT_KEEPALIVE__ENABLE_AUTHN",
+                        "false",
+                    )
+                    .with_env_var("EMQX_LISTENERS__SSL__DEFAULT__ENABLE_AUTHN", "false")
                     .with_env_var("EMQX_LISTENERS__TCP__DEFAULT__BIND", "0.0.0.0:1883")
                     // The broker announces this keep-alive in every CONNACK of the zone's listener
                     // and checks every second whether a client sent anything within one and a half
@@ -717,13 +772,23 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             .await?;
         let port = mapped_port(&container, 1883, "MQTT").await?;
         let short_keepalive_port = mapped_port(&container, 1884, "MQTT short keep-alive").await?;
+        let auth_port = mapped_port(&container, 1885, "MQTT authenticating").await?;
         let tls_port = mapped_port(&container, 8883, "MQTT TLS").await?;
+        let api_port = mapped_port(&container, 18083, "MQTT management API").await?;
         self.endpoints
             .insert(MQTT_ADDR, format!("mqtt://127.0.0.1:{port}"));
         self.endpoints.insert(
             MQTT_SHORT_KEEPALIVE_ADDR,
             format!("mqtt://127.0.0.1:{short_keepalive_port}"),
         );
+        self.endpoints
+            .insert(MQTT_AUTH_ADDR, format!("mqtt://127.0.0.1:{auth_port}"));
+        self.endpoints
+            .insert(MQTT_AUTH_USERNAME, MQTT_AUTH_USERNAME_VALUE.to_string());
+        self.endpoints
+            .insert(MQTT_AUTH_PASSWORD, MQTT_AUTH_PASSWORD_VALUE.to_string());
+        self.endpoints
+            .insert(MQTT_API_ADDR, format!("http://127.0.0.1:{api_port}"));
         self.endpoints
             .insert(MQTT_TLS_ADDR, format!("mqtts://127.0.0.1:{tls_port}"));
         self.containers.push(RunningContainer::Generic(container));

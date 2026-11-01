@@ -402,15 +402,19 @@ current connection, retry and deadline limits.
   `RETRY AFTER` wherever that mode requires it. `MQTT TOPIC` `SUSPEND` also declares `SESSION
   PERSISTENT QOS 1`. Do not mix mode bodies between entities or infer a default.
 - MQTT source client identities default to the domain and ingestor, with an instance suffix for
-  multiple instances. Account for the broker state that input replacement and `DROP INGESTOR`
+  multiple instances. A `client_id` is a template whose `{{instance}}` renders each source
+  instance's index, and every instance must render its own identity; an emitter connects as
+  instance 0. Account for the broker state that input replacement and `DROP INGESTOR`
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
   session lifetime, the separate raw-frame and admitted-publish bounds, oversized-payload counts
   and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
-  path or query; its `tls_*` files belong only with `mqtts`. Write MQTT wildcards only in an
-  ingestor's `TOPIC`, as whole levels with `#` last and never a leading `$share` level, which
-  Nervix forms itself; an emitter's `TOPIC` is one literal topic. Check both against the MQTT
-  sections of `Ingestors` and `Emitters`.
+  path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` in
+  whole seconds and the source admission bound `max_packet_size` as their own keys, checked against
+  the client key table in `Ingestors` → `MQTT`; its `tls_*` files belong only with `mqtts`. Write
+  MQTT wildcards only in an ingestor's `TOPIC`, as whole levels with `#` last and never a leading
+  `$share` level, which Nervix forms itself; an emitter's `TOPIC` is one literal topic. Check both
+  against the MQTT sections of `Ingestors` and `Emitters`.
 - Redis Pub/Sub separates message read-ahead from the byte-bound quiesce buffer. Check the client
   required capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the source's explicit
   `BUFFER` or `DROP` policy in generated Plexus.
