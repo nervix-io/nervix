@@ -460,7 +460,7 @@ not an array — and Nervix never changes a destination schema to make an array 
 | OTEL | The encoded protobuf export request, before optional gzip | The gRPC or HTTP request framing and headers | The receiver's request-size limit; the OpenTelemetry Collector's gRPC default is 4 MiB |
 | ClickHouse | The `JSONEachRow` request body, one line and newline per member, before the client compresses it | The HTTP request line, headers and the statement | No fixed body limit; `max_query_size` bounds the statement, not the streamed data |
 | Postgres | The statement text and every bound array as the extended-query protocol encodes it: a 20-byte array header, then a four-byte length and the value's text for each member | Each parameter's own length word and the protocol messages around them | 1 GB per value, and at most 1,073,741,822 bytes in one protocol message, which no measured write is smaller than |
-| MySQL | The statement text and every bound value as the binary protocol encodes it | The packet headers, and the parameter types and null bitmap of the execute packet | 65,535 placeholders in one prepared statement, and `max_allowed_packet`, 64 MiB by default on MySQL 8.x, for every packet |
+| MySQL | The statement text and every bound value as the binary protocol encodes it | The packet headers, and the parameter types and null bitmap of the execute packet | 65,535 placeholders in one prepared statement; the server's configured `max_allowed_packet` limits each packet, but Nervix does not learn it to narrow inserts |
 | MongoDB | The BSON document of every member: an inserted document with the `_id` the driver adds to a document that has none, or an upsert's filter and update documents | The command and operation fields around the documents, the fields the driver adds to every command, and the wire-protocol message header | 16 MiB per document, and the `maxWriteBatchSize` and `maxMessageSizeBytes` the server reports — 100,000 operations and 48 MB today |
 | Iceberg | The Parquet data file as written to object storage | The manifest and snapshot metadata the commit writes | None fixed by Iceberg; without the clause Nervix rolls data files at 512 MiB |
 
@@ -496,8 +496,11 @@ message, or a MongoDB document above the 16 MiB document limit — is rejected a
 `ON MESSAGE ERROR` as the destination's rejection before anything is written, and the rows around it
 are written. MongoDB takes 100,000 writes in one command, more than `MAX MESSAGES` allows, and its
 driver divides a write above the `maxMessageSizeBytes` the server reports into several commands
-whose documents it still answers for one by one. MySQL applies `max_allowed_packet` to every packet
-the client sends, so a `MAX SIZE` no larger than it keeps every insert within it.
+whose documents it still answers for one by one. MySQL's `max_allowed_packet` limits packets,
+while the current connector measures statement text and binary bound values without packet
+headers, parameter types or the execute null bitmap. It does not learn that server setting to
+narrow writes. Operators must leave protocol headroom below it and keep individual values within
+it; a `MAX SIZE` equal to the packet limit does not guarantee that every insert fits.
 
 Iceberg is the one emitter with two byte bounds, and they measure different things on purpose:
 `BATCH ... MAX SIZE` bounds one written data file, while `COMMIT EACH ... MAX SIZE` bounds the
