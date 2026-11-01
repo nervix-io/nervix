@@ -819,35 +819,77 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn a_confirmation_of_another_subscription_kind_is_refused() {
+    async fn a_reply_other_than_this_subscriptions_confirmation_is_refused() {
+        // A confirmation of a channel subscription, then a plain status reply that confirms no
+        // subscription at all.
+        let replies: [&'static [u8]; 2] = [
+            b"*3\r\n$9\r\nsubscribe\r\n$6\r\nevents\r\n:1\r\n",
+            b"+OK\r\n",
+        ];
+        for reply in replies {
+            consume_budget().await;
+            let (client, server) = tokio::io::duplex(128);
+            let peer = spawn(async move {
+                let mut peer = Peer::new(server, ProtocolVersion::RESP2);
+                peer.command(&["PSUBSCRIBE", "events"]).await;
+                peer.answer(reply).await;
+                peer.ended().await;
+            });
+            let error = match RedisSubscription::open(
+                Box::new(client),
+                &RedisConnectionInfo::default(),
+                &pattern("events"),
+                capacity(),
+                idle(),
+            )
+            .await
+            {
+                Ok(_) => panic!("only a psubscribe confirmation confirms a pattern subscription"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                error.current_context(),
+                RedisPubSubIngestorError::UnexpectedResponse {
+                    operation: "PSUBSCRIBE"
+                }
+            ));
+            peer.await
+                .assured("the refused subscription releases its transport");
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_reply_that_is_neither_a_delivery_nor_a_probe_answer_ends_the_reader() {
         let (client, server) = tokio::io::duplex(128);
         let peer = spawn(async move {
             let mut peer = Peer::new(server, ProtocolVersion::RESP2);
-            peer.command(&["PSUBSCRIBE", "events"]).await;
-            peer.answer(b"*3\r\n$9\r\nsubscribe\r\n$6\r\nevents\r\n:1\r\n")
+            peer.subscribe().await;
+            peer.answer(b"*3\r\n$11\r\nunsubscribe\r\n$6\r\nevents\r\n:0\r\n")
                 .await;
             peer.ended().await;
         });
-        let error = match RedisSubscription::open(
+        let mut subscription = RedisSubscription::open(
             Box::new(client),
             &RedisConnectionInfo::default(),
-            &pattern("events"),
+            &events(),
             capacity(),
             idle(),
         )
         .await
-        {
-            Ok(_) => panic!("a channel confirmation does not confirm a pattern subscription"),
+        .assured("the peer acknowledges its subscription before it ends it");
+        let error = match subscription.next_message().await {
+            Ok(_) => panic!("an unsubscribe confirmation is not a delivered message"),
             Err(error) => error,
         };
         assert!(matches!(
             error.current_context(),
             RedisPubSubIngestorError::UnexpectedResponse {
-                operation: "PSUBSCRIBE"
+                operation: "receiving a subscription message"
             }
         ));
+        drop(subscription);
         peer.await
-            .assured("the refused subscription releases its transport");
+            .assured("the ended subscription reader releases its transport");
     }
 
     #[test]
@@ -863,6 +905,11 @@ mod tests {
         assert_eq!(delivered.pattern(), Some(&b"o*"[..]));
         assert_eq!(delivered.channel(), b"orders");
         assert_eq!(delivered.payload(), b"payload");
+        assert_eq!(
+            format!("{delivered:?}"),
+            "DeliveredMessage { .. }",
+            "a delivery prints none of its pattern, channel or payload bytes"
+        );
         let pushed = DeliveredMessage::from_value(Value::Push {
             kind: PushKind::Message,
             data: vec![bulk(b"orders"), bulk(b"payload")],

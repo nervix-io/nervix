@@ -489,6 +489,7 @@ mod tests {
     use nervix_models::DeadlineKey;
     use nervix_primitives::net::TcpListener;
     use nervix_test_environment::dns_authority::DnsAnswer;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
     use crate::pubsub::test_fixture::Fixture;
@@ -530,13 +531,22 @@ mod tests {
     }
 
     fn plan(addr: &str, dns: DnsResolver) -> RedisPubSubIngestorPlan {
+        plan_subscribing(addr, events(), dns)
+    }
+
+    /// A plan of `subscription` through the Redis server at `addr`.
+    fn plan_subscribing(
+        addr: &str,
+        subscription: RedisSubscriptionTarget,
+        dns: DnsResolver,
+    ) -> RedisPubSubIngestorPlan {
         RedisPubSubIngestorPlan::new(
             vec![
                 entry("addr", addr),
                 entry("subscription_buffer_messages", "1024"),
                 entry("idle_timeout_ms", "30000"),
             ],
-            events(),
+            subscription,
             dns,
         )
         .expect("the Redis address is valid")
@@ -793,6 +803,62 @@ mod tests {
                 .expect("the listener accepts it");
         drop(stream);
         assert!(fixture.authority.questions_for(name) > 0);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_refused_pattern_subscription_names_its_pattern_above_the_servers_typed_cause() {
+        let fixture = Fixture::start().await;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .assured("a loopback listener can bind an ephemeral port");
+        let port = listener
+            .local_addr()
+            .assured("a bound listener has an address")
+            .port();
+        let server = nervix_primitives::task::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .assured("the source connects to its Redis server");
+            let command = b"*2\r\n$10\r\nPSUBSCRIBE\r\n$8\r\norders.*\r\n";
+            let mut received = vec![0; command.len()];
+            stream
+                .read_exact(&mut received)
+                .await
+                .assured("the source asks for its pattern subscription");
+            assert_eq!(received, command);
+            stream
+                .write_all(
+                    b"-NOPERM this user has no permissions to access one of the channels\r\n",
+                )
+                .await
+                .assured("the refusal reaches the source");
+        });
+        let subscription = RedisSubscriptionTarget::Pattern(
+            nervix_models::RedisChannelPattern::parse("orders.*")
+                .assured("a glob pattern is within the bound"),
+        );
+        let plan = plan_subscribing(
+            &format!("redis://127.0.0.1:{port}"),
+            subscription.clone(),
+            fixture.dns,
+        );
+        let error = match plan.subscribe().await {
+            Ok(_) => panic!("the server refused the pattern subscription"),
+            Err(error) => error,
+        };
+        let RedisPubSubIngestorError::Subscribe {
+            subscription: refused,
+        } = error.current_context()
+        else {
+            panic!("a refused subscription reports the subscription it asked for");
+        };
+        assert_eq!(refused, &subscription);
+        let cause = error
+            .downcast_ref::<redis::RedisError>()
+            .assured("the refusal retains the Redis driver's typed cause");
+        assert_eq!(cause.code(), Some("NOPERM"));
+        server.await.assured("the refusing server finishes");
     }
 
     #[nervix_primitives::test]

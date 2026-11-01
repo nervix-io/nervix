@@ -251,7 +251,7 @@ Feature: Redis ingestion
       """
     # One subscription delivers in publication order, so a message from a channel the pattern does
     # not match, or one the route drops by its channel, would arrive before the fence after it.
-    When Redis message is published to channel "returns_{{test_id}}.eu"
+    When Redis message is published to channel "returns_{{test_id}}.eu" that no subscription receives
       """
       {"user_id":3}
       """
@@ -279,9 +279,13 @@ Feature: Redis ingestion
       """
     Then within "20s" the relay subscription receives payloads containing all fragments
       """
-      "user_id":6 | "channel":"audit_{{test_id}}" | "pattern":null
+      "user_id":6 | "channel":"audit_{{test_id}}"
       """
-    When Redis message is published to channel "orders_{{test_id}}.eu"
+    # A subscription payload leaves a null field out, so a channel subscription's null pattern is
+    # the absent key.
+    And the last relay subscription payload does not contain '"pattern":'
+    # The replaced pattern subscription has ended, so Redis delivers its channels to no one.
+    When Redis message is published to channel "orders_{{test_id}}.eu" that no subscription receives
       """
       {"user_id":7}
       """
