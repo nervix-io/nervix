@@ -29,7 +29,7 @@ Feature: Typed ingestor metadata
       CREATE NATS CLIENT nats_main CONFIG { 'addr' = 'nats://127.0.0.1:4222' };
       CREATE PROMETHEUS CLIENT prom_main CONFIG { 'addr' = 'http://127.0.0.1:9090', 'timeout_ms' = 5000 };
       CREATE ZEROMQ CLIENT zmq_main CONFIG { 'addr' = 'tcp://127.0.0.1:5555', 'bind' = 'false' };
-      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1' };
+      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' };
       CREATE WEBSOCKETS CLIENT ws_main CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
       CREATE SYSLOG CLIENT syslog_main CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
       """
@@ -40,14 +40,14 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'http_endpoint_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but HTTP ENDPOINT ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'http_endpoint_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but HTTP ENDPOINT ingestors declare only metadata.method, metadata.path, metadata.query, metadata.remote_addr and metadata.host"
       """
       CREATE HTTP ENDPOINT INGESTOR http_endpoint_source
         FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'ws_endpoint_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but WEBSOCKETS ENDPOINT ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'ws_endpoint_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but WEBSOCKETS ENDPOINT ingestors declare only metadata.frame_type, metadata.remote_addr and metadata.path"
       """
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_source
         FROM ws_ingress MODE NO ACK ON QUIESCE REJECT RETRY AFTER 5s DECODE USING event_codec

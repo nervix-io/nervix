@@ -121,6 +121,7 @@ use tokio::io::AsyncBufReadExt as _;
 use uuid::Uuid;
 
 use crate::common::{
+    broker_observer::BROKER_TIMEOUT,
     cli_terminal::{CliTerminal, DisplayWaitError},
     client_conformance::{
         ATTACHED_LINE, ClientProbe, OPENED_LINE, ProbeExercise, ProbeRuntime, ProbeTarget,
@@ -130,10 +131,12 @@ use crate::common::{
         AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster, CommandHold,
         DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
         InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
-        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
-        assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
-        command_connect_options, delete_rabbitmq_queue, ensure_rabbitmq_queue,
-        observe_kafka_through, publish_kafka_record_through,
+        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, TypedBrokerHeader,
+        WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
+        bind_rabbitmq_queue, client_connect_options, client_domain, command_connect_options,
+        delete_rabbitmq_queue, ensure_rabbitmq_exchange, ensure_rabbitmq_queue, ensure_sqs_queue,
+        observe_kafka_through, observe_sqs, observe_sqs_fifo_without_content_deduplication,
+        publish_kafka_record_through, publish_sqs,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
@@ -178,7 +181,7 @@ use crate::common::{
     },
     scenario_schedule::{
         FeatureLimit, SCENARIO_RETRIES, ScenarioAdmission, ScenarioLength, ScenarioRunSlots,
-        prioritize_features,
+        ScenarioWeight, prioritize_features,
     },
     scenario_shard::{ScenarioShard, ScenarioShardArgs},
     server_process::{
@@ -234,7 +237,8 @@ const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
 const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
-static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<nervix_primitives::sync::Mutex<()>> = OnceLock::new();
+static ICEBERG_CATALOG_PROVISION_LOCK: OnceLock<nervix_primitives::sync::Mutex<()>> =
+    OnceLock::new();
 static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<BlockingMutex<BTreeMap<String, String>>> =
     OnceLock::new();
 const WEB_CONSOLE_ASSERTION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -521,6 +525,8 @@ struct ScenarioWorld {
     external_kafka_members: BTreeMap<String, ExternalKafkaGroupMember>,
     last_broker_payload: Option<String>,
     last_broker_headers: Vec<(String, String)>,
+    /// The typed headers of the last observed broker message: SQS attributes with their data types.
+    last_broker_typed_headers: Vec<TypedBrokerHeader>,
     clickhouse_table: Option<String>,
     clickhouse_tls: bool,
     postgres_table: Option<String>,
@@ -1016,6 +1022,50 @@ impl ScenarioWorld {
                  pause within {duration:?}: {error}"
             )
         });
+    }
+
+    /// Waits until the commit in the scenario's domain reaches the pause armed on `node_id` after
+    /// `completed_statements` statements.
+    ///
+    /// The COMMIT a background execution sent is watched meanwhile, so one that ends before its
+    /// commit reaches the pause fails the step with its own outcome rather than this deadline.
+    /// Either failure releases the pause first: a commit that reaches it after the step gave up
+    /// passes it, instead of holding its node's shutdown for the rest of the drain deadline.
+    async fn wait_for_transaction_commit_pause(
+        &mut self,
+        node_id: &str,
+        completed_statements: usize,
+    ) {
+        let node_name = crate::common::cluster::node_name(node_id);
+        let fault_injection = self.fault_injection.clone();
+        let domain = self.domain.clone();
+        let pause = fault_injection.wait_for_transaction_commit_pause(
+            &node_name,
+            &domain,
+            completed_statements,
+        );
+        let background_commit = self.background_plexus.as_mut();
+        let observed = nervix_primitives::time::timeout(TRANSACTION_COMMIT_PAUSE_TIMEOUT, async {
+            let Some(commit) = background_commit else {
+                pause.await;
+                return None;
+            };
+            nervix_primitives::select! {
+                () = pause => None,
+                outcome = commit => Some(outcome),
+            }
+        })
+        .await;
+        let failure = match observed {
+            Ok(None) => return,
+            Ok(Some(outcome)) => format!("the background COMMIT ended first: {outcome:?}"),
+            Err(error) => format!("{error} after {TRANSACTION_COMMIT_PAUSE_TIMEOUT:?}"),
+        };
+        fault_injection.release_transaction_commit_pause(&node_name, &domain, completed_statements);
+        panic!(
+            "the commit on '{node_id}' did not reach its pause after {completed_statements} \
+             statement(s): {failure}"
+        );
     }
 }
 
@@ -3629,6 +3679,60 @@ async fn given_server_process_cluster_is_started(
     );
 }
 
+/// Starts a real-process cluster whose every member's environment names the endpoint `name` as its
+/// HTTP, HTTPS and fallback proxy under both spellings of each variable, and clears the exclusions
+/// the suite's own environment may set, so a client that followed the environment would send every
+/// request to that endpoint.
+#[given(
+    expr = "a {int} node nervix-server process cluster is started with its proxy environment \
+            naming the endpoint {string}"
+)]
+async fn given_server_process_cluster_is_started_with_proxy_environment(
+    world: &mut ScenarioWorld,
+    node_count: usize,
+    name: String,
+) {
+    assert!(
+        world.server_process_cluster.is_none(),
+        "a scenario starts at most one real-process cluster"
+    );
+    assert!(
+        world.server_process_held_ports.is_none(),
+        "this real-process cluster start holds no ports"
+    );
+    initialize_scenario_identity(world);
+    let endpoint = world
+        .placeholders
+        .get(&name)
+        .unwrap_or_else(|| panic!("no endpoint '{name}' was stood"));
+    let proxy = format!("http://{endpoint}");
+    let mut options = Vec::new();
+    for variable in [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        options.push(ServerProcessOption::Environment {
+            variable: variable.to_string(),
+            value: proxy.clone(),
+        });
+    }
+    for variable in ["NO_PROXY", "no_proxy"] {
+        options.push(ServerProcessOption::Environment {
+            variable: variable.to_string(),
+            value: String::new(),
+        });
+    }
+    world.server_process_cluster = Some(
+        ServerProcessCluster::start_sized(node_count, &options)
+            .await
+            .unwrap_or_else(|error| panic!("failed to start the real-process cluster: {error}")),
+    );
+}
+
 #[given("the server process cluster is configured with these Plexus commands")]
 async fn given_server_process_cluster_is_configured(
     world: &mut ScenarioWorld,
@@ -5957,6 +6061,7 @@ impl IngestorLogicTransportFixture {
             Self::Mqtt => {
                 r#"FROM logic_mqtt
         TOPIC 'logic_notifications_{{test_id}}'
+        SESSION CLEAN QOS 0
         MODE NO ACK"#
             }
             Self::Nats => {
@@ -7848,6 +7953,7 @@ async fn given_cluster_is_started(world: &mut ScenarioWorld, node_count: usize) 
     world.broker_observer = None;
     world.last_broker_payload = None;
     world.last_broker_headers.clear();
+    world.last_broker_typed_headers.clear();
     world.burst_raft_retention_peak = None;
     append_cucumber_log_line(&format!(
         "cluster start requested: nodes={node_count} domain={} test_id={}",
@@ -14039,6 +14145,17 @@ async fn when_physical_time_passes(_world: &mut ScenarioWorld, duration: String)
     nervix_primitives::time::sleep(duration).await;
 }
 
+/// How long a scenario waits for a commit to reach a transaction commit pause it armed.
+///
+/// A commit reaches its pause only after its admission and, for a later statement, the step's
+/// domain pause, drain, entity gates and publication, which a loaded runner delays. A three-node
+/// leader whose raft lease lapses under that load refuses the step's publication while it still
+/// leads; the COMMIT answers as a node that does not lead, its client sends it again under the same
+/// execution reference, and the next attempt adopts the step's pause and runs the step again. The
+/// wait ends as soon as the pause is reached, or the COMMIT ends, so the bound is the generous one
+/// the pause steps use.
+const TRANSACTION_COMMIT_PAUSE_TIMEOUT: Duration = Duration::from_secs(120);
+
 #[then(expr = "the transaction commit pause on node {string} after {int} statement is reached")]
 async fn then_transaction_commit_pause_is_reached(
     world: &mut ScenarioWorld,
@@ -14046,16 +14163,9 @@ async fn then_transaction_commit_pause_is_reached(
     completed_statements: usize,
 ) {
     let node_id = expand_placeholders(world, &node_id);
-    nervix_primitives::time::timeout(
-        Duration::from_secs(10),
-        world.fault_injection.wait_for_transaction_commit_pause(
-            &crate::common::cluster::node_name(&node_id),
-            &world.domain,
-            completed_statements,
-        ),
-    )
-    .await
-    .expect("transaction commit did not reach the armed pause");
+    world
+        .wait_for_transaction_commit_pause(&node_id, completed_statements)
+        .await;
 }
 
 #[when(expr = "the transaction commit pause on node {string} after {int} statement is released")]
@@ -14093,16 +14203,7 @@ async fn then_transaction_commit_admission_pause_is_reached(world: &mut Scenario
         .get("transaction_commit_admission_node")
         .cloned()
         .verified("the preceding admission-pause step saved its leader");
-    nervix_primitives::time::timeout(
-        Duration::from_secs(10),
-        world.fault_injection.wait_for_transaction_commit_pause(
-            &crate::common::cluster::node_name(&leader),
-            &world.domain,
-            0,
-        ),
-    )
-    .await
-    .expect("transaction commit did not reach the admission pause");
+    world.wait_for_transaction_commit_pause(&leader, 0).await;
 }
 
 #[when("the transaction commit admission pause on the leader node is released")]
@@ -19350,7 +19451,8 @@ impl UnacknowledgedSourceFixture {
         ON QUIESCE SUSPEND"
             }
             Self::Mqtt => {
-                "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}' MODE NO ACK
+                "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}' SESSION CLEAN QOS 0
+          MODE NO ACK
         ON QUIESCE DROP"
             }
             Self::Nats => {
@@ -25175,6 +25277,52 @@ async fn given_rabbitmq_queue_exists(world: &mut ScenarioWorld, queue: String) {
         .expect("failed to declare rabbitmq queue");
 }
 
+/// An exchange of one of the types RabbitMQ routes by: `direct`, `topic` or `fanout`.
+#[given(expr = "RabbitMQ exchange {string} of type {word} exists")]
+#[when(expr = "the operator provisions RabbitMQ exchange {string} of type {word}")]
+async fn given_rabbitmq_exchange_exists(world: &mut ScenarioWorld, exchange: String, kind: String) {
+    let exchange = expand_placeholders(world, &exchange);
+    let kind = match kind.as_str() {
+        "direct" => lapin::ExchangeKind::Direct,
+        "topic" => lapin::ExchangeKind::Topic,
+        "fanout" => lapin::ExchangeKind::Fanout,
+        _ => {
+            panic!("a RabbitMQ exchange in these scenarios is direct, topic or fanout, not {kind}")
+        }
+    };
+    ensure_rabbitmq_exchange(world.dependencies.endpoints(), &exchange, kind)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to declare RabbitMQ exchange '{exchange}': {error}")
+        });
+}
+
+#[given(expr = "RabbitMQ queue {string} is bound to exchange {string} with routing key {string}")]
+#[when(
+    expr = "the operator binds RabbitMQ queue {string} to exchange {string} with routing key \
+            {string}"
+)]
+async fn given_rabbitmq_queue_is_bound(
+    world: &mut ScenarioWorld,
+    queue: String,
+    exchange: String,
+    routing_key: String,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let exchange = expand_placeholders(world, &exchange);
+    let routing_key = expand_placeholders(world, &routing_key);
+    bind_rabbitmq_queue(
+        world.dependencies.endpoints(),
+        &queue,
+        &exchange,
+        &routing_key,
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("failed to bind RabbitMQ queue '{queue}' to exchange '{exchange}': {error}")
+    });
+}
+
 #[when(expr = "RabbitMQ queue {string} is deleted")]
 async fn when_rabbitmq_queue_is_deleted(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
@@ -25414,9 +25562,7 @@ async fn when_mock_kafka_message_is_published(
 #[given(expr = "SQS queue {string} exists")]
 async fn given_sqs_queue_exists(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
-    world
-        .cluster()
-        .ensure_sqs_queue(&queue)
+    ensure_sqs_queue(world.dependencies.endpoints(), &queue)
         .await
         .expect("failed to declare sqs queue");
 }
@@ -25469,12 +25615,43 @@ async fn given_iceberg_table_in_namespace_exists(
     location: String,
     #[step] step: &Step,
 ) {
-    let mut fixture = IcebergTableFixture::from_step(world, table, location, docstring(step));
-    fixture.namespace = expand_placeholders(world, &namespace);
+    let fixture =
+        IcebergTableFixture::in_namespace(world, table, &namespace, location, docstring(step));
     fixture
         .ensure()
         .await
         .expect("failed to create Iceberg table in its explicit namespace");
+}
+
+#[when(expr = "the operator provisions Iceberg namespace {string}")]
+async fn when_the_operator_provisions_iceberg_namespace(
+    world: &mut ScenarioWorld,
+    namespace: String,
+) {
+    let fixture = IcebergNamespaceFixture::from_step(world, &namespace);
+    fixture
+        .ensure()
+        .await
+        .expect("failed to provision the Iceberg namespace");
+}
+
+#[when(
+    expr = "the operator provisions Iceberg table {string} in namespace {string} at {string} with \
+            columns"
+)]
+async fn when_the_operator_provisions_iceberg_table_in_namespace(
+    world: &mut ScenarioWorld,
+    table: String,
+    namespace: String,
+    location: String,
+    #[step] step: &Step,
+) {
+    let fixture =
+        IcebergTableFixture::in_namespace(world, table, &namespace, location, docstring(step));
+    fixture
+        .ensure()
+        .await
+        .expect("failed to provision the Iceberg table in its namespace");
 }
 
 #[given(expr = "Kafka topic {string} is observed")]
@@ -25513,7 +25690,10 @@ async fn given_pulsar_tls_topic_is_observed(world: &mut ScenarioWorld, topic: St
     );
 }
 
+/// Declares the queue, which creates it again after it was deleted, and observes what it receives
+/// from now on.
 #[given(expr = "RabbitMQ queue {string} is observed")]
+#[when(expr = "the operator recreates RabbitMQ queue {string} and observes it")]
 async fn given_rabbitmq_queue_is_observed(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
     world.broker_observer = Some(
@@ -25553,11 +25733,22 @@ async fn given_mqtt_topic_is_observed(world: &mut ScenarioWorld, topic: String) 
 async fn given_sqs_queue_is_observed(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
     world.broker_observer = Some(
-        world
-            .cluster()
-            .observe_sqs(&queue)
+        observe_sqs(world.dependencies.endpoints(), &queue)
             .await
             .expect("failed to observe sqs queue"),
+    );
+}
+
+#[given(expr = "SQS FIFO queue {string} without content-based deduplication is observed")]
+async fn given_sqs_fifo_queue_without_content_deduplication_is_observed(
+    world: &mut ScenarioWorld,
+    queue: String,
+) {
+    let queue = expand_placeholders(world, &queue);
+    world.broker_observer = Some(
+        observe_sqs_fifo_without_content_deduplication(world.dependencies.endpoints(), &queue)
+            .await
+            .expect("failed to observe the SQS FIFO queue"),
     );
 }
 
@@ -25822,7 +26013,7 @@ impl EmissionTargetFixture {
                 observe_zeromq_emission_endpoint(world, destination).await;
                 return;
             }
-            Self::Sqs => world.cluster().observe_sqs(&destination).await,
+            Self::Sqs => observe_sqs(world.dependencies.endpoints(), &destination).await,
         };
         let observer = observed
             .unwrap_or_else(|error| panic!("failed to observe {self:?} '{destination}': {error}"));
@@ -26414,6 +26605,7 @@ async fn when_mqtt_message_is_published(
     let topic = expand_placeholders(world, &topic);
     let payload = expand_placeholders(world, docstring(step));
     wait_for_mqtt_ingestors_ready(world).await;
+    world.last_publish_at = Some(Instant::now());
     world
         .cluster()
         .publish_mqtt(&topic, &payload)
@@ -26449,20 +26641,27 @@ async fn when_these_mqtt_messages_are_rapidly_published(
     }
 }
 
-#[when(expr = "MQTT QoS 1 message is published to topic {string}")]
-async fn when_mqtt_qos1_message_is_published(
+/// Publishes the docstring at QoS 1 or 2 and returns once the broker answered it: its PUBACK at
+/// QoS 1, its PUBREC and then PUBCOMP at QoS 2.
+#[when(expr = "MQTT QoS {int} message is published to topic {string}")]
+async fn when_mqtt_message_is_published_at_qos(
     world: &mut ScenarioWorld,
+    qos: u8,
     topic: String,
     #[step] step: &Step,
 ) {
     let topic = expand_placeholders(world, &topic);
     let payload = expand_placeholders(world, docstring(step));
     wait_for_mqtt_ingestors_ready(world).await;
-    world
-        .cluster()
-        .publish_mqtt_qos1(&topic, &payload)
-        .await
-        .expect("failed to publish mqtt QoS 1 message");
+    let published = match qos {
+        1 => world.cluster().publish_mqtt_qos1(&topic, &payload).await,
+        2 => world.cluster().publish_mqtt_qos2(&topic, &payload).await,
+        other => {
+            panic!("the scenario publishes an answered MQTT message at QoS 1 or 2, not {other}")
+        }
+    };
+    published
+        .unwrap_or_else(|error| panic!("failed to publish the MQTT QoS {qos} message: {error}"));
 }
 
 /// Publishes `count` QoS 1 messages whose payloads are exactly `bytes` long: JSON objects whose
@@ -26591,7 +26790,7 @@ async fn when_json_messages_with_user_id_are_rapidly_published_to_input(
     let count = count
         .try_into()
         .expect("rapid publish count must fit into usize");
-    if entity_kind == "MQTT" || entity_kind == "MQTT_QOS1" {
+    if entity_kind == "MQTT" || entity_kind == "MQTT_QOS1" || entity_kind == "MQTT_QOS2" {
         wait_for_mqtt_ingestors_ready(world).await;
     }
     match entity_kind.as_str() {
@@ -26610,6 +26809,11 @@ async fn when_json_messages_with_user_id_are_rapidly_published_to_input(
             .publish_mqtt_qos1_burst(&input, &payload, count)
             .await
             .expect("failed to publish mqtt QoS 1 message burst"),
+        "MQTT_QOS2" => world
+            .cluster()
+            .publish_mqtt_qos2_burst(&input, &payload, count)
+            .await
+            .expect("failed to publish mqtt QoS 2 message burst"),
         "REDIS" => world
             .cluster()
             .publish_redis_burst(&input, &payload, count)
@@ -26791,9 +26995,7 @@ async fn when_sqs_message_is_published(
 ) {
     let queue = expand_placeholders(world, &queue);
     let payload = expand_placeholders(world, docstring(step));
-    world
-        .cluster()
-        .publish_sqs(&queue, &payload)
+    publish_sqs(world.dependencies.endpoints(), &queue, &payload)
         .await
         .expect("failed to publish sqs message");
 }
@@ -28368,6 +28570,44 @@ async fn when_http_payload_is_posted_to_node_with_header(
         .expect("failed to post http payload with header");
 }
 
+#[when(
+    expr = "http payload is posted to node {string} with host {string} path {string} and header \
+            {string} with base64 bytes {string}"
+)]
+async fn when_http_payload_is_posted_to_node_with_header_bytes(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    header_name: String,
+    header_bytes: String,
+    #[step] step: &Step,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let header_bytes = BASE64_STANDARD
+        .decode(header_bytes.trim())
+        .unwrap_or_else(|error| panic!("invalid base64 header value '{header_bytes}': {error}"));
+    append_cucumber_log_line(&format!(
+        "http publish: node={node_id} host={host} path={path} header={header_name} \
+         header_bytes={header_bytes:02x?} payload={payload}"
+    ));
+    world.last_publish_at = Some(Instant::now());
+    world
+        .cluster()
+        .publish_http_with_header_bytes(
+            &node_id,
+            &host,
+            &path,
+            &payload,
+            &header_name,
+            &header_bytes,
+        )
+        .await
+        .expect("failed to post http payload with a header of raw bytes");
+}
+
 #[when(expr = "http payload is posted to node {string} with host {string} path {string} and fails")]
 async fn when_http_payload_is_posted_to_node_and_fails(
     world: &mut ScenarioWorld,
@@ -29264,9 +29504,7 @@ async fn then_within_duration_repeatedly_publishing_sqs_message_yields_subscript
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        world
-            .cluster()
-            .publish_sqs(&queue, &payload)
+        publish_sqs(world.dependencies.endpoints(), &queue, &payload)
             .await
             .expect("failed to publish sqs message");
 
@@ -30661,6 +30899,7 @@ async fn then_observed_broker_receives_payload(world: &mut ScenarioWorld, #[step
         .expect("failed to receive broker payload");
     world.last_broker_payload = Some(message.payload);
     world.last_broker_headers = message.headers;
+    world.last_broker_typed_headers = message.typed_headers;
 
     let actual = world
         .last_broker_payload
@@ -30670,6 +30909,105 @@ async fn then_observed_broker_receives_payload(world: &mut ScenarioWorld, #[step
         payload_matches_expected(actual, &expected_payload),
         "expected payload fragment {} in broker payload, got: {actual}",
         expected_payload.trim()
+    );
+}
+
+/// Measures when the message reached the broker rather than asserting that it had not yet: the
+/// publishing step records its instant before the message leaves the harness, so load only
+/// lengthens the measured delay.
+#[then(
+    expr = "the observed broker receives a payload no sooner than {string} after it was published"
+)]
+async fn then_observed_broker_receives_payload_no_sooner_than(
+    world: &mut ScenarioWorld,
+    delay: String,
+    #[step] step: &Step,
+) {
+    let expected_delay = parse_duration_text(&delay).expect("step delay must be a valid duration");
+    let published_at = world
+        .last_publish_at
+        .expect("a delivery-delay assertion must follow a publishing step");
+    let expected_payload = expand_placeholders(world, docstring(step));
+    let observer = world
+        .broker_observer
+        .as_mut()
+        .expect("a broker observer must exist before assertion");
+    let message = observer
+        .try_next_message(expected_delay + BROKER_TIMEOUT)
+        .await
+        .expect("failed to receive broker payload")
+        .unwrap_or_else(|| {
+            panic!(
+                "timed out waiting for a broker payload {} more than {expected_delay:?} after it \
+                 was published",
+                expected_payload.trim()
+            )
+        });
+    let arrived_after = published_at.elapsed();
+    append_cucumber_log_line(&format!(
+        "broker payload arrived {arrived_after:?} after it was published"
+    ));
+    assert!(
+        payload_matches_expected(&message.payload, &expected_payload),
+        "expected payload fragment {} in broker payload, got: {}",
+        expected_payload.trim(),
+        message.payload
+    );
+    assert!(
+        arrived_after >= expected_delay,
+        "expected the broker payload no sooner than {expected_delay:?} after publishing, but it \
+         arrived after {arrived_after:?}"
+    );
+    world.last_broker_payload = Some(message.payload);
+    world.last_broker_headers = message.headers;
+    world.last_broker_typed_headers = message.typed_headers;
+}
+
+/// Every docstring line is one typed header the last observed message carries, written
+/// `<name>: <data type> <value>`, with a binary value as its bytes in lowercase hex.
+#[then("the last observed broker message has typed headers")]
+async fn then_last_observed_broker_message_has_typed_headers(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let expected = expand_placeholders(world, docstring(step));
+    for line in expected
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let (name, typed_value) = line.split_once(": ").unwrap_or_else(|| {
+            panic!("typed header assertion '{line}' is written '<name>: <data type> <value>'")
+        });
+        let (data_type, value) = typed_value.split_once(' ').unwrap_or_else(|| {
+            panic!("typed header assertion '{line}' is written '<name>: <data type> <value>'")
+        });
+        let expected_header = TypedBrokerHeader {
+            name: name.to_string(),
+            data_type: data_type.to_string(),
+            value: value.to_string(),
+        };
+        assert!(
+            world.last_broker_typed_headers.contains(&expected_header),
+            "expected typed broker header {expected_header:?}, got {:?}",
+            world.last_broker_typed_headers
+        );
+    }
+}
+
+#[then(expr = "the last observed broker payload is at least {int} bytes long")]
+async fn then_last_observed_broker_payload_is_at_least_bytes_long(
+    world: &mut ScenarioWorld,
+    bytes: usize,
+) {
+    let payload = world
+        .last_broker_payload
+        .as_deref()
+        .expect("broker payload must be captured before assertion");
+    assert!(
+        payload.len() >= bytes,
+        "expected a broker payload of at least {bytes} bytes, got {} bytes",
+        payload.len()
     );
 }
 
@@ -32395,22 +32733,129 @@ fn rustfs_iceberg_storage_factory() -> StdArc<dyn iceberg::io::StorageFactory> {
     })
 }
 
-struct IcebergTableFixture {
+/// What an operator provisions in the scenarios' shared REST catalog: one provisioning at a time,
+/// retried while the catalog's SQLite store reports a transient lock.
+struct IcebergCatalogProvisioning;
+
+const ICEBERG_CATALOG_PROVISION_TIMEOUT: Duration = Duration::from_secs(15);
+const ICEBERG_CATALOG_PROVISION_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+impl IcebergCatalogProvisioning {
+    /// Runs `attempt` until it provisions the catalog `entity` it names, retrying it while the
+    /// catalog reports a transient lock.
+    async fn run<Attempt, Provisioned>(entity: &str, attempt: Attempt) -> Result<(), String>
+    where
+        Attempt: Fn() -> Provisioned,
+        Provisioned: Future<Output = Result<(), String>>,
+    {
+        let _guard = ICEBERG_CATALOG_PROVISION_LOCK
+            .get_or_init(|| nervix_primitives::sync::Mutex::new(()))
+            .lock()
+            .await;
+        let deadline = Instant::now() + ICEBERG_CATALOG_PROVISION_TIMEOUT;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match attempt().await {
+                Ok(()) => return Ok(()),
+                Err(error) if Self::is_transient_catalog_lock(&error) => {
+                    if Instant::now() >= deadline {
+                        return Err(format!(
+                            "timed out retrying Iceberg {entity} setup after transient catalog \
+                             lock: {error}"
+                        ));
+                    }
+                    nervix_primitives::time::sleep(ICEBERG_CATALOG_PROVISION_RETRY_INTERVAL).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn is_transient_catalog_lock(error: &str) -> bool {
+        error.contains("SQLITE_BUSY") || error.contains("database is locked")
+    }
+}
+
+/// A catalog namespace a scenario provisions, as an operator does before a table can be created in
+/// it.
+struct IcebergNamespaceFixture {
     dependencies: DependencyEndpoints,
     namespace: String,
+}
+
+impl IcebergNamespaceFixture {
+    fn from_step(world: &ScenarioWorld, namespace: &str) -> Self {
+        Self {
+            dependencies: world.dependencies.endpoints().clone(),
+            namespace: expand_placeholders(world, namespace),
+        }
+    }
+
+    /// The namespace named after the scenario's Nervix domain.
+    fn of_domain(world: &ScenarioWorld) -> Self {
+        Self {
+            dependencies: world.dependencies.endpoints().clone(),
+            namespace: world.domain.clone(),
+        }
+    }
+
+    async fn ensure(&self) -> Result<(), String> {
+        IcebergCatalogProvisioning::run("namespace", || self.ensure_once()).await
+    }
+
+    async fn ensure_once(&self) -> Result<(), String> {
+        let catalog = rustfs_rest_catalog(&self.dependencies).await?;
+        self.ensure_in(&catalog).await?;
+        Ok(())
+    }
+
+    /// Creates the namespace in `catalog` unless the catalog already holds it, and returns its
+    /// identifier.
+    async fn ensure_in(&self, catalog: &RestCatalog) -> Result<NamespaceIdent, String> {
+        let namespace = NamespaceIdent::from_strs(self.namespace.split('.'))
+            .map_err(|source| format!("invalid catalog namespace: {source}"))?;
+        let exists = catalog
+            .namespace_exists(&namespace)
+            .await
+            .map_err(|source| format!("failed to check Iceberg namespace: {source}"))?;
+        if !exists {
+            catalog
+                .create_namespace(&namespace, Default::default())
+                .await
+                .map_err(|source| format!("failed to create Iceberg namespace: {source}"))?;
+        }
+        Ok(namespace)
+    }
+}
+
+struct IcebergTableFixture {
+    namespace: IcebergNamespaceFixture,
     table: String,
     location: String,
     fields: Vec<arrow_schema::Field>,
 }
 
-const ICEBERG_TABLE_PROVISION_TIMEOUT: Duration = Duration::from_secs(15);
-const ICEBERG_TABLE_PROVISION_RETRY_INTERVAL: Duration = Duration::from_millis(100);
-
 impl IcebergTableFixture {
+    /// The table in the namespace named after the scenario's Nervix domain.
     fn from_step(world: &ScenarioWorld, table: String, location: String, columns: &str) -> Self {
         Self {
-            dependencies: world.dependencies.endpoints().clone(),
-            namespace: world.domain.clone(),
+            namespace: IcebergNamespaceFixture::of_domain(world),
+            table: expand_placeholders(world, &table),
+            location: expand_placeholders(world, &location),
+            fields: Self::parse_fields(columns),
+        }
+    }
+
+    /// The table in the catalog namespace a step names.
+    fn in_namespace(
+        world: &ScenarioWorld,
+        table: String,
+        namespace: &str,
+        location: String,
+        columns: &str,
+    ) -> Self {
+        Self {
+            namespace: IcebergNamespaceFixture::from_step(world, namespace),
             table: expand_placeholders(world, &table),
             location: expand_placeholders(world, &location),
             fields: Self::parse_fields(columns),
@@ -32418,44 +32863,12 @@ impl IcebergTableFixture {
     }
 
     async fn ensure(&self) -> Result<(), String> {
-        let _guard = ICEBERG_TABLE_PROVISION_LOCK
-            .get_or_init(|| nervix_primitives::sync::Mutex::new(()))
-            .lock()
-            .await;
-        let deadline = Instant::now() + ICEBERG_TABLE_PROVISION_TIMEOUT;
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            match self.ensure_once().await {
-                Ok(()) => return Ok(()),
-                Err(error) if Self::is_transient_catalog_lock(&error) => {
-                    if Instant::now() >= deadline {
-                        return Err(format!(
-                            "timed out retrying Iceberg table setup after transient catalog lock: \
-                             {error}"
-                        ));
-                    }
-                    nervix_primitives::time::sleep(ICEBERG_TABLE_PROVISION_RETRY_INTERVAL).await;
-                }
-                Err(error) => return Err(error),
-            }
-        }
+        IcebergCatalogProvisioning::run("table", || self.ensure_once()).await
     }
 
     async fn ensure_once(&self) -> Result<(), String> {
-        let catalog = rustfs_rest_catalog(&self.dependencies).await?;
-        let namespace = NamespaceIdent::from_strs(self.namespace.split('.'))
-            .map_err(|source| format!("invalid catalog namespace: {source}"))?;
-        if !catalog
-            .namespace_exists(&namespace)
-            .await
-            .map_err(|source| format!("failed to check Iceberg namespace: {source}"))?
-        {
-            catalog
-                .create_namespace(&namespace, Default::default())
-                .await
-                .map_err(|source| format!("failed to create Iceberg namespace: {source}"))?;
-        }
-
+        let catalog = rustfs_rest_catalog(&self.namespace.dependencies).await?;
+        let namespace = self.namespace.ensure_in(&catalog).await?;
         let table_ident = TableIdent::new(namespace, self.table.clone());
         if catalog
             .table_exists(&table_ident)
@@ -32489,10 +32902,6 @@ impl IcebergTableFixture {
             .await
             .map_err(|source| format!("failed to create Iceberg table {table_ident}: {source}"))?;
         Ok(())
-    }
-
-    fn is_transient_catalog_lock(error: &str) -> bool {
-        error.contains("SQLITE_BUSY") || error.contains("database is locked")
     }
 
     fn parse_fields(columns: &str) -> Vec<arrow_schema::Field> {
@@ -33814,6 +34223,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
             };
             let declared_tags = feature.tags.iter().chain(rule_tags).chain(&scenario.tags);
             let length = ScenarioLength::declared_by(declared_tags.map(String::as_str));
+            let declared_weight = ScenarioWeight::for_scenario(feature, rule, scenario);
             let run_slots = run_slots.clone();
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
@@ -33826,9 +34236,15 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 );
                 let run = registration.run();
                 world.active_scenario = Some(registration);
+                let weight = declared_weight.unwrap_or_else(|error| {
+                    panic!(
+                        "invalid run-slot declaration for feature {feature_name:?}, scenario \
+                         {scenario_name:?}, line {scenario_line}: {error}"
+                    )
+                });
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, length, &feature_name, run, |reason| {
+                    .admit_with(limit, length, weight, &feature_name, run, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;

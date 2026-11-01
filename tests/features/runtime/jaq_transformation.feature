@@ -249,7 +249,7 @@ Feature: JAQ transformation
           'client_id' = 'nervix-cucumber-jaq-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK
+        FROM mqtt_main TOPIC 'notifications_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -410,7 +410,9 @@ Feature: JAQ transformation
         CREATE SQS CLIENT sqs_main
         CONFIG {
           'endpoint' = '{{sqs_endpoint}}',
-          'region' = 'us-east-1'
+          'region' = 'us-east-1',
+          'access_key_id' = 'scenario-key',
+          'secret_access_key' = 'scenario-secret'
         };
         CREATE SQS QUEUE INGESTOR sqs_notifications
         FROM sqs_main QUEUE 'notifications_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s

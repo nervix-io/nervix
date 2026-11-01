@@ -23,9 +23,9 @@ use nervix_models::{
     NatsQueueGroupName, NatsSubjectName, OptionDeclaration, OptionForm, OptionPresence,
     OtelEmitterEntity, PostgresEmitterEntity, PrometheusIngestorEntity, PulsarEmitterEntity,
     PulsarIngestorEntity, PulsarSubscriptionName, PulsarTopicName, RabbitMqEmitterEntity,
-    RabbitMqIngestorEntity, RabbitMqQueueName, RedisChannelName, RedisEmitterEntity,
-    RedisIngestorEntity, RuntimeCapability, SentryEmitterEntity, SqsEmitterEntity,
-    SqsIngestorEntity, SqsQueueName, SyslogEmitterEntity, SyslogIngestorEntity,
+    RabbitMqExchangeName, RabbitMqIngestorEntity, RabbitMqQueueName, RedisChannelName,
+    RedisEmitterEntity, RedisIngestorEntity, RuntimeCapability, SentryEmitterEntity,
+    SqsEmitterEntity, SqsIngestorEntity, SqsQueueName, SyslogEmitterEntity, SyslogIngestorEntity,
     WebsocketsIngestorEntity, ZeroMqEmitterEntity, ZeroMqIngestorEntity,
 };
 use strum::IntoEnumIterator as _;
@@ -125,7 +125,7 @@ fn source_surface(kind: IngestorEntityKind) -> IngestorSurface {
                 (IngestQuiesceKind::Drop, false),
             ],
             locator: Some(("TOPIC", "mqtt_topic_filter")),
-            options: &[("INSTANCES", false), ("SESSION", false), ("QOS", false)],
+            options: &[("INSTANCES", false), ("SESSION", true), ("QOS", true)],
         },
         IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => IngestorSurface {
             delivery: NO_ACK,
@@ -212,11 +212,12 @@ fn every_source_pair_declares_its_modes_quiesce_modes_locator_and_options() {
     }
 }
 
-/// The publishing modes, reference, locator and options one emitter pair declares.
+/// The reference, locator, options and envelope clauses one emitter pair declares.
 struct EmitterSurface {
     reference: EmitterReferenceKind,
     locator: Option<(&'static str, &'static str)>,
     options: &'static [(&'static str, bool)],
+    envelope: &'static [EnvelopeClauseKind],
 }
 
 fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
@@ -225,19 +226,25 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
         reference: client(connector),
         locator: Some((keywords, label)),
         options,
+        envelope: &[],
     };
     let unlocated = |connector, options| EmitterSurface {
         reference: client(connector),
         locator: None,
         options,
+        envelope: &[],
     };
     let otel = &[("ATTRIBUTES", false), ("RESOURCE", false), ("SCOPE", false)];
     let conflict = &[("ON CONFLICT", false)];
+    // Both RabbitMQ entities publish through the same channel, so either can ask the broker to
+    // return a message no queue takes.
+    let mandatory = &[EnvelopeClauseKind::Mandatory];
     match kind {
         EmitterEntityKind::Client(ClientEmitterEntity::Consumer) => EmitterSurface {
             reference: EmitterReferenceKind::Schema,
             locator: None,
             options: &[],
+            envelope: &[],
         },
         EmitterEntityKind::Http(HttpEmitterEntity::Request) => {
             unlocated(ConnectorKind::Http, &[("METHOD", true), ("PATH", true)])
@@ -251,21 +258,37 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
         EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
             located(ConnectorKind::Mqtt, "TOPIC", "mqtt_topic", &[])
         }
-        EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Queue) => {
-            located(ConnectorKind::RabbitMq, "QUEUE", "rabbitmq_queue", &[])
-        }
+        EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Queue) => EmitterSurface {
+            envelope: mandatory,
+            ..located(ConnectorKind::RabbitMq, "QUEUE", "rabbitmq_queue", &[])
+        },
+        EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Exchange) => EmitterSurface {
+            envelope: mandatory,
+            ..located(
+                ConnectorKind::RabbitMq,
+                "EXCHANGE",
+                "rabbitmq_exchange",
+                &[("ROUTING KEY", true)],
+            )
+        },
         EmitterEntityKind::Redis(RedisEmitterEntity::PubSub) => {
             located(ConnectorKind::Redis, "CHANNEL", "redis_channel", &[])
         }
         EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => {
             located(ConnectorKind::Nats, "SUBJECT", "nats_publish_subject", &[])
         }
-        EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => located(
-            ConnectorKind::Sqs,
-            "QUEUE",
-            "sqs_queue",
-            &[("FIFO GROUP", false)],
-        ),
+        EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => EmitterSurface {
+            envelope: &[
+                EnvelopeClauseKind::Delay,
+                EnvelopeClauseKind::DeduplicationId,
+            ],
+            ..located(
+                ConnectorKind::Sqs,
+                "QUEUE",
+                "sqs_queue",
+                &[("FIFO GROUP", false), ("SEND", true)],
+            )
+        },
         EmitterEntityKind::ZeroMq(ZeroMqEmitterEntity::Push) => {
             unlocated(ConnectorKind::ZeroMq, &[])
         }
@@ -315,19 +338,21 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
                 ("CATALOG", true),
                 ("COMMIT EACH", true),
             ],
+            envelope: &[],
         },
     }
 }
 
 #[test]
-fn every_emitter_pair_declares_its_reference_locator_and_options_and_no_envelope_yet() {
+fn every_emitter_pair_declares_its_reference_locator_options_and_envelope_clauses() {
     for kind in EmitterEntityKind::all() {
         let expected = emitter_surface(kind);
         let declared = kind.capabilities();
         assert_eq!(declared.reference, expected.reference, "{kind}");
         assert_eq!(locator_shape(declared.locator), expected.locator, "{kind}");
         assert_eq!(option_shapes(declared.options), expected.options, "{kind}");
-        assert!(declared.envelope.is_empty(), "{kind}");
+        assert_eq!(declared.envelope, expected.envelope, "{kind}");
+        // No entity declares an envelope property yet.
         assert!(declared.properties.is_empty(), "{kind}");
     }
 }
@@ -383,6 +408,7 @@ fn every_external_name_declares_its_label_and_an_example_its_rule_admits() {
     assert_declares_an_admitted_example::<PulsarTopicName>("pulsar_topic");
     assert_declares_an_admitted_example::<PulsarSubscriptionName>("pulsar_subscription");
     assert_declares_an_admitted_example::<RabbitMqQueueName>("rabbitmq_queue");
+    assert_declares_an_admitted_example::<RabbitMqExchangeName>("rabbitmq_exchange");
     assert_declares_an_admitted_example::<SqsQueueName>("sqs_queue");
     assert_declares_an_admitted_example::<RedisChannelName>("redis_channel");
     assert_declares_an_admitted_example::<NatsSubjectName>("nats_subject");
@@ -464,11 +490,17 @@ fn every_requirement_names_a_choice_its_entity_declares() {
                 .option(requirement.option)
                 .unwrap_or_else(|| panic!("{kind} declares no {}", requirement.option));
             assert!(
-                option.choice(requirement.choice).is_some(),
-                "{kind}: {} offers no {}",
-                requirement.option,
-                requirement.choice
+                !requirement.choices.is_empty(),
+                "{kind}: a requirement of {} accepts no choice",
+                requirement.option
             );
+            for choice in requirement.choices {
+                assert!(
+                    option.choice(choice).is_some(),
+                    "{kind}: {} offers no {choice}",
+                    requirement.option
+                );
+            }
         }
     }
 }
@@ -623,11 +655,14 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
                 .runtime_capabilities()
         ),
         [
-            "MODE SINGLE",
-            "MODE BATCH",
+            "MODE ACK",
             "FIFO GROUP <expression>",
             "FIFO GROUP FROM BRANCH",
+            "SEND SINGLE",
+            "SEND BATCH",
             "BATCH",
+            "DELAY",
+            "DEDUPLICATION ID",
             "STALLED PEER timeout_ms",
         ]
     );
@@ -671,7 +706,7 @@ fn an_mqtt_source_answers_the_session_and_quality_of_service_it_subscribes_with(
             .chosen("QOS")
             .assured("MQTT answers its quality of service");
         assert!(matches!(session, "CLEAN" | "PERSISTENT"), "{session}");
-        assert!(matches!(qos, "0" | "1"), "{qos}");
+        assert!(matches!(qos, "0" | "1" | "2"), "{qos}");
         assert_eq!(source.chosen("INSTANCES"), None);
     }
     let kafka = IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic);
@@ -708,10 +743,20 @@ fn assert_generated_ingestor_states_what_its_entity_declares(bytes: &[u8]) {
         let delivery = declared
             .declared_delivery(source.acknowledgement().kind())
             .unwrap_or_else(|| panic!("{entity_kind} names an undeclared mode: {source:?}"));
+        assert_eq!(
+            source.unmet_delivery(),
+            None,
+            "{entity_kind} names a mode without its requirements: {source:?}"
+        );
         for requirement in delivery.requires {
-            assert_eq!(
-                source.chosen(requirement.option),
-                Some(requirement.choice),
+            let Some(chosen) = source.chosen(requirement.option) else {
+                panic!(
+                    "{entity_kind} answers for no {}: {source:?}",
+                    requirement.option
+                );
+            };
+            assert!(
+                requirement.accepts(chosen),
                 "{entity_kind} names a mode without its requirements: {source:?}"
             );
         }

@@ -47,10 +47,10 @@ BACKUP CLUSTER TO './cluster-config.nvxb' WITHOUT STATE;
 - `WITHOUT PAUSE` includes published runtime checkpoints without pausing a running domain. Its
   state and configuration need not be from one quiesced cut.
 - `TIMEOUT <duration>` bounds each running domain's cut, from the wait for its mutation lease
-  through its owners' staging; the resume that follows is not bounded. It is valid with the normal
-  quiesced capture, and without it the cut has 60 seconds. Domains are captured in sequence and each
-  receives its own budget. Each remote owner stages its share of a domain's state within that same
-  budget, however long its state takes to stage; a stopped domain's remote owners stage within the
+  through its owners' staging, the cluster's application of the cut's pause included; the resume
+  that follows is not bounded. It is valid with the normal quiesced capture, and without it the cut
+  has 60 seconds. Domains are captured in sequence and each receives its own budget. Each remote
+  owner stages its share of a domain's state within that same budget, however long its state takes to stage; a stopped domain's remote owners stage within the
   budget too, and a `WITHOUT PAUSE` capture's remote owners within the default one, while the
   leader's own share of those two captures has no deadline. The command's total wait includes all
   cuts, admission and archive assembly.
@@ -892,7 +892,7 @@ that compare restored and re-exported state.
 | Restored window rows a branch reopens | No row ceiling of their own; their row views are charged to the independent state-read memory class while the branch reopens the window |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
 | Unpublished restore checkpoint keys and values per node | The smaller of 128 GiB and the size of the volume that holds the node database by default; configurable with `--restore-staging-max-bytes`, up to that size |
-| Freeze of one running domain | From its pause until its owners have staged their state, at most the backup's `TIMEOUT`, or the 60-second domain drain timeout when none is given; archive assembly and the download follow the resume |
+| Freeze of one running domain | From its pause until its owners have staged their state, at most the backup's `TIMEOUT`, or the 60-second domain drain timeout when none is given. A pause the cluster applies slowly is ended at that deadline and the cut refused; only the replicated pause write, or a local installation of the paused state, already under way at the deadline finishes past it before the resume. Archive assembly and the download follow the resume |
 
 The freeze covers only the drain of admitted work, the confirming force flush and the owners'
 staging. The confirming force flush re-reads the materialized state each message parked by
@@ -965,9 +965,11 @@ contents. The reasons are:
   entity; uncordon a node or bring one back so the entity can be placed
 - an owner has not applied the cut revision within five seconds, or cannot capture or stage its
   share, naming the domain
-- a quiesced domain cannot take its lease or capture its owners within its timeout, reported as
-  `timed out waiting to capture domain '<domain>'` with the active phase, its age, total elapsed
-  time and completed phase durations; a drain timeout also retains what each node still held.
+- a quiesced domain cannot take its lease, have its pause applied across the cluster or capture
+  its owners within its timeout, reported as `timed out waiting to capture domain '<domain>'` with
+  the active phase, its age, total elapsed time and completed phase durations; a drain timeout also
+  retains what each node still held, and a pause the cluster had not applied names the wait the
+  timeout ended, such as every live node readying the paused revision.
   Inspect those phases before changing `TIMEOUT`; owner-local capture stages are retained in the
   administrative logs described in [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
 - the backup coordinator lost its leader tenure while capturing a domain

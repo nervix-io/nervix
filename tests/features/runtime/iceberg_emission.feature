@@ -24,7 +24,7 @@ Feature: Iceberg emission
         'client_id' = 'nervix-cucumber-iceberg-dns-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'iceberg_dns_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'iceberg_dns_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -217,7 +217,7 @@ Feature: Iceberg emission
         'client_id' = 'nervix-cucumber-iceberg-values-error-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'iceberg_values_error_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'iceberg_values_error_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TIMESTAMP NOW
       TO notifications
@@ -375,7 +375,7 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'iceberg_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'iceberg_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -667,7 +667,7 @@ Feature: Iceberg emission
         'client_id' = 'nervix-cucumber-iceberg-nested-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'iceberg_nested_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'iceberg_nested_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications INHERIT ALL UNBRANCHED
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -705,10 +705,10 @@ Feature: Iceberg emission
       | 1            | LIST<LIST<DATETIME>> | VEC<VEC<DATETIME>> |
       | 3            | LIST<LIST<DATETIME>> | VEC<VEC<DATETIME>> |
 
-  Scenario Outline: Iceberg emitter requires an existing catalog table
-    Given MQTT is running
-    And Iceberg dependencies are running
-    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+  @iceberg_provisioning
+  Scenario Outline: An Iceberg emitter reports the catalog namespace and then the table it lacks until an operator provisions them
+    Given Iceberg dependencies are running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -720,66 +720,86 @@ Feature: Iceberg emission
         user_id I64,
         action STRING
       );
-        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         action string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
-        TO SCHEMA notification;
-        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
-        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE MQTT CLIENT mqtt_ingress
-        CONFIG {
-          'addr' = '{{mqtt_addr}}',
-          'client_id' = 'nervix-cucumber-iceberg-missing-{{test_id}}'
-        };
-        CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'iceberg_missing_notifications_in_{{test_id}}' MODE NO ACK
-        ON QUIESCE DROP DECODE USING notification_codec
-        TO notifications
-        INHERIT ALL
-        BRANCHED BY by_mqtt_notifications
-        SET user_id = message.user_id
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG;
-        CREATE S3 CLIENT s3_main
-        CONFIG {
-          'endpoint' = '{{rustfs_addr}}',
-          'region' = 'us-east-1',
-          'access_key_id' = 'rustfsadmin',
-          'secret_access_key' = 'rustfsadmin',
-          'path_style_access' = true
-        };
-        CREATE ICEBERG_REST CLIENT iceberg_catalog
-        CONFIG {
-          'uri' = '{{iceberg_rest_addr}}',
-          'warehouse' = 's3://nervix-iceberg/warehouse'
-        };
-        CREATE DETACHED ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'missing_notifications_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/missing_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG;
-        START;
+      CREATE CODEC notification_codec
+      FROM WIRE JSON SCHEMA notification_wire
+      TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge iceberg-provisioning-{{test_id}}.example.com;
+      CREATE ENDPOINT notification_ingress
+      ON edge
+      PATH '/notifications'
+      TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR notification_source
+      FROM notification_ingress MODE NO ACK
+      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+      TO notifications
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE S3 CLIENT s3_main
+      CONFIG {
+        'endpoint' = '{{rustfs_addr}}',
+        'region' = 'us-east-1',
+        'access_key_id' = 'rustfsadmin',
+        'secret_access_key' = 'rustfsadmin',
+        'path_style_access' = true
+      };
+      CREATE ICEBERG_REST CLIENT iceberg_catalog
+      CONFIG {
+        'uri' = '{{iceberg_rest_addr}}',
+        'warehouse' = 's3://nervix-iceberg/warehouse'
+      };
+      CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'pending_{{test_id}}' NAMESPACE 'Pending_{{test_id}}.Events' LOCATION 's3://nervix-iceberg/tables/pending_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { 'user_id' = input.user_id, 'action' = input.action }
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
       """
-    And MQTT message is published to topic "iceberg_missing_notifications_in_{{test_id}}"
+    And http payload is posted to host "iceberg-provisioning-{{test_id}}.example.com" path "/notifications"
       """
-      {"user_id":47,"action":"MISSING"}
+      {"user_id":51,"action":"BEFORE"}
       """
-    Then within "5s" DESCRIBE EMITTER "iceberg_notifications" on the leader node contains
+    Then within "30s" DESCRIBE EMITTER "iceberg_notifications" on the leader node contains
       """
-      failed to initialize Iceberg table
+      transient error: ICEBERG namespace 'Pending_{{test_id}}.Events' does not exist
       """
-    And the last command output contains
+    When the operator provisions Iceberg namespace "Pending_{{test_id}}.Events"
+    Then within "30s" DESCRIBE EMITTER "iceberg_notifications" on the leader node contains
       """
-      missing_notifications_{{test_id}}
+      transient error: ICEBERG table 'pending_{{test_id}}' does not exist in namespace 'Pending_{{test_id}}.Events'
+      """
+    When the operator provisions Iceberg table "pending_{{test_id}}" in namespace "Pending_{{test_id}}.Events" at "s3://nervix-iceberg/tables/pending_{{test_id}}" with columns
+      """
+      user_id I64
+      action STRING
+      """
+    And http payload is posted to host "iceberg-provisioning-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":52,"action":"AFTER"}
+      """
+    Then the Iceberg table "pending_{{test_id}}" in namespace "Pending_{{test_id}}.Events" eventually contains a row
+      """
+      {"user_id":51,"action":"BEFORE"}
+      """
+    And the Iceberg table "pending_{{test_id}}" in namespace "Pending_{{test_id}}.Events" eventually contains a row
+      """
+      {"user_id":52,"action":"AFTER"}
+      """
+    And within "30s" DESCRIBE EMITTER "iceberg_notifications" on the leader node contains
+      """
+      transient error: -
       """
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 0             |
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario Outline: Iceberg emitter refuses a mapped column the table cannot write at open
     Given Iceberg dependencies are running
@@ -851,7 +871,7 @@ Feature: Iceberg emission
         'client_id' = 'nervix-cucumber-iceberg-by-name-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'iceberg_by_name_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'iceberg_by_name_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications INHERIT ALL UNBRANCHED
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -990,7 +1010,7 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-namespace-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'iceberg_namespace_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'iceberg_namespace_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1089,7 +1109,7 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-temp-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'iceberg_temp_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'iceberg_temp_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1175,7 +1195,7 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-shutdown-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'iceberg_shutdown_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'iceberg_shutdown_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1255,7 +1275,7 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-init-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'iceberg_init_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'iceberg_init_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1288,7 +1308,7 @@ Feature: Iceberg emission
       """
     Then within "5s" DESCRIBE EMITTER "iceberg_notifications" on the leader node contains
       """
-      transient error: failed to initialize Iceberg table {{domain}}.init_notifications_{{test_id}}:
+      transient error: failed to load ICEBERG table 'init_notifications_{{test_id}}' in namespace '{{domain}}':
       """
     And the last command output contains
       """

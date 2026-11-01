@@ -49,7 +49,7 @@ def verify(returncode: int, output: str, lifecycle: str, summary: str) -> None:
         raise ValueError("the deliberate body failures were not reported as failed scenarios")
     if re.search(r"\b[1-9]\d* (?:hook|parsing) error", output):
         raise ValueError("the child reported a hook or parsing failure")
-    if f"Attempts: {count} completed, 0 active; retries: 0," not in summary:
+    if f"Attempts: {count} completed, 0 active; retries: 0." not in summary:
         raise ValueError("the qualification did not complete its exact attempts without retries")
     finished = [line for line in lifecycle.splitlines() if "scenario finished:" in line]
     if len(finished) != count:

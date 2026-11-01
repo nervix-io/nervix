@@ -18,7 +18,7 @@ use error_stack::{Context, Report};
 use nervix_models::{
     BranchSelection, ClientName, ConnectorKind, DomainName, EmitterEntityKind, EndpointName,
     EndpointType, FieldName, IngestorEntityKind, IngestorMetadataType, ModelKind, ModelName,
-    RelayName, WebsocketsClientConfigError, WebsocketsUpgradeHeadersError,
+    RelayName,
 };
 use thiserror::Error;
 
@@ -63,19 +63,23 @@ pub(crate) enum ConnectorDurationSetting {
     Delay,
 }
 
-/// Where an emitter's envelope computes a value: one of its clauses, or one of its properties.
+/// Where an emitter computes a value for every record beside its payload: the routing key its
+/// destination computes, one of its envelope's clauses, or one of its envelope's properties.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EnvelopeValueSite {
+    RoutingKey,
     Clause(nervix_models::EnvelopeClauseKind),
     Property(String),
 }
 
-/// A site is named as its statement writes it: `TIMESTAMP`, or `PROPERTIES key 'priority'`.
+/// A site is named as its statement writes it: the destination's `ROUTING KEY`, `envelope
+/// TIMESTAMP`, or `envelope PROPERTIES key 'priority'`.
 impl fmt::Display for EnvelopeValueSite {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Clause(kind) => formatter.write_str(kind.keywords()),
-            Self::Property(name) => write!(formatter, "PROPERTIES key '{name}'"),
+            Self::RoutingKey => formatter.write_str("ROUTING KEY"),
+            Self::Clause(kind) => write!(formatter, "envelope {}", kind.keywords()),
+            Self::Property(name) => write!(formatter, "envelope PROPERTIES key '{name}'"),
         }
     }
 }
@@ -103,6 +107,22 @@ pub(crate) enum ConnectorDeclarationIssue {
     DuplicateValue { key: String },
     #[error("{} VALUES key {key:?} contains a NUL byte", ConnectorKind::MongoDb)]
     MongoDbFieldName { key: String },
+    #[error(
+        "{} FIFO queue '{queue}' takes no per-message DELAY",
+        ConnectorKind::Sqs
+    )]
+    SqsFifoQueueDelay { queue: nervix_models::SqsQueueName },
+    #[error(
+        "{} DELAY must be whole seconds from 1s to {}s, found '{value}'",
+        ConnectorKind::Sqs,
+        nervix_models::SQS_DELAY_MAXIMUM.as_secs()
+    )]
+    SqsDelay { value: String },
+    #[error(
+        "{} DEDUPLICATION ID requires a queue name ending in .fifo, found '{queue}'",
+        ConnectorKind::Sqs
+    )]
+    SqsStandardQueueDeduplication { queue: nervix_models::SqsQueueName },
     #[error("VALUES requires at least one mapping")]
     EmptyValues,
     #[error("{entity} declares no direct value type contract")]
@@ -126,7 +146,9 @@ pub(crate) enum ConnectorDeclarationIssue {
     },
     #[error("{0}")]
     Envelope(nervix_models::EnvelopeDeclarationError),
-    #[error("envelope {site} requires an exact, non-null, non-sensitive {expected} value")]
+    #[error("{0}")]
+    Delivery(nervix_models::UnmetDeliveryRequirement),
+    #[error("{site} requires an exact, non-null, non-sensitive {expected} value")]
     EnvelopeValue {
         site: EnvelopeValueSite,
         expected: nervix_models::ParseAsType,
@@ -320,20 +342,20 @@ pub(crate) enum RegistryError {
         domain: DomainName,
         client: ClientName,
     },
+    /// The configuration's refusal is the frame beneath, rendered once in the chain.
     #[error(
-        "{} client '{client}' in domain '{domain}' cannot use its CONFIG: {issue}",
+        "{} client '{client}' in domain '{domain}' cannot use its CONFIG",
         ConnectorKind::Websockets
     )]
     InvalidWebsocketsClientConfig {
         domain: DomainName,
         client: ClientName,
-        issue: WebsocketsClientConfigError,
     },
-    #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its HEADERS: {issue}")]
+    /// The upgrade header refusal is the frame beneath, rendered once in the chain.
+    #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its HEADERS")]
     InvalidWebsocketsUpgradeHeaders {
         domain: DomainName,
         ingestor: ModelName,
-        issue: WebsocketsUpgradeHeadersError,
     },
     #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its HEADERS")]
     InvalidHttpRequestHeaders {

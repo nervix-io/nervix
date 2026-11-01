@@ -26,8 +26,8 @@ use futures_util::{SinkExt, future::join_all};
 use lapin::{
     BasicProperties, Connection, ConnectionProperties,
     options::{
-        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions,
-        QueueDeleteOptions,
+        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions,
+        QueueBindOptions, QueueDeclareOptions, QueueDeleteOptions,
     },
     types::FieldTable,
 };
@@ -151,7 +151,7 @@ use super::{
     suite_watchdog::{LiveClusterRegistration, NodeStop, SUITE_BUDGET},
 };
 pub(crate) use super::{
-    broker_observer::{BrokerMessage, BrokerObserver},
+    broker_observer::{BrokerMessage, BrokerObserver, TypedBrokerHeader},
     raw_session::{TestSession, open_raw_session},
 };
 
@@ -2380,6 +2380,11 @@ impl Cluster {
         publish_mqtt_with_qos(&self.dependencies, topic, payload, QoS::AtLeastOnce, true).await
     }
 
+    /// Publishes `payload` at QoS 2 and returns once the broker completed its PUBCOMP exchange.
+    pub(crate) async fn publish_mqtt_qos2(&self, topic: &str, payload: &str) -> io::Result<()> {
+        publish_mqtt_with_qos(&self.dependencies, topic, payload, QoS::ExactlyOnce, true).await
+    }
+
     pub(crate) async fn publish_mqtt_burst(
         &self,
         topic: &str,
@@ -2396,6 +2401,16 @@ impl Cluster {
         count: usize,
     ) -> io::Result<()> {
         publish_mqtt_burst_with_qos(&self.dependencies, topic, payload, count, QoS::AtLeastOnce)
+            .await
+    }
+
+    pub(crate) async fn publish_mqtt_qos2_burst(
+        &self,
+        topic: &str,
+        payload: &str,
+        count: usize,
+    ) -> io::Result<()> {
+        publish_mqtt_burst_with_qos(&self.dependencies, topic, payload, count, QoS::ExactlyOnce)
             .await
     }
 
@@ -2589,10 +2604,6 @@ impl Cluster {
         reset_kafka_topic_partitions(&self.dependencies, topic, partitions).await
     }
 
-    pub(crate) async fn ensure_sqs_queue(&self, queue: &str) -> io::Result<()> {
-        ensure_sqs_queue(&self.dependencies, queue).await
-    }
-
     pub(crate) async fn ensure_sqs_queue_tls(&self, queue: &str) -> io::Result<()> {
         ensure_sqs_queue_tls(&self.dependencies, queue).await
     }
@@ -2611,10 +2622,6 @@ impl Cluster {
         );
         request.send().await.map_err(io::Error::other)?;
         Ok(())
-    }
-
-    pub(crate) async fn publish_sqs(&self, queue: &str, payload: &str) -> io::Result<()> {
-        publish_sqs(&self.dependencies, queue, payload).await
     }
 
     pub(crate) async fn publish_sqs_tls(&self, queue: &str, payload: &str) -> io::Result<()> {
@@ -2887,6 +2894,40 @@ impl Cluster {
         publish_http_with_headers(&handle.spec, host, path, payload, headers).await
     }
 
+    /// Posts `payload` to `node_id` with one header whose value is exactly `value`, including bytes
+    /// a text header value cannot hold, such as a sequence that is not UTF-8.
+    pub(crate) async fn publish_http_with_header_bytes(
+        &self,
+        node_id: &str,
+        host: &str,
+        path: &str,
+        payload: &str,
+        name: &str,
+        value: &[u8],
+    ) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let value = reqwest::header::HeaderValue::from_bytes(value).map_err(io::Error::other)?;
+        let response = reqwest::Client::new()
+            .post(handle.spec.http_uri(path))
+            .header("Host", host)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(name, value)
+            .body(payload.to_owned())
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        if response.status() != reqwest::StatusCode::ACCEPTED {
+            return Err(io::Error::other(format!(
+                "unexpected http status {}",
+                response.status()
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn publish_http_bytes(
         &self,
         node_id: &str,
@@ -2952,10 +2993,6 @@ impl Cluster {
 
     pub(crate) async fn observe_pulsar_tls(&self, topic: &str) -> io::Result<BrokerObserver> {
         observe_pulsar_tls(&self.dependencies, topic).await
-    }
-
-    pub(crate) async fn observe_sqs(&self, queue: &str) -> io::Result<BrokerObserver> {
-        observe_sqs(&self.dependencies, queue).await
     }
 
     pub(crate) async fn observe_nats(&self, subject: &str) -> io::Result<BrokerObserver> {
@@ -5306,6 +5343,65 @@ pub(crate) async fn ensure_rabbitmq_queue(
     declare_rabbitmq_queue(&channel, queue).await
 }
 
+/// Declares `exchange` as an exchange of `kind`, as an operator provisions it before an emitter
+/// publishes to it.
+pub(crate) async fn ensure_rabbitmq_exchange(
+    dependencies: &DependencyEndpoints,
+    exchange: &str,
+    kind: lapin::ExchangeKind,
+) -> io::Result<()> {
+    let connection = Connection::connect(
+        dependencies.get(RABBITMQ_ADDR)?,
+        ConnectionProperties::default(),
+    )
+    .await
+    .map_err(io::Error::other)?;
+    let channel = connection
+        .create_channel()
+        .await
+        .map_err(io::Error::other)?;
+    channel
+        .exchange_declare(
+            exchange.into(),
+            kind,
+            ExchangeDeclareOptions::default(),
+            FieldTable::default(),
+        )
+        .await
+        .map_err(io::Error::other)
+}
+
+/// Declares `queue` and binds it to `exchange` under `routing_key`, so the exchange routes to it
+/// every message its binding matches.
+pub(crate) async fn bind_rabbitmq_queue(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+    exchange: &str,
+    routing_key: &str,
+) -> io::Result<()> {
+    let connection = Connection::connect(
+        dependencies.get(RABBITMQ_ADDR)?,
+        ConnectionProperties::default(),
+    )
+    .await
+    .map_err(io::Error::other)?;
+    let channel = connection
+        .create_channel()
+        .await
+        .map_err(io::Error::other)?;
+    declare_rabbitmq_queue(&channel, queue).await?;
+    channel
+        .queue_bind(
+            queue.into(),
+            exchange.into(),
+            routing_key.into(),
+            QueueBindOptions::default(),
+            FieldTable::default(),
+        )
+        .await
+        .map_err(io::Error::other)
+}
+
 /// Deletes `queue` from the scenario's broker with whatever it holds, as an operator would, so a
 /// message later published to it has no route.
 pub(crate) async fn delete_rabbitmq_queue(
@@ -5835,7 +5931,6 @@ async fn publish_kafka_payloads(
 ) -> io::Result<()> {
     let mut client_config = kafka_client_config(dependencies)?;
     let producer: FutureProducer = client_config
-        .set("message.timeout.ms", "5000")
         .set("delivery.timeout.ms", "5000")
         .set("request.timeout.ms", "5000")
         .create()
@@ -5901,7 +5996,6 @@ pub(crate) async fn publish_kafka_record_through(
     headers: &[(&str, &str)],
 ) -> io::Result<()> {
     let producer: FutureProducer = client_config
-        .set("message.timeout.ms", "5000")
         .set("delivery.timeout.ms", "5000")
         .set("request.timeout.ms", "5000")
         .create()
@@ -6255,7 +6349,12 @@ pub(crate) async fn assert_kafka_consumer_group_next_offset_through(
     }
 }
 
-async fn ensure_sqs_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
+/// Creates `queue` on the scenario's SQS service, which serves in-process and real-process
+/// clusters alike.
+pub(crate) async fn ensure_sqs_queue(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<()> {
     let client = sqs_client(dependencies).await?;
     create_sqs_queue(&client, queue).await
 }
@@ -6276,7 +6375,8 @@ async fn create_sqs_queue(client: &SqsClient, queue: &str) -> io::Result<()> {
     Ok(())
 }
 
-async fn publish_sqs(
+/// Sends `payload` to `queue` on the scenario's SQS service.
+pub(crate) async fn publish_sqs(
     dependencies: &DependencyEndpoints,
     queue: &str,
     payload: &str,
@@ -6728,11 +6828,37 @@ async fn observe_pulsar_with_addr(
         .unwrap_or_else(|| io::Error::other(format!("failed to observe pulsar topic '{topic}'"))))
 }
 
-async fn observe_sqs(
+/// Creates `queue` on the scenario's SQS service and receives every message sent to it.
+pub(crate) async fn observe_sqs(
     dependencies: &DependencyEndpoints,
     queue: &str,
 ) -> io::Result<BrokerObserver> {
     ensure_sqs_queue(dependencies, queue).await?;
+    observe_created_sqs(dependencies, queue).await
+}
+
+/// Creates FIFO `queue` on the scenario's SQS service without content-based deduplication and
+/// receives every message sent to it, so a message the service accepts names its deduplication id.
+pub(crate) async fn observe_sqs_fifo_without_content_deduplication(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<BrokerObserver> {
+    let client = sqs_client(dependencies).await?;
+    client
+        .create_queue()
+        .queue_name(queue)
+        .attributes(QueueAttributeName::FifoQueue, "true")
+        .send()
+        .await
+        .map_err(io::Error::other)?;
+    observe_created_sqs(dependencies, queue).await
+}
+
+/// Observes `queue`, which already exists as the scenario created it.
+async fn observe_created_sqs(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<BrokerObserver> {
     let client = sqs_client(dependencies).await?;
     let queue_url = sqs_queue_url(&client, queue).await?;
     let (payload_tx, payload_rx) = mpsc::channel(16);
@@ -6756,13 +6882,24 @@ async fn observe_sqs(
             // SQS keeps message attributes as an unordered map, so they are compared in name
             // order.
             let mut attributes = Vec::new();
+            let mut typed_attributes = Vec::new();
             if let Some(message_attributes) = message.message_attributes() {
                 for (name, value) in message_attributes {
-                    let value = value.string_value().unwrap_or_default().to_string();
-                    attributes.push((name.clone(), value));
+                    let text = value.string_value().unwrap_or_default().to_string();
+                    attributes.push((name.clone(), text.clone()));
+                    let typed_value = match value.binary_value() {
+                        Some(bytes) => sqs_binary_attribute_hex(bytes.as_ref()),
+                        None => text,
+                    };
+                    typed_attributes.push(TypedBrokerHeader {
+                        name: name.clone(),
+                        data_type: value.data_type().to_string(),
+                        value: typed_value,
+                    });
                 }
             }
             attributes.sort();
+            typed_attributes.sort();
             let group = match message.attributes() {
                 Some(system) => system
                     .get(&MessageSystemAttributeName::MessageGroupId)
@@ -6777,8 +6914,9 @@ async fn observe_sqs(
                     .send()
                     .await;
             }
-            let observed =
-                BrokerMessage::from_bytes(payload.as_bytes(), attributes).with_group(group);
+            let observed = BrokerMessage::from_bytes(payload.as_bytes(), attributes)
+                .with_group(group)
+                .with_typed_headers(typed_attributes);
             if payload_tx.send(observed).await.is_err() {
                 break;
             }
@@ -6786,6 +6924,15 @@ async fn observe_sqs(
     });
 
     Ok(BrokerObserver::forwarded(payload_rx, task))
+}
+
+/// A binary SQS attribute value as its bytes in lowercase hex, the way a scenario writes it.
+fn sqs_binary_attribute_hex(bytes: &[u8]) -> String {
+    let mut hex = String::new();
+    for byte in bytes {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
 }
 
 async fn observe_nats(

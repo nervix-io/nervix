@@ -87,6 +87,7 @@ const INGESTOR_UNFOLDING_REFUSED_TOTAL: &str = "ingestor_unfolding_refused_total
 const INGESTOR_TRANSPORT_REDELIVERIES_TOTAL: &str = "ingestor_transport_redeliveries_total";
 const INGESTOR_DECODE_REJECTIONS_TOTAL: &str = "ingestor_decode_rejections_total";
 const INGESTOR_OVERSIZED_PAYLOADS_TOTAL: &str = "ingestor_oversized_payloads_total";
+const INGESTOR_HEADER_VALUES_DROPPED_TOTAL: &str = "ingestor_header_values_dropped_total";
 const INGESTOR_READ_AHEAD_DROPPED_PAYLOADS_TOTAL: &str =
     "ingestor_read_ahead_dropped_payloads_total";
 const SESSION_SUBSCRIPTIONS: &str = "session_subscriptions";
@@ -1623,6 +1624,7 @@ struct PrometheusMetrics {
     ingestor_transport_redeliveries_total: IntCounterVec,
     ingestor_decode_rejections_total: IntCounterVec,
     ingestor_oversized_payloads_total: IntCounterVec,
+    ingestor_header_values_dropped_total: IntCounterVec,
     ingestor_read_ahead_dropped_payloads_total: IntCounterVec,
     session_subscriptions: IntGaugeVec,
     session_subscription_dropped_rows_total: IntCounterVec,
@@ -1901,6 +1903,19 @@ impl PrometheusMetrics {
             "the metric name, help text and label names are constants that satisfy Prometheus \
              naming rules",
         );
+        let ingestor_header_values_dropped_total = IntCounterVec::new(
+            Opts::new(
+                INGESTOR_HEADER_VALUES_DROPPED_TOTAL,
+                "Total transport header values an ingestor discarded because their bytes are not \
+                 valid UTF-8, without discarding the containing message.",
+            )
+            .namespace("nervix"),
+            INGESTOR_QUIESCE_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let ingestor_read_ahead_dropped_payloads_total = IntCounterVec::new(
             Opts::new(
                 INGESTOR_READ_AHEAD_DROPPED_PAYLOADS_TOTAL,
@@ -1998,6 +2013,12 @@ impl PrometheusMetrics {
             );
         registry
             .register(Box::new(ingestor_oversized_payloads_total.clone()))
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
+        registry
+            .register(Box::new(ingestor_header_values_dropped_total.clone()))
             .assured(
                 "this registry is built here and each metric is registered once under a distinct \
                  name",
@@ -2248,6 +2269,7 @@ impl PrometheusMetrics {
             ingestor_transport_redeliveries_total,
             ingestor_decode_rejections_total,
             ingestor_oversized_payloads_total,
+            ingestor_header_values_dropped_total,
             ingestor_read_ahead_dropped_payloads_total,
             session_subscriptions,
             session_subscription_dropped_rows_total,
@@ -3583,6 +3605,25 @@ impl RuntimeMetrics {
         self.series
             .prometheus
             .ingestor_oversized_payloads_total
+            .with_label_values(&[
+                domain.as_str(),
+                ingestor.as_str(),
+                physical_node_label(physical_node_id),
+            ])
+    }
+
+    /// The count of invalid UTF-8 transport header values an ingestor on this physical node
+    /// discarded while retaining their messages. A host resolves it once when it starts and hands
+    /// it to the endpoint intakes it binds, which count without reaching the registry.
+    pub(crate) fn ingestor_header_values_dropped(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        physical_node_id: Option<&ClusterNodeName>,
+    ) -> IntCounter {
+        self.series
+            .prometheus
+            .ingestor_header_values_dropped_total
             .with_label_values(&[
                 domain.as_str(),
                 ingestor.as_str(),

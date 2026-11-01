@@ -245,7 +245,9 @@ use the declaration's keywords, and optional value placeholders
 show declared defaults, including Prometheus `MAX BODY SIZE` (`16MiB`). HTTP and WebSocket endpoints
 offer `NO ACK` and `ACK`; choosing `ACK` exposes its maximum and timeout and requires `REJECT`
 on quiesce. Buttons whose declared option requirements are unmet stay disabled, including MQTT
-ACK or SUSPEND without `SESSION PERSISTENT QOS 1`. The draft validates those requirements too.
+ACK or SUSPEND without `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. A required option, such as an
+MQTT topic's `SESSION` and `QOS`, starts unchosen and has no default: the draft refuses to build
+until each is chosen, and validates the declared requirements too.
 Switching sources refreshes the option controls and quiesce choices from the selected entity.
 A WebSocket connection edits literal upgrade headers as
 ordered name/value rows. An `HTTP REQUEST` edits its request headers as ordered rows too: a row

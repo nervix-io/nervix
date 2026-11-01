@@ -105,8 +105,7 @@ pub(crate) struct ActiveScenario {
     started_at: Instant,
     phase_started_at: Instant,
     slot_started_at: Option<Instant>,
-    /// The run slots this attempt holds while it runs: one, as a first run holds, unless its
-    /// admission granted a retry's larger share.
+    /// The run slots this attempt holds while it runs, from its weight and retry share.
     run_slots: u32,
 }
 
@@ -119,8 +118,8 @@ impl ActiveScenario {
             .assured("a run holds a few dozen slots for at most the suite budget")
     }
 
-    /// The part of [`Self::slot_work`] beyond the one slot every attempt holds: what a retry's
-    /// larger share costs the suite.
+    /// The part of [`Self::slot_work`] beyond the one slot every attempt holds: what larger
+    /// reservations cost the suite.
     fn extra_slot_work(&self, running: Duration) -> Duration {
         let extra_slots = self
             .run_slots
@@ -264,8 +263,8 @@ struct SuiteMeasurements {
     /// The slot time finished attempts held: each attempt's running time for every run slot its
     /// admission held.
     slot_work: Duration,
-    /// The part of `slot_work` that retries held beyond one slot each.
-    retry_extra_slot_work: Duration,
+    /// The part of `slot_work` reservations held beyond one slot per attempt.
+    extra_slot_work: Duration,
     waiting: BTreeMap<AdmissionWait, Duration>,
     completed: Vec<AttemptTime>,
     /// How late the runner task polled its ticks over the run.
@@ -377,7 +376,7 @@ pub(crate) fn suite_summary() -> String {
         .unwrap_or_default();
     let mut waiting = measurements.waiting.clone();
     let mut slot_work = measurements.slot_work;
-    let mut retry_extra_slot_work = measurements.retry_extra_slot_work;
+    let mut extra_slot_work = measurements.extra_slot_work;
     let mut longest = measurements.completed.clone();
     for scenario in &active {
         if scenario.phase == ScenarioPhase::Finished {
@@ -388,7 +387,7 @@ pub(crate) fn suite_summary() -> String {
         }
         if let Some(started) = scenario.slot_started_at {
             slot_work += scenario.slot_work(started.elapsed());
-            retry_extra_slot_work += scenario.extra_slot_work(started.elapsed());
+            extra_slot_work += scenario.extra_slot_work(started.elapsed());
         }
         if let Some(started) = scenario.slot_started_at {
             longest.push(AttemptTime {
@@ -427,14 +426,16 @@ pub(crate) fn suite_summary() -> String {
             slot_work.as_secs_f64()
         ),
         format!(
-            "Attempts: {} completed, {} active; retries: {retries}, holding {:.1} slot-seconds \
-             beyond one slot each.",
+            "Attempts: {} completed, {} active; retries: {retries}.",
             measurements.completed.len(),
             active
                 .iter()
                 .filter(|scenario| scenario.phase != ScenarioPhase::Finished)
                 .count(),
-            retry_extra_slot_work.as_secs_f64()
+        ),
+        format!(
+            "Reservations: {:.1} slot-seconds beyond one slot per attempt.",
+            extra_slot_work.as_secs_f64()
         ),
         measurements.runner_task_line(length),
         measurements.workers_line(length),
@@ -605,7 +606,7 @@ impl ActiveScenarioRegistration {
                 .map(|started| now - started)
                 .unwrap_or_default();
             measurement.slot_work += active.slot_work(work);
-            measurement.retry_extra_slot_work += active.extra_slot_work(work);
+            measurement.extra_slot_work += active.extra_slot_work(work);
             measurement.completed.push(AttemptTime {
                 identity: active.identity.clone(),
                 attempt: active.attempt,
@@ -648,7 +649,7 @@ impl Drop for ActiveScenarioRegistration {
                 .map(|started| started.elapsed())
                 .unwrap_or_default();
             measurement.slot_work += active.slot_work(length);
-            measurement.retry_extra_slot_work += active.extra_slot_work(length);
+            measurement.extra_slot_work += active.extra_slot_work(length);
             measurement.completed.push(AttemptTime {
                 identity: active.identity,
                 attempt: active.attempt,

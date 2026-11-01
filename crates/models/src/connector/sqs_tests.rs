@@ -18,7 +18,8 @@ use super::*;
 use crate::{
     ClientConfigEntry, ClientConfigFile, ClientConfigOwner, ClientConfigPresence,
     ClientConfigSchemaError, ClientConfigValue, ClientPooling, CreateClientSqs, EmitterEntityKind,
-    EmitterPublishingModeKind, IngestDeliveryKind, IngestQuiesceKind, IngestorEntityKind,
+    EmitterPublishingModeKind, HeaderNames, IngestDeliveryKind, IngestQuiesceKind,
+    IngestorEntityKind,
 };
 
 #[test]
@@ -48,12 +49,11 @@ fn queue_declarations_match_the_sequentially_acknowledged_transport() {
     ] {
         assert_eq!(ingest.declared_quiesce(undeclared), None);
     }
+    // Every request is answered, so the emitter publishes in the shared request/response mode,
+    // and its request shape is the SEND option.
     assert_eq!(
         emit.publishing_modes,
-        &[
-            EmitterPublishingModeKind::SqsSingle,
-            EmitterPublishingModeKind::SqsBatch
-        ]
+        &[EmitterPublishingModeKind::RequestAck]
     );
     assert_eq!(emit.body, EmitterBodyForm::Codec);
     assert!(!emit.requires_batch_transformation);
@@ -86,25 +86,52 @@ fn both_queue_directions_share_the_queue_rule_and_the_client() {
 }
 
 #[test]
-fn queue_declares_message_attributes_as_headers_and_no_envelope() {
+fn queue_declares_message_attributes_as_headers_with_a_delay_and_a_deduplication_id() {
     let ingest = IngestorEntityKind::Sqs(SqsIngestorEntity::Queue).capabilities();
     let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
-    let attributes = Some(HeaderModel::exact(HeaderLayout::LastWins));
 
-    assert_eq!(ingest.headers, attributes);
-    assert_eq!(emit.headers, attributes);
+    assert_eq!(
+        ingest.headers,
+        Some(HeaderModel::exact(HeaderLayout::LastWins))
+    );
     assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
     assert!(ingest.metadata.fields().is_empty());
     assert_eq!(ingest.options, &[OptionDeclaration::INSTANCES]);
-    assert!(emit.envelope.is_empty());
+    assert_eq!(
+        emit.envelope,
+        &[
+            EnvelopeClauseKind::Delay,
+            EnvelopeClauseKind::DeduplicationId
+        ]
+    );
     assert!(emit.properties.is_empty());
+}
+
+#[test]
+fn emitted_attributes_carry_strings_integers_and_bytes_as_their_sqs_data_types() {
+    let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
+    let Some(attributes) = emit.headers else {
+        panic!("an SQS queue emitter writes message attributes");
+    };
+
+    assert_eq!(attributes.layout, HeaderLayout::LastWins);
+    assert_eq!(attributes.names, HeaderNames::Exact);
+    assert_eq!(
+        attributes.values.carried().as_deref(),
+        Some("STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary")
+    );
+    // A boolean and a datetime have no SQS data type that carries them exactly.
+    let declared = attributes.values.types();
+    for refused in [PropertyType::Bool, PropertyType::Datetime] {
+        assert!(!declared.contains(&refused), "{refused}");
+    }
 }
 
 #[test]
 fn fifo_group_is_an_optional_expression_or_the_branch() {
     let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
-    let [fifo_group] = emit.options else {
-        panic!("an SQS queue emitter declares exactly one option, its FIFO GROUP");
+    let [fifo_group, _] = emit.options else {
+        panic!("an SQS queue emitter declares its FIFO GROUP, then its SEND");
     };
 
     assert_eq!(fifo_group.keywords, "FIFO GROUP");
@@ -121,6 +148,29 @@ fn fifo_group_is_an_optional_expression_or_the_branch() {
 }
 
 #[test]
+fn send_is_a_required_choice_between_one_request_per_message_and_batch_requests() {
+    let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
+    let [_, send] = emit.options else {
+        panic!("an SQS queue emitter declares its FIFO GROUP, then its SEND");
+    };
+
+    assert_eq!(send.keywords, "SEND");
+    assert!(send.is_required());
+    let OptionForm::Choice([single, batch]) = send.form else {
+        panic!("SEND is a choice between SINGLE and BATCH");
+    };
+    assert_eq!((single.name, single.value), ("SINGLE", None));
+    assert_eq!((batch.name, batch.value), ("BATCH", None));
+    assert_eq!(SqsSend::Single.keyword(), single.name);
+    assert_eq!(SqsSend::Batch.keyword(), batch.name);
+}
+
+#[test]
+fn a_delay_is_at_most_the_fifteen_minutes_sqs_gives_a_message() {
+    assert_eq!(SQS_DELAY_MAXIMUM.as_secs(), 15 * 60);
+}
+
+#[test]
 fn batching_is_optional_up_to_the_largest_message_sqs_accepts() {
     let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
     let EmitterBatchLegality::Optional {
@@ -130,35 +180,30 @@ fn batching_is_optional_up_to_the_largest_message_sqs_accepts() {
         panic!("an SQS queue emitter batches optionally within the SQS message limit");
     };
 
-    assert_eq!(maximum.bytes().get(), 256 * 1024);
+    assert_eq!(maximum, SQS_MESSAGE_SIZE_MAXIMUM);
+    assert_eq!(maximum.bytes().get(), 1024 * 1024);
 }
 
 #[test]
-fn only_the_send_is_bounded_by_a_client_deadline_key() {
+fn every_request_of_both_directions_is_bounded_by_timeout_ms() {
     let ingest = IngestorEntityKind::Sqs(SqsIngestorEntity::Queue).capabilities();
     let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
+    let timeout = WaitBound::Key {
+        key: DeadlineKey::Timeout,
+        omitted: OmittedDeadline::Unbounded,
+    };
 
     assert!(ingest.bounds.buffers.is_empty());
     assert!(emit.bounds.buffers.is_empty());
-    assert!(ingest.bounds.deadline_keys().is_empty());
+    assert_eq!(ingest.bounds.deadline_keys(), vec![DeadlineKey::Timeout]);
     let ingest_waits: Vec<WaitBound> = ingest.bounds.waits.iter().map(|wait| wait.bound).collect();
     assert_eq!(
         ingest_waits,
-        vec![WaitBound::Driver("3.1 s"), WaitBound::Unbounded]
+        vec![WaitBound::Driver("3.1 s"), timeout, timeout]
     );
     assert_eq!(emit.bounds.deadline_keys(), vec![DeadlineKey::Timeout]);
     let emit_waits: Vec<WaitBound> = emit.bounds.waits.iter().map(|wait| wait.bound).collect();
-    assert_eq!(
-        emit_waits,
-        vec![
-            WaitBound::Driver("3.1 s"),
-            WaitBound::Unbounded,
-            WaitBound::Key {
-                key: DeadlineKey::Timeout,
-                omitted: OmittedDeadline::Unbounded,
-            },
-        ]
-    );
+    assert_eq!(emit_waits, vec![WaitBound::Driver("3.1 s"), timeout]);
 }
 
 fn config_entry(key: &str, value: &str) -> ClientConfigEntry {
@@ -180,6 +225,7 @@ fn client_schema_declares_exactly_the_keys_both_directions_read() {
             "endpoint",
             "region",
             "secret_access_key",
+            "session_token",
             "timeout_ms",
             "tls_ca_file"
         ]
@@ -190,13 +236,24 @@ fn client_schema_declares_exactly_the_keys_both_directions_read() {
     assert_eq!(endpoint.presence, ClientConfigPresence::Required);
     assert_eq!(endpoint.value, ClientConfigValue::Url(&["http", "https"]));
     assert_eq!(endpoint.owner, ClientConfigOwner::Nervix);
+    let region = config
+        .key("region")
+        .assured("the declared key list above names the region");
+    assert_eq!(region.presence, ClientConfigPresence::Required);
+    assert!(!region.confidential);
     for credential in ["access_key_id", "secret_access_key"] {
         let key = config
             .key(credential)
             .assured("the declared key list above names both credentials");
         assert!(key.confidential, "{credential} is redacted by inspection");
-        assert_eq!(key.presence, ClientConfigPresence::Optional);
+        assert_eq!(key.presence, ClientConfigPresence::Required);
     }
+    let session_token = config
+        .key("session_token")
+        .assured("the declared key list above names the session token");
+    assert!(session_token.confidential);
+    assert_eq!(session_token.presence, ClientConfigPresence::Optional);
+    assert_eq!(session_token.value, ClientConfigValue::String);
     let trust = config
         .key("tls_ca_file")
         .assured("the declared key list above names the trusted CA file");
@@ -218,22 +275,42 @@ fn client_schema_accepts_every_declared_key() {
             config_entry("region", "eu-west-1"),
             config_entry("access_key_id", "AKIDEXAMPLE"),
             config_entry("secret_access_key", "declared-secret"),
+            config_entry("session_token", "declared-session-token"),
             config_entry("timeout_ms", "5000"),
             config_entry("tls_ca_file", "trust.pem"),
         ])
         .assured("every declared SQS key with a valid value is accepted before mount resolution");
 }
 
-#[test]
-fn client_schema_requires_the_endpoint() {
+/// The keys every SQS client names: the endpoint it reaches and what each request is signed with.
+fn signing_entries() -> Vec<ClientConfigEntry> {
+    vec![
+        config_entry("endpoint", "http://127.0.0.1:9324"),
+        config_entry("region", "eu-west-1"),
+        config_entry("access_key_id", "AKIDEXAMPLE"),
+        config_entry("secret_access_key", "declared-secret"),
+    ]
+}
+
+#[rstest]
+#[case("endpoint")]
+#[case("region")]
+#[case("access_key_id")]
+#[case("secret_access_key")]
+fn client_schema_requires_the_endpoint_and_what_every_request_is_signed_with(
+    #[case] key: &'static str,
+) {
+    let mut entries = signing_entries();
+    entries.retain(|entry| entry.key != key);
+
     let refusal = CreateClientSqs::<u64>::DECLARATION
         .config
-        .validate(&[config_entry("region", "eu-west-1")])
-        .expect_err("an SQS client cannot reach the service without its endpoint");
+        .validate(&entries)
+        .expect_err("an SQS client reaches the service only with its endpoint, region and keys");
 
     assert_eq!(
         refusal.current_context(),
-        &ClientConfigSchemaError::MissingRequired { key: "endpoint" }
+        &ClientConfigSchemaError::MissingRequired { key }
     );
 }
 
@@ -246,10 +323,9 @@ fn client_schema_refuses_values_outside_their_declared_type(
     #[case] key: &str,
     #[case] value: &str,
 ) {
-    let mut entries = vec![config_entry(key, value)];
-    if key != "endpoint" {
-        entries.push(config_entry("endpoint", "http://127.0.0.1:9324"));
-    }
+    let mut entries = signing_entries();
+    entries.retain(|entry| entry.key != key);
+    entries.push(config_entry(key, value));
 
     let refusal = CreateClientSqs::<u64>::DECLARATION
         .config
@@ -264,10 +340,7 @@ fn client_schema_refuses_values_outside_their_declared_type(
 fn client_schema_refuses_an_undeclared_key() {
     let refusal = CreateClientSqs::<u64>::DECLARATION
         .config
-        .validate(&[
-            config_entry("endpoint", "http://127.0.0.1:9324"),
-            config_entry("regoin", "eu-west-1"),
-        ])
+        .validate(&[signing_entries(), vec![config_entry("regoin", "eu-west-1")]].concat())
         .expect_err("an SQS client is strict: only declared keys configure it");
 
     assert_eq!(
