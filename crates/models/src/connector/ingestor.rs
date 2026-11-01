@@ -519,7 +519,93 @@ impl IngestorEntityCapabilities {
         let Some(declared) = self.declared_quiesce(quiesce.kind()) else {
             return false;
         };
-        ChoiceRequirement::all_met_by(declared.requires, body)
+        ChoiceRequirement::all_met(declared.requires, &|option| body.chosen(option))
+    }
+
+    /// The requirement of the delivery mode `delivery` that a statement of the pair `entity`
+    /// leaves unmet: the option choices the entity declares the mode needs written beside it,
+    /// where the statement does not make every one. `chosen` names the choice the statement makes
+    /// for an option, by the option's keywords. A mode the entity does not declare is the
+    /// grammar's to refuse, so it has no requirement here.
+    pub fn unmet_delivery(
+        &self,
+        entity: IngestorEntityKind,
+        delivery: IngestDeliveryKind,
+        chosen: &dyn Fn(&str) -> Option<&'static str>,
+    ) -> Option<UnmetDeliveryRequirement> {
+        let declared = self.declared_delivery(delivery)?;
+        if ChoiceRequirement::all_met(declared.requires, chosen) {
+            return None;
+        }
+        let mut written = Vec::with_capacity(declared.requires.len());
+        for requirement in declared.requires {
+            written.push(WrittenChoice {
+                option: requirement.option,
+                choice: chosen(requirement.option),
+            });
+        }
+        Some(UnmetDeliveryRequirement {
+            entity,
+            delivery,
+            requires: declared.requires,
+            written,
+        })
+    }
+}
+
+/// A delivery mode a statement names without the option choices its entity declares the mode
+/// needs written beside it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "checking a delivery mode against its entity's declaration is a pure refusal"
+    )
+)]
+#[error(
+    "{entity} ingestors name MODE {delivery} only with {required}; the statement writes {written}",
+    delivery = .delivery.phrase(),
+    required = ChoiceRequirement::conjunction(.requires),
+    written = WrittenChoice::conjunction(.written)
+)]
+pub struct UnmetDeliveryRequirement {
+    /// The pair the statement reads.
+    pub entity: IngestorEntityKind,
+    /// The delivery mode the statement names.
+    pub delivery: IngestDeliveryKind,
+    /// Every choice requirement the entity declares for the mode, all of which a statement meets.
+    pub requires: &'static [ChoiceRequirement],
+    /// The choice the statement makes for each option a requirement names, in the order the
+    /// requirements name them.
+    pub written: Vec<WrittenChoice>,
+}
+
+/// The choice a statement makes for one declared option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WrittenChoice {
+    /// The keywords of the option.
+    pub option: &'static str,
+    /// The name of the choice the statement makes, where its body answers for the option.
+    pub choice: Option<&'static str>,
+}
+
+impl WrittenChoice {
+    /// Every choice of `written`, as a statement writes them together, such as
+    /// `SESSION CLEAN and QOS 0`.
+    fn conjunction(written: &[Self]) -> String {
+        let phrases: Vec<String> = written.iter().map(ToString::to_string).collect();
+        phrases.join(" and ")
+    }
+}
+
+/// A choice is written as its option's keywords, then the choice's own name.
+impl Display for WrittenChoice {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self.choice {
+            Some(choice) => write!(f, "{} {choice}", self.option),
+            None => write!(f, "no {}", self.option),
+        }
     }
 }
 
@@ -533,6 +619,16 @@ pub trait IngestorDeclaration {
         Self: IngestorEntityBody + Sized,
     {
         Self::CAPABILITIES.honors_quiesce(quiesce, self)
+    }
+
+    /// The requirement of this source's delivery mode its statement leaves unmet, as its entity
+    /// declares the mode.
+    fn unmet_delivery(&self) -> Option<UnmetDeliveryRequirement>
+    where
+        Self: IngestorEntityBody + IngestorEntityModel + Sized,
+    {
+        let delivery = self.acknowledgement().kind();
+        Self::CAPABILITIES.unmet_delivery(Self::KIND, delivery, &|option| self.chosen(option))
     }
 }
 
@@ -555,20 +651,6 @@ pub trait IngestorEntityBody {
     /// its entity's declaration states which those are.
     fn chosen(&self, _option: &str) -> Option<&'static str> {
         None
-    }
-}
-
-impl ChoiceRequirement {
-    /// Whether `body` makes the choice this requirement needs.
-    fn met_by(&self, body: &dyn IngestorEntityBody) -> bool {
-        body.chosen(self.option) == Some(self.choice)
-    }
-
-    /// Whether `body` makes every choice `requirements` need.
-    pub(crate) fn all_met_by(requirements: &[Self], body: &dyn IngestorEntityBody) -> bool {
-        requirements
-            .iter()
-            .all(|requirement| requirement.met_by(body))
     }
 }
 
@@ -750,6 +832,16 @@ impl IngestorEntity {
         self.kind()
             .capabilities()
             .honors_quiesce(quiesce, self.body())
+    }
+
+    /// The requirement of this source's delivery mode its statement leaves unmet: its entity
+    /// declares option choices the mode needs written beside it, and the statement does not make
+    /// every one.
+    pub fn unmet_delivery(&self) -> Option<UnmetDeliveryRequirement> {
+        let kind = self.kind();
+        let delivery = self.acknowledgement().kind();
+        kind.capabilities()
+            .unmet_delivery(kind, delivery, &|option| self.chosen(option))
     }
 
     /// The choice this source's statement makes, or holds by default, for the declared option
