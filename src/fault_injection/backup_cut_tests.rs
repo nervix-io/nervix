@@ -6,10 +6,13 @@
 //! - **Depends on.** The gate's fault controls and the runtime's paused clock.
 //! - **Must not know.** Backup coordination, leases or archive contents.
 
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::DomainName;
+use nervix_models::{
+    DomainConfig, DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus,
+    PlacementPolicy,
+};
 use nervix_primitives::{task::JoinHandle, time::Instant};
 use strum::IntoEnumIterator as _;
 
@@ -17,6 +20,33 @@ use super::{BackupCutBoundary, FaultInjection};
 
 fn domain() -> DomainName {
     DomainName::parse("held").assured("the test domain name is valid")
+}
+
+/// The committed domains of a runtime revision in which `name` has `status`.
+fn revision_domains(name: DomainName, status: DomainStatus) -> BTreeMap<DomainName, DomainState> {
+    let state = DomainState {
+        id: name.clone(),
+        config: DomainConfig {
+            pace: DomainPace::Unpaced,
+            placement: PlacementPolicy::Neutral,
+        },
+        status,
+        start_version: 0,
+        last_start: DomainStartPoint::Resume,
+        clock: None,
+    };
+    BTreeMap::from([(name, state)])
+}
+
+/// A node's wait for every live node to ready a revision with `domains`, on a task of its own.
+fn arriving_application(
+    faults: &FaultInjection,
+    domains: BTreeMap<DomainName, DomainState>,
+) -> JoinHandle<()> {
+    let faults = faults.clone();
+    nervix_primitives::task::spawn(async move {
+        faults.pause_backup_cut_application_if_armed(&domains).await;
+    })
 }
 
 /// A backup cut of `domain` reaching `boundary`, on a task of its own.
@@ -188,4 +218,84 @@ async fn cleanup_clears_unreached_gates_of_every_domain_and_is_idempotent() {
     })
     .await
     .assured("a cut arriving at any cleaned-up gate passes immediately");
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn every_wait_for_a_revision_that_pauses_the_domain_is_held_from_its_own_arrival() {
+    let faults = FaultInjection::default();
+    let hold = Duration::from_secs(45);
+    faults.pause_backup_cut_on(domain(), BackupCutBoundary::PauseApplication);
+    faults.hold_backup_cuts_for(&domain(), BackupCutBoundary::PauseApplication, hold);
+
+    // The cut's own wait and another node's reconciliation both wait for the paused revision.
+    let cut = arriving_application(&faults, revision_domains(domain(), DomainStatus::Paused));
+    let first_arrival = faults
+        .wait_for_backup_cut_pause(&domain(), BackupCutBoundary::PauseApplication)
+        .await;
+    nervix_primitives::time::advance(Duration::from_secs(5)).await;
+    let reconciliation_arrival = Instant::now();
+    let reconciliation =
+        arriving_application(&faults, revision_domains(domain(), DomainStatus::Paused));
+    cut.await.assured("the cut's wait continues after its hold");
+    assert_eq!(first_arrival.elapsed(), hold);
+    reconciliation
+        .await
+        .assured("the reconciliation's wait continues after its own hold");
+    assert_eq!(reconciliation_arrival.elapsed(), hold);
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_revision_in_which_the_domain_runs_passes_its_armed_pause_application_gate() {
+    let faults = FaultInjection::default();
+    faults.pause_backup_cut_on(domain(), BackupCutBoundary::PauseApplication);
+    let started = Instant::now();
+
+    // The resume, and a revision that pauses only another domain, are never held.
+    arriving_application(&faults, revision_domains(domain(), DomainStatus::Running))
+        .await
+        .assured("the revision that resumes the domain passes");
+    let other = DomainName::parse("another").assured("the other test domain name is valid");
+    arriving_application(&faults, revision_domains(other, DomainStatus::Paused))
+        .await
+        .assured("a revision that pauses another domain passes");
+    assert_eq!(started.elapsed(), Duration::ZERO);
+
+    let paused = arriving_application(&faults, revision_domains(domain(), DomainStatus::Paused));
+    faults
+        .wait_for_backup_cut_pause(&domain(), BackupCutBoundary::PauseApplication)
+        .await;
+    assert!(
+        !paused.is_finished(),
+        "a revision that pauses the domain passed its armed gate"
+    );
+    faults.release_backup_cut_pause(&domain(), BackupCutBoundary::PauseApplication);
+    paused
+        .await
+        .assured("the held wait continues once the gate is released");
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_wait_that_ends_while_held_leaves_the_gate_holding_later_waits() {
+    let faults = FaultInjection::default();
+    faults.pause_backup_cut_on(domain(), BackupCutBoundary::PauseApplication);
+    let domains = revision_domains(domain(), DomainStatus::Paused);
+
+    // A deadline or a newer revision ends the wait that holds it by dropping it.
+    let ended = nervix_primitives::time::timeout(
+        Duration::from_secs(20),
+        faults.pause_backup_cut_application_if_armed(&domains),
+    )
+    .await;
+    assert!(ended.is_err(), "the held wait ends only when it is dropped");
+
+    let later = arriving_application(&faults, domains);
+    nervix_primitives::task::yield_now().await;
+    assert!(
+        !later.is_finished(),
+        "a later wait passed the gate an ended wait had reached"
+    );
+    faults.release_backup_cut_pause(&domain(), BackupCutBoundary::PauseApplication);
+    later
+        .await
+        .assured("the later wait continues once the gate is released");
 }

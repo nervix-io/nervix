@@ -255,21 +255,21 @@ Feature: Syslog listener and collector declarations
       """
 
     Examples:
-      | cluster_size | config                                                                             | expected                                                             |
-      | 1            | 'protocol' = 'udp', 'addr' = '127.0.0.1:5514', 'framing' = 'octet-counting'        | client config key 'framing' requires 'protocol' to be tcp or tls     |
-      | 3            | 'protocol' = 'udp', 'addr' = '127.0.0.1:5514', 'framing' = 'octet-counting'        | client config key 'framing' requires 'protocol' to be tcp or tls     |
-      | 1            | 'protocol' = 'udp', 'addr' = '127.0.0.1:5514', 'idle_timeout_ms' = '1000'          | client config key 'idle_timeout_ms' requires 'protocol' to be tcp or tls |
-      | 3            | 'protocol' = 'udp', 'addr' = '127.0.0.1:5514', 'idle_timeout_ms' = '1000'          | client config key 'idle_timeout_ms' requires 'protocol' to be tcp or tls |
-      | 1            | 'protocol' = 'tcp', 'addr' = '127.0.0.1:5514', 'tls_ca_file' = '/tmp/ca.crt'       | client config key 'tls_ca_file' requires 'protocol' to be tls        |
-      | 3            | 'protocol' = 'tcp', 'addr' = '127.0.0.1:5514', 'tls_ca_file' = '/tmp/ca.crt'       | client config key 'tls_ca_file' requires 'protocol' to be tls        |
-      | 1            | 'protocol' = 'udp', 'addr' = '127.0.0.1:5514', 'tls_client_ca_file' = '/tmp/ca.crt' | client config key 'tls_client_ca_file' requires 'protocol' to be tls |
-      | 3            | 'protocol' = 'udp', 'addr' = '127.0.0.1:5514', 'tls_client_ca_file' = '/tmp/ca.crt' | client config key 'tls_client_ca_file' requires 'protocol' to be tls |
-      | 1            | 'protocol' = 'tls', 'addr' = '127.0.0.1:6514', 'framing' = 'non-transparent'       | invalid client config key 'framing': expected octet-counting over tls |
-      | 3            | 'protocol' = 'tls', 'addr' = '127.0.0.1:6514', 'framing' = 'non-transparent'       | invalid client config key 'framing': expected octet-counting over tls |
-      | 1            | 'protocol' = 'tcp', 'addr' = 'missing-port'                                        | invalid client config key 'addr': expected host:port                 |
-      | 3            | 'protocol' = 'tcp', 'addr' = 'missing-port'                                        | invalid client config key 'addr': expected host:port                 |
-      | 1            | 'protocol' = 'tcp', 'addr' = 'syslog.example.test:5514/path'                       | invalid client config key 'addr': expected host:port                 |
-      | 3            | 'protocol' = 'tcp', 'addr' = 'syslog.example.test:5514/path'                       | invalid client config key 'addr': expected host:port                 |
+      | cluster_size | config                                                                              | expected                                                                 |
+      | 1            | 'protocol' = 'udp', 'addr' = '127.0.0.1:5514', 'framing' = 'octet-counting'         | client config key 'framing' requires 'protocol' to be tcp or tls         |
+      | 3            | 'protocol' = 'udp', 'addr' = '127.0.0.1:5514', 'framing' = 'octet-counting'         | client config key 'framing' requires 'protocol' to be tcp or tls         |
+      | 1            | 'protocol' = 'udp', 'addr' = '127.0.0.1:5514', 'idle_timeout_ms' = '1000'           | client config key 'idle_timeout_ms' requires 'protocol' to be tcp or tls |
+      | 3            | 'protocol' = 'udp', 'addr' = '127.0.0.1:5514', 'idle_timeout_ms' = '1000'           | client config key 'idle_timeout_ms' requires 'protocol' to be tcp or tls |
+      | 1            | 'protocol' = 'tcp', 'addr' = '127.0.0.1:5514', 'tls_ca_file' = '/tmp/ca.crt'        | client config key 'tls_ca_file' requires 'protocol' to be tls            |
+      | 3            | 'protocol' = 'tcp', 'addr' = '127.0.0.1:5514', 'tls_ca_file' = '/tmp/ca.crt'        | client config key 'tls_ca_file' requires 'protocol' to be tls            |
+      | 1            | 'protocol' = 'udp', 'addr' = '127.0.0.1:5514', 'tls_client_ca_file' = '/tmp/ca.crt' | client config key 'tls_client_ca_file' requires 'protocol' to be tls     |
+      | 3            | 'protocol' = 'udp', 'addr' = '127.0.0.1:5514', 'tls_client_ca_file' = '/tmp/ca.crt' | client config key 'tls_client_ca_file' requires 'protocol' to be tls     |
+      | 1            | 'protocol' = 'tls', 'addr' = '127.0.0.1:6514', 'framing' = 'non-transparent'        | invalid client config key 'framing': expected octet-counting over tls    |
+      | 3            | 'protocol' = 'tls', 'addr' = '127.0.0.1:6514', 'framing' = 'non-transparent'        | invalid client config key 'framing': expected octet-counting over tls    |
+      | 1            | 'protocol' = 'tcp', 'addr' = 'missing-port'                                         | invalid client config key 'addr': expected host:port                     |
+      | 3            | 'protocol' = 'tcp', 'addr' = 'missing-port'                                         | invalid client config key 'addr': expected host:port                     |
+      | 1            | 'protocol' = 'tcp', 'addr' = 'syslog.example.test:5514/path'                        | invalid client config key 'addr': expected host:port                     |
+      | 3            | 'protocol' = 'tcp', 'addr' = 'syslog.example.test:5514/path'                        | invalid client config key 'addr': expected host:port                     |
 
   Scenario Outline: Syslog declarations render the listener and the collector they declare
     Given a <cluster_size> node nervix cluster is started

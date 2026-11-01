@@ -43,7 +43,9 @@ Feature: Emitter batching configuration
       };
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9324',
-        'region' = 'us-east-1'
+        'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret'
       };
       CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = 'http://public@127.0.0.1:8000/1',
@@ -437,7 +439,9 @@ Feature: Emitter batching configuration
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9324',
-        'region' = 'us-east-1'
+        'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret'
       };
       CREATE SENTRY CLIENT sentry_main CONFIG { 'dsn' = 'http://public@127.0.0.1:8000/1', 'timeout_ms' = 5000 };
       CREATE MONGODB CLIENT mongodb_main POOL SIZE MIN 1 MAX 2 CONFIG {

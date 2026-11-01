@@ -13,7 +13,8 @@ Use it for:
 - [execution plans: the committed schedule, typed revisions, local binding, publication, and recovery](./execution-plans.md)
 - [typed failure ownership, the report model, fixed outcome boundaries, sensitivity, recovery, enforcement, and public diagnostics](./errors-and-diagnostics.md)
 - [typed absence, semantic states, validation boundaries, state identity, and boundary encodings](./typed-states.md)
-- [connector crate ownership, the shared ingestor and emitter contract, and host execution](./connector-contract.md)
+- [connector and entity kinds through statement heads, Models, typed plans and composition](./connector-contract.md#connector-and-entity-kinds)
+- [connector crate ownership, the shared ingestor and emitter contract, and host execution](./connector-contract.md#ownership-and-dependency-direction)
 - [HTTP emitter request preparation, delivery, lifecycle, and qualification](./http-emitter-architecture.md)
 - [client ingestors and emitters: native batches, application ACKs, credits, forwarding,
   restoration, buffered ALTER and paced workflows](./client-io-architecture.md)

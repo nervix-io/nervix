@@ -284,7 +284,7 @@ impl HttpApplicationHeaders {
     }
 }
 
-fn http_token_byte(byte: u8) -> bool {
+pub(crate) fn http_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric()
         || matches!(
             byte,

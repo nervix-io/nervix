@@ -467,7 +467,7 @@ compares it with the workflows.
 | `shuttle` | Check | The Shuttle checks and their replay check |
 | `loom` | Check | The Loom models and their weakening qualification |
 | `turmoil` | Check | The Turmoil simulation suite and its replay check |
-| `deloxide` | Check | The four Deloxide lanes |
+| `deloxide` | Check | The four Deloxide lanes and each selection's supervision qualification |
 | `client-conformance` | Check | The cross-language client probes against one- and three-node clusters |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
 | `fuzz` | Check, through Bolero | The Bolero sanitizer campaigns and the combined record of their shards |
@@ -475,7 +475,7 @@ compares it with the workflows.
 | `extra-miri` | Check | Miri over the expiry map |
 | `extra-mutation` | Check | Mutation tests of the expiry map |
 | `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector and the primitive source validator |
-| `extra-compiler` | Check | Source contracts, compiler diagnostics, paired API doctests and compiler cache qualification |
+| `extra-compiler` | Check | Source contracts, compiler diagnostics, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's runners |
 | `extra-bench-smoke` | Check | Benchmark smoke tests |
 | `extra-primitives` | Check | Primitive boundary conformance in every mode, and its compile and browser checks. `coverage-full` then requires those collections |
 | `extra-completion-walk` | Check | The Plexus completion walk |
@@ -621,6 +621,7 @@ its semantic fixtures and the structural scanner tests with:
 ```bash
 just validate-typed-errors
 just ratchet
+just test-typed-ratchet-compiler
 just test-typed-ratchet-contracts
 just test-ratchet-units
 ```
@@ -639,8 +640,9 @@ production-owner model execution. Keep each verdict with the configuration and c
 subscription and VM predicates, the UDF execution context, consensus capabilities, DNS error
 carriers, recovery outcomes and SIMD byte classes with `compile_fail` doctests beside their APIs.
 Paired compiling examples check that the imports and current signatures remain valid. These
-checks cover the specific rejected operations in each snippet. They run in `just test` and CI;
-the runtime examples require the `testing` feature, which the recipe enables.
+checks cover the specific rejected operations in each snippet. They run in `just test`, and CI
+runs them for a pull request labeled `extra-doctests`; the runtime examples require the `testing`
+feature, which the recipe enables.
 
 ### Deterministic concurrency checks
 
@@ -866,10 +868,12 @@ on the task and pull request. A green job from an earlier revision cannot qualif
 owner. For async-only or otherwise untracked changes, name the other checks that cover the changed
 path; for documentation-only work, record why no diagnostic execution applies. Use the toolchain
 files' declared `llvm-tools` for the compiler that produced each coverage profile, retaining the
-configured kache wrapper. Registered Bolero properties run as ordinary tests in the ordinary
-suites; sanitizer CI, the preferred Bolero evidence, runs only with `fuzz`, the randomized Bolero
-job only with `bolero-random`, and a skipped run supplies no execution evidence. API
-rejections use paired current `compile_fail` and compiling doctests in normal tests and CI.
+configured kache wrapper. Registered product Bolero properties run as ordinary tests in the
+ordinary suites, and the compiler-tooling ones in `just test-typed-ratchet`; sanitizer CI, the
+preferred Bolero evidence, runs only with `fuzz`, the randomized Bolero job only with
+`bolero-random`, and a skipped run supplies no execution evidence. API rejections use paired
+current `compile_fail` and compiling doctests, which `just test` runs and CI runs for a pull request
+labeled `extra-doctests`.
 [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) has the lane's
 classes, its record, proof requirements, current graph limits and the paths detection does not
 cover, and [Integration Test Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) its bounds.
@@ -981,9 +985,9 @@ and build-target matrix, result guarantees, and recorded performance evidence. N
 generated-instruction inspection, complete scalar/level differential checks including forced
 fallback, and a measured caller. Use its [qualification recipes](./simd-kernels.md#qualification)
 and [measurement recipes](./simd-kernels.md#measurement-and-recorded-evidence), retaining kache.
-Registered Bolero properties run as ordinary tests in the ordinary suites; sanitizer CI, the
-preferred Bolero evidence, requires the `fuzz` label, the randomized Bolero job the `bolero-random`
-label, and a skip supplies no execution or coverage evidence. API-rejection checks use paired
+Registered product Bolero properties run as ordinary tests in the ordinary suites; sanitizer CI,
+the preferred Bolero evidence, requires the `fuzz` label, the randomized Bolero job the
+`bolero-random` label, and a skip supplies no execution or coverage evidence. API-rejection checks use paired
 current `compile_fail` and compiling doctests. Publish new benchmark and validation artifacts on
 the corresponding ClickUp task; keep durable architectural conclusions in the chapter.
 

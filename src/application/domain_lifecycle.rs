@@ -41,9 +41,10 @@ use super::{
         command_error, command_ok, command_ok_already_existed, quiesce_level_message,
     },
     ownership_handoff::{mark_complete_ownership_transitions, planned_relocation_count},
-    session_service::SessionServiceImpl,
+    session_service::{ApplicationBound, SessionServiceImpl},
     transaction::{QuiescenceAttempt, TransactionStepImpactRecorder},
 };
+use crate::runtime::RuntimeError;
 #[derive(Debug, Error)]
 pub(in crate::application) enum DomainAlterError {
     #[error("domain '{domain}' already has a model alteration in progress")]
@@ -89,6 +90,10 @@ pub(in crate::application) enum DomainAlterError {
     /// The runtime's report of the cluster state it could not apply is beneath.
     #[error("failed to stop ingestion in domain '{domain}' for model alteration")]
     StopIngestion { domain: DomainName },
+    /// A backup cut's deadline ended the application of its pause before every live node applied
+    /// it. The runtime's report of the wait the deadline ended is beneath.
+    #[error("timed out applying the backup pause of domain '{domain}'")]
+    BackupPauseTimeout { domain: DomainName },
     /// The consensus report of the resume is beneath.
     #[error("failed to resume domain '{domain}' after model alteration")]
     ResumeDomain { domain: DomainName },
@@ -109,9 +114,21 @@ pub(in crate::application) enum DomainDrainMode {
     /// A model alteration's drain, which gives every node `timeout` from when the drain begins.
     Alteration { timeout: Duration },
     /// A quiesced backup cut's drain, which polls until the cut's own `deadline`. The cut counts
-    /// its budget from before its lease, so the steps before the drain, the pause's application
-    /// included, have already spent part of it.
+    /// its budget from before its lease, so the steps before the drain have already spent part of
+    /// it. The deadline also ends the pause's application: the cut never waits for the cluster to
+    /// apply its pause past it.
     Backup { deadline: Instant },
+}
+
+impl DomainDrainMode {
+    /// What ends the waits of the pause's application. An alteration's pause waits as long as the
+    /// cluster's own budget allows, and a backup cut's pause ends at the cut's deadline.
+    fn application_bound(self) -> ApplicationBound {
+        match self {
+            Self::Alteration { .. } => ApplicationBound::ClusterBudget,
+            Self::Backup { deadline } => ApplicationBound::Deadline(deadline),
+        }
+    }
 }
 
 pub(in crate::application) struct ResolvedDomainStart {
@@ -282,7 +299,14 @@ impl SessionServiceImpl {
             impact.confirm(attempt);
         }
 
-        if let Err(error) = self.apply_current_cluster_state().await {
+        // A backup cut's deadline does not cut the replicated pause short: a write abandoned after
+        // it was proposed may still commit and leave the domain paused with nobody to resume it.
+        // The deadline ends the pause's application instead, at one of its waits. The domain is
+        // then resumed below and the cut refused, while every node goes on to apply the resume.
+        let applied = self
+            .apply_current_cluster_state_within(mode.application_bound())
+            .await;
+        if let Err(error) = applied {
             if let (Some(impact), Some(attempt)) = (impact, attempt) {
                 impact.fail(
                     attempt,
@@ -290,9 +314,15 @@ impl SessionServiceImpl {
                     format!("{error:#}"),
                 );
             }
-            let stopped = error.change_context(DomainAlterError::StopIngestion {
-                domain: domain.clone(),
-            });
+            let context = match error.current_context() {
+                RuntimeError::ApplicationDeadline { .. } => DomainAlterError::BackupPauseTimeout {
+                    domain: domain.clone(),
+                },
+                _ => DomainAlterError::StopIngestion {
+                    domain: domain.clone(),
+                },
+            };
+            let stopped = error.change_context(context);
             return Err(self
                 .abort_domain_alter_pause(domain, mutation, impact.zip(attempt), stopped)
                 .await);
@@ -1153,7 +1183,9 @@ mod tests {
     use nervix_recovery::Discarded as _;
 
     #[cfg(feature = "testing")]
-    use super::super::test_fixtures::build_test_service_with_probe;
+    use super::super::test_fixtures::{
+        build_test_service_with_fault_injection, build_test_service_with_probe,
+    };
     use super::{
         super::test_fixtures::{TestService, build_test_service},
         *,
@@ -1482,6 +1514,141 @@ mod tests {
                 .placement,
             PlacementPolicy::RequireColocation
         );
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+    }
+
+    #[test]
+    fn only_a_backup_cut_bounds_its_pause_application_by_its_deadline() {
+        let deadline = Instant::now();
+        assert_eq!(
+            DomainDrainMode::Alteration {
+                timeout: Duration::from_secs(30),
+            }
+            .application_bound(),
+            ApplicationBound::ClusterBudget
+        );
+        assert_eq!(
+            DomainDrainMode::Backup { deadline }.application_bound(),
+            ApplicationBound::Deadline(deadline)
+        );
+    }
+
+    /// Starts the default domain of a service whose runtime consults `faults`.
+    #[cfg(feature = "testing")]
+    async fn running_default_domain(faults: &crate::FaultInjection) -> (TestService, DomainName) {
+        let test_service = build_test_service_with_fault_injection(true, faults.clone()).await;
+        let domain = DomainName::parse("default").assured("the test domain name is valid");
+        let start = test_service
+            .service
+            .start_domain(
+                &domain,
+                StartDomain {
+                    start: DomainStartPoint::Resume,
+                },
+            )
+            .await;
+        assert!(start.succeeded(), "{start:?}");
+        (test_service, domain)
+    }
+
+    /// The domain's committed status.
+    #[cfg(feature = "testing")]
+    async fn committed_status(service: &SessionServiceImpl, domain: &DomainName) -> DomainStatus {
+        let state = service
+            .inner
+            .consensus
+            .current_domain(domain)
+            .await
+            .assured("the test domain exists");
+        state.status
+    }
+
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn a_backup_pause_that_commits_after_its_deadline_is_resumed_before_any_installation() {
+        let faults = crate::FaultInjection::default();
+        let (
+            TestService {
+                service,
+                registry,
+                path,
+            },
+            domain,
+        ) = running_default_domain(&faults).await;
+
+        // The deadline has passed before the pause commits, so the cut waits for no application.
+        let deadline = Instant::now();
+        let error = service
+            .pause_and_drain_domain(&domain, None, None, DomainDrainMode::Backup { deadline })
+            .await
+            .err()
+            .assured("a pause applied after its cut's deadline is refused");
+        let DomainAlterError::BackupPauseTimeout { domain: refused } = error.current_context()
+        else {
+            panic!("the cut's deadline ended its pause's application: {error:#}");
+        };
+        assert_eq!(refused, &domain);
+        let Some(RuntimeError::ApplicationDeadline { wait }) = error.downcast_ref::<RuntimeError>()
+        else {
+            panic!("the wait the deadline ended remains beneath: {error:#}");
+        };
+        assert_eq!(*wait, crate::runtime::ApplicationWait::Installation);
+        assert!(matches!(
+            committed_status(&service, &domain).await,
+            DomainStatus::Running
+        ));
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+    }
+
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn a_backup_pause_application_held_past_its_deadline_ends_there_and_the_domain_resumes() {
+        let faults = crate::FaultInjection::default();
+        let (
+            TestService {
+                service,
+                registry,
+                path,
+            },
+            domain,
+        ) = running_default_domain(&faults).await;
+        // The gate holds every wait for a revision that pauses the domain until it is released, so
+        // the cluster never applies the cut's pause and only the cut's deadline ends the wait.
+        faults.pause_backup_cut_on(
+            domain.clone(),
+            crate::fault_injection::BackupCutBoundary::PauseApplication,
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let error = service
+            .pause_and_drain_domain(&domain, None, None, DomainDrainMode::Backup { deadline })
+            .await
+            .err()
+            .assured("a pause the cluster does not apply by the cut's deadline is refused");
+        let DomainAlterError::BackupPauseTimeout { domain: refused } = error.current_context()
+        else {
+            panic!("the cut's deadline ended its pause's application: {error:#}");
+        };
+        assert_eq!(refused, &domain);
+        assert!(
+            matches!(
+                error.downcast_ref::<RuntimeError>(),
+                Some(RuntimeError::ApplicationDeadline { .. })
+            ),
+            "the wait the deadline ended remains beneath: {error:#}"
+        );
+        // The resume applied while the gate still holds any wait for the paused revision.
+        assert!(matches!(
+            committed_status(&service, &domain).await,
+            DomainStatus::Running
+        ));
+        assert_eq!(faults.release_all_backup_cut_pauses(), 1);
 
         drop(service);
         drop(registry);

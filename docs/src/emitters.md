@@ -349,7 +349,8 @@ parsed against the client origin. It cannot include a fragment, backslash, inval
 whitespace or control character; normalization must keep it on that origin and must not produce a
 leading `//`. The normalized target is limited to 8 KiB. `write_header` accepts valid HTTP field
 names and UTF-8 values without control characters or leading/trailing whitespace in a nonempty
-value. Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
+value. The request carries those values as their exact UTF-8 bytes, including non-ASCII characters.
+Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
 application headers and 32 KiB of name/value bytes are allowed.
 
 `ENCODE USING` permits the ordinary transforming construction clauses. `WITHOUT BODY` selects an
@@ -861,7 +862,7 @@ destination schema changes.
 
 | Emitter | One write | `MAX SIZE` measures |
 | --- | --- | --- |
-| ClickHouse | One `INSERT INTO <table> FORMAT JSONEachRow` request | The request body, one JSON line and newline per row, before the client compresses it |
+| ClickHouse | One `INSERT INTO <table> FORMAT JSONEachRow` request | The request body, one JSON line and newline per row, before the driver compresses it with LZ4 |
 | Postgres | One `INSERT ... SELECT ... FROM unnest(...)` statement binding one text array per mapped column | The statement text and every bound array as the extended-query protocol encodes it: a 20-byte array header, then a four-byte length and the value's text for each row |
 | MySQL | One multi-row `INSERT ... VALUES (...), (...)` statement | The statement text and every bound value as the binary protocol encodes it |
 | MongoDB | One unordered `insert_many`, or one unordered bulk write of upserts under `ON CONFLICT` | Each inserted document as the driver writes it, with the `_id` it adds to a document that has none, or each upsert's filter and update documents |
@@ -914,8 +915,9 @@ Each emitter writes a `BYTES` value in its native binary form: the octets themse
 `String`, the `bytea` hex format Postgres reads back as the same octets, the octets bound to a MySQL
 binary or blob column, and generic BSON binary data in MongoDB. An `ARRAY` or `VEC` value is a JSON
 array in ClickHouse's `JSONEachRow` and in the JSON text Postgres and MySQL bind for it, and a BSON
-array in MongoDB; inside that JSON text a `BYTES` element is the padded base64 text every Nervix JSON
-value carries octets as.
+array in MongoDB. A `BYTES` element of a ClickHouse array keeps its own octets, as a `BYTES` value
+outside an array does. Inside the JSON text Postgres and MySQL bind, a `BYTES` element is the padded
+base64 text every Nervix JSON value carries octets as.
 
 ## Altering emitters
 
@@ -1164,12 +1166,13 @@ Transport-specific expectations:
 - `KAFKA`: pass-through to librdkafka, except `allow.auto.create.topics`, which `CREATE KAFKA CLIENT` refuses. The emitter's producer keeps librdkafka's producer default, so a broker that allows auto-creation creates a missing topic on the first publish; provision topics explicitly. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and optional `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `RABBITMQ`: use `amqps://...` in `addr`; Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](./ingestors.md#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`.
+- `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
-- `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
-  An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses
-  `tls_cert_file` and `tls_key_file`.
+- `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`,
+  and `CREATE SQS CLIENT` refuses a `tls_ca_file` that holds no certificate it could trust. An SQS
+  connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and
+  `tls_key_file`.
 - `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; its `tls_ca_file` adds
   a trust root beside the platform's native roots, and `tls_cert_file` with `tls_key_file` presents
   a client certificate.
@@ -1179,7 +1182,7 @@ Transport-specific expectations:
 - `CLICKHOUSE`: use an `https://...` `addr` with mounted `tls_ca_file` and required positive
   `timeout_ms`; HTTP addresses refuse TLS file keys.
 - `POSTGRES`: use `sslmode=verify-full` in the `addr` URL; Nervix honors `tls_ca_file`, `tls_cert_file`, and `tls_key_file`. `sslmode=disable` is the only other accepted policy.
-- `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file` and paired `tls_cert_file`/`tls_key_file` client identity files.
+- `MYSQL`: enable TLS with `require_ssl=true` in `addr` or with mounted TLS files. Nervix honors `tls_ca_file` and paired `tls_cert_file`/`tls_key_file` client identity files; see [MySQL](#mysql) for the URL verification policy.
 - `MONGODB`: Nervix honors `tls_ca_file`, and `tls_cert_file` with `tls_key_file` as its client
   certificate; any of them enables TLS without `tls=true` in `addr`, and an `addr` with `tls=false`
   refuses them. See [MongoDB](#mongodb).
@@ -1257,7 +1260,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
-| Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, message.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
+| Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
 | Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1277,9 +1280,10 @@ report is still ambiguous: the broker may have accepted the record, so a retry c
 
 Kafka's `acks`, idempotence, batching, linger, and compression remain pass-through client
 configuration. `ACK TIMEOUT` bounds the report wait and is also the producer's own delivery bound:
-the emitter sets librdkafka's `message.timeout.ms` to its
-`ACK TIMEOUT`, rounded up to the millisecond, and removes `delivery.timeout.ms`, overriding either
-name in the client's `CONFIG`. The producer therefore gives up a record within about a second of
+the emitter sets the producer's `delivery.timeout.ms` to its
+`ACK TIMEOUT`, rounded up to the millisecond, replacing the client's own `delivery.timeout.ms`, the
+one name a Kafka client accepts for that librdkafka property. The producer therefore gives up a
+record within about a second of
 the emitter doing so, the interval at which librdkafka checks message timeouts, instead of
 delivering it later beside the copy the retry sends. An `ACK TIMEOUT` longer than the 2147483647
 milliseconds librdkafka holds refuses the emitter when it starts. `NO ACK` is fire-and-forget after
@@ -1578,6 +1582,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-emit).
 <!-- connector-matrix:emit-mqtt-topic:end -->
 
+`TOPIC` names one literal topic, published to exactly as written, letter case included. It follows
+the [ingestion topic filter rule](ingestors.md#external-names) without the `+` and `#` wildcards,
+so `TOPIC 'devices/+'` is refused when the emitter is created. The client's `addr` names the broker
+by its scheme, host and port alone, as [MQTT ingestion](ingestors.md#mqtt) describes.
+
 CREATE refuses an unsupported QoS number with its value and accepted levels, such as
 `MQTT emitter QOS must be 0, 1, or 2, found 3`, underlining the supplied number.
 
@@ -1854,7 +1863,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start: unbounded<br>a send: `timeout_ms`; unbounded when omitted |
+| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start and a send: `timeout_ms`; unbounded when omitted |
 | Driver limits | A batch request holds at most 10 entries and 256 KiB; a record above 256 KiB is rejected. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
@@ -1880,18 +1889,21 @@ to U+D7FF, U+E000 to U+FFFD and U+10000 to U+10FFFF. Every other C0 control and 
 U+FFFE and U+FFFF are forbidden, while the other noncharacters fall inside those ranges and are
 sent.
 
-Set the SQS client's optional `timeout_ms` CONFIG key to bound both the complete service operation
-and its single SDK attempt. Nervix disables the AWS SDK's internal retries, so a timeout returns to
-the emitter and the mode's declared `RETRY POLICY` owns all retry pacing.
+Set the SQS client's optional `timeout_ms` CONFIG key to bound each request, the queue lookup at
+start and every send, as both the complete service operation and its single SDK attempt. Nervix
+disables the AWS SDK's internal retries in both directions, so a request that runs out of
+`timeout_ms` returns to the emitter, which `DESCRIBE EMITTER` shows as
+`an SQS send did not finish within timeout_ms 5s`, and the mode's declared `RETRY POLICY` owns all
+retry pacing.
 
 The client resolves the host of its `endpoint` through the node's asynchronous resolver each time it
 opens a connection, and tries the answers in order; a literal IPv4 or IPv6 address is dialled as
 written. Every request is still signed for the configured host, and over HTTPS the service
 certificate must name that host, whichever address accepted the connection. The lookup counts
 against the SDK's 3.1-second connect timeout and against `timeout_ms`. Without `tls_ca_file` the
-client trusts the platform's native roots and follows the `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`
-and `NO_PROXY` environment variables; with it, the client trusts that CA alone and connects
-directly. A missing name, a silent name server or an unreachable answer fails the queue lookup or
+client trusts the platform's native roots; with it, the client trusts that CA alone. Either way it
+connects directly and ignores the `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`
+environment variables of its node. A missing name, a silent name server or an unreachable answer fails the queue lookup or
 the send, which the emitter retries on its `RETRY POLICY`; nothing is acknowledged until SQS
 answers.
 
@@ -2450,9 +2462,25 @@ CREATE CLICKHOUSE CLIENT ch
 `'database'`, `'tls_ca_file'`, `'tls_cert_file'`, `'tls_key_file'`, `'tcp_keepalive_ms'`, and
 `'pool_idle_timeout_ms'`; unknown keys are refused.
 The timeout bounds both sending an insert body and waiting for ClickHouse to finish the insert and
-return its result. An `https` address requires `'tls_ca_file'` pointing to mounted trust material.
-An `http` address refuses all three TLS file keys. A client certificate and key must be supplied
-together.
+return its result.
+
+`'addr'` is the `http` or `https` URL of ClickHouse's HTTP interface. Every insert goes to its host,
+port and path with a query string the client composes itself: the `INSERT` statement, `'database'`
+when it is set, and `decompress=1`. A query string written in `'addr'` is not sent. ClickHouse
+authenticates each insert by `'user'` and `'password'`, which the client sends as the
+`X-ClickHouse-User` and `X-ClickHouse-Key` request headers; without `'user'`, ClickHouse applies its
+`default` user. `'database'` names the database of a one-part `TABLE`; a two-part `TABLE` names its
+own.
+
+An `https` address requires `'tls_ca_file'` pointing to mounted trust material. An `http` address
+refuses all three TLS file keys. The certificates in `'tls_ca_file'` are added to the bundled public
+roots and the node's own trust store; they do not replace them. A client certificate and key must be
+supplied together, as PEM files in `'tls_cert_file'` and `'tls_key_file'`. The client presents that
+certificate whenever the server's TLS handshake asks for one, for a server that verifies client
+certificates. The certificate identifies the connection, not the user: the client never sends
+ClickHouse's `X-ClickHouse-SSL-Certificate-Auth` header, so ClickHouse does not authenticate the user
+by the certificate, and a ClickHouse user identified with `ssl_certificate` cannot insert through a
+ClickHouse client.
 
 `tcp_keepalive_ms` sets the TCP idle interval before keep-alive probes begin; its declared default
 is 60000 milliseconds. `pool_idle_timeout_ms` limits how long an unused HTTP connection may be
@@ -2462,6 +2490,14 @@ expressed in milliseconds, matching the socket's precision and supported range. 
 timeout below the server's `keep_alive_timeout`, and set TCP keep-alive below an intervening NAT or
 load balancer's idle limit. These settings apply to HTTP
 and HTTPS. They govern connection reuse and probing; `timeout_ms` bounds each insert.
+
+A ClickHouse client takes no `POOL SIZE` clause, and no declared bound limits its connections. Each
+running ClickHouse emitter builds its own HTTP client from the client's configuration, so separate
+emitters of one client never share a connection. An emitter sends one insert at a time and uses one
+connection while the insert waits for its answer. The connection then stays open for the emitter's
+next insert until it has been idle for `pool_idle_timeout_ms`, and closes after that; the client
+keeps idle connections without a count limit. The database clients that declare a bounded pool are
+described in [Database client pools](./database-client-pools.md).
 
 `DESCRIBE CLIENT ch` reports the configured keys and effective declared defaults, marking an
 omitted default with `(default)` and redacting confidential values. `SHOW CREATE CLIENT ch`
@@ -2479,13 +2515,18 @@ host's answer changes, and the next connection resolves again.
 ClickHouse requires the [batching clause](#batching). A flush is written as inserts of at most
 `MAX MESSAGES` rows whose `JSONEachRow` body is at most `MAX SIZE` bytes, as
 [Database writes](#database-writes) describes, and each successful insert is an acknowledgment.
+The ClickHouse driver compresses each insert body with LZ4, in ClickHouse's compressed-block format,
+and `decompress=1` tells the server to decompress it. Compression is the driver's default: Nervix
+neither configures it nor offers a key to change it, and `MAX SIZE` measures the body before it is
+compressed.
 ClickHouse writes each `JSONEachRow` line directly from the mapped Arrow columns in `VALUES`
 order, using the same typed JSON column writer as schemaful JSON emission. Null mapped values are
 written as `null`, including null list elements. Column names are escaped once for each write, and
 string values use their carrier's escape classification. `TABLE` names preserve their case and
 contain one part (`'Orders'`) or two nonempty dot-separated parts (`'sales.Orders'`). Nervix quotes
 each part with backticks in the insert SQL, so `sales.Orders` is sent as
-`` `sales`.`Orders` ``. A third part or empty part is refused when the emitter is declared.
+`` `sales`.`Orders` ``. The table-name alphabet admits no backtick, so no quoted part needs
+escaping. A third part or empty part is refused when the emitter is declared.
 
 The ClickHouse `VALUES` encoding contract is:
 
@@ -2508,6 +2549,16 @@ unavailable.
 `F32` columns keep ClickHouse's JSON number formatting after widening to `F64`; schemaful JSON
 codecs format `F32` directly. A `BYTES` value is written as its own octets, which a `String` column
 stores unchanged, where schemaful JSON codecs write padded base64.
+
+ClickHouse answers a failed insert with an exception whose name its response text carries in
+parentheses, such as `(CANNOT_PARSE_NUMBER)`. The emitter treats an insert as refused for its rows
+only when that name is `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN`, `CANNOT_PARSE_DATE`,
+`CANNOT_PARSE_DATETIME`, `CANNOT_PARSE_NUMBER`, `CANNOT_PARSE_TEXT`, `TOO_LARGE_STRING_SIZE` or
+`VIOLATED_CONSTRAINT`, or when the answer's text contains `413 Payload Too Large` or
+`413 Request Entity Too Large`, as a proxy in front of ClickHouse answers an oversized body; the
+emitter names that refusal `PAYLOAD_TOO_LARGE`. Every other failure is infrastructure-wide: another
+exception name, a lost connection, an expired `timeout_ms` or a failed lookup leaves the insert's
+rows unresolved, and the emitter retries them on its `RETRY POLICY`.
 For ClickHouse, Postgres, and MySQL, a failed multi-row insert is classified first as
 record-specific or infrastructure-wide. Infrastructure failures retry with backpressure. A
 record-specific failure is isolated by re-executing the insert one record at a time so healthy rows
@@ -2661,8 +2712,14 @@ An insert and its row-by-row isolation use one borrowed connection, returned bef
 insert. Isolation obtains each row's outcome without a second acquisition from the client's pool,
 even when other emitters are waiting. The host handles those outcomes when the write completes.
 Conflict clauses are the user's tool for bounding duplicates when poison isolation re-executes a
-failed insert. Declare a `MAX SIZE` no larger than the server's `max_allowed_packet`, 64 MiB by
-default on MySQL 8.x, which the client applies to every packet it sends.
+failed insert. For `c` mapped columns, the placeholder limit allows at most `floor(65535 / c)`
+rows per insert, even when `MAX MESSAGES` is larger. `MAX SIZE` measures the SQL text and binary
+bound values; it excludes packet headers, parameter types and the execute packet's null bitmap.
+Nervix does not learn the server's `max_allowed_packet` to narrow these inserts. Set `MAX SIZE`
+below the server's configured packet limit with room for that framing, and keep individual
+values within the server's limit. Equal byte limits do not guarantee that every packet fits.
+A packet or bound value the driver or server refuses can still fail a write; automatic sizing
+against that server setting is outside the current contract.
 
 MySQL emitters may include an insert conflict policy after `VALUES`:
 
@@ -2716,7 +2773,9 @@ so the Plexus conflict policy takes no target list. `DO UPDATE` executes
 `ON DUPLICATE KEY UPDATE col = VALUES(col)` for every mapped `VALUES` column, including mapped
 key columns. `DO NOTHING` executes `ON DUPLICATE KEY UPDATE first = first`, where `first` is
 the first mapped column. This is a duplicate-key update and can run update triggers; it is not
-an insert-ignore operation.
+an insert-ignore operation. Without `ON CONFLICT`, the connector sends an ordinary insert;
+a duplicate-key rejection follows `ON MESSAGE ERROR`. `INSERT IGNORE`, `REPLACE` and `LOAD DATA`
+are not offered by this entity.
 
 The connector binds the following exact Plexus types through MySQL's binary protocol. Nullable
 values bind as SQL `NULL`. The target table must already exist and provide compatible columns.
@@ -2746,18 +2805,26 @@ CREATE MYSQL CLIENT mysql
   };
 ```
 
-For TLS connections, include `require_ssl=true`, mount a TLS resource, and set `'tls_ca_file'` to
-the mounted CA path. Supplying the CA preserves the URL's certificate-verification, hostname and
-built-in-root options. For mutual TLS, also set `tls_cert_file` and `tls_key_file` together. The
+Enable TLS with `require_ssl=true` in `addr`, or by supplying TLS files from a mounted resource.
+`tls_ca_file` supplies the server CA path. With `require_ssl=true`, the URL's `verify_ca`,
+`verify_identity` and `built_in_roots` choices are preserved when files are added. With files
+alone, Nervix enables TLS using the driver's default verification policy: certificate and hostname
+verification enabled, with built-in roots trusted. Include `require_ssl=true` to apply custom URL
+verification choices. For mutual TLS, set `tls_cert_file` and `tls_key_file` together. The
 driver reads a PEM certificate chain and an RSA PKCS#1 private key; for a PEM key this is the
 `RSA PRIVATE KEY` form, which OpenSSL can produce with `openssl rsa -traditional`.
 
 The current client CONFIG keys are required `addr` and optional `timeout_ms`, `tls_ca_file`,
 `tls_cert_file` and `tls_key_file`. The address must
-be a `mysql://` URL accepted by the driver's offline parser. URL query options belong to the
-driver, except connection-pool sizing: declare that capacity with `POOL SIZE MIN ... MAX ...`.
+be a `mysql://` URL accepted by the driver's offline parser. Declare capacity with
+`POOL SIZE MIN ... MAX ...`. Nervix installs those bounds on default driver pool options;
+[Database Client Connection Pools](database-client-pools.md) details the resulting URL lifetime settings.
 Pool-size query parameters such as `pool_min` and `pool_max` are refused before the client is
-committed. Unknown standalone CONFIG keys are refused rather than ignored.
+committed, including their percent-encoded spellings and ASCII case variants. Unknown standalone
+CONFIG keys are refused rather than ignored. The generated [MYSQL client key reference](connector-capabilities.md#mysql-client)
+lists each key's presence, type and confidentiality; it does not expose additional pool-lifetime
+keys. The [pool minimum](database-client-pools.md#how-each-client-type-keeps-its-minimum) keeper waits
+one second before each pass, counting idle and checked-out connections together.
 
 `timeout_ms` is a positive, schedulable whole number of milliseconds. It bounds opening and
 validating the pool's first connection, each subsequent pool checkout (including connection
@@ -3150,6 +3217,30 @@ CREATE ICEBERG TABLE EMITTER iceberg_notifications
 ```
 
 The REST catalog is the authority for namespace and table metadata. Nervix does not write a separate object-store catalog pointer file and does not provision catalog entries from the emitter runtime path.
+
+#### Iceberg catalog namespace and table
+
+At open, the emitter loads the declared table from the REST catalog. Nervix creates neither the
+namespace nor the table: a catalog that holds no namespace of the declared name, or no table of the
+declared name in a namespace it holds, fails the open with the entity it lacks. A REST catalog
+answers the load of a table in a missing namespace exactly as it answers the load of a missing
+table, so the emitter asks the catalog for the namespace to tell the two apart. `DESCRIBE EMITTER`
+shows the outcome as the emitter's transient error, and the emitter retries the open on its declared
+retry policy, so it opens once an operator provisions what it lacks. Rows its relays deliver
+meanwhile wait for that open, and the emitter commits them once it opens:
+
+| Catalog state | Transient error |
+| --- | --- |
+| No namespace of the declared name | `ICEBERG namespace 'Analytics.Events' does not exist` |
+| The namespace, without a table of the declared name in it | `ICEBERG table 'orders' does not exist in namespace 'Analytics.Events'` |
+| A catalog that fails the load | `failed to load ICEBERG table 'orders' in namespace 'Analytics.Events'`, followed by the catalog's error |
+| A catalog that does not hold the table, then fails the namespace lookup | `failed to look up ICEBERG namespace 'Analytics.Events'`, followed by the catalog's error |
+
+To move an emitter to a table in another namespace, `ALTER ICEBERG TABLE EMITTER ... SET TO`
+restates the complete destination with the new `NAMESPACE` and that table's `LOCATION`, as
+[Altering emitters](#altering-emitters) describes for every entity. The replaced emitter opens the
+table in the new namespace, which must already exist, and `SHOW CREATE EMITTER` and
+`DESCRIBE EMITTER` show the new namespace.
 
 #### Iceberg table schema
 

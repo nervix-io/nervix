@@ -32,13 +32,11 @@ Feature: MQTT name resolution
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_in MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}',
-        'client_id' = 'nervix-dns-in-{{test_id}}',
-        'tls_ca_file' = '{{dev_tls}}/ca.pem'
+        'client_id' = 'nervix-dns-in-{{test_id}}'<trust>
       };
       CREATE MQTT CLIENT mqtt_out MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}',
-        'client_id' = 'nervix-dns-out-{{test_id}}',
-        'tls_ca_file' = '{{dev_tls}}/ca.pem'
+        'client_id' = 'nervix-dns-out-{{test_id}}'<trust>
       };
       CREATE MQTT TOPIC INGESTOR mqtt_in
       FROM mqtt_in TOPIC 'dns_in_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
@@ -73,11 +71,11 @@ Feature: MQTT name resolution
     And the DNS fixture eventually receives a question for "mqtt.nervix.test"
 
     Examples:
-      | scheme | address           | cluster_size |
-      | MQTT   | mqtt_dns_addr     | 1            |
-      | MQTT   | mqtt_dns_addr     | 3            |
-      | MQTTS  | mqtt_tls_dns_addr | 1            |
-      | MQTTS  | mqtt_tls_dns_addr | 3            |
+      | scheme | address           | trust                                  | cluster_size |
+      | MQTT   | mqtt_dns_addr     |                                        | 1            |
+      | MQTT   | mqtt_dns_addr     |                                        | 3            |
+      | MQTTS  | mqtt_tls_dns_addr | , 'tls_ca_file' = '{{dev_tls}}/ca.pem' | 1            |
+      | MQTTS  | mqtt_tls_dns_addr | , 'tls_ca_file' = '{{dev_tls}}/ca.pem' | 3            |
 
   Scenario Outline: An MQTTS client rejects a broker certificate that does not name the host it resolved
     Given MQTT is running

@@ -353,7 +353,7 @@ Feature: Kafka emission
       };
       CREATE KAFKA CLIENT unavailable_kafka_sink CONFIG {
         'bootstrap.servers' = '127.0.0.1:1',
-        'message.timeout.ms' = '100',
+        'delivery.timeout.ms' = '100',
         'socket.timeout.ms' = '100'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications

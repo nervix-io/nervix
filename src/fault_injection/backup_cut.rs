@@ -1,9 +1,9 @@
 //! Controlled backup cut boundaries for public backup scenarios.
 //!
 //! Layer: test harness, outside the product layer order.
-//! - **Owns.** Domain-scoped gates a backup cut reaches once it holds its lease, once its domain
-//!   is paused, and before its owners capture state, and how each gate holds every cut that
-//!   reaches it.
+//! - **Owns.** Domain-scoped gates a backup cut reaches once it holds its lease, while the cluster
+//!   applies its pause, once its domain is paused, and before its owners capture state, and how
+//!   each gate holds every cut or node wait that reaches it.
 //! - **Depends on.** Execution-sensitive watch channels, timers and cooperative budget, and
 //!   vocabulary identities.
 //! - **Must not know.** Archive contents, the nodes a cut must reach or backup recovery policy.
@@ -22,10 +22,10 @@
     )
 )]
 
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::DomainName;
+use nervix_models::{DomainName, DomainState, DomainStatus};
 use nervix_primitives::{
     sync::{Arc, watch},
     time::Instant,
@@ -39,6 +39,12 @@ pub enum BackupCutBoundary {
     /// Once a quiesced cut holds its domain's lease, before it checks the nodes it must reach and
     /// before it pauses the domain.
     Lease,
+    /// While the cluster applies a cut's pause: each node's wait for every live node to ready a
+    /// runtime revision in which the domain is paused, the cut's own wait and every node's
+    /// reconciliation alike. A hold here is a cluster slow to apply the pause, which the cut's
+    /// deadline ends. A revision in which the domain runs again passes, so the resume is never
+    /// held, and a newer revision ends a hold as it ends that wait.
+    PauseApplication,
     /// Once a quiesced cut paused its domain and every live node applied the pause, before the
     /// drain's first poll. A hold here spends the cut's budget, as a slow application of the
     /// pause would.
@@ -185,9 +191,9 @@ impl FaultInjection {
         self.backup_cut_gate(domain, boundary).release();
     }
 
-    /// Releases every armed lease, drain and capture gate before forgetting them. Cuts that already
-    /// borrowed a gate observe its release; cuts that arrive later find no gate to hold them.
-    /// Returns how many gates cleanup released.
+    /// Releases every armed lease, pause-application, drain and capture gate before forgetting
+    /// them. Cuts and waits that already borrowed a gate observe its release; those that arrive
+    /// later find no gate to hold them. Returns how many gates cleanup released.
     pub fn release_all_backup_cut_pauses(&self) -> usize {
         let released = self.inner.backup_cut_gates.len();
         for gate in &self.inner.backup_cut_gates {
@@ -195,6 +201,21 @@ impl FaultInjection {
         }
         self.inner.backup_cut_gates.clear();
         released
+    }
+
+    /// Holds a node's wait for every live node to ready a revision whose `domains` pause one with
+    /// an armed pause-application gate, as that gate holds every wait that reaches it.
+    pub(crate) async fn pause_backup_cut_application_if_armed(
+        &self,
+        domains: &BTreeMap<DomainName, DomainState>,
+    ) {
+        for (domain, state) in domains {
+            nervix_primitives::task::consume_budget().await;
+            if let DomainStatus::Paused = state.status {
+                self.pause_backup_cut_if_armed(domain, BackupCutBoundary::PauseApplication)
+                    .await;
+            }
+        }
     }
 
     pub(crate) async fn pause_backup_cut_if_armed(

@@ -1145,6 +1145,16 @@ class WorkflowTests(unittest.TestCase):
         self.workflow = (ROOT / ".github/workflows/check.yaml").read_text()
         self.justfile = (ROOT / "justfile").read_text()
 
+    def test_each_union_download_keeps_the_artifact_in_its_own_directory(self) -> None:
+        job = job_section(self.workflow, "coverage-full")
+        for step in job.split("\n      - name: "):
+            if "uses: actions/download-artifact" not in step:
+                continue
+            inputs = step.split("with:", 1)[1]
+            artifact = re.search(r"pattern: (\S+)", inputs)[1]
+            self.assertNotRegex(artifact, r"[?*\[\]{}]", "each download selects one exact artifact")
+            self.assertIn(f"path: coverage-full-inputs/{artifact}\n", inputs)
+
     def test_the_union_job_waits_for_every_producer_job_and_runs_unless_cancelled(self) -> None:
         job = job_section(self.workflow, "coverage-full")
         needs = re.search(r"needs: \[(.*)\]", job)[1].split(", ")
@@ -1164,6 +1174,8 @@ class WorkflowTests(unittest.TestCase):
         for step in job.split("\n      - name: "):
             if "uses: actions/download-artifact" in step:
                 self.assertRegex(step, r"\n          pattern: \S+")
+        extras = step_section(job, "Download native extra coverage")
+        self.assertIn("if: needs.extra-tests.outputs.coverage-required == 'true'", extras)
         combine = step_section(job, "Combine coverage")
         self.assertIn("if: ${{ !cancelled() }}", combine)
 
@@ -1175,16 +1187,15 @@ class WorkflowTests(unittest.TestCase):
                 continue
             match = re.search(r"(?:name|pattern): (\S+)", step.split("with:")[1])
             downloaded.add(match[1])
-        expected = set()
-        for requirement in (*REQUIREMENTS, coverage_full.SELECTION_RECORD):
-            if requirement.job == "deloxide":
-                expected.add("deloxide-*")
-            else:
-                expected.add(requirement.artifact)
+        expected = {requirement.artifact for requirement in (*REQUIREMENTS, coverage_full.SELECTION_RECORD)}
+        lane_job = job_section(self.workflow, "deloxide")
+        selections = re.search(r"selection: \[(.*)\]", lane_job)[1].split(", ")
+        self.assertEqual({f"deloxide-{selection}" for selection in selections}, {name for name in expected if name.startswith("deloxide-")})
         self.assertEqual(downloaded, expected)
         for step in job.split("\n      - name: "):
             if "pattern:" in step:
-                self.assertIn("path: coverage-full-inputs\n", step)
+                artifact = re.search(r"pattern: (\S+)", step)[1]
+                self.assertIn(f"path: coverage-full-inputs/{artifact}\n", step)
 
     def test_the_union_job_records_the_snapshot_then_combines_through_the_recipes(self) -> None:
         job = job_section(self.workflow, "coverage-full")

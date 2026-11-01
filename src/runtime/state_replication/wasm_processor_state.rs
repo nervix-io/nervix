@@ -19,8 +19,9 @@
 
 use super::*;
 
-/// How often a checkpoint waiting for its replicas reads the schedule again, so a changed
-/// assignment or owner re-plans or fails the checkpoint without waiting for its deadline.
+/// How often a checkpoint waiting for its replicas rereads the branch's retained unit assignment
+/// publication, which schedule installation replaces, so a changed assignment or owner re-plans or
+/// fails the checkpoint without waiting for its deadline.
 const WASM_CHECKPOINT_REPLAN_INTERVAL: Duration = Duration::from_millis(100);
 
 impl Runtime {

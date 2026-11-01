@@ -1,7 +1,8 @@
 Feature: Kafka topic declarations
   KAFKA TOPIC uses one literal, case-preserving topic rule in both directions. Its offset
-  ownership, delivery, quiesce and publishing modes, and the configuration a Kafka client needs to
-  reach a broker, apply at CREATE without contacting a broker.
+  ownership, delivery, quiesce and publishing modes, the configuration a Kafka client needs to
+  reach a broker, and the one name a Kafka client accepts for each librdkafka property, apply at
+  CREATE without contacting a broker.
 
   Scenario Outline: Kafka topic declarations preserve topic literals and offset ownership in both directions on <cluster_size> nodes
     Given a <cluster_size> node nervix cluster is started
@@ -199,3 +200,60 @@ Feature: Kafka topic declarations
       | 3            | 'bootstrap.servers' = '127.0.0.1:1', 'nervix.unknown' = 'value'   | invalid client config key 'nervix.unknown'             |
       | 1            | 'bootstrap.servers' = '127.0.0.1:1', 'fetch.wait.max.ms' = 'soon' | invalid client config key 'fetch.wait.max.ms'          |
       | 3            | 'bootstrap.servers' = '127.0.0.1:1', 'fetch.wait.max.ms' = 'soon' | invalid client config key 'fetch.wait.max.ms'          |
+
+  @kafka_client_property_names
+  Scenario Outline: Kafka clients refuse every other name librdkafka reads for a property on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands fail
+      """
+      CREATE KAFKA CLIENT refused_client CONFIG {
+        'bootstrap.servers' = '127.0.0.1:1', <config>
+      };
+      """
+    Then the last command error contains
+      """
+      <expected>
+      """
+
+    Examples:
+      | cluster_size | config                                                              | expected                                                                                                                |
+      | 1            | 'metadata.broker.list' = '127.0.0.2:1'                              | client config key 'metadata.broker.list' is the driver's other name for 'bootstrap.servers'; write 'bootstrap.servers'  |
+      | 3            | 'metadata.broker.list' = '127.0.0.2:1'                              | client config key 'metadata.broker.list' is the driver's other name for 'bootstrap.servers'; write 'bootstrap.servers'  |
+      | 1            | 'acks' = 'all', 'request.required.acks' = '1'                       | client config key 'request.required.acks' is the driver's other name for 'acks'; write 'acks'                           |
+      | 3            | 'acks' = 'all', 'request.required.acks' = '1'                       | client config key 'request.required.acks' is the driver's other name for 'acks'; write 'acks'                           |
+      | 1            | 'sasl.mechanisms' = 'PLAIN'                                         | client config key 'sasl.mechanisms' is the driver's other name for 'sasl.mechanism'; write 'sasl.mechanism'             |
+      | 3            | 'sasl.mechanisms' = 'PLAIN'                                         | client config key 'sasl.mechanisms' is the driver's other name for 'sasl.mechanism'; write 'sasl.mechanism'             |
+      | 1            | 'delivery.timeout.ms' = '5000', 'topic.message.timeout.ms' = '9000' | client config key 'topic.message.timeout.ms' is written under the driver's 'topic.' prefix; write it without the prefix |
+      | 3            | 'delivery.timeout.ms' = '5000', 'topic.message.timeout.ms' = '9000' | client config key 'topic.message.timeout.ms' is written under the driver's 'topic.' prefix; write it without the prefix |
+
+  @kafka_client_property_names
+  Scenario Outline: Kafka clients accept each librdkafka property under the Java client's name on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE KAFKA CLIENT accepted_client CONFIG {
+        'bootstrap.servers' = '127.0.0.1:1',
+        'delivery.timeout.ms' = '30000',
+        'linger.ms' = '20',
+        'acks' = 'all',
+        'topic.metadata.refresh.interval.ms' = '1000'
+      };
+      SHOW CREATE CLIENT accepted_client;
+      """
+    Then the last command output contains
+      """
+      'delivery.timeout.ms' = '30000'
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

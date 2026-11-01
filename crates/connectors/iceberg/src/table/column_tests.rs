@@ -2,7 +2,7 @@
 //! columns are refused for, driven through the sink against Iceberg's in-memory catalog.
 
 use ::iceberg::{
-    TableCreation,
+    NamespaceIdent, TableCreation, TableIdent,
     spec::{NestedField, PrimitiveType, Schema, Type},
     transaction::AddColumn,
 };

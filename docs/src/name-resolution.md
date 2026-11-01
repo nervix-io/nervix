@@ -301,7 +301,7 @@ name again for every new connection it opens.
 | Syslog UDP, TCP and TLS senders | The connector resolves and dials each new sender | The client's `connect_timeout_ms`, 30 seconds by default, shared with socket setup, or with the attempts and TLS | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
 | WebSocket `ws` and `wss` client sources | The connector resolves and dials each connection and resume | The client's `connect_timeout_ms`, 30 seconds by default, shared with the attempts, TLS and the upgrade | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
 | ClickHouse emitters, using HTTP without TLS files or HTTPS with mounted CA trust | Hyper's resolver service on `hyper-util`'s `HttpConnector`; new connections resolve again after the client's `pool_idle_timeout_ms` ends reuse | The insert's required positive `timeout_ms`, including its lookup and connection; the node resolver still caps an individual hook lookup at thirty seconds. `tcp_keepalive_ms` controls TCP probing and does not extend that budget | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
-| SQS sources and emitters, with and without a custom CA | Smithy's `ResolveDns`, installed with `build_with_resolver` | The SDK's 3.1-second connect timeout, which encloses the lookup, and an emitter's `timeout_ms` as its attempt and operation timeouts | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
+| SQS sources and emitters, with and without a custom CA | Smithy's `ResolveDns`, installed with `build_with_resolver` | The SDK's 3.1-second connect timeout, which encloses the lookup, and `timeout_ms` as the attempt and operation timeouts of every request of both directions, a receive's counted after its one-second long poll | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
 | The node's own OTLP trace export | Tonic 0.14's lazy custom connector, which waits for the node resolver installed during startup | The OTLP export timeout, ten seconds by default, enclosing DNS and TCP attempts after resolver installation; the same timeout bounds the request | [Node Trace Export](#node-trace-export) |
 | OTEL gRPC emitters | Tonic 0.14's lazy channel over `hyper-util`'s `HttpConnector` with Hyper's resolver service | Required `timeout_ms`, as the connection and request timeout enclosing DNS | [DNS for OTEL gRPC](./connector-contract.md#dns-for-otel-grpc) |
 | Redis command pools | Redis's `AsyncConnectionConfig::set_dns_resolver`, installed for every new physical `bb8` connection | The thirty-second hook budget, inside the connection timeout the pool sets on the driver and its checkout from the client's `connect_timeout_ms`, 30 seconds by default | [DNS for Redis](./connector-contract.md#dns-for-redis) |
@@ -375,9 +375,8 @@ the identity of the connection, whichever address accepted it:
   `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`. When a request goes through a proxy, the
   node's resolver resolves only the proxy's host; the proxy resolves the service, an HTTP request
   is sent to it in absolute form, an HTTPS request tunnels through it with `CONNECT`, and TLS still
-  verifies the configured host. An SQS client without a custom CA takes its proxy from the same
-  variables under the same rule, and one with a custom CA uses no proxy. No other path uses a
-  proxy.
+  verifies the configured host. An SQS client uses no proxy, with or without a custom CA, and
+  ignores those variables. No other path uses a proxy.
 - **Request signing.** An SQS request is signed with SigV4 for its configured endpoint before its
   host is resolved, so the signature, the `Host` header and the certificate check name the same
   host.
@@ -428,7 +427,7 @@ Nervix selects each library's resolver deliberately. The locked versions and sel
 | Reqwest, for Iceberg REST | 0.12.28, with Hickory 0.25.2 | Required by `iceberg-catalog-rest` 0.10.1. `hickory-dns` is selected and the client installs the node's resolver the same way; its TLS stays on AWS-LC with bundled roots |
 | OpenDAL | 0.57.0 | Iceberg object storage receives a Reqwest 0.13 client through `HttpClientLayer`, which also serves OpenDAL's credential providers. OpenDAL's standalone S3 `detect_region` helper builds its own client, and Nervix never calls it |
 | `hyper-util` | 0.1.21 | `HttpConnector::new_with_resolver` with the node's resolver as its resolver service, for ClickHouse, OTEL gRPC emitters, native sessions and the node's own trace exporter |
-| Smithy's HTTP client | 1.4.2 | `build_with_resolver` with the node's resolver as its `ResolveDns`, for SQS |
+| Smithy's HTTP client | 1.5.2 | The public `Builder::build_with_resolver` with the node's resolver as its `ResolveDns` and no proxy, for SQS |
 | Tonic | 0.13.1 | `connect_with_connector` over that `HttpConnector`, for native sessions |
 | Tonic, for OpenTelemetry | 0.14.6 | `connect_with_connector_lazy` over that `HttpConnector`, for OTEL gRPC emitters and the node's own trace exporter |
 | Lapin and `async-rs` | 4.12.0 and 0.8.12 | `hickory-dns` deliberately off: it resolves through one process-wide resolver built on first use from `/etc/resolv.conf`, which ignores the node's configuration and bounds and keeps name-server connections of the first Tokio runtime that used it. The connector hands Lapin an established transport through `Connection::connector` instead |

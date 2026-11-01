@@ -1,4 +1,88 @@
 Feature: HTTP client ingestion
+  @http_poll_header_utf8
+  Scenario Outline: HTTP polling preserves UTF-8 response header values on <cluster_size> nodes
+    Given HTTP receiver "api" is running
+    And HTTP receiver "api" answers with
+      """
+      respond 200; header X-City: Zürich; body {"user_id":42}
+      """
+    And HTTP receiver "api" answers unscripted requests with "respond 204"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( user_id I64 );
+      CREATE SCHEMA routed_event ( user_id I64, city STRING OPTIONAL );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA routed_event UNBRANCHED;
+      CREATE HTTP CLIENT source CONFIG {
+        'endpoint' = '{{http_receiver.api}}/poll', 'timeout_ms' = 5000
+      };
+      CREATE HTTP REQUEST INGESTOR polled FROM source METHOD 'GET' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL SET city = read_header('x-city') UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION event_subscription TO events;
+      START;
+      """
+    Then within "60s" the relay subscription receives a payload
+      """
+      "city":"Zürich"
+      """
+    And the relay subscription does not receive a payload within "2s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @http_poll_header_invalid_utf8
+  Scenario Outline: HTTP polling drops and counts invalid UTF-8 response header values on <cluster_size> nodes
+    Given HTTP receiver "api" is running
+    And HTTP receiver "api" answers with
+      """
+      raw HTTP/1.1 200 OK\r\ncontent-length: 14\r\nx-city: \xFF\r\n\r\n{"user_id":43}
+      """
+    And HTTP receiver "api" answers unscripted requests with "respond 204"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( user_id I64 );
+      CREATE SCHEMA routed_event ( user_id I64, city STRING OPTIONAL );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA routed_event UNBRANCHED;
+      CREATE HTTP CLIENT source CONFIG {
+        'endpoint' = '{{http_receiver.api}}/poll', 'timeout_ms' = 5000
+      };
+      CREATE HTTP REQUEST INGESTOR polled FROM source METHOD 'GET' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL SET city = read_header('x-city') UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION event_subscription TO events;
+      START;
+      """
+    Then within "60s" the relay subscription receives a payload
+      """
+      "user_id":43
+      """
+    And the last relay subscription payload does not contain "city\""
+    And within "10s" node "node-1" eventually reports describe ingestor "polled" as "status: running"
+    And the last command output owner is saved as placeholder "poll_owner"
+    And node "{{poll_owner}}" observability metric "nervix_ingestor_header_values_dropped_total" with labels eventually equals 1
+      """
+      domain="{{domain}}"
+      ingestor="polled"
+      physical_node_id="{{poll_owner}}"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: HTTP polling declares its request and client transport contract on <cluster_size> nodes
     Given the HTTP mock server is running
     And a <cluster_size> node nervix cluster is started
