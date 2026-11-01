@@ -383,10 +383,10 @@ minute, hour and day. A job's size follows the memory and disk its builds use ra
 since a Boat machine has only 2 GB of memory per CPU, with 4 GB of swap beside it:
 
 - `boat-xlarge`, with 16 CPUs, 32 GB and 251 GB of disk, runs validation, the diagnostic evidence,
-  the extra checks, Shuttle, Loom, the Deloxide lane, the Bolero randomized properties, the image
-  builds and the benchmarks. In October 2026 the extra checks used about 95 GiB of disk and the
-  amd64 image build lost its runner
-  on a 16 GB machine.
+  the unit tests, the scenario build and its shards, the extra checks, Shuttle, Loom, the Deloxide
+  lane, the Bolero randomized properties, the image builds and the benchmarks. In October 2026 the
+  extra checks used about 95 GiB of disk and the amd64 image build lost its runner on a 16 GB
+  machine.
   Sixteen compilers of the instrumented Loom build exceed the machine's 32 GB, so the `loom` job
   sets `CARGO_BUILD_JOBS` to eight; its build then peaked at 21 GiB.
 - `boat-large`, with 8 CPUs, 16 GB and 111 GB, runs Turmoil.
@@ -402,19 +402,17 @@ Boat jobs that run the selection's tests install the current git from the git-co
 runner image does.
 
 [Blacksmith](https://www.blacksmith.sh)'s `blacksmith-16vcpu-ubuntu-2404`, with 16 CPUs, 64 GB and
-GitHub's runner image, runs the scenario archive build, its unit-test reader and scenario shards,
-the Bolero sanitizer shards, the Loom qualification shards and client conformance. The archive
-build and its readers share the provider's checkout path, which the archive validates before it
-restores any file. In Check run 41176344914, Boat's third ordinary shard recorded mean CPU steal
-of 15.2% and a peak of 46.7%, alongside deadline failures; the contemporaneous Blacksmith sanitizer
-runner recorded 0.0% mean and 0.2% peak steal. The scenario jobs use Blacksmith with the same
-48 run slots, assertions and deadlines. These observations identify runner contention without
-attributing every scenario failure to it. The sanitizer shards' address-sanitized server build
+GitHub's runner image, runs the Bolero sanitizer shards, the Loom qualification shards and client
+conformance. The sanitizer shards' address-sanitized server build
 needs more than Boat's 32 GB, even with eight compilers. The other two are compile-bound builds that kache serves slowly on Boat: in
 Check run 40991534806 kache's downloads spent most of their time waiting for the lock of its local
 store, 1.8 to 4.6 seconds each against 0.4 seconds on Blacksmith, the Loom qualification shards
 reached their two-hour limit after about 107 minutes of compiling, and the client conformance build
 took 49 of its job's 60 minutes. `.github/actionlint.yaml` declares the Blacksmith labels as well.
+
+The scenario build, the unit tests and the shards must share one provider, because the archive
+restores only at the checkout path it was built in, and it checks that path before it restores any
+file.
 
 A kache-backed job uses the cache bucket in its runner's region: the EU bucket on Boat's European
 machines, and the US bucket on GitHub's hosted runners and on Blacksmith's US runners.
@@ -498,6 +496,17 @@ declaration `extra-connector-matrix`, a change to a compiler rule `extra-compile
 a primitive `extra-primitives`. A pull request carries `benchmark` only when its task requires a
 measured comparison, such as a change that claims a performance effect, and `no-docker` only when
 nothing in it needs an image. `no-docker` never authorizes a test exclusion.
+
+`fuzz`, `chaos`, `chaos-soak` and `deloxide` are expensive in CI, so they stay off by default and
+their checks run locally first. A pull request carries one only for a strong, task-specific need
+that local verification cannot reasonably satisfy, not because it touches related code. It enables
+the fewest lanes that need CI, says why in its description, and records the local commands,
+revision, seeds or scenarios and results there. A release qualification still needs them, because
+`just release-evidence` requires their checks. Once a label has enabled a check, the check's result
+stands: removing the label never hides a failure.
+
+Which runner a job uses, its size, its provider and the cache bucket that follows them change only
+with the user's approval, as `AGENTS.md` requires.
 
 The `extra-tests` job stays one job: each `extra-*` label selects its own steps, and the job runs
 only when at least one is present. Without any of them it is skipped, and `coverage` and
@@ -854,9 +863,8 @@ identity, the invariant it owns, its selections and the coverage it declares; a 
 renamed there in the same change. A source file that starts acquiring tracked blocking locks needs
 an `[[owner]]` record naming the workloads that reach them or the path the lane does not reach and
 why: `just validate-deloxide-applicability`, part of `just validate`, holds the records to the
-compiler's acquisition catalog. For a pull request labeled `deloxide`, which every change the
-Deloxide rule applies to carries, CI's `deloxide` job runs every selection through the native
-coverage collector, as `just coverage-native-extras test-deloxide test-deloxide-order
+compiler's acquisition catalog. For a pull request labeled `deloxide`, CI's `deloxide` job runs
+every selection through the native coverage collector, as `just coverage-native-extras test-deloxide test-deloxide-order
 test-deloxide-stress test-deloxide-stress-restore` does locally,
 and keeps their attempts, completion records and diagnostic coverage reports as artifacts. The
 ordinary report tool also exports selected artifacts, records explicit proofs in reviewed copies and
@@ -932,8 +940,9 @@ the soak suite runs every delivered scenario with fixed and rotating mixed-insta
 runs the smoke suite against a pull request's own images only for a pull request labeled `chaos`,
 and the soak suite for one labeled `chaos-soak`. A manual run of the `Chaos` workflow takes a
 suite, an immutable image digest and its kind.
-Label a pull request that changes the chaos runner, or the membership, failover, recovery or
-delivery behavior its scenarios verify, with `chaos`.
+Run the suite locally for a change to the chaos runner, or to the membership, failover, recovery or
+delivery behavior its scenarios verify. The `chaos` label stays off by default, as
+[CI labels](#ci-labels) says.
 
 Each suite runs twice on CI: against the release image and against the Deloxide diagnostic image
 of the same revision, which `just docker-build-diagnostic` builds and whose label makes every run

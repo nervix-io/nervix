@@ -598,13 +598,12 @@ that thread ran on a CPU for 86 percent of the run, every scenario took about 1.
 median across the factor `3` runs, and the run needed 279,439 slot-seconds where 48 slots had
 needed at most 215,000. More slots added no throughput, so the job keeps factor `3`. Memory was no
 limit on those runs' runner, which used at most 28 GiB of its 62. The archive build and its
-unit-test and scenario readers run on `blacksmith-16vcpu-ubuntu-2404`, keeping the compiled
-checkout path identical across archive publication and restoration. Each scenario shard retains
-16 CPUs, 48 slots and every product and harness deadline. A Boat shard in Check run 41176344914
-recorded 15.2% mean CPU steal and 46.7% peak steal alongside deadline failures, while the
-contemporaneous Blacksmith sanitizer runner recorded near-zero steal. The runner records retain
-the measurements and failed attempts; changing the environment does not explain every individual
-retry observation.
+unit-test and scenario readers run on `boat-xlarge`, keeping the compiled checkout path identical
+across archive publication and restoration. Its 32 GB and 4 GB of swap stay above that peak with
+less to spare, and each scenario shard keeps 16 CPUs, 48 slots and every product and harness
+deadline. A Boat runner can lose a fifth of its CPU to its host: in Check 41157008321 two of three
+shards averaged 18% and 20% CPU steal with 54 and 64 retries, and the third averaged 0.9% with one.
+The runner load record shows how close a run comes on memory and how much CPU it lost.
 
 Admission grants feature capacity and the attempt's share of the run slots in one decision, after
 both are available. A scenario holds both through the end of teardown. The `@slots_N` tag declares
