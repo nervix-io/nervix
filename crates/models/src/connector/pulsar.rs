@@ -533,7 +533,10 @@ impl EmitterDeclaration for PulsarTopicEmitter {
         // properties and payload. Its topic decides how it is stored, and it has no routing or
         // retention flag, no reply target and no per-message identity a producer chooses. Its
         // properties carry what a PROPERTIES block would, and its ordering key is a key.
-        envelope: &[EnvelopeClauseKind::Timestamp, EnvelopeClauseKind::DeliverAfter],
+        envelope: &[
+            EnvelopeClauseKind::Timestamp,
+            EnvelopeClauseKind::DeliverAfter,
+        ],
         properties: &[],
         bounds: PULSAR_EMITTER_BOUNDS,
     };

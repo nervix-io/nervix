@@ -198,6 +198,13 @@ Feature: Emitters write envelope clauses only where their entity declares them
         DELIVER AFTER 0s
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
+    And these Plexus commands fail with "invalid DELIVER AFTER duration 'soon'"
+      """
+      CREATE PULSAR TOPIC EMITTER unreadable FROM events TO broker TOPIC 'orders'
+        MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING event_codec
+        DELIVER AFTER soon
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
     And these Plexus commands fail with "expected duration"
       """
       CREATE PULSAR TOPIC EMITTER unitless FROM events TO broker TOPIC 'orders'

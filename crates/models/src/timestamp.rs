@@ -317,7 +317,10 @@ mod tests {
         #[case] unix_nanos: i64,
         #[case] unix_millis: i64,
     ) {
-        assert_eq!(Timestamp::from_unix_nanos(unix_nanos).unix_millis(), unix_millis);
+        assert_eq!(
+            Timestamp::from_unix_nanos(unix_nanos).unix_millis(),
+            unix_millis
+        );
     }
 
     #[test]

@@ -108,12 +108,8 @@ fn the_latest_timestamp_is_an_event_time() {
 #[test]
 fn a_message_is_due_the_delay_after_its_batchs_execution_time() {
     let execution_time = at("2001-02-03T04:05:06.789Z");
-    let times = PulsarMessageTimes::of(&record(
-        execution_time,
-        None,
-        Some(Duration::from_secs(5)),
-    ))
-    .assured("the delay leaves the timestamp range nowhere near here");
+    let times = PulsarMessageTimes::of(&record(execution_time, None, Some(Duration::from_secs(5))))
+        .assured("the delay leaves the timestamp range nowhere near here");
 
     assert_eq!(times.event_time, None);
     assert_eq!(times.deliver_at_time, Some(981_173_111_789));
@@ -232,11 +228,9 @@ impl GeneratedRecord {
         let unix_nanos = timestamp.unix_nanos();
         let millisecond = Self::containing_millisecond(i128::from(unix_nanos));
         if millisecond < 1 {
-            return Err(
-                PulsarMessageTimeError::EventTimeBeforeFirstMillisecond {
-                    timestamp: Timestamp::from_unix_nanos(unix_nanos),
-                },
-            );
+            return Err(PulsarMessageTimeError::EventTimeBeforeFirstMillisecond {
+                timestamp: Timestamp::from_unix_nanos(unix_nanos),
+            });
         }
         let event_time = u64::try_from(millisecond).assured("the millisecond is positive");
         Ok(Some(event_time))

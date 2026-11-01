@@ -252,9 +252,13 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
         EmitterEntityKind::Kafka(KafkaEmitterEntity::Topic) => {
             located(ConnectorKind::Kafka, "TOPIC", "kafka_topic", &[])
         }
-        EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => {
-            located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
-        }
+        EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => EmitterSurface {
+            envelope: &[
+                EnvelopeClauseKind::Timestamp,
+                EnvelopeClauseKind::DeliverAfter,
+            ],
+            ..located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
+        },
         EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
             located(ConnectorKind::Mqtt, "TOPIC", "mqtt_topic", &[])
         }

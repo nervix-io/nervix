@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn deliver_after_takes_a_duration_literal() {
-        for delay in ["5", "soon", "'5s'", ""] {
+        for delay in ["5", "'5s'", ""] {
             assert!(
                 refused(&enveloped_statement(&format!("DELIVER AFTER {delay}"))),
                 "`{delay}` is no duration literal"
@@ -179,7 +179,10 @@ mod tests {
 
         let delayed = format!("{opening}DELIVER AFTER 5s ");
         let after_the_delay = suggest_statement(&delayed, delayed.len());
-        assert!(!offered(&after_the_delay, "TIMESTAMP"), "{after_the_delay:?}");
+        assert!(
+            !offered(&after_the_delay, "TIMESTAMP"),
+            "{after_the_delay:?}"
+        );
         assert!(
             !offered(&after_the_delay, "DELIVER AFTER"),
             "{after_the_delay:?}"
