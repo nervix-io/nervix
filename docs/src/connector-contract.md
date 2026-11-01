@@ -498,6 +498,13 @@ opened lets the handle go. A connection that fails before its AMQP handshake has
 thread. An established connection is not closed because its host's answer changed or expired; the
 next connection uses the new answer.
 
+The stalled-AMQP unit check resolves and dials its loopback broker under a separate setup bound,
+then starts its unchanged 500 ms budget at the production handshake. It checks the handshake's
+error context, the typed `connect_timeout_ms` expiry and the socket closing. This isolates the
+phase under parallel test load; production still shares one deadline across resolution, dialling,
+TLS, the AMQP handshake and channel setup. The connection tests separately exercise lookup and
+address-attempt expiry.
+
 ### DNS for Redis
 
 Composition gives the node resolver to the shared Redis command pool and to each Pub/Sub source
