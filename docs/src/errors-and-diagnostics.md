@@ -1410,7 +1410,10 @@ the wait: an installation slot, or every live node preparing or readying a revis
 reports it beneath `DomainAlterError::BackupPauseTimeout`, and the cut attributes that to its drain
 phase as its timeout, such as `timed out waiting to capture domain 'edge': phase=drain, ...: timed
 out applying the backup pause of domain 'edge': the caller's deadline ended the runtime application
-while it waited for every live node to ready runtime revision 9`.
+while it waited for every live node to ready runtime revision 9`. An already elapsed deadline
+refuses the first installation wait immediately, even when its slot is available; attribution
+does not depend on whether the timer driver has processed that deadline yet. A pause committed
+after its cut's deadline therefore retains the installation refusal beneath the pause timeout.
 
 ### Ingestors, Emitters And Generators
 
