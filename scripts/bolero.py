@@ -22,6 +22,7 @@ from collections.abc import Callable
 from typing import Any, Iterator
 
 from scripts import bolero_coverage as coverage
+from scripts.rust_source import RustFile, _end_of_block
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "tests/bolero-targets.toml"
@@ -294,15 +295,65 @@ def package_rust_sources(manifest: pathlib.Path) -> Iterator[pathlib.Path]:
                 yield path / filename
 
 
+def function_body(code: str, parameters: int) -> tuple[int, int] | None:
+    """Return the span of the body of a function whose parameter list opens at `parameters`.
+
+    `code` has comments and literal contents blanked. The signature ends at the first `{` or `;`
+    outside its brackets, so a `;` inside an array type does not end it, while one that ends a
+    declaration without a body, such as a trait method's, leaves the function without one.
+    """
+    depth = 1
+    index = parameters
+    length = len(code)
+    while index < length:
+        char = code[index]
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif depth == 0 and char == "{":
+            return index, _end_of_block(code, index)
+        elif depth == 0 and char == ";":
+            return None
+        index += 1
+    return None
+
+
+def owning_function(code: str, offset: int) -> str | None:
+    """Name the innermost function whose body holds `offset`.
+
+    `code` has comments and literal contents blanked, so their braces and words do not count. The
+    nearest preceding function whose body holds `offset` is the innermost one; a nested item
+    function written before `offset` ends before it and does not own it.
+    """
+    preceding = list(FUNCTION.finditer(code, 0, offset))
+    for function in reversed(preceding):
+        body = function_body(code, function.end())
+        if body is not None and body[0] < offset < body[1]:
+            return function.group(1)
+    return None
+
+
+def macro_owners(source: pathlib.Path, content: str) -> list[str]:
+    """Name the function that owns each Bolero macro of one source file, in source order."""
+    macros = list(MACRO.finditer(content))
+    if not macros:
+        return []
+    code = RustFile(str(source), content).code
+    owners = []
+    for macro in macros:
+        owner = owning_function(code, macro.start())
+        if owner is None:
+            raise BoleroError(f"{source}: Bolero macro has no owning function")
+        owners.append(owner)
+    return owners
+
+
 def static_targets(manifest: pathlib.Path) -> dict[str, pathlib.Path]:
     found = {}
     for source in package_rust_sources(manifest):
         content = source.read_text()
-        for macro in MACRO.finditer(content):
-            preceding = list(FUNCTION.finditer(content, 0, macro.start()))
-            if not preceding:
-                raise BoleroError(f"{source}: Bolero macro has no owning function")
-            function = preceding[-1].group(1)
+        for function in macro_owners(source, content):
             if not function.startswith("bolero_"):
                 raise BoleroError(f"{source}: Bolero property {function} must start with bolero_")
             if function in found:

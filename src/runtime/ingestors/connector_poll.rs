@@ -2,9 +2,9 @@
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Reporting the records a poll could not read, splitting the messages it did read
-//!   into intake batches no larger than the bound the ingestor's entity declares, and starting an
-//!   ingest group of its own for each batch.
+//! - **Owns.** Reporting the records a poll could not read, counting header values its connector
+//!   dropped, splitting the messages it did read into intake batches no larger than the bound the
+//!   ingestor's entity declares, and starting an ingest group of its own for each batch.
 //! - **Depends on.** The connector ingestor contract's poll result and the ingestor host's
 //!   unacknowledged intake, quiesce control and ingest group flush.
 //! - **Must not know.** A connector driver, the domain cadence that schedules the poll, or the
@@ -71,6 +71,10 @@ impl RuntimeIngestorHost {
         poll: IngestorPoll,
         intake_batch: NonZeroUsize,
     ) -> IngestorIntakeResult<bool> {
+        if poll.dropped_header_values > 0 {
+            self.header_values_dropped
+                .inc_by(poll.dropped_header_values.arch_into());
+        }
         for failure in poll.failures {
             nervix_primitives::task::consume_budget().await;
             self.report_error(format!(
