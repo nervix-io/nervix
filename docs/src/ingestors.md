@@ -1205,7 +1205,7 @@ absent. Quiescing does not change the auto-commit loss windows of `MODE NO ACK`.
 ```plexus,ignore
 CREATE PULSAR TOPIC INGESTOR <name>
   FROM <client> TOPIC 'orders'
-  (SUBSCRIPTION 'readers' OWNED BY INGESTOR | SUBSCRIPTION 'readers' PROVISIONED)
+  (SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST | SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST | SUBSCRIPTION 'readers' PROVISIONED)
   [INSTANCES 2]
   MODE <mode>
   ON QUIESCE <quiesce>
@@ -1221,7 +1221,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | PULSAR client |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | Not offered: The current topic declaration exposes properties as headers but no separate typed broker metadata namespace. |
@@ -1240,15 +1240,23 @@ Pulsar ingestors read through a shared, durable subscription. The subscription n
 Pulsar, but the subscription type is not exposed in Plexus. Every statement also declares who owns
 the subscription, because the broker cannot say later who created one:
 
-- `OWNED BY INGESTOR`: the ingestor owns the subscription. Its consumers create it when it is
-  absent, starting at the earliest message the topic retains, and dropping the ingestor or its
-  domain removes it.
+- `OWNED BY INGESTOR START AT EARLIEST` or `OWNED BY INGESTOR START AT LATEST`: the ingestor owns
+  the subscription and declares where a newly created cursor begins. `EARLIEST` reads the topic's
+  retained backlog; `LATEST` starts after the messages present when the subscription is created.
+  Dropping the ingestor or its domain removes its owned subscription.
 - `PROVISIONED`: an operator provisioned the subscription, and Nervix never creates or removes it.
   Before an instance joins it, the instance checks that it exists. A missing subscription is the
   ingestor's transient error, as in `PULSAR subscription 'readers' of topic
   'persistent://public/default/orders' does not exist`, and the instance checks again after its
   retry policy's backoff, or on the host's reconnect cadence in `MODE NO ACK`, until the operator
   provisions it. A missing subscription does not keep the ingestor or its domain from starting.
+
+`START AT` is required for an owned subscription and is unavailable for a provisioned subscription.
+An existing subscription keeps its cursor regardless of the declared start position. `ALTER PULSAR
+TOPIC INGESTOR <name> SET START AT EARLIEST|LATEST` changes the policy for the next creation without
+seeking the existing cursor or discarding its backlog. The alteration is refused for a provisioned
+subscription and leaves its definition unchanged. `SHOW CREATE` and `DESCRIBE INGESTOR` expose the
+declared position; it is a creation policy, not a report of the current broker position.
 
 The check subscribes once with a non-durable cursor of the same name: the broker refuses that while
 the durable subscription exists, and otherwise opens a cursor that the check closes again. The
@@ -1285,7 +1293,7 @@ Different configured host names are distinct addresses even if DNS resolves them
 Declaring the retained subscription `PROVISIONED` hands its ownership to the operator and keeps
 its backlog. Removal on replacement has the same timeout and best-effort reporting as removal
 on drop; a failure does not prevent starting the replacement. `DESCRIBE INGESTOR`
-shows the subscription name, `OWNED BY INGESTOR` or `PROVISIONED`, and `INSTANCES` together
+shows the subscription name, its ownership and declared start position, and `INSTANCES` together
 in the declared `options:` row.
 
 Client config currently supports:
@@ -1321,9 +1329,10 @@ each message without waiting for the broker's answer.
 
 Suspension disconnects the consumer. The durable subscription retains its backlog and redelivers
 unacknowledged in-flight messages. Broker message TTL, backlog quota policy, and inactive-subscription
-expiry remain in force. If an owned subscription expires, resume creates it again at the earliest
-message the topic retains, which can deliver earlier messages again, and what the topic no longer
-retains from the suspension window is lost.
+expiry remain in force. If an owned subscription expires, resume creates it again at its declared
+`START AT` position: `EARLIEST` can deliver retained earlier messages again, while `LATEST` skips
+the backlog present at recreation. What the topic no longer retains from the suspension window
+is lost.
 A provisioned subscription that expires is the ingestor's transient error until the operator
 provisions it again.
 

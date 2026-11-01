@@ -54,13 +54,13 @@ Feature: Pulsar topic declarations
       """
 
     Examples:
-      | cluster_size | topic                                  | ownership         | ingest_mode                                                                           | emit_mode                                                            |
-      | 1            | Orders-EU_1                            | OWNED BY INGESTOR | NO ACK                                                                                | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                            |
-      | 3            | Orders-EU_1                            | OWNED BY INGESTOR | NO ACK                                                                                | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                            |
-      | 1            | persistent://tenant-a/orders/Placed    | PROVISIONED       | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                         | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |
-      | 3            | persistent://tenant-a/orders/Placed    | PROVISIONED       | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                         | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |
-      | 1            | non-persistent://public/default/orders | OWNED BY INGESTOR | ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | ACK PARALLEL MAX 4 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s |
-      | 3            | non-persistent://public/default/orders | OWNED BY INGESTOR | ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | ACK PARALLEL MAX 4 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s |
+      | cluster_size | topic                                  | ownership                           | ingest_mode                                                                           | emit_mode                                                            |
+      | 1            | Orders-EU_1                            | OWNED BY INGESTOR START AT EARLIEST | NO ACK                                                                                | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                            |
+      | 3            | Orders-EU_1                            | OWNED BY INGESTOR START AT EARLIEST | NO ACK                                                                                | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                            |
+      | 1            | persistent://tenant-a/orders/Placed    | PROVISIONED                         | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                         | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |
+      | 3            | persistent://tenant-a/orders/Placed    | PROVISIONED                         | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                         | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |
+      | 1            | non-persistent://public/default/orders | OWNED BY INGESTOR START AT EARLIEST | ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | ACK PARALLEL MAX 4 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s |
+      | 3            | non-persistent://public/default/orders | OWNED BY INGESTOR START AT EARLIEST | ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | ACK PARALLEL MAX 4 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s |
 
   Scenario Outline: Pulsar topic ingestors refuse a subscription without its ownership and quiesce modes the topic does not declare
     Given a <cluster_size> node nervix cluster is started
@@ -87,17 +87,17 @@ Feature: Pulsar topic declarations
       """
 
     Examples:
-      | cluster_size | subscription                             | quiesce                                      | expected                                          |
-      | 1            |                                          | SUSPEND                                      | expected SUBSCRIPTION, found MODE                 |
-      | 3            |                                          | SUSPEND                                      | expected SUBSCRIPTION, found MODE                 |
-      | 1            | SUBSCRIPTION 'readers'                   | SUSPEND                                      | PROVISIONED, found MODE                           |
-      | 3            | SUBSCRIPTION 'readers'                   | SUSPEND                                      | PROVISIONED, found MODE                           |
-      | 1            | SUBSCRIPTION '' OWNED BY INGESTOR        | SUSPEND                                      | invalid pulsar_subscription '': must not be empty |
-      | 3            | SUBSCRIPTION '' OWNED BY INGESTOR        | SUSPEND                                      | invalid pulsar_subscription '': must not be empty |
-      | 1            | SUBSCRIPTION 'readers' OWNED BY INGESTOR | DROP                                         | expected SUSPEND, found DROP                      |
-      | 3            | SUBSCRIPTION 'readers' OWNED BY INGESTOR | DROP                                         | expected SUSPEND, found DROP                      |
-      | 1            | SUBSCRIPTION 'readers' PROVISIONED       | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER                    |
-      | 3            | SUBSCRIPTION 'readers' PROVISIONED       | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER                    |
+      | cluster_size | subscription                                               | quiesce                                      | expected                                          |
+      | 1            |                                                            | SUSPEND                                      | expected SUBSCRIPTION, found MODE                 |
+      | 3            |                                                            | SUSPEND                                      | expected SUBSCRIPTION, found MODE                 |
+      | 1            | SUBSCRIPTION 'readers'                                     | SUSPEND                                      | PROVISIONED, found MODE                           |
+      | 3            | SUBSCRIPTION 'readers'                                     | SUSPEND                                      | PROVISIONED, found MODE                           |
+      | 1            | SUBSCRIPTION '' OWNED BY INGESTOR START AT EARLIEST        | SUSPEND                                      | invalid pulsar_subscription '': must not be empty |
+      | 3            | SUBSCRIPTION '' OWNED BY INGESTOR START AT EARLIEST        | SUSPEND                                      | invalid pulsar_subscription '': must not be empty |
+      | 1            | SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST | DROP                                         | expected SUSPEND, found DROP                      |
+      | 3            | SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST | DROP                                         | expected SUSPEND, found DROP                      |
+      | 1            | SUBSCRIPTION 'readers' PROVISIONED                         | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER                    |
+      | 3            | SUBSCRIPTION 'readers' PROVISIONED                         | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER                    |
 
   Scenario Outline: Pulsar topic names outside the topic rule are refused in both directions
     Given a <cluster_size> node nervix cluster is started
@@ -113,7 +113,7 @@ Feature: Pulsar topic declarations
     When these Plexus commands fail
       """
       CREATE PULSAR TOPIC INGESTOR refused_intake
-        FROM pulsar_main TOPIC '<topic>' SUBSCRIPTION 'readers' OWNED BY INGESTOR MODE NO ACK
+        FROM pulsar_main TOPIC '<topic>' SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
