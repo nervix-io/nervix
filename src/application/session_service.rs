@@ -264,7 +264,17 @@ impl ApplicationBound {
         match self {
             Self::ClusterBudget => std::future::pending().await,
             Self::Deadline(deadline) => {
-                nervix_primitives::time::sleep_until(deadline).await;
+                let timer = nervix_primitives::time::sleep_until(deadline);
+                tokio::pin!(timer);
+                std::future::poll_fn(|context| {
+                    // The timer rounds up to a millisecond tick. A ready installation must not
+                    // win after the actual deadline, including when it elapsed between polls.
+                    if nervix_primitives::time::Instant::now() >= deadline {
+                        return std::task::Poll::Ready(());
+                    }
+                    timer.as_mut().poll(context)
+                })
+                .await;
                 Report::new(crate::runtime::RuntimeError::ApplicationDeadline { wait })
             }
         }
@@ -2018,6 +2028,8 @@ pub(in crate::application) fn conflicting_reference(
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    mod application_deadline;
+
     use nervix_models::{
         ClientName, ConnectorKind, EndpointName, EndpointType, HttpIngestorEntity,
         IngestorEntityKind, ModelKind, NodeRef, SyslogIngestorEntity,
@@ -2618,8 +2630,8 @@ mod tests {
         let mqtt = suggestion_values(
             &service,
             &subscriptions,
-            "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' MODE NO ACK ON QUIESCE \
-             SUSPEND DECODE USING codec TO outgoing SET value = read_",
+            "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' SESSION PERSISTENT QOS \
+             1 MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_",
         )
         .await;
         assert!(mqtt.is_empty(), "{mqtt:?}");

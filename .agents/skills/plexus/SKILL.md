@@ -22,8 +22,9 @@ lowercase HTTP field names, and on an emitter that keeps one value per header na
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, subprotocol offers, response-header reads, frame metadata and the closed client CONFIG key
-set. Offer subprotocols only through `HEADERS { 'sec-websocket-protocol' = '...' }`, and expect
-the peer to select one of them: any other answer fails the connection.
+set, including the trust roots `tls_ca_file` adds to and how inspection redacts an endpoint. Offer
+subprotocols only through `HEADERS { 'sec-websocket-protocol' = '...' }`, and expect the peer to
+select one of them: any other answer fails the connection.
 For ClickHouse HTTP connection tuning, client certificates, compression and which insert failures
 reject a row rather than retry, read the ClickHouse Emitters section and the generated client key
 reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured values;
@@ -508,7 +509,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   [HTTP inspection](../../../docs/src/emitters.md#http-inspection-and-metrics).
 - Write a supported emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
   emitter clause and route construction, before `FLUSH`; it is required for CLIENT, ClickHouse,
-  Postgres, MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
+  Postgres, MySQL, and MongoDB emitters and limited to `1MiB` for SQS. A batching Sentry emitter needs a
   codec with `ON EMITTING BATCH`, and a batching protobuf codec needs `BATCH MESSAGE`. Compatible
   rows from successive Arrow carriers in one flush may share a payload, but rows from different
   source relays or concrete branches cannot. For the database emitters, the clause bounds each insert
@@ -611,8 +612,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - End every transport ingestor source body with an explicit source-supported `ON QUIESCE` body
   immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `HTTP ENDPOINT` and
   `WEBSOCKETS ENDPOINT`, an explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include
-  `RETRY AFTER` for endpoint `REJECT`. Use `MQTT TOPIC` `SUSPEND` only with
-  `SESSION PERSISTENT QOS 1`. Do not invent a default or use a mode offered by another entity.
+  `RETRY AFTER` for endpoint `REJECT`. Write every `MQTT TOPIC` ingestor's `SESSION CLEAN` or
+  `SESSION PERSISTENT` and its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, and use its `ACK` modes
+  and `SUSPEND` only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Do not invent a default or
+  use a mode offered by another entity.
 - A server endpoint WebSocket keeps its route and signaling protocol for the connection. After
   its source stops or is replaced, reconnect to use the new source; after signaling, the next
   refused payload on the preceding connection closes with 1013. Configured routes without a live

@@ -754,7 +754,7 @@ impl SessionServiceImpl {
             ))
         }
         .await;
-        let released = self
+        let released = match self
             .inner
             .consensus
             .release_command_domain_mutation(
@@ -764,13 +764,13 @@ impl SessionServiceImpl {
                 domain.clone(),
             )
             .await
-            .map(|_| ())
-            .map_err(|error| {
-                error.change_context(BackupError::CaptureDomain {
-                    domain: domain.clone(),
-                    reason: "mutation lease release failed".to_string(),
-                })
-            });
+        {
+            Ok(_) => Ok(()),
+            Err(error) => Err(error.change_context(BackupError::CaptureDomain {
+                domain: domain.clone(),
+                reason: "mutation lease release failed".to_string(),
+            })),
+        };
         let captured = finish_backup_cut(&execution.reference, captured, released);
         if captured.is_ok()
             && self.inner.consensus.current_leader_tenure().as_ref() != Some(&coordinator_tenure)
