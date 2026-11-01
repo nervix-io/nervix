@@ -4,7 +4,7 @@ This ledger is the acceptance record for
 [WASM State 11](https://app.clickup.com/t/90141361959/86bc22g2q) under the
 [WASM state durability, reset and recovery epic](https://app.clickup.com/t/86bc22g1h). It names the
 executable evidence for every guarantee the epic advertises, the crash windows the qualification
-pins, the defects it found and fixed, and the practical limits of the durability contract.
+pins and the practical limits of the durability contract.
 
 Run the public qualification selection with:
 
@@ -63,23 +63,6 @@ with one replica.
 | Full restart and rejoin | The single-node crash-window outline, the three-node cluster-stop scenario, the reset outline, and `wasm_processor.feature` "WASM processor restores guest state after cluster restart". |
 | Saves above the replication message limit | `large_wasm_state_replication.feature` checkpoints two interleaved branches with 3 and 40 MiB saves, verifies replica-confirmed revisions, then exercises promotion and planned drain with 3 MiB saves and no duplicate output. The bulk stream checks length and digest before replica installation. |
 
-## Defects found and fixed
-
-1. **A branch task outlived its node.** Runtime teardown gives a processor task two seconds, and the
-   processor task gives each branch two seconds inside it, so a processor task was ended before it
-   could end a branch still in its checkpoint. The branch's Tokio handle was then dropped, which
-   detaches the task: it kept running without an owner, reported a `state authority check` failure
-   after the node had stopped, and held the node's runtime database open, so an in-process restart
-   failed with `node returned before releasing its node database lock`. Branch handles now end their
-   task when dropped. Red: every three-node cluster restart with a held checkpoint failed. Green:
-   the same scenarios restart.
-2. **A whole-cluster restart could reset every WASM branch.** The first node to lead after a restart
-   formed a quorum with a second node before gossip had heard from the owner, failed the processor
-   over "without local replicated state" and started a new generation, discarding the replicated
-   checkpoints of every branch. Automatic scheduling now waits up to ten seconds for gossip to
-   observe every voter. Red: the three-node cluster-stop scenario lost `beta`'s state. Green: it
-   continues from it.
-
 ## Deterministic race checks
 
 | Check | Production types | Invariant |
@@ -108,29 +91,4 @@ existing `state_store_shuttle_tests.rs` checks of the state assignment authority
 - A whole-cluster restart keeps ownership while every voter rejoins within the ten-second observation
   grace.
 
-## Validation record
-
-Recorded on 2026-09-25 against base revision `b02ef87b` on one Linux host running other worktrees
-builds and suites at the same time.
-
-| Command | Result |
-| --- | --- |
-| `just test-scenarios --input tests/features/runtime/wasm_state_qualification.feature` | 11 of 11 scenarios passed; an earlier owner-loss attempt needed one retry |
-| `just test-scenarios --input 'tests/features/runtime/wasm_\*.feature'` | 5 features, 122 of 122 scenarios passed |
-| `just test-scenarios --input 'tests/features/cluster/\*.feature'` | 30 features, 209 of 209 scenarios passed, including every restart, failover, drain and relocation scenario the voter observation grace touches |
-| `just test-shuttle wasm_checkpoint`, `just test-shuttle durability` | 8 of 8 checks passed under random, PCT and DFS schedules |
-| `just test-lib a_branch_task_ends_with_the_handle wasm_checkpoint durability`, `just test-consensus a_voter_gossip_neither` | Passed |
-| `just validate`, `just ratchet` | Passed; every ratchet count at its baseline |
-| `just test-coverage-feature tests/features/runtime/wasm_state_qualification.feature` | 143 of 149 instrumented changed server lines covered (96.0%) |
-
-Before the fixes, the same feature failed every three-node cluster restart with a held checkpoint
-(`node returned before releasing its node database lock`), and the three-node cluster-stop scenario
-lost `beta`'s state after the restarted leader failed its owner over.
-
-`just bench-wasm-checkpoint`, run on the same ZFS filesystem for both arms under the shared benchmark
-lock, measured one durable checkpoint at 3–18 ms per round for one branch and 6–37 ms for sixteen
-concurrent branches that share a synchronization, and the unsynchronized write at 0.3 ms for one
-branch and 2.6–2.8 ms for 128. Both arms' intervals are dominated by the host's synchronization
-latency and overlap, so the barrier refactor, which moves the coalescing loop without changing it,
-shows no attributable cost. Durability is not weakened: every checkpoint still waits for a
-synchronization that covers it.
+Historical run results and audit findings are retained on [WASM State 11](https://app.clickup.com/t/86bc22g2q).

@@ -6,7 +6,7 @@ binding exposes, [Clock Attach 05A](https://app.clickup.com/t/86bc95p44) with th
 reports, and [Client I/O 04](https://app.clickup.com/t/86bc8bj89) with the producers and consumers
 of client endpoints. It records which runtimes speak the finalized session protocol, whether each
 does so as an independent native client or through the shared Rust binding, the commands that build
-and run each one, and what the qualification found. It does not promise a separately maintained
+and run each one, and the contract each probe checks. It does not promise a separately maintained
 production SDK for any language: the probes are qualification clients, and the binding is the
 supported way for Python, JVM, Ruby, C and C++ hosts to reuse the Rust session.
 
@@ -35,8 +35,7 @@ restoration are the ones `nervix-client-core` tests, and no host reinterprets an
 The Go and TypeScript clients implement the protocol themselves: they correlate replies by request
 identity, follow a leader redirect with the same execution reference, and fail rather than report
 success when an outcome is unknown. Other JVM languages reach the binding through the same Foreign
-Function and Memory API as Java; Kotlin and Swift code generation from the schema was checked, and
-neither is probed.
+Function and Memory API as Java. Kotlin and Swift have no live probes in this inventory.
 
 ## Build and run
 
@@ -226,15 +225,14 @@ checks that its refusal leaves that reading unapplied, and explicitly replays it
 A delayed consumer refusal after the last submitted tick also exits promptly instead of waiting
 for the outstanding-outcome deadline or a producer close that cannot drain that output.
 
-## Findings
+## Reader boundaries
 
-| Finding | Resolution |
+| Boundary | Probe contract |
 | --- | --- |
-| `Fingerprint` was a struct holding a fixed-length byte array, which `flatc` cannot generate for Go, Kotlin, Swift or Dart. | `Fingerprint` is a table holding a byte vector of exactly 32 bytes. The Rust reader refuses any other length, and the corpus readers check it. |
-| JavaScriptCore, which Bun runs on, canonicalizes a NaN it materializes as a Number, and V8 keeps the payload; the generated `value()` of a float cell returns a Number. | A JavaScript client that needs exact float bits reads the scalar's bits, as the TypeScript probe does. |
-| The Go and TypeScript FlatBuffers runtimes have no verifier. | Their probes check each frame's identifier and every union discriminant and required value they read. The Rust verifier remains the only full structural verification. |
-| Dart code generation rejects optional scalars, which the schema uses for every required enum. | Dart is not a target runtime. |
-| Under load, the outputs of two batches a producer had outstanding at once sometimes arrived in the other order, with one- and three-node clusters alike. The node refuses a batch as `Busy` when it cannot reserve memory or a worker to validate it, and the client sends that batch again after the backoff, behind the batch submitted after it. | Nothing orders batches outstanding at once, as [Ordering And Backpressure](../docs/src/client-session-protocol.md#ordering-and-backpressure) and P-5 of the implementation manual say. The probes check that each of the two outputs keeps its rows, in either order. |
+| Fingerprints | A fingerprint is a table containing exactly 32 bytes. Rust refuses another length, and the corpus readers check it. |
+| JavaScript float values | A client that needs exact float bits reads those bits directly, as the TypeScript probe does, instead of materializing a JavaScript Number. |
+| Go and TypeScript verification | These FlatBuffers runtimes have no full structural verifier. The probes check the identifier, union discriminants and required values they read. |
+| Concurrent producer batches | Outputs of batches outstanding at once may arrive in either order. Each output must preserve its batch's rows, as the ordering contract requires. |
 
 ## Limits
 
@@ -257,3 +255,7 @@ for the outstanding-outcome deadline or a producer close that cannot drain that 
   it.
 - The Go and TypeScript clients read the attach reply and the clock frames only from the corpus;
   no live probe of theirs follows a domain clock.
+
+
+Historical run results and audit findings are retained on [Client Wire 14](https://app.clickup.com/t/86bc1ahyr).
+[Client I/O 04](https://app.clickup.com/t/86bc8bj89) retains the concurrent producer-batch observation.
