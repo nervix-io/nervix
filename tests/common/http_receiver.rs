@@ -583,7 +583,7 @@ pub(crate) enum ReceiverScriptError {
     BodySize { size: usize },
     #[error("{count} generated response headers exceed the receiver script limit")]
     HeaderCount { count: usize },
-    #[error("raw bytes {text:?} end inside an escape; use `\\r`, `\\n`, or `\\\\`")]
+    #[error("raw bytes {text:?} contain an invalid escape; use `\\r`, `\\n`, `\\xHH`, or `\\\\`")]
     Escape { text: String },
 }
 
@@ -592,7 +592,7 @@ impl FromStr for ReceiverResponse {
 
     /// Reads one script line: `respond <status>` followed by `;`-separated clauses,
     /// `lose response`, `hold response`, `hold response until released`, or `raw <bytes>` with
-    /// `\r`, `\n`, and `\\` escapes.
+    /// `\r`, `\n`, `\xHH`, and `\\` escapes.
     fn from_str(line: &str) -> Result<Self, Self::Err> {
         let line = line.trim();
         if line == "lose response" {
@@ -635,6 +635,19 @@ fn unescape_raw(text: &str) -> Result<Vec<u8>, ReceiverScriptError> {
             Some('r') => bytes.push(b'\r'),
             Some('n') => bytes.push(b'\n'),
             Some('\\') => bytes.push(b'\\'),
+            Some('x') => {
+                let first = characters.next().and_then(|digit| digit.to_digit(16));
+                let second = characters.next().and_then(|digit| digit.to_digit(16));
+                let (Some(first), Some(second)) = (first, second) else {
+                    return Err(ReceiverScriptError::Escape {
+                        text: text.to_string(),
+                    });
+                };
+                bytes.push(
+                    u8::try_from(first * 16 + second)
+                        .assured("two hexadecimal digits fit in one byte"),
+                );
+            }
             Some(_) | None => {
                 return Err(ReceiverScriptError::Escape {
                     text: text.to_string(),
