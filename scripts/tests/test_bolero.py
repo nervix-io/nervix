@@ -421,6 +421,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-otel",
             "nervix-connector-sentry",
             "nervix-connector-http",
+            "nervix-connector-redis",
             "nervix-web-console",
             "nervix-dns",
         })
