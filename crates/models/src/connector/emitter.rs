@@ -37,10 +37,10 @@ use crate::{
     AlterEmitterError, ClickHouseTableEmitterMode, ClientEmitterMode, ClientName, ConnectorKind,
     EmitterBatchLegality, EmitterPublishing, EmitterPublishingModeKind, Expression,
     HttpRequestEmitterMode, IcebergTableEmitterMode, KafkaTopicEmitterMode,
-    MongoDbCollectionEmitterMode, MqttTopicEmitterMode, MySqlTableEmitterMode,
-    NatsSubjectEmitterMode, OtelEmitterMode, PostgresTableEmitterMode, PulsarTopicEmitterMode,
-    RabbitMqEmitterMode, RedisPubSubEmitterMode, SchemaName, SentryEventEmitterMode,
-    SqsQueueEmitterMode, SyslogCollectorEmitterMode, ZeroMqPushEmitterMode,
+    MongoDbCollectionEmitterMode, MqttTopicEmitterMode, MySqlTableEmitterMode, NatsEmitterMode,
+    OtelEmitterMode, PostgresTableEmitterMode, PulsarTopicEmitterMode, RabbitMqQueueEmitterMode,
+    RedisPubSubEmitterMode, SchemaName, SentryEventEmitterMode, SqsQueueEmitterMode,
+    SyslogCollectorEmitterMode, ZeroMqPushEmitterMode,
 };
 
 /// One column, attribute or field a direct `VALUES` emitter writes, and the expression that computes
@@ -389,7 +389,7 @@ emitter_destinations! {
         RabbitMq(RabbitMqEmitter, RabbitMqEmitterEntity, RabbitMqEmitterMode),
         Redis(RedisEmitter, RedisEmitterEntity, RedisPubSubEmitterMode),
         Mqtt(MqttEmitter, MqttEmitterEntity, MqttTopicEmitterMode),
-        Nats(NatsEmitter, NatsEmitterEntity, NatsSubjectEmitterMode),
+        Nats(NatsEmitter, NatsEmitterEntity, NatsEmitterMode),
         ZeroMq(ZeroMqEmitter, ZeroMqEmitterEntity, ZeroMqPushEmitterMode),
         Sqs(SqsEmitter, SqsEmitterEntity, SqsQueueEmitterMode),
         Sentry(SentryEmitter, SentryEmitterEntity, SentryEventEmitterMode),
