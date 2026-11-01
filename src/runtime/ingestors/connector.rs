@@ -566,6 +566,8 @@ pub(super) struct RuntimeIngestorHost {
     transport_redeliveries: prometheus::IntCounter,
     /// Counts the payloads this host's ingestor dropped because they exceed its client's size bound.
     oversized_payloads: prometheus::IntCounter,
+    /// Counts header values the connector skipped because their bytes are not valid UTF-8.
+    header_values_dropped: prometheus::IntCounter,
     /// Consumes the payloads the ingestor's codec refuses, for this host and the endpoint bindings
     /// it hands out.
     decode_rejections: DecodeRejections,
@@ -603,6 +605,11 @@ impl RuntimeIngestorHost {
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
         );
         let oversized_payloads = spec.runtime.inner.metrics.ingestor_oversized_payloads(
+            &spec.domain,
+            &spec.ingestor,
+            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+        );
+        let header_values_dropped = spec.runtime.inner.metrics.ingestor_header_values_dropped(
             &spec.domain,
             &spec.ingestor,
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
@@ -648,6 +655,7 @@ impl RuntimeIngestorHost {
             unfolding_refused,
             transport_redeliveries,
             oversized_payloads,
+            header_values_dropped,
             decode_rejections,
             confirmation_delay,
         }
