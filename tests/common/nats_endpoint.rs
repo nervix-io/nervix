@@ -49,6 +49,13 @@ enum NatsEndpointMode {
     Down,
 }
 
+/// Observations of data publishes and the server replies this endpoint discards.
+#[derive(Clone)]
+struct NatsPublicationObservations {
+    forwarded: watch::Sender<u64>,
+    discarded: watch::Sender<u64>,
+}
+
 /// A listener that forwards every client connection to one NATS server unless the scenario holds
 /// what clients send or takes the endpoint down.
 #[derive(Debug)]
@@ -85,8 +92,10 @@ impl NatsEndpoint {
             observed,
             refused.clone(),
             held.clone(),
-            forwarded.clone(),
-            discarded.clone(),
+            NatsPublicationObservations {
+                forwarded: forwarded.clone(),
+                discarded: discarded.clone(),
+            },
             connections.clone(),
         ));
         Ok(Self {
@@ -200,8 +209,7 @@ impl NatsEndpoint {
         mode: watch::Receiver<NatsEndpointMode>,
         refused: watch::Sender<u64>,
         held: watch::Sender<u64>,
-        forwarded: watch::Sender<u64>,
-        discarded: watch::Sender<u64>,
+        publication: NatsPublicationObservations,
         connections: CancellationToken,
     ) {
         loop {
@@ -225,8 +233,8 @@ impl NatsEndpoint {
                 server,
                 mode.clone(),
                 held.clone(),
-                forwarded.clone(),
-                discarded.clone(),
+                publication.forwarded.clone(),
+                publication.discarded.clone(),
                 connections.clone(),
             ));
         }
