@@ -1020,9 +1020,12 @@ the same confidential projection as `SHOW CREATE CLIENT`. Runtime initialization
 same effective-entry projection. Stored Models, archives and canonical `SHOW CREATE` retain the
 authored entries; default metadata lives only in the current vocabulary declaration.
 
-A mode or a quiesce mode that needs an option choice declares it: an MQTT topic's `ACK` modes and its
-`SUSPEND` require `SESSION PERSISTENT` and `QOS 1`, the session a broker keeps messages for, and the
-source answers which choices its statement made. Whether a source can honor a quiesce mode, whether
+A mode or a quiesce mode that needs an option choice declares the choices that meet it: an MQTT
+topic's `ACK` modes and its `SUSPEND` require `SESSION PERSISTENT` and `QOS 1` or `QOS 2`, the
+session a broker keeps messages for, and the source answers which choices its statement made. A
+statement that names a mode without the choices it requires is refused at `CREATE` and `ALTER`
+with the vocabulary's typed `UnmetDeliveryRequirement`, which names every required choice and what
+the statement writes for each. Whether a source can honor a quiesce mode, whether
 an emitter accepts a publishing mode, whether its body needs a codec, and the batching contract with its
 maximum and its refusal for an emitter that cannot batch are all read from the declaration. The
 registry, the planner and the console keep their own copies of some of these facts until the work
@@ -1071,10 +1074,11 @@ letter case included, within MQTT's 65,535-byte string. A filter may write `+` f
 `#` for every remaining level, each only as a whole level and `#` only last, but its first level
 is not `$share`: every instance subscribes through the shared subscription
 `$share/<domain>~<ingestor>/<filter>` that Nervix forms, so a filter naming its own would match
-nothing. A publication topic admits neither wildcard. The ingestor declares `NO ACK`, and
-`ACK SEQUENTIAL`, `ACK PARALLEL` and `SUSPEND` only with `SESSION PERSISTENT` and `QOS 1`, the
-session a broker keeps messages for and redelivers after a lost connection; `BUFFER` and `DROP`
-stay connected under any session. Neither direction carries transport headers, and the ingestor
+nothing. A publication topic admits neither wildcard. Every ingestor statement writes its
+`SESSION CLEAN` or `SESSION PERSISTENT` and its `QOS 0`, `QOS 1` or `QOS 2`, neither of which has a
+default. The ingestor declares `NO ACK`, and `ACK SEQUENTIAL`, `ACK PARALLEL` and `SUSPEND` only
+with `SESSION PERSISTENT` and `QOS 1` or `QOS 2`, the session a broker keeps messages for and
+redelivers after a lost connection; `BUFFER` and `DROP` stay connected under any session. Neither direction carries transport headers, and the ingestor
 projects no typed metadata field. The emitter declares QoS as its publishing mode, `QOS 0`,
 `QOS 1 ACK` or `QOS 2 ACK`, with codec payloads, no envelope clause and optional batching up to the
 Maximum Packet Size each broker declares when the client connects. The unpooled client's keys are
@@ -1622,16 +1626,16 @@ allocation, so a small admitted slice cannot retain an oversized neighbouring fr
 
 In an `ACK` mode every `CONNECT` advertises the mode's acknowledgement window and 64 more as its
 Receive Maximum: 65 under `ACK SEQUENTIAL`, and `ACK PARALLEL MAX` plus 64 up to MQTT's largest
-Receive Maximum, 65,535. The broker then sends no further publish at QoS 1 while that many wait on
-their acknowledgements, so a batch holds at most that many, and an `ACK PARALLEL MAX` above 65,535
+Receive Maximum, 65,535. The broker then sends no further publish at QoS 1 or 2 while that many
+wait on their acknowledgements, so a batch holds at most that many, and an `ACK PARALLEL MAX` above 65,535
 gathers at most 65,535 of them before its `BATCH TIMEOUT` ends it. The extra capacity lets the
 connection keep reading while the host holds a batch. The broker holds back no publish at QoS 0,
-which a subscription at QoS 1 receives from a publisher that sends at QoS 0. In an `ACK` mode the
+which a subscription at QoS 1 or 2 receives from a publisher that sends at QoS 0. In an `ACK` mode the
 read-ahead reserves the full Receive Maximum for QoS 1/2 packet outcomes and admits up to 64 QoS 0
 outcomes alongside them, in the same packet-ordered queue. Each queued QoS 0 outcome owns one
 capacity permit until the source takes it. Excess QoS 0 publishes are dropped and counted, so
-they cannot stop event-loop polling, consume a QoS 1/2 slot, delay a `PUBACK`, or stop keep-alive
-pings. An oversized QoS 0 publish that cannot enter read-ahead is counted as overflow rather than
+they cannot stop event-loop polling, consume a QoS 1/2 slot, delay a `PUBACK` or `PUBREC`, or stop
+keep-alive pings. An oversized QoS 0 publish that cannot enter read-ahead is counted as overflow rather than
 as an oversized outcome; no payload is counted twice.
 
 The host resolves `nervix_ingestor_read_ahead_dropped_payloads_total` once per ingestor and physical
@@ -1645,9 +1649,12 @@ Its read-ahead holds 64 outcomes. Once it is full, the task holds the next outco
 nothing until the source reads one, so the connection's flow control holds the broker back and
 the client sends no keep-alive until the host reads again.
 
-Acknowledging a batch requests a `PUBACK` for each of its publishes at QoS 1 and returns once the
-event loop has written all of them to the connection and flushed them. The broker answers none, so
-that is everything the source can confirm. A batch never asks for more acknowledgements than the
+Acknowledging a batch requests a `PUBACK` for each of its publishes at QoS 1, and a `PUBREC` for
+each at QoS 2, and returns once the event loop has written all of them to the connection and
+flushed them. The broker answers a `PUBACK` with nothing, and a `PUBREC` with a `PUBREL` that the
+client completes with `PUBCOMP` on its own, so the written acknowledgement is everything the source
+can confirm. A rejected publish asks for no acknowledgement: the source replays it ahead of the
+connection and asks for its one acknowledgement once the host accepts it. A batch never asks for more acknowledgements than the
 client's request queue holds, so no request waits for room. The acknowledgement never waits on a
 task that stopped polling. While the task holds a publish for room in a full read-ahead, only the
 host's next read, which follows the acknowledgement, could let it write, so the acknowledgement
@@ -1797,7 +1804,7 @@ it did not get:
 | --- | --- | --- |
 | `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `SQS QUEUE` | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
 | `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | The source acknowledges nothing on its transport. |
-| `written` | `MQTT TOPIC`, `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT does not answer a `PUBACK`, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` the batch asks for to the connection. |
+| `written` | `MQTT TOPIC`, `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT answers a `PUBACK` with nothing and a QoS 2 `PUBREC` only with the `PUBREL` the client completes on its own, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` and `PUBREC` the batch asks for to the connection. |
 <!-- connector-matrix:confirmation:end -->
 
 `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` and `CLIENT PRODUCER` declare `none` as both their position

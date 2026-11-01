@@ -261,7 +261,7 @@ A source accepts only the modes it can honor, and completion of its body offers 
 | Entity | Allowed `ON QUIESCE` bodies |
 |---|---|
 | `KAFKA TOPIC`, `PULSAR TOPIC`, `RABBITMQ QUEUE`, `SQS QUEUE` | `SUSPEND` |
-| `MQTT TOPIC` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP`; `SUSPEND` requires `SESSION PERSISTENT QOS 1` |
+| `MQTT TOPIC` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP`; `SUSPEND` requires `SESSION PERSISTENT` at `QOS 1` or `QOS 2` |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `WEBSOCKETS CONNECTION` | `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | `ZEROMQ PULL`, `SYSLOG LISTENER` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | `HTTP REQUEST`, `PROMETHEUS QUERY` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...` |
@@ -1521,8 +1521,8 @@ frame. Configure both bounds for the expected payload sizes.
 CREATE MQTT TOPIC INGESTOR <name>
   FROM <client> TOPIC 'devices/+/orders'
   [INSTANCES 2]
-  [SESSION CLEAN | SESSION PERSISTENT]
-  [QOS 0 | QOS 1]
+  (SESSION CLEAN | SESSION PERSISTENT)
+  (QOS 0 | QOS 1 | QOS 2)
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -1536,15 +1536,15 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | --- | --- |
 | Reference | MQTT client |
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |
-| Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1) |
-| Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); optional; default CLEAN<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); optional; default 0 |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |
+| Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
 | Headers | Not offered: Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
-| Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | Not offered: The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace. |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
-| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
+| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE, PUBACK and PUBREC requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
 | Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound.<br>ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow only. NO ACK retains backpressure. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
@@ -1574,29 +1574,46 @@ session does not persist that local state.
 
 Delivery constraints:
 
-- `NO ACK` defaults to `SESSION CLEAN QOS 0`; explicit `SESSION` and `QOS` may be supplied before `MODE`
+- every statement writes its session, `SESSION CLEAN` or `SESSION PERSISTENT`, and then its quality
+  of service, `QOS 0`, `QOS 1` or `QOS 2`, before `MODE`. Neither has a default, and `MODE` names
+  only the acknowledgement: `NO ACK` or an `ACK` mode
 - `NO ACK` has no in-flight ACK window, so it never accepts `MAX <n>`
-- `ACK` modes require `SESSION PERSISTENT QOS 1`
+- `ACK` modes require `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. CREATE and ALTER refuse any other
+  pairing, naming the session and quality of service the statement writes and underlining the
+  mode, such as `MQTT TOPIC ingestors name MODE ACK SEQUENTIAL only with SESSION PERSISTENT and
+  QOS 1 or 2; the statement writes SESSION CLEAN and QOS 1`
 - `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait;
   a quiesce change or a stop that meets a partial batch takes in the publishes it gathered at once
   rather than after its batch timeout
 - every `CONNECT` in an `ACK` mode advertises the in-flight window and 64 more as its Receive
   Maximum: 65 under `ACK SEQUENTIAL`, and `MAX` plus 64 under `ACK PARALLEL`, at most MQTT's
-  65,535, so the broker sends no further QoS 1 publish while that many wait on their
+  65,535, so the broker sends no further QoS 1 or QoS 2 publish while that many wait on their
   acknowledgements, and a batch above 65,535 gathers at most 65,535 of them before its
   `BATCH TIMEOUT` ends it. The extra capacity lets the connection keep reading while the ingestor
   holds a batch
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages. Every instance subscribes to `$share/<domain>~<ingestor>/<filter>`, so the share group belongs to Nervix and a topic filter cannot begin with a `$share` level of its own
 
-In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for
-is written to the connection, within one keep-alive interval; the broker answers none. Its
-connection keeps writing those acknowledgements and sending its keep-alive while the ingestor
-waits on a batch's acknowledgement trees, however long a downstream emitter holds them, so the
-broker keeps the session connected and delivers nothing again. In an `ACK` mode the read-ahead
+In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for,
+and every `PUBREC` its QoS 2 publishes ask for, is written to the connection, within one keep-alive
+interval. The broker answers a `PUBACK` with nothing, and a `PUBREC` with a `PUBREL` that the
+connection completes with `PUBCOMP` on its own. Nothing is written for a publish the ingestor
+rejects: it delivers that publish again from its own replay, ahead of anything the broker sends
+next, on the mode's `RETRY POLICY`, and writes its one acknowledgement once the publish is
+accepted. Its connection keeps writing those acknowledgements and sending its keep-alive while the
+ingestor waits on a batch's acknowledgement trees, however long a downstream emitter holds them, so
+the broker keeps the session connected and delivers nothing again. In an `ACK` mode the read-ahead
 reserves its full Receive Maximum for QoS 1/2 outcomes and holds up to 64 QoS 0 outcomes alongside
-them. A QoS 0 publisher is not held back by the broker, even through a QoS 1 subscription. Nervix
-drops and counts QoS 0 publishes that do not fit, keeping the connection polling and retaining the
-reserved capacity and acknowledgements of QoS 1 publishes. Admitted outcomes retain packet order.
+them. A QoS 0 publisher is not held back by the broker, even through a QoS 1 or QoS 2 subscription.
+Nervix drops and counts QoS 0 publishes that do not fit, keeping the connection polling and
+retaining the reserved capacity and acknowledgements of QoS 1 and QoS 2 publishes. Admitted
+outcomes retain packet order.
+
+Under `NO ACK` the connection acknowledges each QoS 1 or QoS 2 publish as it receives it, before
+the ingestor reads it. At `QOS 2` the broker sends a publish again only until a connection has
+written its `PUBREC`; after that it releases the publish once with `PUBREL`. Nervix keeps the
+delivery attempts and acknowledgements of a connection in memory only, so a publish whose
+acknowledgement a lost connection never wrote is delivered again once a persistent session
+resumes, at QoS 2 as at QoS 1.
 The per-node Prometheus counter `nervix_ingestor_read_ahead_dropped_payloads_total`, labeled by
 `domain`, `ingestor` and `physical_node_id`, counts each overflow immediately, including during an
 acknowledgement wait. It is separate from the transport-redelivery count in `DESCRIBE INGESTOR`.
@@ -1640,11 +1657,11 @@ whose broker, identity, filter, session mode and QoS still match are retained, i
 an instance-count change. Changing a filter discards the retired filter's broker queue.
 Ordinary `STOP`, reconnect and ownership transfer retain persistent broker sessions.
 
-`SUSPEND` is valid only with `SESSION PERSISTENT QOS 1`. CREATE refuses any other pairing with
-`MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1`, underlining `SUSPEND`.
-An unsupported QoS number is refused with the supplied value and the accepted ingestor levels,
-such as `MQTT ingestor QOS must be 0 or 1, found 2`. Completion offers only the session's valid
-quiesce choices.
+`SUSPEND` is valid only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. CREATE refuses any other
+pairing with `MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT and QOS 1 or 2`, underlining
+`SUSPEND`. An unsupported QoS number is refused with the supplied value and the accepted ingestor
+levels, such as `MQTT ingestor QOS must be 0, 1 or 2, found 3`. Completion offers only the
+session's valid quiesce choices.
 
 `SUSPEND` disconnects while asking the broker to
 retain the session; broker offline-queue bounds and session expiry limit what can return. If the

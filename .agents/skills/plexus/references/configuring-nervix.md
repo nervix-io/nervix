@@ -426,8 +426,10 @@ current connection, retry and deadline limits.
   external system names it and within the rules of `Ingestors` → `External Names`.
 - Every transport ingestor source ends with its documented `ON QUIESCE` body immediately before
   `DECODE USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint
-  `RETRY AFTER` wherever that mode requires it. `MQTT TOPIC` `SUSPEND` also declares `SESSION
-  PERSISTENT QOS 1`. Do not mix mode bodies between entities or infer a default.
+  `RETRY AFTER` wherever that mode requires it. An `MQTT TOPIC` ingestor writes its `SESSION` and
+  then its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`; its `ACK` modes and `SUSPEND` also declare
+  `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Do not mix mode bodies between entities or infer a
+  default.
 - MQTT source client identities default to the domain and ingestor, with an instance suffix for
   multiple instances. Account for the broker state that input replacement and `DROP INGESTOR`
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,

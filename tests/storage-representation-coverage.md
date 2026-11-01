@@ -23,8 +23,14 @@ and the same signature and namespace fence that shape.
 Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
 `LATEST`, and provisioned subscriptions without a position. Statement generators mix typed
 `SET START AT` with shared ingestor operations. The Model, registry and consensus properties
-preserve those complete values. The `NERVIX MODEL SET` registry signature and
-`raft_declared_models_` consensus namespace identify this current Model layout before decoding.
+preserve those complete values. The `NERVIX INGESTORS` registry signature and
+`raft_ingestor_choices_` consensus namespace identify this current Model layout before decoding.
+
+MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
+persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration
+admits is generated and none it refuses. The Model/archive, registry, consensus and canonical
+Plexus properties preserve the session, quality of service and mode as separate written values,
+and the archive signature and consensus keyspace namespace fence this shape before decoding.
 
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions
