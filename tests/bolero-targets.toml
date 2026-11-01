@@ -3477,7 +3477,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 20
+domain_version = 21
 features = []
 id = "client-config-schema"
 invariant = "Bounded entries drawn from every current client key schema preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."

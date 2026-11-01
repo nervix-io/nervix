@@ -358,6 +358,13 @@ pub(crate) struct ConnectedTransports {
     incoming_b: mpsc::Receiver<ReceivedEnvelope>,
 }
 
+impl ConnectedTransports {
+    /// New credentials for the first transport's own identity, from the fixture's authority.
+    pub(crate) fn reissued_tls_a(&self) -> TlsConfigBundle {
+        self._authority.issue("test-cluster", &self.node_a)
+    }
+}
+
 async fn connected_transports() -> ConnectedTransports {
     connected_transports_with_options(TransportOptions::default()).await
 }
