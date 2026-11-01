@@ -1380,7 +1380,8 @@ Treat this as the checklist for a new builtin, or for a new family.
     the serialized `just benchmark-ab` for any end-to-end claim.
     - Claim vectorization only after inspecting the generated instructions for the target.
     - Claim a speedup only from a same-host A/B.
-    - Record the result beside the existing report.
+    - Record the result on the function's ClickUp task, beside the
+      [VM functions measurement report](https://app.clickup.com/t/86bc202hj).
 11. **Document it.**
     - Add its contract to [Expression Functions](./filter-map-functions.md), including a catalog
       row.

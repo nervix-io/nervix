@@ -33,7 +33,8 @@ Compile-time API restrictions use paired Rustdoc examples beside the owning API:
 example for the forbidden call and a compiling example with the current imports and supported
 signature. `just test` invokes `just test-capability-docs` for the capability owners;
 `just test-primitives-compile` exercises primitive doctests in their declared execution modes.
-Both recipes run in CI. An import
+CI runs the first for a pull request labeled `extra-doctests` and the second for one labeled
+`extra-primitives`. An import
 that no longer resolves cannot serve as evidence of the intended restriction. Nervix uses no
 `trybuild` dependency, harness, fixture source or diagnostic snapshot for these checks. Doctests
 prove only the build configuration in which they run; Cargo graph and target probes, compiler
@@ -95,7 +96,7 @@ records their scope without treating a passing qualification as a completed camp
 | `models-identities` | `nervix-models` execution reference, upload identity, endpoint and pool-bound equality | valid identities, v3 | 256 | 512 bytes |
 | `models-identity-validation` | `nervix-models` identity parsers and decoders accept exactly their rule | arbitrary identity text and bounds, v3 | 256 | 512 bytes |
 | `models-connector-declarations` | `nervix-models` a generated ingestor and emitter state only what their entity declares: a declared mode with its required option choices, an honored quiesce mode, the declared body form, admitted batching and a client of a declared connector | ingestors and emitters of every connector entity, v17 | 256 | 2048 bytes |
-| `client-config-schema` | `nervix-models` complete client configuration-entry equality through JSON and archive, retained schema acceptance idempotent effective defaults preserving authored entries, and idempotent public inspection | every current client schema with its declared keys, delegated driver namespaces, omitted defaults, scheme-restricted and scheme-bound keys, percent-encoded headers and bounded type-valid TCP intervals, string, boolean, integer, URL, host-and-port URL, scheme-restricted driver address, driver URLs with Nervix-owned query options and the keys conditioned on them, choice, file and level-template values, v21 | 256 | 1024 bytes |
+| `client-config-schema` | `nervix-models` complete client configuration-entry equality through JSON and archive, retained schema acceptance idempotent effective defaults preserving authored entries, and idempotent public inspection | every current client schema with its declared keys, delegated driver namespaces, omitted defaults, scheme-restricted and scheme-bound keys, percent-encoded headers and bounded type-valid TCP intervals, string, boolean, integer, URL, host-and-port URL, scheme-restricted driver address, driver URLs with Nervix-owned query options and the keys conditioned on them, choice, file and level-template values, v22 | 256 | 1024 bytes |
 | `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, full-width counts included, v26 | 256 | 4096 bytes |
 | `models-archived-counts` | `nervix-models` count-bearing Model, statement, transaction identity and WASM inspection archive equality | zero where permitted, `u32::MAX + 1`, `u64::MAX` and generated native counts, v3 | 256 | 16 bytes |
 | `scheduled-units` | `nervix-models` complete domain schedule equality through archive encoding | current Single, Partition and Instance unit placements with generated primary and assigned nodes, v1 | 256 | 128 bytes |
@@ -286,11 +287,12 @@ records their scope without treating a passing qualification as a completed camp
 | `websocket-retained-metadata` | `nervix-server` Both current WebSockets data-frame kinds, the exact immutable connection header snapshot, every header value and duplicate-header order survive the production quiesce retain/replay boundary without copying the snapshot. | both data-frame kinds with ordered duplicate headers and retained snapshots, v1 | 256 | 32 bytes |
 | `ingest-metadata-projection` | `nervix-server` Every value a message hands over for its entity's declared metadata fields, absent or of each declared type at its boundaries and borrowed or rendered, survives the connector's retained copy and the quiesce buffer's retain and replay with the message's ordered headers, shared header snapshot and transport position; a group builds exactly one column for each field its programs read, in declared order whatever order and repetition they name it in, holding every message's value with its validity, keeps every message's ordered headers and visits no value when no field is read. | a declaration of every metadata type, repeated and reordered read sets, and messages with absent, borrowed and rendered values, ordered headers and Kafka or syslog positions, v1 | 256 | 1024 bytes |
 | `websocket-client-config` | `nervix-models` Every bounded valid ws/wss configuration preserves the complete endpoint, connection and ping durations, effective idle deadline, handshake capacity and incoming message/frame limits while applying the declared TLS pairing rules. | valid ws/wss endpoints, deadlines, capacities and TLS pairings, v2 | 256 | 32 bytes |
-| `websocket-upgrade-headers` | `nervix-models` Every bounded canonical upgrade-header collection preserves all names, values and order through the production validated representation; malformed and canonicalizing cases have separate owner tests. | bounded canonical header names and values in order, v1 | 256 | 32 bytes |
+| `websocket-upgrade-headers` | `nervix-models` Every bounded canonical upgrade-header collection, with or without a subprotocol offer already written as unique tokens joined by commas, preserves all names, values and order through the production validated representation; malformed and canonicalizing cases have separate owner tests. | bounded canonical header names and values in order, with an optional canonical offer of up to three tokens, v2 | 256 | 32 bytes |
+| `websocket-subprotocol-offers` | `nervix-models` Every offer of unique subprotocol tokens, written with any spaces or tabs around its commas, validates to exactly its tokens in written order joined by commas alone. | four unique subprotocol tokens with spaces, tabs or nothing around each comma, v1 | 256 | 32 bytes |
 | `node-settings-command-line` | `nervix-server` Current valid node settings of every group, with the Raft timings ordered in whole milliseconds, the drain shorter than the shutdown and the memory watermarks paired and ordered, render as the server's options and read back through the same options and validation unchanged; every duration and byte quantity help prints reads back as the same value. | valid settings across groups, ordered Raft timings and paired memory watermarks, v2 | 256 | 512 bytes |
 
-Each target declares its Cargo manifest. Product targets use the root workspace; the synchronization
-properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers declared tooling workspaces
+Each target declares its Cargo manifest. Product targets use the root workspace; the five `typed-*`
+compiler-tooling properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers declared tooling workspaces
 from root metadata and uses the selected manifest in ordinary, sanitizer, replay and qualification
 commands. Compiler executions are fixture checks, not work done in each fuzz iteration.
 
@@ -742,8 +744,10 @@ failure, sanitizer finding or property failure fails the job.
 `fuzz` is the preferred Bolero evidence in CI. Its shards discover the inventory, run a
 coverage-guided sanitizer campaign of every registered target from its checked-in corpus, measure
 the Rust source those campaigns execute and qualify the runner's failure paths. A pull request whose
-diff requires the ordinary suites runs each property there as an ordinary Rust test that replays its
-checked-in corpus, whatever its labels. The randomized job adds the run of each harness with its
+diff requires the ordinary suites runs each product property there as an ordinary Rust test that
+replays its checked-in corpus, whatever its labels; the five `typed-*` properties of the separate
+`tools/nervix-lint` workspace run as ordinary tests in `just test-typed-ratchet`, which CI runs for a
+pull request labeled `extra-compiler`. The randomized job adds the run of each harness with its
 exact declared features and the check that every property ran the inventory's case count and
 replayed its whole corpus. Label a pull request `bolero-random` only when its task requires
 that run, such as a change to the randomized run itself, its runner or its job, or a release

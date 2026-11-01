@@ -762,7 +762,7 @@ absent. Reused source sites never replace run-local instance identity.
 
 `ProcessRecord` requires its compile-time/runtime diagnostic selection, and an artifact requires
 whole-process or selected scope. A selected export cannot qualify a source process whose other
-findings it omitted. The current version-2 wire conversion checks every required field, bound,
+findings it omitted. The current version-3 wire conversion checks every required field, bound,
 identity and review once; unsupported versions fail from their header without another shape or a
 default. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) owns the
 current representation, qualification policy and coverage limits.
@@ -1054,8 +1054,10 @@ the selected bound address and its acknowledgement belong to that same armed req
 
 Domain-clock publication carries lifecycle pause, generation and start
 point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;
-a present assignment contains its state identity, optional primary, executors and replicas
-together. An absent primary represents an assignment without one primary owner. Replication routes
+a present assignment carries its state identity and, once the entity is placed, its checkpoint
+owners: an optional primary, executors and replicas together. An assignment without checkpoint
+owners is an installed identity awaiting placement, and an absent primary represents a placed
+assignment without one primary owner. Replication routes
 retain that same slot and an optional state intake; ending an intake permanently fences its exact
 route before the routing publication withdraws it. Assignment absence and ended intake are distinct
 states: identity removal invalidates every reader, while state retirement may leave the entity's
