@@ -17,7 +17,7 @@ use nervix_primitives::{
 use rstest::rstest;
 
 use crate::{
-    broker_observer::{BrokerMessage, BrokerObserver, BrokerRecordTime},
+    broker_observer::{BrokerMessage, BrokerObserver, BrokerRecordTime, TypedBrokerHeader},
     nats_observer::NatsObserver,
     nats_observer_tests::StandInNatsServer,
 };
@@ -175,10 +175,16 @@ async fn forwarded_reads_preserve_the_complete_message_and_observer() {
         unix_millis: 981_173_106_790,
     };
     let (messages, receiver) = mpsc::channel(3);
+    let typed_headers = vec![TypedBrokerHeader {
+        name: "user".to_string(),
+        data_type: "Number".to_string(),
+        value: "7".to_string(),
+    }];
     let message = BrokerMessage::from_bytes(b"\xff", headers())
         .with_key(Some("key".to_string()))
         .with_group(Some("group".to_string()))
-        .with_time(Some(created));
+        .with_time(Some(created))
+        .with_typed_headers(typed_headers.clone());
     messages.send(message).await.assured("the channel has room");
     messages
         .send(BrokerMessage::from_bytes(b"appended", Vec::new()).with_time(Some(appended)))
@@ -203,6 +209,7 @@ async fn forwarded_reads_preserve_the_complete_message_and_observer() {
     assert_eq!(first.key.as_deref(), Some("key"));
     assert_eq!(first.group.as_deref(), Some("group"));
     assert_eq!(first.time, Some(created));
+    assert_eq!(first.typed_headers, typed_headers);
     let second = observer
         .next_message()
         .await

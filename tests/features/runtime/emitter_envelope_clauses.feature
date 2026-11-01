@@ -2,9 +2,10 @@ Feature: Emitters write envelope clauses only where their entity declares them
 
   An emitter's envelope clauses follow its payload and set what its transport carries beside each
   payload. A clause or PROPERTIES key the emitter's entity does not declare is refused where it is
-  written. KAFKA TOPIC declares TIMESTAMP, the RabbitMQ entities declare MANDATORY, and no entity
-  declares another clause or a property, so a node refuses each clause form on every entity that
-  does not declare it, and a declared clause refuses a value that is not exactly the type it carries.
+  written. KAFKA TOPIC declares TIMESTAMP, SQS QUEUE declares DELAY and DEDUPLICATION ID, the
+  RabbitMQ entities declare MANDATORY, and no entity declares another clause or a property, so a
+  node refuses each clause form on every entity that does not declare it, and a declared clause
+  refuses a value that is not exactly the type it carries.
 
   @emitter_envelope
   Scenario Outline: Every emitter entity refuses the envelope clauses it does not declare
@@ -81,7 +82,7 @@ Feature: Emitters write envelope clauses only where their entity declares them
     And these Plexus commands fail with "found PROPERTIES"
       """
       CREATE SQS QUEUE EMITTER generated FROM events TO destination_client QUEUE 'orders'
-        MODE SINGLE RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING events_codec
+        SEND SINGLE MODE ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING events_codec
         PROPERTIES {'content_type' = 'application/json'}
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """

@@ -46,6 +46,19 @@ pub(crate) struct BrokerMessage {
     pub(crate) group: Option<String>,
     /// When the broker says the record was made: a Kafka record's create or log-append time.
     pub(crate) time: Option<BrokerRecordTime>,
+    /// The headers a broker delivered with a type of their own, sorted by name: SQS message
+    /// attributes with their data types. Empty for a broker whose headers carry no type.
+    pub(crate) typed_headers: Vec<TypedBrokerHeader>,
+}
+
+/// One header a broker delivered with a type of its own, such as an SQS message attribute.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TypedBrokerHeader {
+    pub(crate) name: String,
+    /// The broker's name for the value's type, such as SQS's `Number`.
+    pub(crate) data_type: String,
+    /// The value as text, and a binary value as its bytes in lowercase hex.
+    pub(crate) value: String,
 }
 
 impl BrokerMessage {
@@ -57,7 +70,13 @@ impl BrokerMessage {
             key: None,
             group: None,
             time: None,
+            typed_headers: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_typed_headers(mut self, typed_headers: Vec<TypedBrokerHeader>) -> Self {
+        self.typed_headers = typed_headers;
+        self
     }
 
     pub(crate) fn with_key(mut self, key: Option<String>) -> Self {

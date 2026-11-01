@@ -48,24 +48,41 @@ fn first_example(option: &OptionDeclaration) -> &'static str {
     }
 }
 
+/// An option a generated statement writes besides its required ones: its keywords and the option
+/// written in full.
+#[derive(Debug, Clone, Copy)]
+struct WrittenOption {
+    keywords: &'static str,
+    example: &'static str,
+}
+
 /// The declared reference, locator and required entity options, before MODE.
 fn reference(kind: EmitterEntityKind) -> String {
+    destination(kind, None)
+}
+
+/// The declared reference and locator, then the entity's options in declared order: every required
+/// one, and `written` in its declared place, or after them where only another entity declares it.
+fn destination(kind: EmitterEntityKind, written: Option<WrittenOption>) -> String {
     let declared = kind.capabilities();
-    let mut words = vec![match declared.reference {
-        EmitterReferenceKind::Schema => "SCHEMA outgoing".to_owned(),
-        EmitterReferenceKind::Client(_) | EmitterReferenceKind::StorageClient(_) => {
-            "destination_client".to_owned()
+    let mut words = vec![through_locator(kind)];
+    let mut placed = false;
+    for option in declared.options {
+        if let Some(written) = written
+            && written.keywords == option.keywords
+        {
+            words.push(written.example.to_owned());
+            placed = true;
+            continue;
         }
-    }];
-    if let Some(locator) = declared.locator {
-        words.push(locator.example());
+        if option.is_required() {
+            words.push(first_example(option).to_owned());
+        }
     }
-    for option in declared
-        .options
-        .iter()
-        .filter(|option| option.is_required())
+    if let Some(written) = written
+        && !placed
     {
-        words.push(first_example(option).to_owned());
+        words.push(written.example.to_owned());
     }
     words.join(" ")
 }
@@ -104,8 +121,8 @@ fn batching(legality: EmitterBatchLegality) -> Vec<bool> {
 /// One emitter statement of an entity, rendered from what its entity declares.
 struct Generated {
     kind: EmitterEntityKind,
-    /// An option written after the destination's required options.
-    option: Option<&'static str>,
+    /// An option written besides the destination's required options.
+    option: Option<WrittenOption>,
     mode: &'static str,
     body: &'static str,
     /// An envelope clause or a property set written after the body.
@@ -141,16 +158,14 @@ impl Generated {
 
     /// The statement up to the publishing mode `MODE` introduces.
     fn through_mode(&self) -> String {
-        let mut destination = reference(self.kind);
-        if let Some(option) = self
+        // A direct `VALUES` emitter writes its option after the body.
+        let before_mode = self
             .option
-            .filter(|_| self.kind.capabilities().body != EmitterBodyForm::Values)
-        {
-            destination = format!("{destination} {option}");
-        }
+            .filter(|_| self.kind.capabilities().body != EmitterBodyForm::Values);
         format!(
-            "CREATE {} EMITTER generated FROM events TO {destination} MODE ",
-            self.kind.phrase()
+            "CREATE {} EMITTER generated FROM events TO {} MODE ",
+            self.kind.phrase(),
+            destination(self.kind, before_mode)
         )
     }
 
@@ -163,7 +178,7 @@ impl Generated {
             .option
             .filter(|_| self.kind.capabilities().body == EmitterBodyForm::Values)
         {
-            words.push(option.to_owned());
+            words.push(option.example.to_owned());
         }
         if let Some(envelope) = self.envelope {
             words.push(envelope.to_owned());
@@ -293,7 +308,10 @@ fn every_declared_option_parses_in_each_of_its_forms() {
             }
             for example in option.examples() {
                 let generated = Generated {
-                    option: Some(example),
+                    option: Some(WrittenOption {
+                        keywords: option.keywords,
+                        example,
+                    }),
                     ..Generated::of(kind)
                 };
                 generated.parse();
@@ -401,13 +419,13 @@ fn an_option_only_another_entity_declares_is_refused() {
     let examples = every_option_example();
     for kind in EmitterEntityKind::all() {
         let declared = kind.capabilities();
-        for (keywords, written) in &examples {
+        for (&keywords, written) in &examples {
             if declared.option(keywords).is_some() {
                 continue;
             }
-            for example in written {
+            for &example in written {
                 let generated = Generated {
-                    option: Some(example),
+                    option: Some(WrittenOption { keywords, example }),
                     ..Generated::of(kind)
                 };
                 generated.assert_refused(example);
@@ -502,39 +520,70 @@ fn completion_offers_exactly_the_declared_publishing_modes() {
 }
 
 #[test]
-fn completion_after_the_destination_offers_exactly_the_optional_options_and_the_mode() {
+fn completion_after_the_destination_offers_exactly_the_options_that_may_come_next_and_the_mode() {
     for kind in EmitterEntityKind::all() {
         let declared = kind.capabilities();
-        // An expression can go on after its last word, so completion after a destination that
-        // ends in one offers the expression's continuations too.
-        let ends_in_expression = declared
-            .options
-            .iter()
-            .rev()
-            .find(|option| option.is_required());
-        if let Some(OptionDeclaration {
-            form:
+        // The destination written so far holds the reference, the locator and the required options
+        // before `position`; completion offers every option from there to the next required one,
+        // and `MODE` once no required option remains.
+        let mut written_destination = through_locator(kind);
+        let mut position = 0;
+        let mut ends_in_expression = false;
+        loop {
+            let mut continuations = Vec::new();
+            let mut next_required = None;
+            for (index, option) in declared.options.iter().enumerate().skip(position) {
+                if option.is_required() {
+                    continuations.extend(option.examples());
+                    next_required = Some(index);
+                    break;
+                }
+                // A direct `VALUES` emitter writes its options after the body.
+                if declared.body != EmitterBodyForm::Values {
+                    continuations.extend(option.examples());
+                }
+            }
+            if next_required.is_none() {
+                continuations.push("MODE");
+            }
+            // An expression can go on after its last word, so completion after one offers the
+            // expression's continuations too.
+            if !ends_in_expression {
+                let prefix = format!(
+                    "CREATE {} EMITTER generated FROM events TO {written_destination} ",
+                    kind.phrase()
+                );
+                assert_offers_exactly(&prefix, &continuations);
+            }
+            let Some(index) = next_required else {
+                break;
+            };
+            let option = &declared.options[index];
+            written_destination = format!("{written_destination} {}", first_example(option));
+            ends_in_expression = matches!(
+                option.form,
                 OptionForm::Value {
                     value: OptionValue::Expression,
                     ..
-                },
-            ..
-        }) = ends_in_expression
-        {
-            continue;
+                }
+            );
+            position = index + 1;
         }
-        let mut continuations = Vec::new();
-        for option in declared.options {
-            if !option.is_required() && declared.body != EmitterBodyForm::Values {
-                continuations.extend(option.examples());
-            }
+        assert_eq!(written_destination, reference(kind), "{kind}");
+    }
+}
+
+/// The declared reference and locator of `kind`, before any option.
+fn through_locator(kind: EmitterEntityKind) -> String {
+    let declared = kind.capabilities();
+    let reference = match declared.reference {
+        EmitterReferenceKind::Schema => "SCHEMA outgoing".to_owned(),
+        EmitterReferenceKind::Client(_) | EmitterReferenceKind::StorageClient(_) => {
+            "destination_client".to_owned()
         }
-        continuations.push("MODE");
-        let prefix = format!(
-            "CREATE {} EMITTER generated FROM events TO {} ",
-            kind.phrase(),
-            reference(kind)
-        );
-        assert_offers_exactly(&prefix, &continuations);
+    };
+    match declared.locator {
+        Some(locator) => format!("{reference} {}", locator.example()),
+        None => reference,
     }
 }

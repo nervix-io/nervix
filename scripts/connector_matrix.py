@@ -133,10 +133,26 @@ def bounds_rows(bounds):
     ]
 
 
+def header_label(model):
+    """A declared header model as `DESCRIBE` names it: its layout and names, then what carries each
+    typed value where its values are typed."""
+    label = f"`{model['layout']}`, {model['names']} names"
+    if model["values"]:
+        label += f"; {model['values']}"
+    return label
+
+
+def header_meaning(model):
+    """What a declared header model means for the headers of one message."""
+    meaning = f"{model['layout_meaning']}; {model['names_meaning']}"
+    if model["values"]:
+        meaning += "; a value's exact type decides the type it travels as"
+    return meaning
+
+
 def header_model(model):
-    """A declared header model as the manuals state it: its layout and names, then their meaning."""
-    return (f"`{model['layout']}`, {model['names']} names: {model['layout_meaning']}; "
-            f"{model['names_meaning']}")
+    """A declared header model as the manuals state it: its label, then its meaning."""
+    return f"{header_label(model)}: {header_meaning(model)}"
 
 
 def entity_rows(row, side, notes):
@@ -315,15 +331,14 @@ def header_models_table(surface):
             model = row["headers"]
             if not model:
                 continue
-            key = (model["layout"], model["names"])
+            key = (model["layout"], model["names"], model["values"] or "")
             group = groups.setdefault(key, {"ingest": [], "emit": [], "meaning": model})
             group[side].append(f"`{row['entity']}`")
     rows = []
-    for (layout, names), group in sorted(groups.items()):
+    for _, group in sorted(groups.items()):
         model = group["meaning"]
-        rows.append((f"`{layout}`, {names} names", ", ".join(group["ingest"]) or "None",
-                     ", ".join(group["emit"]) or "None",
-                     f"{model['layout_meaning']}; {model['names_meaning']}"))
+        rows.append((header_label(model), ", ".join(group["ingest"]) or "None",
+                     ", ".join(group["emit"]) or "None", header_meaning(model)))
     return table(rows, ("Header model", "Ingest", "Emit", "Meaning"))
 
 
@@ -336,8 +351,7 @@ def side_headers(surface, side):
         if not model:
             without.append(f"`{row['entity']}`")
             continue
-        rows.append((f"`{row['entity']}`", f"`{model['layout']}`, {model['names']} names",
-                     f"{model['layout_meaning']}; {model['names_meaning']}"))
+        rows.append((f"`{row['entity']}`", header_label(model), header_meaning(model)))
     if side == "ingest":
         text = table(rows, ("Ingestor", "Header model", "What `read_header` and `read_headers` find"))
         closing = "carry no transport headers and refuse `read_header` and `read_headers`"

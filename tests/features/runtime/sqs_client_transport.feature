@@ -77,7 +77,7 @@ Feature: SQS client transport
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE SQS QUEUE EMITTER sqs_out FROM notifications
-        TO sqs_main QUEUE 'proxied_out_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 200ms MAX 1s
+        TO sqs_main QUEUE 'proxied_out_{{test_id}}' SEND SINGLE MODE ACK RETRY POLICY BACKOFF 200ms MAX 1s
         ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE

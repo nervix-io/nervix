@@ -191,7 +191,7 @@ to discard a record.
 | NATS | `NO ACK`; `JETSTREAM ACK SEQUENTIAL`; `JETSTREAM ACK PARALLEL MAX <n>` | The Core NATS write's queued bytes drained and flushed on the same connection for `NO ACK`, without a server round trip; JetStream `PubAck` otherwise |
 | Redis Pub/Sub | `NO ACK` | Server acceptance of `PUBLISH`; the subscriber count is not a delivery guarantee |
 | ZeroMQ | `NO ACK` | Socket acceptance |
-| SQS | `SINGLE`; `BATCH` | Successful per-record or per-entry service response |
+| SQS | `ACK` | Successful per-record or per-entry service response |
 | Sentry | `ACK` | A `2xx` answer to the event's one-event envelope |
 | OTEL | `ACK` | Successful OTLP Export response; `partial_success` is acknowledged with a warning |
 | ClickHouse, Postgres, MySQL | `ACK` | Successful insert/write result |
@@ -676,7 +676,7 @@ A statement is rejected, naming the offending value, when:
 
 - `MAX MESSAGES` is zero or above 65,536;
 - `MAX SIZE` is zero, fractional, written without a unit, or past the 64-bit byte range;
-- `MAX SIZE` is above 256 KiB on an SQS emitter, the largest SQS message Nervix sends;
+- `MAX SIZE` is above 1 MiB on an SQS emitter, the largest SQS message Nervix sends;
 - the clause is absent on a ClickHouse, Postgres, MySQL or MongoDB emitter;
 - the clause is present on a Sentry emitter whose codec declares no `ON EMITTING BATCH`
   transformation, because one Sentry envelope carries at most one event and only that
@@ -801,8 +801,8 @@ delivery report, broker receipt, publisher confirm, `PUBACK`, completed QoS 2 ha
 JetStream `PubAck` for it. `ACK TIMEOUT` bounds that one wait, and a batch message whose outcome
 stays unknown is retained for the retry described above.
 
-SQS `MODE BATCH` remains a request shape and is independent of the clause. One `SendMessageBatch`
-request carries up to ten batch messages as separate entries within the 256 KiB request limit, and
+SQS `SEND BATCH` remains a request shape and is independent of the clause. One `SendMessageBatch`
+request carries up to ten batch messages as separate entries within the 1 MiB request limit, and
 never two messages of one FIFO message group. The service answers for each entry, and an entry's
 answer applies to every member of the batch message it carries. Entries are never merged into one
 message, and one entry never carries more than one batch message.
@@ -817,7 +817,7 @@ counting what it writes around the payload:
 | MQTT | The Maximum Packet Size the broker declared in its latest `CONNACK`, and the largest packet the protocol can express | The fixed header, topic, packet identifier and property length |
 | NATS | The `max_payload` the server announced | The message headers |
 | Pulsar | The `maxMessageSize` the broker announced when the producer's connection opened | The message metadata: the properties, the partition key and the producer's own fields |
-| SQS | 256 KiB | Message attribute names, types and values, and the FIFO message group |
+| SQS | 1 MiB | Message attribute names, types and values, and the FIFO message group |
 
 A batch message that does not fit is never written. Every member follows `ON MESSAGE ERROR` with
 code `external`, operation `publish` and one shared reference, and the message names the size and
@@ -1034,8 +1034,9 @@ alteration preserves the emitter's accepted configuration.
 
 ## Header invocations
 
-`write_header` is a side-effect function. It accepts statically non-null `STRING` name and value
-expressions and is valid only as a top-level `INVOKE` call. Sensitive values require
+`write_header` is a side-effect function. It accepts a statically non-null `STRING` name and a
+statically non-null value of a type the emitter's header model declares, `STRING` on every emitter
+but `SQS QUEUE`, and is valid only as a top-level `INVOKE` call. Sensitive values require
 `leak_sensitive`. Calls execute left to right after payload finalization and route filtering. Header
 mutations are staged in a temporary route-local envelope; invocation failure prevents payload and
 partial-envelope publication.
@@ -1053,7 +1054,7 @@ Each emitter that writes transport headers declares a
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ EXCHANGE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
-| `SQS QUEUE` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+| `SQS QUEUE` | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
 
 `CLIENT CONSUMER`, `REDIS PUBSUB`, `MQTT TOPIC`, `ZEROMQ PUSH`, `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`, `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION`, `ICEBERG TABLE` write no transport headers and refuse `write_header`.
 <!-- connector-matrix:emit-headers:end -->
@@ -1113,7 +1114,8 @@ does not declare is refused where it is written, with the entity and the clause 
 the registry refuses it again in a Model that reaches it another way. The
 [capability matrix](connector-capabilities.md) lists the clauses and properties each entity
 declares, and each entity's section below says what its transport does with them. `KAFKA TOPIC`
-declares `TIMESTAMP`, which [Kafka](#kafka) writes as each record's create time, and the two
+declares `TIMESTAMP`, which [Kafka](#kafka) writes as each record's create time, `SQS QUEUE`
+declares `DELAY` and `DEDUPLICATION ID`, which [SQS](#sqs) sends with each message, and the two
 [RabbitMQ](#rabbitmq) entities declare `MANDATORY`. No entity declares another clause or a property
 yet, and every emitter refuses each clause its entity does not declare.
 
@@ -1946,8 +1948,11 @@ CREATE SQS QUEUE EMITTER <name>
   FROM <relay>
   TO <client> QUEUE 'orders'
   [FIFO GROUP tenant | FIFO GROUP FROM BRANCH]
+  (SEND SINGLE | SEND BATCH)
     MODE <mode>
     ENCODE USING <codec>
+    [DELAY 5s]
+    [DEDUPLICATION ID id]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1961,32 +1966,33 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | --- | --- |
 | Reference | SQS client |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |
-| Modes (complete bodies after MODE) | SINGLE RETRY POLICY BACKOFF 1s MAX 30s<br>BATCH RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `FIFO GROUP tenant` (expression); `FIFO GROUP FROM BRANCH` (keyword choice); optional; omitted when unset |
-| Headers | `write_header`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+| Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `FIFO GROUP tenant` (expression); `FIFO GROUP FROM BRANCH` (keyword choice); optional; omitted when unset<br>`SEND SINGLE` (keyword choice); `SEND BATCH` (keyword choice); required |
+| Headers | `write_header`; `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
-| Protocol batch maximum | 256KiB |
+| Protocol batch maximum | 1MiB |
 | Batch transformation required | no |
-| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
+| Envelope | DELAY 5s<br>DEDUPLICATION ID id |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | The connector holds no buffer between its transport and the host. |
 | Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start and a send: `timeout_ms`; unbounded when omitted |
-| Driver limits | A batch request holds at most 10 entries and 256 KiB; a record above 256 KiB is rejected. |
+| Driver limits | A batch request holds at most 10 entries and 1 MiB; a record above 1 MiB is rejected. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sqs-queue-emit).
 <!-- connector-matrix:emit-sqs-queue:end -->
 
 `QUEUE` uses the same rule as [SQS ingestion](ingestors.md#sqs): 1 to 80 ASCII letters, digits,
-`-` and `_`, a FIFO queue's `.fifo` suffix included, preserved exactly as written. `write_header`
-writes message attributes, and the emitter declares no envelope clause or `PROPERTIES` block. The
+`-` and `_`, a FIFO queue's `.fifo` suffix included, preserved exactly as written. The
 `SQS CLIENT` it names declares the keys the [SQS ingestion section](ingestors.md#sqs) lists.
 
-`SINGLE` issues one request per message. `BATCH` groups messages within SQS's fixed limit of ten
-entries and 256 KiB per request; both modes issue requests sequentially and acknowledge service
-responses. Per-entry transient failures retry only those entries, while invalid entries and a
-message larger than 256 KiB, counting its attributes and FIFO message group, follow
+`SEND` is the request shape, and every statement writes it. `SEND SINGLE` issues one `SendMessage`
+request per message. `SEND BATCH` groups messages into `SendMessageBatch` requests within SQS's
+fixed limit of ten entries and 1 MiB per request. Both shapes publish in `MODE ACK`, the mode every
+request/response emitter uses: requests are issued sequentially, and a record is acknowledged once
+the service accepts it. Per-entry transient failures retry only those entries, while invalid
+entries and a message larger than 1 MiB, counting its attributes and FIFO message group, follow
 `ON MESSAGE ERROR` individually. Nervix checks what SQS refuses before sending: a body that is not
 UTF-8, a body or attribute value holding a character SQS forbids, more than ten attributes, an
 attribute name SQS does not allow, an empty attribute value, and an invalid FIFO message group. A
@@ -1996,6 +2002,31 @@ accepts the characters of the XML 1.0 `Char` production: tab, line feed, carriag
 to U+D7FF, U+E000 to U+FFFD and U+10000 to U+10FFFF. Every other C0 control and the noncharacters
 U+FFFE and U+FFFF are forbidden, while the other noncharacters fall inside those ranges and are
 sent.
+
+`write_header` writes message attributes, and the value's exact type decides the attribute's data
+type: a `STRING` is a `String` attribute, a `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64` or `I64`
+is a `Number` attribute holding the integer's decimal digits, and `BYTES` is a `Binary` attribute
+holding the bytes unchanged. Any other type has no exact SQS data type, so a statement that writes
+one is refused when it is validated, with a message such as
+`write_header value must be STRING, U8, I8, U16, I16, U32, I32, U64, I64 or BYTES, found Boolean`.
+A `String` or `Binary` value must not be empty, because SQS refuses an empty attribute value.
+
+The emitter declares two envelope clauses, written after `ENCODE USING`, and no `PROPERTIES` block.
+`DELAY <duration>` sets every message's `DelaySeconds`: SQS keeps the message invisible to every
+receive for that long after accepting it. The duration is whole seconds from `1s` to `900s`, fifteen
+minutes, the longest delay SQS gives a message. Without `DELAY`, a message takes the queue's own
+delivery delay. A FIFO queue takes no per-message delay, so a statement that writes `DELAY` for a
+`.fifo` queue is refused when it is validated.
+
+`DEDUPLICATION ID <expression>` sets every message's `MessageDeduplicationId` on a FIFO queue: SQS
+accepts a message whose id it already accepted within its five-minute deduplication interval and
+does not deliver it again. The expression has exact `STRING` type for every record and obeys the
+normal external-sensitivity leakage rules. A value SQS does not accept, empty, longer than 128
+characters or holding a character other than an ASCII letter, digit or punctuation mark, rejects its
+record before anything is sent, and the record follows `ON MESSAGE ERROR`. A standard queue takes no
+deduplication id, so a statement that writes `DEDUPLICATION ID` for a queue without the `.fifo`
+suffix is refused when it is validated. Every attempt to send a record carries the delay,
+deduplication id and attributes its first attempt carried.
 
 Set the SQS client's optional `timeout_ms` CONFIG key to bound each request, the queue lookup at
 start and every send, as both the complete service operation and its single SDK attempt. Nervix
@@ -2022,9 +2053,10 @@ other groups may still make progress independently.
 A queue name ending in `.fifo` requires `FIFO GROUP`, and `FIFO GROUP` is rejected for a queue
 without that suffix. `FROM BRANCH` requires branched input and uses the record's branch key as its
 message group. Otherwise the expression must have exact `STRING` type for every record and obey
-normal external-sensitivity leakage rules. Nervix relies on content-based deduplication, which the
-operator must enable while provisioning the FIFO queue. Sends to a FIFO queue without it fail as
-publish errors; Nervix never creates or reconfigures the queue.
+normal external-sensitivity leakage rules. A FIFO queue deduplicates every message either by its
+`DEDUPLICATION ID` or by the content-based deduplication the operator enables while provisioning the
+queue. Sends to a FIFO queue with neither fail as publish errors; Nervix never creates or
+reconfigures the queue.
 
 `FIFO GROUP` is the emitter's ordering group. Nervix evaluates it against each record's input
 row after any `FROM ... WHERE` filter, and every record the emitter sends carries the group its own
