@@ -42,7 +42,9 @@ Feature: Emitter publishing modes
       };
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9324',
-        'region' = 'us-east-1'
+        'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret'
       };
       CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = 'http://public@127.0.0.1:8000/1',
@@ -461,7 +463,9 @@ Feature: Emitter publishing modes
       };
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9324',
-        'region' = 'us-east-1'
+        'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret'
       };
       CREATE CLICKHOUSE CLIENT clickhouse_main CONFIG {
         'addr' = 'http://127.0.0.1:8123',

@@ -33,10 +33,10 @@ pub use emitter::{HttpRequestEmitter, HttpRequestEmitterConfig};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    ClientConfigResult, HttpClientConfig, IngestMessageHeaders, IngestorConnector, IngestorError,
-    IngestorPoll, IngestorPollMessage, IngestorResult, PacedIngestorConnector,
-    RetainedIngestHeaders, RetainedIngestMetadata, RetainedIngestMetadataValue,
-    client_config_value, physical_time::actual_utc_now,
+    ClientConfigResult, HttpClientConfig, IngestorConnector, IngestorError, IngestorPoll,
+    IngestorPollMessage, IngestorResult, PacedIngestorConnector, RetainedIngestHeaders,
+    RetainedIngestMetadata, RetainedIngestMetadataValue, client_config_value,
+    physical_time::actual_utc_now,
 };
 use nervix_dns::{DnsResolver, LookupShare, OperationBudget};
 use nervix_models::{ClientConfigEntry, HttpRequestHeader, PayloadSizeLimit, Timestamp};
@@ -88,19 +88,6 @@ pub enum HttpRequestIngestorError {
     ResponseBody,
     #[error("HTTP ingestor response exceeds MAX BODY SIZE {limit}")]
     ResponseTooLarge { limit: PayloadSizeLimit },
-}
-
-/// The headers of one borrowed HTTP response, skipping values that are not UTF-8.
-struct HttpResponseHeaders<'a>(&'a HeaderMap);
-
-impl IngestMessageHeaders for HttpResponseHeaders<'_> {
-    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
-        for (name, value) in self.0 {
-            if let Ok(value) = value.to_str() {
-                visit(name.as_str(), value);
-            }
-        }
-    }
 }
 
 #[async_trait]
@@ -162,6 +149,7 @@ impl PacedIngestorConnector for HttpRequestIngestor {
             return Ok(IngestorPoll {
                 messages: Vec::new(),
                 failures: Vec::new(),
+                dropped_header_values: 0,
                 observed_at: actual_utc_now(),
             });
         }
@@ -172,7 +160,7 @@ impl PacedIngestorConnector for HttpRequestIngestor {
             .change_context(IngestorError::Read { connector: HTTP }));
         }
 
-        let headers = RetainedIngestHeaders::capture(&HttpResponseHeaders(response.headers()));
+        let (headers, dropped_header_values) = Self::retained_response_headers(response.headers());
         let status = response.status().as_u16();
         let payload = Self::bounded_body(response, self.max_body_size)
             .await
@@ -184,12 +172,27 @@ impl PacedIngestorConnector for HttpRequestIngestor {
                 metadata: Self::poll_metadata(status, scheduled_at),
             }],
             failures: Vec::new(),
+            dropped_header_values,
             observed_at: actual_utc_now(),
         })
     }
 }
 
 impl HttpRequestIngestor {
+    /// Retains valid UTF-8 response headers in their transport order and counts only invalid
+    /// values. A bad value never discards the response or its other headers.
+    fn retained_response_headers(headers: &HeaderMap) -> (RetainedIngestHeaders, usize) {
+        let mut pairs = Vec::with_capacity(headers.len());
+        let mut dropped = 0;
+        for (name, value) in headers {
+            match std::str::from_utf8(value.as_bytes()) {
+                Ok(value) => pairs.push((name.as_str().to_string(), value.to_string())),
+                Err(_) => dropped += 1,
+            }
+        }
+        (RetainedIngestHeaders::from_pairs(pairs), dropped)
+    }
+
     /// The metadata HTTP REQUEST declares for one answered poll, in its order: the response status,
     /// then the poll's scheduled instant.
     fn poll_metadata(status: u16, scheduled_at: Timestamp) -> RetainedIngestMetadata {
@@ -299,6 +302,7 @@ impl HttpRequestIngestor {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use nervix_connector::IngestMessageHeaders as _;
     use reqwest::header::{HeaderName, HeaderValue};
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
@@ -322,8 +326,9 @@ mod tests {
             );
         }
         let mut visited: Vec<(String, String)> = Vec::new();
-        HttpResponseHeaders(&fields)
-            .visit(&mut |name, value| visited.push((name.to_string(), value.to_string())));
+        let (retained, dropped) = HttpRequestIngestor::retained_response_headers(&fields);
+        retained.visit(&mut |name, value| visited.push((name.to_string(), value.to_string())));
+        assert_eq!(dropped, 0);
 
         // The order of different names is not declared, so only each name's values are compared,
         // after checking that a name's values arrive together.
@@ -352,6 +357,66 @@ mod tests {
             ("x-trace", vec!["a", "b"]),
         ]);
         assert_eq!(values, expected);
+    }
+
+    #[test]
+    fn response_headers_keep_utf8_and_count_invalid_values() {
+        let mut fields = HeaderMap::new();
+        fields.append(
+            "x-city",
+            HeaderValue::from_bytes("Zürich".as_bytes()).unwrap(),
+        );
+        fields.append("x-city", HeaderValue::from_bytes(b"\xff").unwrap());
+        fields.append("x-city", HeaderValue::from_bytes(b"\xc3(").unwrap());
+        fields.append("x-city", HeaderValue::from_static("Oslo"));
+        let (retained, dropped) = HttpRequestIngestor::retained_response_headers(&fields);
+        let mut values = Vec::new();
+        retained.visit(&mut |name, value| values.push((name.to_string(), value.to_string())));
+        assert_eq!(
+            values,
+            [
+                ("x-city".into(), "Zürich".into()),
+                ("x-city".into(), "Oslo".into())
+            ]
+        );
+        assert_eq!(dropped, 2);
+    }
+
+    #[test]
+    fn bolero_response_headers_preserve_utf8_and_count_invalid_values() {
+        const VALUE_CHARS: &[char] = &['a', 'Z', '0', '-', 'ü', '雪', 'é'];
+        const INVALID_VALUES: [&[u8]; 3] = [b"\xff", b"\xc3(", b"\xf0\x9f\x92"];
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(128)
+            .with_type::<Vec<u8>>()
+            .for_each(|seed| {
+                let value = std::iter::once('ü')
+                    .chain(
+                        seed.iter()
+                            .take(32)
+                            .map(|byte| VALUE_CHARS[usize::from(*byte) % VALUE_CHARS.len()]),
+                    )
+                    .collect::<String>();
+                let invalid = INVALID_VALUES
+                    [usize::from(seed.first().copied().unwrap_or_default()) % INVALID_VALUES.len()];
+                let mut fields = HeaderMap::new();
+                fields.append("x-city", HeaderValue::from_bytes(value.as_bytes()).unwrap());
+                fields.append("x-city", HeaderValue::from_bytes(invalid).unwrap());
+                fields.append("x-city", HeaderValue::from_static("Oslo"));
+
+                let (retained, dropped) = HttpRequestIngestor::retained_response_headers(&fields);
+                let mut visited = Vec::new();
+                retained.visit(&mut |name, value| {
+                    visited.push((name.to_string(), value.to_string()));
+                });
+
+                assert_eq!(
+                    visited,
+                    [("x-city".into(), value), ("x-city".into(), "Oslo".into())]
+                );
+                assert_eq!(dropped, 1);
+            });
     }
 
     /// An answered poll hands over the values of the metadata HTTP REQUEST declares, of the

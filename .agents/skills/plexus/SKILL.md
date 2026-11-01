@@ -14,13 +14,17 @@ clause order or connector options from memory.
 For Plexus connector choices, read [Connector Capabilities](https://docs.nervix.io/connector-capabilities.md)
 alongside the entity's Ingestors or Emitters section. Its generated tables show modes, option
 requirements, metadata types, each side's header model, batching, buffer bounds, network waits and
-the reasons ingest and emit differ. Read headers the way the source's model records them, such as
+the reasons ingest and emit differ. Read `Plexus Overview` → `Statement catalog` for connector and
+entity heads, kind-preserving alterations, and name-based inspection. Choose the complete declared
+pair before assembling its body, including when its connector has one entity. Read headers the way
+the source's model records them, such as
 lowercase HTTP field names, and on an emitter that keeps one value per header name write each literal
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, response-header reads, frame metadata and the closed client CONFIG key set.
-For ClickHouse HTTP connection tuning, read the ClickHouse Emitters section and the generated
-client key reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured values;
+For ClickHouse HTTP connection tuning, client certificates, compression and which insert failures
+reject a row rather than retry, read the ClickHouse Emitters section and the generated client key
+reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured values;
 `SHOW CREATE CLIENT <name>` preserves authored configuration. Both redact secrets.
 
 For delivery durations and direct-value mappings, follow the Ingestors delivery-mode and Emitters
@@ -265,6 +269,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   evaluates returned data with a fresh execution snapshot. The declared quiesce mode still decides
   whether polling is suspended or buffered; withholding work does not pause or re-anchor the
   cadence. Connector timeouts, retries, backoff, and cancellation remain physical.
+- For HTTP REQUEST polling, `metadata.polled_at` is the scheduled instant and `metadata.status`
+  is the successful HTTP status. A `204 No Content` response emits no row. `read_header` retains
+  non-ASCII UTF-8 values; invalid UTF-8 header values are omitted and counted in
+  `nervix_ingestor_header_values_dropped_total`. Read the
+  [HTTP REQUEST ingestor contract](../../../docs/src/ingestors.md#http-request) for its declaration
+  and header model.
 - Treat domain execution time as one snapshot per accepted unit of work. Every expression in that
   unit uses the same instant, including filters, construction, keys, correlation and window
   programs, inferencer mappings, emitter `VALUES` and SQS FIFO groups, and subscription filters.
@@ -433,7 +443,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
 - Request/response emitters do not take `ACK TIMEOUT`. ClickHouse, OTEL and Sentry clients require a
   positive `timeout_ms`; SQS or Iceberg object-store clients use it when a request
-  needs an explicit bound. A ClickHouse HTTPS address also requires `tls_ca_file` from a mounted
+  needs an explicit bound, which for SQS bounds every request of both directions. A ClickHouse HTTPS address also requires `tls_ca_file` from a mounted
   resource, while HTTP refuses TLS file keys. Its table locator has one or two case-preserving
   dot-separated parts, each quoted by the connector when sent. The emitter's declared retry
   policy owns pacing after that request fails. A ZeroMQ client's `timeout_ms` bounds each send,
@@ -476,7 +486,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   request field is evaluated, a failed method, path, header write or body encoding rejects the
   record through `ON MESSAGE ERROR` before any part of its request is sent, and a retry resends the
   prepared request unchanged. Declare
-  `Content-Type` and any idempotency key with `write_header`; see
+  `Content-Type` and any idempotency key with `write_header`, whose valid UTF-8 value reaches
+  the request as the same bytes, including non-ASCII characters; see
   [HTTP requests](../../../docs/src/emitters.md#http-requests). Complete valid `2xx` response
   headers deliver the record without waiting for the response body. `401`, `403`, `407`, `408`,
   `425`, `429`, and `5xx` retain it for retry; other `3xx`/`4xx` statuses and `101` reject that

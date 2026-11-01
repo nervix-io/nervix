@@ -218,6 +218,7 @@ provides.
 | Shared C binding | `ClientError` as the current context, and the `BackupDownloadError` beneath a failed download | The `NX_ERROR_*` kind of the failure |
 | Session edge | `ConsensusError::LeadershipLost` as the current context of a proposal report | A leader redirect in place of a failed command |
 | Transaction application | `RuntimeError`'s revision preparation and readiness timeouts as the current context | Apply the cluster state again and retry, in place of failing the transaction |
+| Quiesced backup cut | `RuntimeError::ApplicationDeadline` as the current context of its pause's application, then `DomainAlterError`'s pause application and drain timeouts as the current context | The cut's timeout with its active phase, in place of a failure to stop ingestion or a capture failure |
 | Session transaction binding | `SessionTransactionBindingError` as the current context | The `TransactionTakenOver` or `TransactionDetached` disposition |
 | Postgres, MySQL and ClickHouse emitters | The driver's SQLSTATE, code or named rejection in the current context | Whether the destination refused rows for good or the attempt failed as infrastructure |
 | Connectors that resolve through a driver's DNS hook | `DnsLookupError::find_in` over the causes the driver wraps around the lookup | Keep the typed lookup failure beneath the connection failure |
@@ -1033,6 +1034,20 @@ service that has not answered it within 10 seconds of the cancellation ends the 
 The host shows it as the source's transient error; nothing is rejected or acknowledged, and a message
 the receive was returning stays invisible until its visibility timeout.
 
+An SQS request that runs out of its client's `timeout_ms` keeps the connector contract's
+`DeadlineElapsed` as its innermost cause, naming the request, the key and its bound: the queue
+lookup, a receive after its long poll, a delete, a send or a batch send. It sits beneath the same
+context as any other failure of that request, so the source host shows it as the deepest cause, such
+as `the SQS queue lookup did not finish within timeout_ms 5s`, and an emitter attaches its message
+last, which `DESCRIBE EMITTER` shows. An SQS client whose keys its connections cannot use is
+`InvalidSqsClientKey`, which names the key, above its cause: the contract's `ClientConfigError` for
+a missing key, an unreadable file or an invalid deadline, `TlsClientConfigError::ParseCaCertificate`
+or `AddCaCertificate` for a `tls_ca_file` rustls cannot take as a trust store, and `EmptyCaFile` for
+one without a certificate. The source reports it as `SqsQueueIngestorError::ClientConfig`, the
+emitter as `EmitterOpenError::InvalidConfiguration`, and `CREATE SQS CLIENT`, which reads the client
+the same way before it commits it, as `OfflineClientConfigError::InvalidKey`, whose public message
+names only the key.
+
 OTEL keeps a row conversion failure in the invalid-record channel and names its mapped key as the
 affected field. A lower OTEL value type or range error stays in the internal report until the
 rejection is constructed. Database emitter insert reports keep transport driver or pool causes while the
@@ -1362,7 +1377,14 @@ session receives render the whole chain, such as `failed to start domain 'edge':
 runtime revision 7: failed to build domain execution for 'edge': failed to load lookup 'zips': ...`,
 and a domain whose build failed records the same chain as its instantiation error. Revision
 preparation and readiness timeouts keep variants of their own, which a transaction recognizes in
-the report's top context to retry its application rather than fail it.
+the report's top context to retry its application rather than fail it. A caller that bounds the
+application by a deadline of its own, as a quiesced backup cut applying its pause, receives
+`RuntimeError::ApplicationDeadline` when that deadline ends one of the application's waits, naming
+the wait: an installation slot, or every live node preparing or readying a revision. The pause path
+reports it beneath `DomainAlterError::BackupPauseTimeout`, and the cut attributes that to its drain
+phase as its timeout, such as `timed out waiting to capture domain 'edge': phase=drain, ...: timed
+out applying the backup pause of domain 'edge': the caller's deadline ended the runtime application
+while it waited for every live node to ready runtime revision 9`.
 
 ### Ingestors, Emitters And Generators
 
