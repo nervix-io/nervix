@@ -3447,16 +3447,31 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/websockets/__fuzz__/connector__websockets__upgrade_headers_tests__bolero_validated_upgrade_headers_preserve_every_canonical_field/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "websocket-upgrade-headers"
-invariant = "Every bounded canonical upgrade-header collection preserves all names, values and order through the production validated representation; malformed and canonicalizing cases have separate owner tests."
+invariant = "Every bounded canonical upgrade-header collection, with or without a subprotocol offer already written as unique tokens joined by commas, preserves all names, values and order through the production validated representation; malformed and canonicalizing cases have separate owner tests."
 manifest = "Cargo.toml"
 max_input_bytes = 32
 package = "nervix-models"
 random_iterations = 256
 source = "crates/models/src/connector/websockets/upgrade_headers_tests.rs"
 test = "connector::websockets::upgrade_headers_tests::bolero_validated_upgrade_headers_preserve_every_canonical_field"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/src/connector/websockets/__fuzz__/connector__websockets__upgrade_headers_tests__bolero_subprotocol_offers_validate_to_their_tokens_in_written_order/corpus"
+domain_version = 1
+features = []
+id = "websocket-subprotocol-offers"
+invariant = "Every offer of unique subprotocol tokens, written with any spaces or tabs around its commas, validates to exactly its tokens in written order joined by commas alone."
+manifest = "Cargo.toml"
+max_input_bytes = 32
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/connector/websockets/upgrade_headers_tests.rs"
+test = "connector::websockets::upgrade_headers_tests::bolero_subprotocol_offers_validate_to_their_tokens_in_written_order"
 test_target = "lib"
 
 [[target]]
@@ -3477,7 +3492,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 21
+domain_version = 22
 features = []
 id = "client-config-schema"
 invariant = "Bounded entries drawn from every current client key schema preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."

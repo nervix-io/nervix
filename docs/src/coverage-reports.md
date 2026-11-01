@@ -39,7 +39,7 @@ counters.
 | --- | --- |
 | `just test-coverage` (`scenarios-build` and `tests`) | Ordinary workspace unit, binary, benchmark test-mode and harness-liveness tests. Packages that own execution modes run separately with ordinary features, so an all-features invocation never combines modes. Exports `lcov-workspace.info` and `coverage-source-root.txt` as `coverage-tests`. |
 | `just test-scenarios-coverage` (`scenarios-build` and the `scenarios` shards) | The public Cucumber suite, including the server it links and its instrumented CLI, report tool, paced Rust driver and shared binding. Each shard exports the same report/root pair for its share of the suite, and the paced Python drivers' `python.lcov` when it ran them, as `coverage-scenarios-<I>`. |
-| `coverage-native-extras test-typed-ratchet` (`extra-tests`) | Source-contract compiler fixtures, including their paired fixture doctests and loaded procedural macro objects, using the analysis compiler's matching LLVM tools. Product API doctests and modeled fixture checks finish separately without instrumentation. |
+| `coverage-native-extras test-typed-ratchet` (`extra-tests`) | Source-contract compiler fixtures, including their paired fixture doctests and loaded procedural macro objects, and the `nervix-lint-report` unit tests with the five `typed-*` properties, using the analysis compiler's matching LLVM tools. Product API doctests and modeled fixture checks finish separately without instrumentation. |
 | `coverage-native-extras bench-smoke` (`extra-tests`) | The smoke recipe's benchmark bodies in test mode. Other Cargo benchmark test targets run in `test-coverage`. Instrumented timings are not performance evidence. |
 | `coverage-native-extras test-primitives-ordinary` (`extra-tests`) | The primitive boundary's native ordinary conformance checks. Other conformance modes remain separate. |
 | Language completion walk (`extra-tests`) | The composed grammar's completion reachability check for Plexus, the Nervix graph definition language, collected under the current `plexus-completion-walk` recipe. |
@@ -63,7 +63,7 @@ the downloaded artifact:
 | `coverage-ci-selection` | Exact-source suite and Bolero call selection |
 | `coverage-wasm-bindgen` | The console build's wasm-bindgen CLI selection, installation and verification |
 | `coverage-model-runner` | Native collector supervision, command and artifact accounting |
-| `coverage-typed-ratchet-python` | Architecture source/compiler rule runners and their qualification |
+| `coverage-typed-ratchet-python` | Architecture source/compiler rule runners and their qualification, the native collector, the Bolero runner and its coverage export, and the console build script |
 | `coverage-primitive-boundary` | Primitive provenance and thread-owner validation |
 
 Only reports the artifact actually exports are inputs; running a focused coverage recipe does not
@@ -85,8 +85,7 @@ collection. Its ordinary mode alone does not register it as a workspace-report p
 
 ## Native Collection
 
-The extra checks that execute Nervix code natively in ordinary mode, the compiler synchronization
-fixtures, benchmark bodies, primitive boundary conformance and Plexus completion walk, also measure which source
+The extra checks that execute Nervix code natively in ordinary mode, the compiler fixtures, benchmark bodies, primitive boundary conformance and Plexus completion walk, also measure which source
 lines they execute. Run them the way CI does:
 
 ```bash

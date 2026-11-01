@@ -1183,7 +1183,7 @@ Transport-specific expectations:
 - `CLICKHOUSE`: use an `https://...` `addr` with mounted `tls_ca_file` and required positive
   `timeout_ms`; HTTP addresses refuse TLS file keys.
 - `POSTGRES`: use `sslmode=verify-full` in the `addr` URL; Nervix honors `tls_ca_file`, `tls_cert_file`, and `tls_key_file`. `sslmode=disable` is the only other accepted policy.
-- `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file` and paired `tls_cert_file`/`tls_key_file` client identity files.
+- `MYSQL`: enable TLS with `require_ssl=true` in `addr` or with mounted TLS files. Nervix honors `tls_ca_file` and paired `tls_cert_file`/`tls_key_file` client identity files; see [MySQL](#mysql) for the URL verification policy.
 - `MONGODB`: Nervix honors `tls_ca_file`, and `tls_cert_file` with `tls_key_file` as its client
   certificate; any of them enables TLS without `tls=true` in `addr`, and an `addr` with `tls=false`
   refuses them. See [MongoDB](#mongodb).
@@ -2731,8 +2731,14 @@ An insert and its row-by-row isolation use one borrowed connection, returned bef
 insert. Isolation obtains each row's outcome without a second acquisition from the client's pool,
 even when other emitters are waiting. The host handles those outcomes when the write completes.
 Conflict clauses are the user's tool for bounding duplicates when poison isolation re-executes a
-failed insert. Declare a `MAX SIZE` no larger than the server's `max_allowed_packet`, 64 MiB by
-default on MySQL 8.x, which the client applies to every packet it sends.
+failed insert. For `c` mapped columns, the placeholder limit allows at most `floor(65535 / c)`
+rows per insert, even when `MAX MESSAGES` is larger. `MAX SIZE` measures the SQL text and binary
+bound values; it excludes packet headers, parameter types and the execute packet's null bitmap.
+Nervix does not learn the server's `max_allowed_packet` to narrow these inserts. Set `MAX SIZE`
+below the server's configured packet limit with room for that framing, and keep individual
+values within the server's limit. Equal byte limits do not guarantee that every packet fits.
+A packet or bound value the driver or server refuses can still fail a write; automatic sizing
+against that server setting is outside the current contract.
 
 MySQL emitters may include an insert conflict policy after `VALUES`:
 
@@ -2786,7 +2792,9 @@ so the Plexus conflict policy takes no target list. `DO UPDATE` executes
 `ON DUPLICATE KEY UPDATE col = VALUES(col)` for every mapped `VALUES` column, including mapped
 key columns. `DO NOTHING` executes `ON DUPLICATE KEY UPDATE first = first`, where `first` is
 the first mapped column. This is a duplicate-key update and can run update triggers; it is not
-an insert-ignore operation.
+an insert-ignore operation. Without `ON CONFLICT`, the connector sends an ordinary insert;
+a duplicate-key rejection follows `ON MESSAGE ERROR`. `INSERT IGNORE`, `REPLACE` and `LOAD DATA`
+are not offered by this entity.
 
 The connector binds the following exact Plexus types through MySQL's binary protocol. Nullable
 values bind as SQL `NULL`. The target table must already exist and provide compatible columns.
@@ -2816,18 +2824,26 @@ CREATE MYSQL CLIENT mysql
   };
 ```
 
-For TLS connections, include `require_ssl=true`, mount a TLS resource, and set `'tls_ca_file'` to
-the mounted CA path. Supplying the CA preserves the URL's certificate-verification, hostname and
-built-in-root options. For mutual TLS, also set `tls_cert_file` and `tls_key_file` together. The
+Enable TLS with `require_ssl=true` in `addr`, or by supplying TLS files from a mounted resource.
+`tls_ca_file` supplies the server CA path. With `require_ssl=true`, the URL's `verify_ca`,
+`verify_identity` and `built_in_roots` choices are preserved when files are added. With files
+alone, Nervix enables TLS using the driver's default verification policy: certificate and hostname
+verification enabled, with built-in roots trusted. Include `require_ssl=true` to apply custom URL
+verification choices. For mutual TLS, set `tls_cert_file` and `tls_key_file` together. The
 driver reads a PEM certificate chain and an RSA PKCS#1 private key; for a PEM key this is the
 `RSA PRIVATE KEY` form, which OpenSSL can produce with `openssl rsa -traditional`.
 
 The current client CONFIG keys are required `addr` and optional `timeout_ms`, `tls_ca_file`,
 `tls_cert_file` and `tls_key_file`. The address must
-be a `mysql://` URL accepted by the driver's offline parser. URL query options belong to the
-driver, except connection-pool sizing: declare that capacity with `POOL SIZE MIN ... MAX ...`.
+be a `mysql://` URL accepted by the driver's offline parser. Declare capacity with
+`POOL SIZE MIN ... MAX ...`. Nervix installs those bounds on default driver pool options;
+[Database Client Connection Pools](database-client-pools.md) details the resulting URL lifetime settings.
 Pool-size query parameters such as `pool_min` and `pool_max` are refused before the client is
-committed. Unknown standalone CONFIG keys are refused rather than ignored.
+committed, including their percent-encoded spellings and ASCII case variants. Unknown standalone
+CONFIG keys are refused rather than ignored. The generated [MYSQL client key reference](connector-capabilities.md#mysql-client)
+lists each key's presence, type and confidentiality; it does not expose additional pool-lifetime
+keys. The [pool minimum](database-client-pools.md#how-each-client-type-keeps-its-minimum) keeper waits
+one second before each pass, counting idle and checked-out connections together.
 
 `timeout_ms` is a positive, schedulable whole number of milliseconds. It bounds opening and
 validating the pool's first connection, each subsequent pool checkout (including connection
