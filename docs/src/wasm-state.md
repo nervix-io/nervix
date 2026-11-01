@@ -817,11 +817,10 @@ branches.
 | Large backup and restore | `backup_guest_saves.feature`: two 40 MiB branch saves on one and three nodes, bounded bulk capture, interrupted capture cleanup, exact restored bytes and the next guest callback |
 | Large saves within the replica deadline | `large_wasm_state_replication.feature`: 40 MiB saves of interleaved branches reach the checkpoint boundary on three nodes with one replica; the interconnect check that a bulk response puts one whole bulk receive window in flight before its reader reads, backed by exactly one `bulk_window` reservation |
 
-The [WASM state qualification
-ledger](https://github.com/nervix-io/nervix/blob/main/tests/wasm-state-qualification-ledger.md)
-records the commands, the defects the qualification found and fixed, the validation record, and the
-measured cost of a durable checkpoint: 3 to 18 milliseconds per round for one branch, and 6 to 37
-milliseconds for sixteen concurrent branches that share a synchronization.
+The [WASM state qualification map](https://github.com/nervix-io/nervix/blob/main/tests/wasm-state-qualification-ledger.md)
+records crash windows, guarantees and their executable evidence.
+[WASM State 11](https://app.clickup.com/t/86bc22g2q) retains the historical validation results,
+audit findings and durable-checkpoint cost measurements, with their commands and tested revision.
 
 ## Retained Checkpoint Assignment
 
