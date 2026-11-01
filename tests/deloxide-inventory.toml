@@ -1573,6 +1573,16 @@ scenario = "A second-domain quiesce expiry returns its failure and resumes both 
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Native-client command recovery and archive download after the first domain's mutation lease release meets a one-shot lapsed-leader-lease refusal. Existing client, storage and cluster lifecycle locks are tracked; consensus refusal and command-retry asynchronous waits are untracked."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-lease-release-recovery"
+invariant = "A refused first-domain mutation lease release leaves the admitted backup recoverable under its original reference, and the recovered archive contains both quiesced domain cuts on one and three nodes."
+invocation = "scenarios"
+scenario = "A cluster backup recovers a first-domain lease release refused by a lapsed leader lease on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Diagnostic cut timeout and domain resumption through the public CLI, retaining the active capture phase and elapsed completed drain."
 examples = 2
 feature = "tests/features/cluster/backup_cut_diagnostics.feature"
@@ -2373,6 +2383,16 @@ scenario = "A bounded native wait recovers the original multi-domain backup afte
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
+coverage = "Under scheduling stress: native-client command recovery and archive download after the first domain's mutation lease release meets a one-shot lapsed-leader-lease refusal. Consensus refusal and command-retry asynchronous waits remain untracked."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-lease-release-recovery"
+invariant = "A refused first-domain mutation lease release leaves the admitted backup recoverable under its original reference, and the recovered archive contains both quiesced domain cuts on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A cluster backup recovers a first-domain lease release refused by a lapsed leader lease on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Under scheduling stress: client command and pending-reply lifetimes while two delayed domain cuts each stay within their own budget and together exceed the ordinary request budget."
 examples = 2
 feature = "tests/features/cluster/backup_wait.feature"
@@ -3033,10 +3053,12 @@ path = "crates/client-core/src/client.rs"
 workloads = [
   "paced.reopen-generation",
   "paced.delayed-refusal",
+  "scenario.backup-lease-release-recovery",
   "scenario.backup-native-recovery",
   "scenario.backup-multi-domain-wait",
   "stress.paced.reopen-generation",
   "stress.paced.delayed-refusal",
+  "stress.backup-lease-release-recovery",
   "stress.backup-native-recovery",
   "stress.backup-multi-domain-wait",
 ]
@@ -3073,10 +3095,12 @@ path = "crates/client-core/src/exchange.rs"
 workloads = [
   "scenario.client-alter-drain",
   "paced.reopen-generation",
+  "scenario.backup-lease-release-recovery",
   "scenario.backup-native-recovery",
   "scenario.backup-multi-domain-wait",
   "stress.client-alter-drain",
   "stress.paced.reopen-generation",
+  "stress.backup-lease-release-recovery",
   "stress.backup-native-recovery",
   "stress.backup-multi-domain-wait",
 ]
