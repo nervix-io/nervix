@@ -596,6 +596,12 @@ contracts.
 | The primitive boundary check | `just validate-primitive-boundary` | No Nervix-authored code calls the operating system's resolver through `tokio::net::lookup_host` or `ToSocketAddrs` | Resolution inside a dependency |
 | The external Chaos suite | `just chaos` | Three node containers that advertise and bootstrap by container name through Docker's embedded DNS with the production resolver, including a recovered voter whose stopped bootstrap container no longer resolves | Arbitrary DNS failures, changed answers beyond the stopped container, and connector names |
 
+The RabbitMQ stalled-AMQP unit check starts its 500 ms handshake budget after the fixture name has
+resolved and its TCP transport has connected. Lookup and dialling have a separate generous setup
+bound there, so their scheduling delays cannot consume the handshake check's budget. The product
+retains one `connect_timeout_ms` deadline across all connection phases; lookup and dialling expiry
+have their own connection checks.
+
 The scenario features are `cluster/dns_resolution.feature`, the `runtime/*_dns_resolution.feature`
 files for RabbitMQ, Redis, MQTT, Syslog, WebSocket, ClickHouse and SQS, the fixture-name scenarios
 in the HTTP polling, Prometheus, Sentry, OTEL, Iceberg, HTTP emitter and WebSocket client features,
