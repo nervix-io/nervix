@@ -521,6 +521,28 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "CONSUMER"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_ingestion.feature", scenario = "NATS STREAM ingestor delivers and acknowledges what its durable consumer holds under <delivery>" },
+]
+
+[[capability]]
+capability = "MODE ACK PARALLEL"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_ingestion.feature", scenario = "NATS STREAM ingestor delivers and acknowledges what its durable consumer holds under <delivery>" },
+]
+
+[[capability]]
+capability = "MODE ACK SEQUENTIAL"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_ingestion.feature", scenario = "NATS STREAM ingestor delivers and acknowledges what its durable consumer holds under <delivery>" },
+  { feature = "tests/features/runtime/nats_ingestion.feature", scenario = "NATS STREAM ingestor negatively acknowledges a rejected delivery so its consumer delivers it again" },
+]
+
+[[capability]]
 capability = "BATCH"
 entity = "NATS SUBJECT EMITTER"
 scenarios = [

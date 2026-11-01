@@ -95,10 +95,10 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_ingestor_choices_logs";
-const KEYSPACE_META: &str = "raft_ingestor_choices_meta";
-const KEYSPACE_STATE_MACHINE: &str = "raft_ingestor_choices_state";
-const KEYSPACE_SNAPSHOT: &str = "raft_ingestor_choices_snapshots";
+const KEYSPACE_LOGS: &str = "raft_jetstream_logs";
+const KEYSPACE_META: &str = "raft_jetstream_meta";
+const KEYSPACE_STATE_MACHINE: &str = "raft_jetstream_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_jetstream_snapshots";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
 const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
 

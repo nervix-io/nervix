@@ -80,6 +80,8 @@ Feature: Visual connector choices follow the entity declarations
       | 3            | mqtt-topic            | no-ack         | ack-sequential | ack-parallel   | 3     | .create-ingestor-mqtt-session  |
       | 1            | nats-subject          | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-queue-group   |
       | 3            | nats-subject          | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-queue-group   |
+      | 1            | nats-stream           | ack-sequential | ack-parallel   | ack-parallel   | 2     | .create-ingestor-consumer      |
+      | 3            | nats-stream           | ack-sequential | ack-parallel   | ack-parallel   | 2     | .create-ingestor-consumer      |
       | 1            | rabbitmq-queue        | no-ack         | ack-sequential | ack-parallel   | 3     | .create-ingestor-queue         |
       | 3            | rabbitmq-queue        | no-ack         | ack-sequential | ack-parallel   | 3     | .create-ingestor-queue         |
       | 1            | redis-pubsub          | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-channel       |

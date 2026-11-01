@@ -1,7 +1,7 @@
-//! NatsSubjectIngestor, NatsSubjectEmitter connector entities.
+//! NatsSubjectIngestor, NatsSubjectEmitter and NatsStreamIngestor connector entities.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** The public subject connector implementation surface.
+//! - **Owns.** The public subject and stream connector implementation surface.
 //! - **Depends on.** The connector contract, vocabulary values and its own driver stack.
 //! - **Must not know.** Graph routing, registry state, placement or other connector engines.
 
@@ -17,7 +17,9 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+pub mod stream;
 pub mod subject;
+pub use stream::*;
 pub use subject::*;
 
 mod offline_config;

@@ -860,7 +860,7 @@ the names the connector recorded. A null name reads as absent. Each ingestor and
 [header model](connector-contract.md#header-models): what a repeated name keeps, the order names
 travel in, and whether names are recorded in lowercase, as HTTP field names are. Header reads are available on
 `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `HTTP REQUEST`, `KAFKA TOPIC`, `NATS SUBJECT`,
-`PULSAR TOPIC`, `RABBITMQ QUEUE`, and `SQS QUEUE` ingestors, in their `FILTER WHERE` and route
+`NATS STREAM`, `PULSAR TOPIC`, `RABBITMQ QUEUE`, and `SQS QUEUE` ingestors, in their `FILTER WHERE` and route
 construction, and in an error route's construction for a failure on such an ingestor. Header writes
 are available on HTTP, Kafka, NATS, Pulsar, RabbitMQ, and SQS emitters. Anywhere else a statement
 is rejected when it is validated, with a message such as `function 'read_header' is only available

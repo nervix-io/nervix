@@ -10,14 +10,15 @@ use nervix_models::{
     IngestorDeclaration, IngestorEntity, IngestorEntityBody, IngestorEntityKind, IngestorInput,
     KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicIngestor, MqttIngestMode,
     MqttIngestorEntity, MqttQos, MqttSession, MqttTopicIngestor, NatsIngestMode,
-    NatsIngestorEntity, NatsSubjectIngestor, PrometheusIngestMode, PrometheusIngestorEntity,
-    PrometheusQueryIngestor, PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription,
-    PulsarSubscriptionOwnership, PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestorEntity,
-    RabbitMqQueueIngestor, RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor,
-    RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SyslogIngestMode,
-    SyslogIngestorEntity, SyslogListenerIngestor, TransportIngestorInput,
-    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
-    WebsocketsIngestorEntity, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
+    NatsIngestorEntity, NatsStreamIngestMode, NatsStreamIngestor, NatsSubjectIngestor,
+    PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor, PulsarIngestMode,
+    PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicIngestor,
+    RabbitMqIngestMode, RabbitMqIngestorEntity, RabbitMqQueueIngestor, RedisIngestorEntity,
+    RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SqsIngestMode, SqsIngestorEntity,
+    SqsQueueIngestor, SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor,
+    TransportIngestorInput, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestMode, WebsocketsIngestorEntity, ZeroMqIngestMode, ZeroMqIngestorEntity,
+    ZeroMqPullIngestor,
 };
 
 use crate::{
@@ -120,6 +121,9 @@ impl Arbitrary<'_> {
             IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => self.mqtt_topic_source().into(),
             IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => {
                 self.nats_subject_source().into()
+            }
+            IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => {
+                self.nats_stream_source().into()
             }
             IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => {
                 self.rabbitmq_queue_source().into()
@@ -276,6 +280,18 @@ impl Arbitrary<'_> {
             queue_group: self.nats_queue_group_name(),
             instances: self.positive_u64(),
             mode: NatsIngestMode::NoAck,
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// A durable pull consumer of a JetStream stream.
+    pub fn nats_stream_source(&mut self) -> NatsStreamIngestor {
+        let source = NatsStreamIngestor {
+            client: self.name(),
+            stream: self.nats_stream_name(),
+            consumer: self.nats_consumer_name(),
+            mode: self.nats_stream_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -507,6 +523,21 @@ impl Arbitrary<'_> {
                     retry_policy: self.retry_policy(),
                 }
             }
+        }
+    }
+
+    fn nats_stream_mode(&mut self) -> NatsStreamIngestMode {
+        if self.entropy.flag() {
+            return NatsStreamIngestMode::AckSequential {
+                timeout: self.duration(),
+                retry_policy: self.retry_policy(),
+            };
+        }
+        NatsStreamIngestMode::AckParallel {
+            max: self.positive_u64(),
+            batch_timeout: self.duration(),
+            timeout: self.duration(),
+            retry_policy: self.retry_policy(),
         }
     }
 

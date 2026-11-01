@@ -167,6 +167,7 @@ keeps the ingestor's accepted policy.
 | --- | --- |
 | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC`, `RABBITMQ QUEUE` | `NO ACK`, `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` |
 | `SQS QUEUE` | `ACK SEQUENTIAL ...` |
+| `NATS STREAM` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` |
 | `CLIENT PRODUCER` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` without `BATCH TIMEOUT` |
 | `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `NO ACK`, `ACK MAX <n> ACK TIMEOUT <duration>` |
 | `HTTP REQUEST`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
@@ -176,8 +177,9 @@ delivery the message unfolded into has completed, and it reports that progress o
 transport confirmed the acknowledgement as far as the entity can: an `SQS QUEUE` waits for the
 broker's answer to its deletion, a `KAFKA TOPIC` for the answer to its consumer-group commit, or
 under `OFFSET BY DOMAIN` for its offsets' state replicas, a `PULSAR TOPIC` for the broker's answer
-to its acknowledgement, and a `RABBITMQ QUEUE` and an `MQTT TOPIC` for their acknowledgements to be
-written to the connection, which neither broker answers. An acknowledgement the transport fails to
+to its acknowledgement, a `NATS STREAM` for the server's answer to its acknowledgement, and a
+`RABBITMQ QUEUE` and an `MQTT TOPIC` for their acknowledgements to be written to the connection,
+which neither broker answers. An acknowledgement the transport fails to
 confirm, or a rejection it fails to take back, is a source error that `DESCRIBE INGESTOR` shows as
 the transient error until a later acknowledgement is confirmed, and the messages are delivered
 again. A node that stops gracefully waits for its ingestors' outstanding confirmations before it
@@ -273,7 +275,7 @@ A source accepts only the modes it can honor, and completion of its body offers 
 | `KAFKA TOPIC`, `PULSAR TOPIC`, `RABBITMQ QUEUE`, `SQS QUEUE` | `SUSPEND` |
 | `MQTT TOPIC` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP`; `SUSPEND` requires `SESSION PERSISTENT` at `QOS 1` or `QOS 2` |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `WEBSOCKETS CONNECTION` | `BUFFER ... ON OVERFLOW ...`, `DROP` |
-| `ZEROMQ PULL`, `SYSLOG LISTENER` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP` |
+| `ZEROMQ PULL`, `SYSLOG LISTENER`, `NATS STREAM` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | `HTTP REQUEST`, `PROMETHEUS QUERY` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...` |
 | `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `REJECT RETRY AFTER ...`; `BUFFER MAX SIZE ...` only with `MODE NO ACK` |
 | `CLIENT PRODUCER` | `SUSPEND` |
@@ -555,6 +557,7 @@ The `name` argument can be any expression that returns `STRING`. Both functions 
 - `WEBSOCKETS CONNECTION` exposes printable ASCII headers from its opening HTTP upgrade response
 - `KAFKA TOPIC` exposes Kafka record headers
 - `NATS SUBJECT` exposes message headers
+- `NATS STREAM` exposes the headers each message was published with
 - `PULSAR TOPIC` exposes message properties
 - `RABBITMQ QUEUE` exposes AMQP message headers, converting typed AMQP values to strings
 - `SQS QUEUE` exposes message attributes, converting string, number, and binary values to strings
@@ -570,6 +573,7 @@ Each of these sources declares a [header model](./connector-contract.md#header-m
 | `KAFKA TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `PULSAR TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| `NATS STREAM` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `SQS QUEUE` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `WEBSOCKETS CONNECTION` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
@@ -920,7 +924,8 @@ see [Metrics And Observability](metrics-and-observability.md#client-ingestors).
 ## External Names
 
 An ingestor names the external entity it reads with a string literal: a topic, consumer group,
-subscription, queue, channel, subject, queue group, or MQTT topic filter. Nervix keeps the name
+subscription, queue, channel, subject, queue group, JetStream stream or consumer, or MQTT topic
+filter. Nervix keeps the name
 exactly as written, letter case included, and sends it to the external system as written. Each
 entity validates its names when `CREATE` or `ALTER` applies, by the external system's own rule
 where it has one:
@@ -936,6 +941,8 @@ where it has one:
 | `REDIS PUBSUB` | `CHANNEL` | 1 to 1,024 bytes of any text; a `*` is the character itself, and pattern subscriptions are not offered |
 | `NATS SUBJECT` | `SUBJECT` | At most 1,024 bytes of `.`-separated tokens, none empty, without whitespace or control characters; `*` stands for one token and `>` for the rest, each only as a whole token, and `>` only last |
 | `NATS SUBJECT` | `QUEUE GROUP` | 1 to 255 bytes without whitespace or control characters |
+| `NATS STREAM` | `STREAM` | 1 to 255 bytes without whitespace, control characters, `.`, `*`, `>`, `/` or `\`: the JetStream server's own rule |
+| `NATS STREAM` | `CONSUMER` | The rule of a stream name |
 | `MQTT TOPIC` | `TOPIC` | A topic filter of 1 to 65,535 bytes without NUL; `+` stands for one level and `#` for the rest, each only as a whole level, and `#` only last. Levels are joined by `/` and may be empty. The first level is not `$share`, since Nervix forms the shared subscription itself |
 
 A reference to a Nervix model, such as a client, endpoint, schema, codec, or relay, stays a bare
@@ -959,6 +966,7 @@ under the same head. `DECODE USING <codec>`, the timestamp, the filter, the rout
 | `REDIS PUBSUB` | A channel, through a `REDIS CLIENT` | [Redis Pub/Sub](#redis-pubsub) |
 | `MQTT TOPIC` | A topic filter, through an `MQTT CLIENT` | [MQTT](#mqtt) |
 | `NATS SUBJECT` | A subject, through a `NATS CLIENT` | [NATS](#nats) |
+| `NATS STREAM` | A durable pull consumer of a JetStream stream, through a `NATS CLIENT` | [NATS](#nats) |
 | `ZEROMQ PULL` | The PULL socket of a `ZEROMQ CLIENT` | [ZeroMQ](#zeromq) |
 | `SYSLOG LISTENER` | The listener a `SYSLOG CLIENT` declares | [Syslog](#syslog) |
 | `SQS QUEUE` | A queue, through an `SQS CLIENT` | [SQS](#sqs) |
@@ -1751,10 +1759,10 @@ the NATS wildcards as whole tokens: `SUBJECT 'orders.*.EU'` matches one token in
 `SUBJECT 'orders.>'` every remaining token, so `>` comes last. A message's subject and reply
 subject are not exposed as typed metadata; programs read its payload and headers.
 
-NATS ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
+`NATS SUBJECT` ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
 are mandatory; use `INSTANCES 1` for a single queue member.
 
-Core NATS retains no backlog, so `SUSPEND` is unavailable. A quiesced instance remains a member of
+Core NATS retains no backlog, so `SUSPEND` is unavailable to `NATS SUBJECT`. A quiesced instance remains a member of
 its queue group and keeps receiving its share; that share is buffered or discarded rather than
 shifted to other members.
 
@@ -1770,6 +1778,81 @@ the instance has subscribed again, `DESCRIBE INGESTOR` shows `ready: true`, whil
 error and its backoff stay until the instance takes in its next message, which also returns the
 delay to 250 ms. Core NATS retains nothing for a subscription that is not connected, so messages
 published while the instance reconnects never reach it.
+
+<!-- connector-matrix:ingest-nats-stream:start -->
+```plexus,ignore
+CREATE NATS STREAM INGESTOR <name>
+  FROM <client> STREAM 'orders'
+  (CONSUMER 'nervix')
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | NATS client |
+| Locator and validation rule | STREAM 'orders' (nats_stream) |
+| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `CONSUMER 'nervix'` (string literal checked by nats_consumer); required |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| Metadata | Not offered: The current stream declaration exposes message headers but no typed stream, consumer, sequence, timestamp or delivery-count metadata namespace. |
+| Every live node | no; scheduled owner |
+| Position class | broker_redelivered |
+| Acknowledgement confirmation | answered |
+| Buffers | deliveries a pull request brought ahead of the host: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>the consumer lookup: driver default, 5 s request timeout<br>the answer to an acknowledgement or a negative acknowledgement: driver default, 10 s request timeout<br>a pull request, and a silent connection: driver default, a ping every 60 s; the connection ends after 2 go unanswered |
+| Driver limits | A pull request asks for at most the consumer's MaxRequestBatch and waits at most its MaxRequestExpires, where its operator set them. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
+
+See the [NATS STREAM capability and mirror reference](connector-capabilities.md#nats-stream-ingest).
+<!-- connector-matrix:ingest-nats-stream:end -->
+
+`NATS STREAM` reads a JetStream stream through one durable pull consumer of it, and both belong to
+an operator: Nervix creates neither. `STREAM` and `CONSUMER` are string literals Nervix names
+exactly as written within the [external name rules](#external-names).
+
+The instance connects, looks the consumer up, and refuses a consumer it cannot read as it declares:
+a push consumer, which delivers to a subject of its own, and a consumer whose acknowledgement policy
+is not explicit, which would not wait for each message's own acknowledgement. A stream or consumer
+that does not exist is reported by name as the ingestor's transient error, such as `NATS consumer
+'nervix' of stream 'orders' does not exist`, and the instance looks again on its `RETRY POLICY`
+until an operator provisions it.
+
+The instance pulls its deliveries. One pull request at a time asks for as many deliveries as the
+delivery mode lets wait on their acknowledgement, one under `ACK SEQUENTIAL` and `MAX` under
+`ACK PARALLEL`, and at most the consumer's `MaxRequestBatch` where its operator set one. A pull
+request waits without expiry, or for the consumer's `MaxRequestExpires` where its operator set one,
+after which the next request asks again. A delivery is acknowledged once every route and error
+delivery its records unfolded into has completed, and the acknowledgement is a request the server
+answers once it recorded it. A delivery the ingestor rejects, because its `ACK TIMEOUT` passed or a
+record of it failed, is negatively acknowledged, so the consumer delivers it again at once and the
+ingestor reads it again on its `RETRY POLICY`. Where the consumer's operator set a `MaxDeliver`, it
+bounds how often the consumer delivers a message, and JetStream stops delivering one that reached
+it.
+
+`SUSPEND` lets the instance's pull go: the instance unsubscribes the inbox its pull requests
+deliver to, so the consumer delivers nothing to it while it is suspended and the stream keeps
+everything published meanwhile for the consumer. A delivery the instance had received but not yet
+read when it suspends is negatively acknowledged, so the consumer delivers it again once the
+instance resumes, and one still on its way is delivered again once the consumer's `AckWait`
+passes. Under `BUFFER` and `DROP` the instance keeps pulling while it is quiesced and
+acknowledges each delivery once the host buffered or dropped it, as every acknowledged source does
+in those modes.
+
+The consumer's position is the stream's: an instance that resumes, on its own node or on another one
+after its owner stopped, continues after the last delivery it acknowledged. A delivery an instance
+received and had not acknowledged when its connection was lost is delivered again once the
+consumer's `AckWait` passes. A delivery carries the headers it was published with; its stream and
+consumer sequences, its timestamp and how often it was delivered are not exposed as typed metadata.
+A lost connection ends the instance's pull as it ends a `NATS SUBJECT` instance's subscription, and
+`DESCRIBE INGESTOR` shows it as the transient error `NATS connection lost` until the instance has
+connected, looked the consumer up and pulled again on its `RETRY POLICY`.
 
 ### ZeroMQ
 

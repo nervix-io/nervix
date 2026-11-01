@@ -111,6 +111,15 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
+    When these Plexus statements fail with "ingestor 'nats_stream_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but NATS STREAM ingestors declare no metadata field"
+      """
+      CREATE NATS STREAM INGESTOR nats_stream_source
+        FROM nats_main STREAM 'Orders' CONSUMER 'Readers'
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 1s MAX 30s
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
     When these Plexus statements fail with "ingestor 'sqs_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but SQS QUEUE ingestors declare no metadata field"
       """
       CREATE SQS QUEUE INGESTOR sqs_source

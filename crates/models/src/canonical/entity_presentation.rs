@@ -28,13 +28,13 @@ use crate::{
     IngestorEntityBody, IngestorEntityKind, IngestorEntityModel, IngestorInput, KafkaEmitter,
     KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, LocatorDeclaration, MongoDbEmitter,
     MqttEmitter, MqttIngestor, MqttTopicIngestor, MySqlEmitter, NatsEmitter, NatsIngestor,
-    NatsSubjectIngestor, OptionDeclaration, OptionPresence, OtelEmitter, OtelMetric,
-    OtelMetricKind, PostgresEmitter, PrometheusIngestor, PrometheusQueryIngestor, PulsarEmitter,
-    PulsarIngestor, PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestor, RabbitMqQueueIngestor,
-    RedisEmitter, RedisIngestor, RedisPubSubIngestor, SentryEmitter, SqsEmitter, SqsFifoGroup,
-    SqsIngestor, SqsQueueIngestor, SyslogIngestor, SyslogListenerIngestor,
-    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestor, ZeroMqIngestor,
-    ZeroMqPullIngestor,
+    NatsStreamIngestor, NatsSubjectIngestor, OptionDeclaration, OptionPresence, OtelEmitter,
+    OtelMetric, OtelMetricKind, PostgresEmitter, PrometheusIngestor, PrometheusQueryIngestor,
+    PulsarEmitter, PulsarIngestor, PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestor,
+    RabbitMqQueueIngestor, RedisEmitter, RedisIngestor, RedisPubSubIngestor, SentryEmitter,
+    SqsEmitter, SqsFifoGroup, SqsIngestor, SqsQueueIngestor, SyslogIngestor,
+    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestor, ZeroMqIngestor, ZeroMqPullIngestor,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -470,6 +470,15 @@ impl IngestorPresentationModel for NatsSubjectIngestor {
     }
 }
 
+impl IngestorPresentationModel for NatsStreamIngestor {
+    fn entity_presentation(&self) -> EntityPresentation {
+        let mut presentation = EntityPresentation::ingestor(self);
+        presentation.external_locator(self.stream.as_str());
+        presentation.written_option("CONSUMER", string_literal(self.consumer.as_str()));
+        presentation
+    }
+}
+
 macro_rules! queue_ingestor_presentations {
     ($($Model:ty),+ $(,)?) => {
         $(impl IngestorPresentationModel for $Model {
@@ -514,6 +523,7 @@ impl IngestorEntity {
             Self::Pulsar(PulsarIngestor::Topic(entity)) => entity.entity_presentation(),
             Self::Mqtt(MqttIngestor::Topic(entity)) => entity.entity_presentation(),
             Self::Nats(NatsIngestor::Subject(entity)) => entity.entity_presentation(),
+            Self::Nats(NatsIngestor::Stream(entity)) => entity.entity_presentation(),
             Self::RabbitMq(RabbitMqIngestor::Queue(entity)) => entity.entity_presentation(),
             Self::Redis(RedisIngestor::PubSub(entity)) => entity.entity_presentation(),
             Self::Prometheus(PrometheusIngestor::Query(entity)) => entity.entity_presentation(),

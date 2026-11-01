@@ -236,7 +236,7 @@ commands under the same session and domain.
 
 An ingestor form offers every connector and entity an ingestor reads through a transport:
 `HTTP REQUEST`, `HTTP ENDPOINT`, `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC`, `NATS SUBJECT`,
-`RABBITMQ QUEUE`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SQS QUEUE`,
+`NATS STREAM`, `RABBITMQ QUEUE`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SQS QUEUE`,
 `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER`. Its client or endpoint is a
 typed choice limited to that pair: clients of its connector, or endpoints of the `TYPE` its head
 names. The preview writes the statement under that pair's head. The entity declaration supplies

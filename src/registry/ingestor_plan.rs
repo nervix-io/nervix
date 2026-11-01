@@ -25,19 +25,19 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
     AckWindow, ClientConfigEntry, ClientEndpointContract, ClientName, ClientProducerIngestor,
-    ClientProducerPolicy, ClientResourceMount, ClusterNodeName, CodecName, CreateClientWebsockets,
-    CreateIngestor, CreateSchema, DomainName, EndpointIngestMode, EndpointName, FlushPolicy,
-    GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor, HttpRequestIngestor,
-    IngestAcknowledgement, IngestQuiesceMode, IngestTimestampSource, IngestorEntity,
-    IngestorEntityKind, IngestorInput, IngestorName, KafkaIngestMode, KafkaIngestor,
-    KafkaOffsetMode, KafkaTopicIngestor, MessageErrorOperation, Model, ModelName, MqttIngestMode,
-    MqttIngestor, MqttTopicIngestor, NatsIngestor, NatsSubjectIngestor, PrometheusIngestor,
-    PulsarIngestMode, PulsarIngestor, PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestor,
-    RabbitMqQueueIngestor, RedisIngestor, RedisPubSubIngestor, ResolvedBranching, ScheduledNode,
-    SchemaField, SchemaName, SignalingProtocolName, SqsIngestMode, SqsIngestor, SqsQueueIngestor,
-    SyslogIngestor, SyslogListenerIngestor, WebsocketsConnectionIngestor,
-    WebsocketsEndpointIngestor, WebsocketsIngestor, ZeroMqIngestor, ZeroMqPullIngestor,
-    parse_duration_text,
+    ClientProducerPolicy, ClientResourceMount, ClusterNodeName, CodecName, CreateClientNats,
+    CreateClientWebsockets, CreateIngestor, CreateSchema, DomainName, EndpointIngestMode,
+    EndpointName, FlushPolicy, GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor,
+    HttpRequestIngestor, IngestAcknowledgement, IngestQuiesceMode, IngestTimestampSource,
+    IngestorEntity, IngestorEntityKind, IngestorInput, IngestorName, KafkaIngestMode,
+    KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, MessageErrorOperation, Model, ModelName,
+    MqttIngestMode, MqttIngestor, MqttTopicIngestor, NatsIngestor, NatsStreamIngestor,
+    NatsSubjectIngestor, PrometheusIngestor, PulsarIngestMode, PulsarIngestor, PulsarTopicIngestor,
+    RabbitMqIngestMode, RabbitMqIngestor, RabbitMqQueueIngestor, RedisIngestor,
+    RedisPubSubIngestor, ResolvedBranching, ScheduledNode, SchemaField, SchemaName,
+    SignalingProtocolName, SqsIngestMode, SqsIngestor, SqsQueueIngestor, SyslogIngestor,
+    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestor, ZeroMqIngestor, ZeroMqPullIngestor, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 
@@ -195,6 +195,11 @@ client_plan!(NatsSubjectIngestorStartPlan {
     queue_group: nervix_models::NatsQueueGroupName,
     instances: NonZeroU64,
     mode: nervix_models::NatsIngestMode,
+});
+client_plan!(NatsStreamIngestorStartPlan {
+    stream: nervix_models::NatsStreamName,
+    consumer: nervix_models::NatsConsumerName,
+    mode: nervix_models::NatsStreamIngestMode,
 });
 client_plan!(RabbitMqQueueIngestorStartPlan {
     queue: nervix_models::RabbitMqQueueName,
@@ -418,10 +423,11 @@ pub(crate) enum MqttIngestorStartPlan {
     Topic(MqttTopicIngestorStartPlan),
 }
 
-/// The subject entity planned for Nats execution.
+/// The subject and stream entities planned for Nats execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NatsIngestorStartPlan {
     Subject(NatsSubjectIngestorStartPlan),
+    Stream(NatsStreamIngestorStartPlan),
 }
 
 /// The pull entity planned for ZeroMq execution.
@@ -517,6 +523,7 @@ impl IngestorStartPlan {
             IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(_))
             | IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(_))
             | IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Subject(_))
+            | IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Stream(_))
             | IngestorConnectorPlan::RabbitMq(RabbitMqIngestorStartPlan::Queue(_))
             | IngestorConnectorPlan::Redis(RedisIngestorStartPlan::PubSub(_))
             | IngestorConnectorPlan::Prometheus(PrometheusIngestorStartPlan::Query(_))
@@ -591,6 +598,9 @@ impl IngestorStartPlan {
                 plan.mode.acknowledgement()
             }
             IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Subject(plan)) => {
+                plan.mode.acknowledgement()
+            }
+            IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Stream(plan)) => {
                 plan.mode.acknowledgement()
             }
             IngestorConnectorPlan::RabbitMq(RabbitMqIngestorStartPlan::Queue(plan)) => {
@@ -811,6 +821,56 @@ fn client_endpoint_contract(
     ))
 }
 
+impl NatsIngestorStartPlan {
+    /// The plan of the NATS entity `source` names, which reads through the NATS client `client`.
+    fn decide(
+        name: &IngestorName,
+        source: &NatsIngestor,
+        client: &CreateClientNats,
+    ) -> Result<Self, Report<EntrypointPlanError>> {
+        match source {
+            NatsIngestor::Subject(NatsSubjectIngestor {
+                client: expected,
+                subject,
+                queue_group,
+                instances,
+                mode,
+                ..
+            }) => Ok(Self::Subject(NatsSubjectIngestorStartPlan {
+                client: IngestorClientSpec::resolved(
+                    name,
+                    expected,
+                    &client.name,
+                    client.mount.as_ref(),
+                    &client.config,
+                )?,
+                subject: subject.clone(),
+                queue_group: queue_group.clone(),
+                instances: *instances,
+                mode: mode.clone(),
+            })),
+            NatsIngestor::Stream(NatsStreamIngestor {
+                client: expected,
+                stream,
+                consumer,
+                mode,
+                ..
+            }) => Ok(Self::Stream(NatsStreamIngestorStartPlan {
+                client: IngestorClientSpec::resolved(
+                    name,
+                    expected,
+                    &client.name,
+                    client.mount.as_ref(),
+                    &client.config,
+                )?,
+                stream: stream.clone(),
+                consumer: consumer.clone(),
+                mode: mode.clone(),
+            })),
+        }
+    }
+}
+
 impl WebsocketsConnectionIngestorStartPlan {
     fn decide(
         name: &IngestorName,
@@ -952,31 +1012,9 @@ impl IngestorConnectorPlan {
                     mode: mode.clone(),
                 },
             ))),
-            (
-                IngestorEntity::Nats(NatsIngestor::Subject(NatsSubjectIngestor {
-                    client: expected,
-                    subject,
-                    queue_group,
-                    instances,
-                    mode,
-                    ..
-                })),
-                Model::ClientNats(resolved),
-            ) => Ok(Self::Nats(NatsIngestorStartPlan::Subject(
-                NatsSubjectIngestorStartPlan {
-                    client: IngestorClientSpec::resolved(
-                        name,
-                        expected,
-                        &resolved.name,
-                        resolved.mount.as_ref(),
-                        &resolved.config,
-                    )?,
-                    subject: subject.clone(),
-                    queue_group: queue_group.clone(),
-                    instances: *instances,
-                    mode: mode.clone(),
-                },
-            ))),
+            (IngestorEntity::Nats(source), Model::ClientNats(resolved)) => Ok(Self::Nats(
+                NatsIngestorStartPlan::decide(name, source, resolved)?,
+            )),
             (
                 IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(RabbitMqQueueIngestor {
                     client: expected,

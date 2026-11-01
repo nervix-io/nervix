@@ -130,6 +130,7 @@ impl<'a> ConfiguredQuery<'a> {
             | ChoiceTarget::IngestPulsarSource
             | ChoiceTarget::IngestMqttSource
             | ChoiceTarget::IngestNatsSource
+            | ChoiceTarget::IngestNatsStreamSource
             | ChoiceTarget::IngestRabbitMqSource
             | ChoiceTarget::IngestRedisPubSubSource
             | ChoiceTarget::IngestPrometheusSource
