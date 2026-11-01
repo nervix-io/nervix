@@ -374,9 +374,12 @@ retain that table's `FileIO` and its initialized storage, so later object calls 
 an object URL for a different storage root is refused. OpenDAL's credential providers keep their
 own credential refresh. Storage calls make one attempt: the emitter host owns retry pacing, and
 neither an OpenDAL retry layer nor the HTTP client's retry policy multiplies that attempt.
-Azure locations select the Blob service with `wasb`/`wasbs` and the Data Lake service with
-`abfs`/`abfss`; their account hosts identify the corresponding `blob` or `dfs` service. Both use
-the same node resolver and storage-client operation deadline described here.
+An Azure location's host names the Blob service for `wasb`/`wasbs` and the Data Lake service for
+`abfs`/`abfss`, and the emitter checks that service and the container before `@` when it opens.
+Object requests for every Azure scheme go to the account's Data Lake endpoint, which the connector
+derives from the location's account and suffix, over HTTPS for `wasbs` and `abfss` and plain HTTP
+for `wasb` and `abfs`, with the location's container as the file system. They use the same node
+resolver and storage-client operation deadline described here.
 The standalone OpenDAL S3 `detect_region` helper constructs its own client, but
 Nervix does not call it; S3 operator construction requires its configured region or the driver's
 environment policy.
