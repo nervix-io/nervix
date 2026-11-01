@@ -178,7 +178,7 @@ use crate::common::{
     },
     scenario_schedule::{
         FeatureLimit, SCENARIO_RETRIES, ScenarioAdmission, ScenarioLength, ScenarioRunSlots,
-        prioritize_features,
+        ScenarioWeight, prioritize_features,
     },
     scenario_shard::{ScenarioShard, ScenarioShardArgs},
     server_process::{
@@ -1016,6 +1016,50 @@ impl ScenarioWorld {
                  pause within {duration:?}: {error}"
             )
         });
+    }
+
+    /// Waits until the commit in the scenario's domain reaches the pause armed on `node_id` after
+    /// `completed_statements` statements.
+    ///
+    /// The COMMIT a background execution sent is watched meanwhile, so one that ends before its
+    /// commit reaches the pause fails the step with its own outcome rather than this deadline.
+    /// Either failure releases the pause first: a commit that reaches it after the step gave up
+    /// passes it, instead of holding its node's shutdown for the rest of the drain deadline.
+    async fn wait_for_transaction_commit_pause(
+        &mut self,
+        node_id: &str,
+        completed_statements: usize,
+    ) {
+        let node_name = crate::common::cluster::node_name(node_id);
+        let fault_injection = self.fault_injection.clone();
+        let domain = self.domain.clone();
+        let pause = fault_injection.wait_for_transaction_commit_pause(
+            &node_name,
+            &domain,
+            completed_statements,
+        );
+        let background_commit = self.background_plexus.as_mut();
+        let observed = nervix_primitives::time::timeout(TRANSACTION_COMMIT_PAUSE_TIMEOUT, async {
+            let Some(commit) = background_commit else {
+                pause.await;
+                return None;
+            };
+            nervix_primitives::select! {
+                () = pause => None,
+                outcome = commit => Some(outcome),
+            }
+        })
+        .await;
+        let failure = match observed {
+            Ok(None) => return,
+            Ok(Some(outcome)) => format!("the background COMMIT ended first: {outcome:?}"),
+            Err(error) => format!("{error} after {TRANSACTION_COMMIT_PAUSE_TIMEOUT:?}"),
+        };
+        fault_injection.release_transaction_commit_pause(&node_name, &domain, completed_statements);
+        panic!(
+            "the commit on '{node_id}' did not reach its pause after {completed_statements} \
+             statement(s): {failure}"
+        );
     }
 }
 
@@ -14060,6 +14104,17 @@ async fn when_physical_time_passes(_world: &mut ScenarioWorld, duration: String)
     nervix_primitives::time::sleep(duration).await;
 }
 
+/// How long a scenario waits for a commit to reach a transaction commit pause it armed.
+///
+/// A commit reaches its pause only after its admission and, for a later statement, the step's
+/// domain pause, drain, entity gates and publication, which a loaded runner delays. A three-node
+/// leader whose raft lease lapses under that load refuses the step's publication while it still
+/// leads; the COMMIT answers as a node that does not lead, its client sends it again under the same
+/// execution reference, and the next attempt adopts the step's pause and runs the step again. The
+/// wait ends as soon as the pause is reached, or the COMMIT ends, so the bound is the generous one
+/// the pause steps use.
+const TRANSACTION_COMMIT_PAUSE_TIMEOUT: Duration = Duration::from_secs(120);
+
 #[then(expr = "the transaction commit pause on node {string} after {int} statement is reached")]
 async fn then_transaction_commit_pause_is_reached(
     world: &mut ScenarioWorld,
@@ -14067,16 +14122,9 @@ async fn then_transaction_commit_pause_is_reached(
     completed_statements: usize,
 ) {
     let node_id = expand_placeholders(world, &node_id);
-    nervix_primitives::time::timeout(
-        Duration::from_secs(10),
-        world.fault_injection.wait_for_transaction_commit_pause(
-            &crate::common::cluster::node_name(&node_id),
-            &world.domain,
-            completed_statements,
-        ),
-    )
-    .await
-    .expect("transaction commit did not reach the armed pause");
+    world
+        .wait_for_transaction_commit_pause(&node_id, completed_statements)
+        .await;
 }
 
 #[when(expr = "the transaction commit pause on node {string} after {int} statement is released")]
@@ -14114,16 +14162,7 @@ async fn then_transaction_commit_admission_pause_is_reached(world: &mut Scenario
         .get("transaction_commit_admission_node")
         .cloned()
         .verified("the preceding admission-pause step saved its leader");
-    nervix_primitives::time::timeout(
-        Duration::from_secs(10),
-        world.fault_injection.wait_for_transaction_commit_pause(
-            &crate::common::cluster::node_name(&leader),
-            &world.domain,
-            0,
-        ),
-    )
-    .await
-    .expect("transaction commit did not reach the admission pause");
+    world.wait_for_transaction_commit_pause(&leader, 0).await;
 }
 
 #[when("the transaction commit admission pause on the leader node is released")]
@@ -33827,6 +33866,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
             };
             let declared_tags = feature.tags.iter().chain(rule_tags).chain(&scenario.tags);
             let length = ScenarioLength::declared_by(declared_tags.map(String::as_str));
+            let declared_weight = ScenarioWeight::for_scenario(feature, rule, scenario);
             let run_slots = run_slots.clone();
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
@@ -33839,9 +33879,15 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 );
                 let run = registration.run();
                 world.active_scenario = Some(registration);
+                let weight = declared_weight.unwrap_or_else(|error| {
+                    panic!(
+                        "invalid run-slot declaration for feature {feature_name:?}, scenario \
+                         {scenario_name:?}, line {scenario_line}: {error}"
+                    )
+                });
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, length, &feature_name, run, |reason| {
+                    .admit_with(limit, length, weight, &feature_name, run, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;
