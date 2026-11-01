@@ -223,6 +223,7 @@ capability = "NAMESPACE"
 entity = "ICEBERG TABLE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/iceberg_declarations.feature", scenario = "An Iceberg emitter commits to a case-preserving multilevel catalog namespace" },
+  { feature = "tests/features/runtime/iceberg_declarations.feature", scenario = "ALTER ICEBERG TABLE EMITTER SET TO moves an emitter to a table in another catalog namespace" },
 ]
 
 [[capability]]
