@@ -224,6 +224,14 @@ impl Arbitrary<'_> {
                     queue: self.rabbitmq_queue_name(),
                 }))
             }
+            EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Exchange) => {
+                EmitterEntity::RabbitMq(RabbitMqEmitter::Exchange(RabbitMqExchangeEmitter {
+                    mode: self.rabbitmq_exchange_publication(),
+                    client: self.name(),
+                    exchange: self.rabbitmq_exchange_name(),
+                    routing_key: self.expression(),
+                }))
+            }
             EmitterEntityKind::Redis(RedisEmitterEntity::PubSub) => {
                 EmitterEntity::Redis(RedisEmitter::PubSub(RedisPubSubEmitter {
                     mode: self.redis_pubsub_publication(),
@@ -582,6 +590,7 @@ publication_generators! {
     kafka_topic_publication(arbitrary) -> KafkaTopicPublishingMode = [KafkaTopicPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, KafkaTopicPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
     pulsar_topic_publication(arbitrary) -> PulsarTopicPublishingMode = [PulsarTopicPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, PulsarTopicPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
     rabbitmq_queue_publication(arbitrary) -> RabbitMqQueuePublishingMode = [RabbitMqQueuePublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, RabbitMqQueuePublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
+    rabbitmq_exchange_publication(arbitrary) -> RabbitMqExchangePublishingMode = [RabbitMqExchangePublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, RabbitMqExchangePublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
     redis_pubsub_publication(arbitrary) -> RedisPubSubPublishingMode = [RedisPubSubPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }];
     mqtt_topic_publication(arbitrary) -> MqttTopicPublishingMode = [MqttTopicPublishingMode::Qos0 { retry_policy: arbitrary.retry_policy() }, MqttTopicPublishingMode::Qos1 { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }, MqttTopicPublishingMode::Qos2 { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
     nats_subject_publication(arbitrary) -> NatsSubjectPublishingMode = [NatsSubjectPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, NatsSubjectPublishingMode::JetStream { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
