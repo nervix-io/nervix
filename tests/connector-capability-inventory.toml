@@ -811,10 +811,18 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "SUBSCRIPTION OWNED BY INGESTOR"
+capability = "SUBSCRIPTION OWNED BY INGESTOR START AT EARLIEST"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/pulsar_subscriptions.feature", scenario = "Dropping a Pulsar ingestor removes the subscription it owns" },
+  { feature = "tests/features/runtime/pulsar_start_position.feature", scenario = "An owned Pulsar subscription replays its backlog and keeps its cursor when START AT changes" },
+]
+
+[[capability]]
+capability = "SUBSCRIPTION OWNED BY INGESTOR START AT LATEST"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_start_position.feature", scenario = "A new owned Pulsar subscription starts after the backlog when START AT LATEST is declared" },
 ]
 
 [[capability]]

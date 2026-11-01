@@ -424,7 +424,9 @@ typed fields: the field, input relay, route target, or materialized dependency, 
 requested names when an alteration targets another Model. An ingestor alteration whose head names
 another connector and entity than the stored ingestor reads is refused with both typed kinds, which
 its message renders as their phrases, such as `the stored ingestor reads HTTP ENDPOINT, so ALTER
-KAFKA TOPIC INGESTOR cannot alter it`. An input, route, or dependency operation
+KAFKA TOPIC INGESTOR cannot alter it`. A Pulsar `SET START AT` on a provisioned subscription is a
+typed vocabulary alteration refusal; the existing definition and broker cursor are unchanged.
+An input, route, or dependency operation
 that junctions, deduplicators, reorderers, and reingestors share is reported in the altered
 processor's own error where it is detected, so the report begins at the failure rather than at a
 conversion. Canonical Plexus rendering refuses only a value the language has no spelling for: a NaN or
@@ -1413,7 +1415,10 @@ the wait: an installation slot, or every live node preparing or readying a revis
 reports it beneath `DomainAlterError::BackupPauseTimeout`, and the cut attributes that to its drain
 phase as its timeout, such as `timed out waiting to capture domain 'edge': phase=drain, ...: timed
 out applying the backup pause of domain 'edge': the caller's deadline ended the runtime application
-while it waited for every live node to ready runtime revision 9`.
+while it waited for every live node to ready runtime revision 9`. An already elapsed deadline
+refuses the first installation wait immediately, even when its slot is available; attribution
+does not depend on whether the timer driver has processed that deadline yet. A pause committed
+after its cut's deadline therefore retains the installation refusal beneath the pause timeout.
 
 ### Ingestors, Emitters And Generators
 

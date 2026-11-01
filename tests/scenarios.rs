@@ -19434,7 +19434,8 @@ impl UnacknowledgedSourceFixture {
             }
             Self::Pulsar => {
                 "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
-          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR INSTANCES 1 MODE NO ACK
+          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST INSTANCES \
+                 1 MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::RedisPubSub => {

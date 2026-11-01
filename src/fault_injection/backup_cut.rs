@@ -2,8 +2,8 @@
 //!
 //! Layer: test harness, outside the product layer order.
 //! - **Owns.** Domain-scoped gates a backup cut reaches once it holds its lease, while the cluster
-//!   applies its pause, once its domain is paused, and before its owners capture state, and how
-//!   each gate holds every cut or node wait that reaches it.
+//!   applies its pause, once its pause commits, once its domain is paused, and before its owners
+//!   capture state, and how each gate holds every cut or node wait that reaches it.
 //! - **Depends on.** Execution-sensitive watch channels, timers and cooperative budget, and
 //!   vocabulary identities.
 //! - **Must not know.** Archive contents, the nodes a cut must reach or backup recovery policy.
@@ -39,6 +39,10 @@ pub enum BackupCutBoundary {
     /// Once a quiesced cut holds its domain's lease, before it checks the nodes it must reach and
     /// before it pauses the domain.
     Lease,
+    /// After the replicated pause completes, before the coordinator tries to install it. A hold
+    /// here models a pause proposal whose result arrives after the cut's deadline; reconciliation
+    /// remains free to install committed revisions while the coordinator waits.
+    PauseCommitted,
     /// While the cluster applies a cut's pause: each node's wait for every live node to ready a
     /// runtime revision in which the domain is paused, the cut's own wait and every node's
     /// reconciliation alike. A hold here is a cluster slow to apply the pause, which the cut's
@@ -191,8 +195,8 @@ impl FaultInjection {
         self.backup_cut_gate(domain, boundary).release();
     }
 
-    /// Releases every armed lease, pause-application, drain and capture gate before forgetting
-    /// them. Cuts and waits that already borrowed a gate observe its release; those that arrive
+    /// Releases every armed lease, committed-pause, pause-application, drain and capture gate before
+    /// forgetting them. Cuts and waits that already borrowed a gate observe its release; those that arrive
     /// later find no gate to hold them. Returns how many gates cleanup released.
     pub fn release_all_backup_cut_pauses(&self) -> usize {
         let released = self.inner.backup_cut_gates.len();
