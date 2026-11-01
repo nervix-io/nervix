@@ -11,7 +11,7 @@
 )]
 
 use std::{
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::Range,
     str::FromStr,
 };
@@ -465,6 +465,45 @@ pub fn nonzero_u32_value<'src>(
     u32_value(label)
         .try_map(move |value, span| {
             NonZeroU32::new(value).ok_or_else(|| Rich::custom(span, zero_reason))
+        })
+        .boxed()
+}
+
+/// An integer written where the count is bounded by the 16-bit range its Model uses.
+///
+/// The bound belongs to the value, so a count outside it is rejected where it is written rather
+/// than narrowed later: the message names the range instead of leaving a truncated number behind.
+pub fn u16_value<'src>(
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], u16, extra::Err<ParseError<'src>>> + Clone {
+    // Each alternative carries the label for the same reason `u64_value` does: chumsky only
+    // rewrites an alternative error whose position matches the start of the labelled parser.
+    choice((
+        select! { Token::NumberLiteral(v) => v }.labelled(label),
+        word_raw().labelled(label),
+    ))
+    .try_map(|raw, span| {
+        integer_literal::<u16>(&raw).map_err(|_| {
+            Rich::custom(
+                span,
+                format!("invalid integer '{raw}'; expected 0 through {}", u16::MAX),
+            )
+        })
+    })
+    .boxed()
+}
+
+/// A 16-bit count written where zero has no meaning, parsed straight into `NonZeroU16`.
+///
+/// The label goes on the integer itself, not on the checked parser: labelling the check would
+/// rewrite `zero_reason` into a bare expectation and lose the explanation.
+pub fn nonzero_u16_value<'src>(
+    label: &'static str,
+    zero_reason: &'static str,
+) -> impl Parser<'src, &'src [Token], NonZeroU16, extra::Err<ParseError<'src>>> + Clone {
+    u16_value(label)
+        .try_map(move |value, span| {
+            NonZeroU16::new(value).ok_or_else(|| Rich::custom(span, zero_reason))
         })
         .boxed()
 }

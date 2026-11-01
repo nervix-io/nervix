@@ -31,12 +31,12 @@ fn channel() -> RelayOutboundChannel {
 fn retained_branches_follow_routes_but_never_follow_recreated_incarnations() {
     let channels = RelayChannels::default();
     let key = string_branch_key("tenant", "acme");
-    let branch = channels.bind(&key);
+    let branch = channels.bind(&key, Unit::Single);
     let ingress = branch.ingress();
     let outbound = branch.outbound(channel());
-    assert!(StdArc::ptr_eq(&branch, &channels.bind(&key)));
+    assert!(StdArc::ptr_eq(&branch, &channels.bind(&key, Unit::Single)));
     assert!(StdArc::ptr_eq(&outbound, &branch.outbound(channel())));
-    channels.replace_owner();
+    channels.replace_owner_of([Unit::Single]);
     assert!(ingress.cancellation().is_cancelled());
     assert!(outbound.cancellation().is_cancelled());
     let current = branch.ingress();
@@ -45,7 +45,7 @@ fn retained_branches_follow_routes_but_never_follow_recreated_incarnations() {
     assert!(current.cancellation().is_cancelled());
     assert!(branch.is_retired());
     assert!(branch.ingress().cancellation().is_cancelled());
-    let recreated = channels.bind(&key);
+    let recreated = channels.bind(&key, Unit::Single);
     assert!(!StdArc::ptr_eq(&branch, &recreated));
     assert!(!recreated.ingress().cancellation().is_cancelled());
     channels.retire_all();
@@ -60,18 +60,20 @@ fn bolero_relay_sequences_preserve_exact_lifetimes_and_order() {
         .with_iterations(256)
         .with_max_len(64)
         .for_each(|bytes: &[u8]| {
-            let channels = RelayChannels::default();
+            // Two partitions of one relay: eta lands in partition 0 of 2 and acme in partition 1.
+            let units = [Unit::Partition(0), Unit::Partition(1)];
+            let channels = RelayChannels::for_units(&units);
             let keys = [
-                string_branch_key("tenant", "acme"),
-                string_branch_key("tenant", "beta"),
+                (string_branch_key("tenant", "eta"), Unit::Partition(0)),
+                (string_branch_key("tenant", "acme"), Unit::Partition(1)),
             ];
             let mut retained = Vec::new();
             let mut last = HashMap::default();
             for byte in bytes {
-                let key = &keys[usize::from(byte / 5) % keys.len()];
+                let (key, unit) = &keys[usize::from(byte / 5) % keys.len()];
                 match byte % 5 {
                     0 | 1 => {
-                        let branch = channels.bind(key);
+                        let branch = channels.bind(key, *unit);
                         let slot = branch.outbound(channel());
                         let delivery = slot.next_delivery();
                         if let Some(previous) =
@@ -81,24 +83,46 @@ fn bolero_relay_sequences_preserve_exact_lifetimes_and_order() {
                         } else {
                             assert_eq!(delivery.sequence, 0);
                         }
-                        retained.push((key.clone(), branch, slot));
+                        retained.push((key.clone(), *unit, branch, slot));
                     }
                     2 => {
-                        channels.replace_owner();
-                        for (_, _, slot) in &retained {
-                            assert!(slot.cancellation().is_cancelled());
+                        // Replacing one partition's owner cancels the channels of exactly that
+                        // partition's branches.
+                        let live_elsewhere = retained
+                            .iter()
+                            .filter(|(_, owner, _, slot)| {
+                                owner != unit && !slot.cancellation().is_cancelled()
+                            })
+                            .count();
+                        channels.replace_owner_of([*unit]);
+                        for (_, owner, _, slot) in &retained {
+                            if owner == unit {
+                                assert!(slot.cancellation().is_cancelled());
+                            }
                         }
+                        let still_live = retained
+                            .iter()
+                            .filter(|(_, owner, _, slot)| {
+                                owner != unit && !slot.cancellation().is_cancelled()
+                            })
+                            .count();
+                        assert_eq!(still_live, live_elsewhere);
                     }
                     3 => {
                         channels.retire(key);
-                        for (selected, branch, slot) in &retained {
+                        for (selected, _, branch, slot) in &retained {
                             if selected == key {
                                 assert!(branch.is_retired());
                                 assert!(slot.cancellation().is_cancelled());
                             }
                         }
                     }
-                    _ => channels.replace_destinations(),
+                    _ => {
+                        channels.replace_destinations();
+                        for (_, _, _, slot) in &retained {
+                            assert!(slot.cancellation().is_cancelled());
+                        }
+                    }
                 }
                 assert!(channels.branches.load().len() <= keys.len());
                 for branch in channels.branches.load().values() {
@@ -109,7 +133,7 @@ fn bolero_relay_sequences_preserve_exact_lifetimes_and_order() {
             assert!(
                 retained
                     .iter()
-                    .all(|(_, branch, slot)| branch.is_retired()
+                    .all(|(_, _, branch, slot)| branch.is_retired()
                         && slot.cancellation().is_cancelled())
             );
         });
@@ -119,7 +143,7 @@ fn bolero_relay_sequences_preserve_exact_lifetimes_and_order() {
 fn withdrawal_releases_the_branch_after_its_last_producer_ends() {
     let channels = RelayChannels::default();
     let key = string_branch_key("tenant", "acme");
-    let retained = channels.bind(&key);
+    let retained = channels.bind(&key, Unit::Single);
     let weak = StdArc::downgrade(&retained);
     channels.retire(&key);
     assert!(weak.upgrade().is_some());
@@ -131,7 +155,7 @@ fn withdrawal_releases_the_branch_after_its_last_producer_ends() {
 async fn retirement_ends_a_queued_channel_wait_without_waiting_for_its_holder() {
     use futures_util::FutureExt as _;
     let channels = RelayChannels::default();
-    let branch = channels.bind(&None);
+    let branch = channels.bind(&None, Unit::Single);
     let slot = branch.outbound(channel());
     let holder = slot
         .lock_for_delivery()
@@ -151,7 +175,7 @@ async fn retirement_ends_a_queued_channel_wait_without_waiting_for_its_holder() 
 fn relay_channel_cost() {
     let channels = RelayChannels::default();
     let key = string_branch_key("tenant", "acme");
-    let branch = channels.bind(&key);
+    let branch = channels.bind(&key, Unit::Single);
     let allocated = tikv_jemalloc_ctl::thread::allocatedp::read().expect("server uses jemalloc");
     let deallocated =
         tikv_jemalloc_ctl::thread::deallocatedp::read().expect("server uses jemalloc");
@@ -170,7 +194,7 @@ fn relay_channel_cost() {
                 let slot = if retained_branch {
                     branch.ingress()
                 } else {
-                    channels.bind(&key).ingress()
+                    channels.bind(&key, Unit::Single).ingress()
                 };
                 std::hint::black_box(slot);
                 timings.push(start.elapsed().as_nanos());
@@ -194,7 +218,7 @@ fn relay_channel_cost() {
     let start = Instant::now();
     for _ in 0..10_000 {
         channels.retire(&key);
-        let current = channels.bind(&key);
+        let current = channels.bind(&key, Unit::Single);
         std::hint::black_box(current.outbound(channel()));
         assert_eq!(channels.branches.load().len(), 1);
     }
@@ -214,7 +238,7 @@ fn relay_channel_cost() {
 fn subscription_generations_preserve_equal_interests_and_release_withdrawn_peers() {
     use nervix_models::{ClusterNodeIdentity, ClusterNodeIncarnation};
     let channels = RelayChannels::default();
-    let branch = channels.bind(&None);
+    let branch = channels.bind(&None, Unit::Single);
     let domain = DomainName::parse("sales").expect("valid domain");
     let relay = RelayName::parse("events").expect("valid relay");
     let node = ClusterNodeName::parse("node-2").expect("valid node");

@@ -163,6 +163,8 @@ pub(crate) enum RemoteRelayDecodeError {
     SubscriptionAcks,
     #[error("failed to decode the remote branch key")]
     BranchKey,
+    #[error("the payload is addressed to unit {addressed:?}, which does not own its branch key")]
+    Unit { addressed: Unit },
     #[error("failed to assemble the relay batch")]
     Batch,
 }
@@ -742,6 +744,7 @@ impl RemoteDispatcher {
         services: &RelayBoundaryServices,
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
         batch: &RelayRecordBatch,
         excluded_nodes: &BTreeSet<ClusterNodeName>,
     ) {
@@ -749,6 +752,7 @@ impl RemoteDispatcher {
         let interest_index = self.cluster.subscription_interest_index();
         let channels = services.subscription_channels(
             &batch.key,
+            unit,
             StdArc::clone(&interest_index),
             domain,
             relay,
@@ -801,6 +805,7 @@ impl RemoteDispatcher {
                         kind: RelayPayloadKind::SubscriptionFanout,
                         domain: domain.clone(),
                         relay: relay.clone(),
+                        unit,
                         key: BranchKey::to_remote_key(&batch.key),
                         batch_ipc: batch_ipc.clone(),
                         metadata: batch.metadata.to_remote(),
@@ -1206,6 +1211,22 @@ impl Runtime {
         Ok(DecodedRemoteRows { batch, key })
     }
 
+    /// Checks that the unit a payload is addressed to is the unit of the relay its key lands in, so
+    /// a batch never enters the buffer, presence or state of a partition that does not own its key.
+    fn check_remote_unit(
+        services: &RelayBoundaryServices,
+        key: &Option<BranchKey>,
+        addressed: Unit,
+    ) -> error_stack::Result<(), RemoteRelayDecodeError> {
+        let owning = services
+            .unit_of(key)
+            .change_context(RemoteRelayDecodeError::Unit { addressed })?;
+        if owning != addressed {
+            return Err(Report::new(RemoteRelayDecodeError::Unit { addressed }));
+        }
+        Ok(())
+    }
+
     async fn handle_remote_stream_payload_with_admission(
         &self,
         mut remote: RelayPayload,
@@ -1216,7 +1237,9 @@ impl Runtime {
         let RemoteRelayTarget { services, schema } = self
             .wait_for_remote_stream_target(routing, &remote.domain, &remote.relay)
             .await?;
-        if owner_ingress && !self.owns_relay(&services) {
+        // An owner admits ingress only for a unit it owns; a payload addressed to a unit whose
+        // owner moved meanwhile is refused as one for a relay this node does not instantiate.
+        if owner_ingress && !self.owns_relay_unit(&services, remote.unit) {
             return Err(Report::new(RuntimeError::relay_not_instantiated(
                 &remote.domain,
                 &remote.relay,
@@ -1249,6 +1272,12 @@ impl Runtime {
                 )));
             }
         };
+        if let Err(report) = Self::check_remote_unit(&services, &decoded.key, remote.unit) {
+            return Err(report.change_context(RuntimeError::decode_remote_relay(
+                &remote.domain,
+                &remote.relay,
+            )));
+        }
         let mut watches = Vec::with_capacity(watch_count);
         let mut acks = Vec::with_capacity(remote.acks.len());
         for registration in remote.acks {
@@ -1623,11 +1652,13 @@ impl Runtime {
         local_node_id: &ClusterNodeName,
     ) -> HashMap<RelayName, Vec<RemoteRuntimeConsumer>> {
         let mut consumers = HashMap::<RelayName, Vec<RemoteRuntimeConsumer>>::new();
+        // A node that owns any unit of a relay fans that unit's batches out to every remote
+        // consumer of the relay, because a consumer reads every partition.
         let owned_relays = revision
             .nodes
             .values()
-            .filter(|node| node.execution_node() == Some(local_node_id))
             .filter(|node| node.kind() == ModelKind::Relay)
+            .filter(|node| !node.units_executing_on(local_node_id).is_empty())
             .map(|node| RelayName::from(&node.identifier))
             .collect::<HashSet<_>>();
         for spec in &revision.processors.processors {
@@ -2519,7 +2550,9 @@ mod tests {
     #[nervix_primitives::test]
     async fn relay_gate_holds_nonowner_dispatch_before_the_remote_slot() {
         let services = test_relay_boundary_services();
-        services.replace_owner_node(Some(ClusterNodeName::parse("node-2").expect("valid name")));
+        services.replace_owner_routes(RelayOwnerRoutes::single(
+            ClusterNodeName::parse("node-2").expect("valid name"),
+        ));
         let gate = services.fanout.dispatch_gate();
         let lease = RelayDispatchGateLease::engage(
             gate,
@@ -2529,7 +2562,12 @@ mod tests {
         let task_services = services.clone();
         let dispatch = nervix_primitives::task::spawn(async move {
             task_services
-                .dispatch_to_owner(&domain("default"), &named("orders"), &quiesce_test_batch())
+                .dispatch_to_owner(
+                    &domain("default"),
+                    &named("orders"),
+                    &quiesce_test_batch(),
+                    Unit::Single,
+                )
                 .await
         });
 
@@ -2569,6 +2607,7 @@ mod tests {
             .fanout_owner_batch(
                 &domain,
                 &relay,
+                Unit::Single,
                 &batch,
                 &ConfiguredFaultInjection::default(),
             )

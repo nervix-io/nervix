@@ -471,13 +471,20 @@ impl Runtime {
                 Self::scheduled_node(&execution.revision, entity)
                     .is_some_and(|existing| existing.executes_on(local_node_id))
             });
-            let previous_owner = if let Some(execution) = self.inner.executions.get(domain)
+            // A relay is rebound unit by unit: the units this node owned, the owner each unit had,
+            // and the units it owns now decide which owner and state tasks stop and start.
+            let (previous_local_units, previous_unit_owners) = if let Some(execution) =
+                self.inner.executions.get(domain)
                 && let Some(existing) = Self::scheduled_node(&execution.revision, entity)
             {
-                existing.execution_node().cloned()
+                (
+                    existing.units_executing_on(local_node_id),
+                    existing.unit_execution_nodes(),
+                )
             } else {
-                None
+                (BTreeSet::new(), BTreeMap::new())
             };
+            let desired_local_units = desired_node.units_executing_on(local_node_id);
             let executes_locally = desired_node.executes_on(local_node_id);
             self.activate_prepared_forced_ownership_recovery_state(
                 domain,
@@ -512,21 +519,26 @@ impl Runtime {
                 None
             };
 
-            if entity.kind == ModelKind::Relay && was_local && !executes_locally {
-                let previous = if let Some(mut execution) = self.inner.executions.get_mut(domain) {
-                    execution
-                        .relay_owner_tasks
-                        .remove(&RelayName::from(&entity.identifier))
-                } else {
-                    None
-                };
-                if let Some(task) = previous {
-                    task.stop(self.branch_task_stop_timeout())
-                        .await
-                        .change_context_lazy(|| ExecutionBuildError::DrainRelay {
-                            relay: RelayName::from(&entity.identifier),
-                        })
-                        .change_context_lazy(build)?;
+            if entity.kind == ModelKind::Relay {
+                let relay = RelayName::from(&entity.identifier);
+                for unit in previous_local_units.difference(&desired_local_units) {
+                    let previous =
+                        self.inner
+                            .executions
+                            .get_mut(domain)
+                            .and_then(|mut execution| {
+                                execution
+                                    .relay_owner_tasks
+                                    .remove(&RelayUnitRef::new(relay.clone(), *unit))
+                            });
+                    if let Some(task) = previous {
+                        task.stop(self.branch_task_stop_timeout())
+                            .await
+                            .change_context_lazy(|| ExecutionBuildError::DrainRelay {
+                                relay: relay.clone(),
+                            })
+                            .change_context_lazy(build)?;
+                    }
                 }
             }
             let previous_tasks = if let Some(mut execution) = self.inner.executions.get_mut(domain)
@@ -548,36 +560,41 @@ impl Runtime {
             if let Some(relay) = materialized_relay.as_ref()
                 && let Some(PlacedNodeState::MaterializedRelay(schema)) = &state
             {
-                let state_placement = self
-                    .state_placement(
-                        domain,
-                        RuntimeStateKind::MaterializedRelay,
-                        ModelKind::Relay,
-                        relay,
-                        None,
-                    )
-                    .change_context_lazy(|| ExecutionBuildError::PlaceState {
-                        node: entity.clone(),
-                    })
-                    .change_context_lazy(build)?;
-                self.prepare_materialized_stream_restore(&state_placement, schema)
-                    .await
-                    .change_context_lazy(|| ExecutionBuildError::PrepareMaterializedRestore {
-                        relay: relay.clone(),
-                    })
-                    .change_context_lazy(build)?;
+                for unit in desired_node.units.keys() {
+                    let state_placement = self
+                        .state_placement_for_unit(
+                            domain,
+                            RuntimeStateKind::MaterializedRelay,
+                            ModelKind::Relay,
+                            relay,
+                            *unit,
+                            None,
+                        )
+                        .change_context_lazy(|| ExecutionBuildError::PlaceState {
+                            node: entity.clone(),
+                        })
+                        .change_context_lazy(build)?;
+                    self.prepare_materialized_stream_restore(&state_placement, schema)
+                        .await
+                        .change_context_lazy(|| ExecutionBuildError::PrepareMaterializedRestore {
+                            relay: relay.clone(),
+                        })
+                        .change_context_lazy(build)?;
+                }
             }
-            if executes_locally
-                && !was_local
-                && let Some(relay) = materialized_relay.as_ref()
-                && let Some(previous_owner) = previous_owner.as_ref()
-            {
+            for unit in desired_local_units.difference(&previous_local_units) {
+                let (Some(relay), Some(previous_owner)) =
+                    (materialized_relay.as_ref(), previous_unit_owners.get(unit))
+                else {
+                    continue;
+                };
                 let state_placement = self
-                    .state_placement(
+                    .state_placement_for_unit(
                         domain,
                         RuntimeStateKind::MaterializedRelay,
                         ModelKind::Relay,
                         relay,
+                        *unit,
                         None,
                     )
                     .change_context_lazy(|| ExecutionBuildError::PlaceState {
@@ -614,6 +631,37 @@ impl Runtime {
                         .change_context_lazy(build)?;
                 }
             }
+            // A unit this node keeps owning keeps its state, but the placement below rebinds that
+            // state to a new assignment generation, which retires the originator the unit's running
+            // state task applies rows through. Each such task therefore stops first, applying the
+            // rows already queued to it under the generation they were dispatched in, and the unit
+            // starts a new task once the placement has issued the successor. The relay's local
+            // dispatch stays gated meanwhile, so nothing is queued between the two.
+            if let Some(relay) = materialized_relay.as_ref() {
+                for unit in previous_local_units.intersection(&desired_local_units) {
+                    let previous =
+                        self.inner
+                            .executions
+                            .get_mut(domain)
+                            .and_then(|mut execution| {
+                                execution
+                                    .relay_state_tasks
+                                    .remove(&RelayUnitRef::new(relay.clone(), *unit))
+                            });
+                    let Some(task) = previous else {
+                        continue;
+                    };
+                    task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+                        .await
+                        .change_context_lazy(|| ExecutionBuildError::StopRelayStateTask {
+                            relay: relay.clone(),
+                        })
+                        .change_context_lazy(build)?;
+                    if let Some(services) = relay_services.as_ref() {
+                        services.remove_local_runtime_consumer(AckMode::Detached);
+                    }
+                }
+            }
             let placement = self
                 .build_scheduled_node_placement(
                     domain,
@@ -641,12 +689,20 @@ impl Runtime {
                     .executions
                     .get(domain)
                     .and_then(|execution| execution.relay_services.get(&relay).cloned());
-                if was_local && !executes_locally {
-                    let previous = self
-                        .inner
-                        .executions
-                        .get_mut(domain)
-                        .and_then(|mut execution| execution.relay_state_tasks.remove(&relay));
+                let mut materialized_states = placement.materialized_states;
+                // The state task of a unit this node stops owning ends here; a unit it keeps
+                // stopped its task before the placement. Each unit this node owns now starts a task
+                // with the originator its new assignment generation issued.
+                for unit in previous_local_units.difference(&desired_local_units) {
+                    let previous =
+                        self.inner
+                            .executions
+                            .get_mut(domain)
+                            .and_then(|mut execution| {
+                                execution
+                                    .relay_state_tasks
+                                    .remove(&RelayUnitRef::new(relay.clone(), *unit))
+                            });
                     if let Some(task) = previous {
                         task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
                             .await
@@ -654,19 +710,19 @@ impl Runtime {
                                 relay: relay.clone(),
                             })
                             .change_context_lazy(build)?;
-                    }
-                    if let Some(services) = services.as_ref() {
-                        services.remove_local_runtime_consumer(AckMode::Detached);
+                        if let Some(services) = services.as_ref() {
+                            services.remove_local_runtime_consumer(AckMode::Detached);
+                        }
                     }
                 }
-                if executes_locally && !was_local {
-                    let Some(services) = services else {
+                for unit in &desired_local_units {
+                    let Some(services) = services.clone() else {
                         return Err(Report::new(ExecutionBuildError::MissingRelayBoundary {
                             relay,
                         })
                         .change_context(build()));
                     };
-                    let Some(state) = placement.materialized_state else {
+                    let Some(state) = materialized_states.remove(unit) else {
                         return Err(Report::new(ExecutionBuildError::MissingMaterializedState {
                             relay,
                         })
@@ -676,6 +732,8 @@ impl Runtime {
                         domain,
                         RelayStateTaskSpec {
                             relay: relay.clone(),
+                            unit: *unit,
+                            partitioning: services.partitioning,
                             state,
                             retention: activation_plan
                                 .relays
@@ -686,37 +744,41 @@ impl Runtime {
                         },
                     );
                     if let Some(mut execution) = self.inner.executions.get_mut(domain) {
-                        execution.relay_state_tasks.insert(relay.clone(), task);
+                        execution
+                            .relay_state_tasks
+                            .insert(RelayUnitRef::new(relay.clone(), *unit), task);
                     }
                 }
                 if let Some(mut execution) = self.inner.executions.get_mut(domain) {
-                    execution
-                        .materialized_stream_owner_nodes
-                        .insert(relay, desired_node.execution_node().cloned());
+                    execution.materialized_stream_owner_nodes.insert(
+                        relay,
+                        RelayOwnerRoutes::new(desired_node.unit_execution_nodes()),
+                    );
                 }
             }
 
-            if entity.kind == ModelKind::Relay && executes_locally && !was_local {
-                let Some(services) = relay_services else {
-                    return Err(Report::new(ExecutionBuildError::MissingRelayBoundary {
-                        relay: RelayName::from(&entity.identifier),
-                    })
-                    .change_context(build()));
-                };
-                let task = self.spawn_relay_owner_task(
-                    domain,
-                    &RelayName::from(&entity.identifier),
-                    services,
-                    activation_plan
+            if entity.kind == ModelKind::Relay {
+                let relay = RelayName::from(&entity.identifier);
+                for unit in desired_local_units.difference(&previous_local_units) {
+                    let Some(services) = relay_services.clone() else {
+                        return Err(Report::new(ExecutionBuildError::MissingRelayBoundary {
+                            relay,
+                        })
+                        .change_context(build()));
+                    };
+                    let retention = activation_plan
                         .relays
-                        .get(&RelayName::from(&entity.identifier))
+                        .get(&relay)
                         .verified("the domain plan covers every scheduled relay")
-                        .retention,
-                );
-                if let Some(mut execution) = self.inner.executions.get_mut(domain) {
-                    execution
-                        .relay_owner_tasks
-                        .insert(RelayName::from(&entity.identifier), task);
+                        .retention;
+                    let task = self
+                        .spawn_relay_owner_task(domain, &relay, *unit, services, retention)
+                        .change_context_lazy(build)?;
+                    if let Some(mut execution) = self.inner.executions.get_mut(domain) {
+                        execution
+                            .relay_owner_tasks
+                            .insert(RelayUnitRef::new(relay.clone(), *unit), task);
+                    }
                 }
             }
 
@@ -885,7 +947,7 @@ impl Runtime {
                         );
                         execution.materialized_stream_owner_nodes.insert(
                             RelayName::from(&entity.identifier),
-                            desired_node.execution_node().cloned(),
+                            RelayOwnerRoutes::new(desired_node.unit_execution_nodes()),
                         );
                     } else {
                         execution
@@ -895,19 +957,18 @@ impl Runtime {
                             .materialized_stream_owner_nodes
                             .remove(&RelayName::from(&entity.identifier));
                     }
+                    let previous_state_tasks = execution.take_relay_state_tasks(&relay);
                     (
                         was_materialized,
                         execution.shutdown.clone(),
                         schema,
                         services,
-                        execution
-                            .relay_state_tasks
-                            .remove(&RelayName::from(&entity.identifier)),
+                        previous_state_tasks,
                         execution.placement_tasks.remove(entity).unwrap_or_default(),
                     )
                 };
 
-                if let Some(task) = previous_state_task {
+                for task in previous_state_task {
                     task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
                         .await
                         .change_context_lazy(|| ExecutionBuildError::StopRelayStateTask {
@@ -932,42 +993,39 @@ impl Runtime {
                             Some(PlacedNodeState::MaterializedRelay(schema.arrow_schema())),
                         )
                         .change_context_lazy(build)?;
-                    let state_task = if desired_node.executes_on(local_node) {
-                        let Some(state) = placement.materialized_state.take() else {
+                    let mut state_tasks = Vec::new();
+                    for unit in desired_node.units_executing_on(local_node) {
+                        let Some(state) = placement.materialized_states.remove(&unit) else {
                             return Err(Report::new(
                                 ExecutionBuildError::MissingMaterializedState { relay },
                             )
                             .change_context(build()));
                         };
-                        Some(
-                            self.spawn_relay_state_task(
-                                domain,
-                                RelayStateTaskSpec {
-                                    relay: relay.clone(),
-                                    state,
-                                    retention: activation_plan
-                                        .relays
-                                        .get(&relay)
-                                        .verified("the domain plan covers every scheduled relay")
-                                        .retention,
-                                    receiver: services
-                                        .add_local_runtime_consumer(AckMode::Detached),
-                                },
-                            ),
-                        )
-                    } else {
-                        None
-                    };
+                        let task = self.spawn_relay_state_task(
+                            domain,
+                            RelayStateTaskSpec {
+                                relay: relay.clone(),
+                                unit,
+                                partitioning: services.partitioning,
+                                state,
+                                retention: activation_plan
+                                    .relays
+                                    .get(&relay)
+                                    .verified("the domain plan covers every scheduled relay")
+                                    .retention,
+                                receiver: services.add_local_runtime_consumer(AckMode::Detached),
+                            },
+                        );
+                        state_tasks.push((RelayUnitRef::new(relay.clone(), unit), task));
+                    }
                     if let Some(mut execution) = self.inner.executions.get_mut(domain) {
                         if !placement.tasks.is_empty() {
                             execution
                                 .placement_tasks
                                 .insert(entity.clone(), placement.tasks);
                         }
-                        if let Some(state_task) = state_task {
-                            execution
-                                .relay_state_tasks
-                                .insert(RelayName::from(&entity.identifier), state_task);
+                        for (key, state_task) in state_tasks {
+                            execution.relay_state_tasks.insert(key, state_task);
                         }
                     }
                 }
@@ -1474,16 +1532,12 @@ impl Runtime {
                 let remote_consumers =
                     Self::remote_runtime_consumers_for_revision(&revision, local_node_id);
                 for (relay, services) in &execution.relay_services {
-                    let owner_node = if let Some(node) = revision
-                        .nodes
-                        .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
-                        && let Some(owner) = node.execution_node()
-                    {
-                        Some(owner.clone())
-                    } else {
-                        None
+                    let relay_node = NodeRef::new(ModelKind::Relay, ModelName::from(relay));
+                    let owners = match revision.nodes.get(&relay_node) {
+                        Some(node) => RelayOwnerRoutes::new(node.unit_execution_nodes()),
+                        None => RelayOwnerRoutes::default(),
                     };
-                    services.replace_owner_node(owner_node);
+                    services.replace_owner_routes(owners);
                     services.replace_remote_runtime_consumers(
                         remote_consumers.get(relay).cloned().unwrap_or_default(),
                     );
@@ -1528,15 +1582,15 @@ impl Runtime {
                 continue;
             };
             let node = NodeRef::new(ModelKind::Relay, ModelName::from(relay));
-            let owner = match desired.nodes.get(&node) {
-                Some(node) => node.execution_node(),
-                None => None,
+            let owners = match desired.nodes.get(&node) {
+                Some(node) => RelayOwnerRoutes::new(node.unit_execution_nodes()),
+                None => RelayOwnerRoutes::default(),
             };
             let destinations = match consumers.get(relay) {
                 Some(destinations) => destinations.as_slice(),
                 None => &[],
             };
-            services.fence_routing_change(owner, destinations);
+            services.fence_routing_change(&owners, destinations);
         }
     }
 
@@ -1670,34 +1724,36 @@ impl Runtime {
     /// replicated states this cluster node owns or replicates for it, and the background tasks
     /// that snapshot and poll them. An assignment change rebuilds exactly this for the moved node
     /// and leaves every other node alone.
-    pub(super) fn build_scheduled_node_placement(
+    /// Places the materialized state of every unit of a materialized relay that this node owns or
+    /// replicates: the unit's owner keeps the state's originator for its state task, and each of
+    /// its replicas polls the owner for the state it keeps.
+    fn place_materialized_relay_units(
         &self,
         domain: &DomainName,
         shutdown_tx: &watch::Sender<bool>,
         node: &ExecutionNode,
         local_node_id: &ClusterNodeName,
-        state: Option<PlacedNodeState>,
-    ) -> error_stack::Result<ScheduledNodePlacement, ExecutionBuildError> {
-        let mut placement = ScheduledNodePlacement::default();
-        let executes_locally = node.executes_on(local_node_id);
-        let assigned_locally = node.is_assigned_to(local_node_id);
-        let execution_node = node.execution_node().cloned();
-        if let Some(PlacedNodeState::MaterializedRelay(schema)) = state.as_ref()
-            && (executes_locally || assigned_locally)
-        {
-            let relay = RelayName::from(&node.identifier);
-            let schema = schema.clone();
-            let replica_nodes = node
+        schema: &StdArc<arrow_schema::Schema>,
+        placement: &mut ScheduledNodePlacement,
+    ) -> error_stack::Result<(), ExecutionBuildError> {
+        let relay = RelayName::from(&node.identifier);
+        for (unit, scheduled) in &node.units {
+            let executes_locally = node.unit_executes_on(*unit, local_node_id);
+            if !executes_locally && !scheduled.assigned_nodes.contains(local_node_id) {
+                continue;
+            }
+            let replica_nodes = scheduled
                 .replica_nodes()
                 .into_iter()
                 .cloned()
                 .collect::<Vec<_>>();
             let state_placement = self
-                .state_placement(
+                .state_placement_for_unit(
                     domain,
                     RuntimeStateKind::MaterializedRelay,
                     ModelKind::Relay,
                     &relay,
+                    *unit,
                     None,
                 )
                 .change_context_lazy(|| ExecutionBuildError::PlaceState {
@@ -1705,8 +1761,8 @@ impl Runtime {
                 })?;
             let mut assignment = self.replicated_materialized_stream_state(
                 state_placement,
-                schema,
-                execution_node.clone(),
+                schema.clone(),
+                node.unit_execution_node(*unit).cloned(),
                 replica_nodes,
                 Some(local_node_id),
             );
@@ -1721,7 +1777,7 @@ impl Runtime {
                         ExecutionBuildError::MaterializedStateAuthority { relay },
                     ));
                 };
-                placement.materialized_state = Some(originator);
+                placement.materialized_states.insert(*unit, originator);
             } else {
                 let Some(installer) = assignment.installer.take() else {
                     return Err(Report::new(
@@ -1734,6 +1790,37 @@ impl Runtime {
                     placement.tasks.replication.push(task);
                 }
             }
+        }
+        Ok(())
+    }
+
+    pub(super) fn build_scheduled_node_placement(
+        &self,
+        domain: &DomainName,
+        shutdown_tx: &watch::Sender<bool>,
+        node: &ExecutionNode,
+        local_node_id: &ClusterNodeName,
+        state: Option<PlacedNodeState>,
+    ) -> error_stack::Result<ScheduledNodePlacement, ExecutionBuildError> {
+        let mut placement = ScheduledNodePlacement::default();
+        let executes_locally = node.executes_on(local_node_id);
+        let assigned_locally = node.is_assigned_to(local_node_id);
+        // A partitioned relay has no one execution node; its units are placed one by one below and
+        // it exposes no node-wide series.
+        let execution_node = if node.is_partitioned() {
+            None
+        } else {
+            node.execution_node().cloned()
+        };
+        if let Some(PlacedNodeState::MaterializedRelay(schema)) = state.as_ref() {
+            self.place_materialized_relay_units(
+                domain,
+                shutdown_tx,
+                node,
+                local_node_id,
+                schema,
+                &mut placement,
+            )?;
         }
 
         if let Some(PlacedNodeState::KafkaDomainOffsets) = state.as_ref()
@@ -1832,7 +1919,15 @@ impl Runtime {
                 placement.tasks.replication.push(task);
             }
         }
-        if node.kind() != ModelKind::Relay || executes_locally {
+        // A relay exposes its node-level series on the node its one owner runs on, and that
+        // owner withdraws them as it ends. A relay scheduled as partitions exposes only the
+        // series of each partition, which that partition's owner on this node withdraws as it
+        // ends, so no node-level series outlives the partitions this node stops owning.
+        let exposes_node_series = match node.kind() {
+            ModelKind::Relay => executes_locally && !node.is_partitioned(),
+            _ => true,
+        };
+        if exposes_node_series {
             self.inner.metrics.register_global_node(
                 domain,
                 node.kind(),
@@ -1861,7 +1956,9 @@ impl Runtime {
         if let Some(local_node_id) = local_node_id {
             return node.executes_on(local_node_id);
         }
-        node.single_unit().primary_node.is_none() && node.single_unit().assigned_nodes.is_empty()
+        node.units
+            .values()
+            .all(|unit| unit.primary_node.is_none() && unit.assigned_nodes.is_empty())
     }
 }
 

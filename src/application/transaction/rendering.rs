@@ -318,8 +318,9 @@ fn effect_lines(effects: &ImpactEffects) -> Vec<String> {
     }
     for moved in &effects.ownership_moves {
         lines.push(format!(
-            "ownership move {} from={} to={} {}",
+            "ownership move {}{} from={} to={} {}",
             coverage_text(&moved.node),
+            moved.unit.status_field(),
             moved.source,
             moved.destination,
             attribution_text(&moved.attribution)

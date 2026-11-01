@@ -101,6 +101,43 @@ pub(super) fn preserve_schedule(
     }
 }
 
+#[test]
+fn a_partition_count_change_is_planned_only_on_a_stopped_domain() {
+    let alter = Statement::AlterBranch(nervix_models::AlterBranch {
+        branch: named("by_tenant"),
+        operations: vec![nervix_models::AlterBranchOperation::SetPartitions {
+            partitions: nervix_models::BranchPartitions::Direct(nonzero!(2u16)),
+        }],
+    });
+    let operation = TransactionOperationNumber::from_index(0).assured("the first index fits");
+    for status in [DomainStatus::Running, DomainStatus::Paused] {
+        let error =
+            ensure_branch_partitions_change_is_stopped(&domain_state(status), &alter, operation)
+                .expect_err("a running or paused domain keeps its partition counts");
+        let TransactionPlanningError::BranchPartitionsRequireStoppedDomain {
+            branch, domain, ..
+        } = error.current_context()
+        else {
+            panic!("the refusal names the stopped-domain path: {error:?}");
+        };
+        assert_eq!(branch.as_str(), "by_tenant");
+        assert_eq!(domain.as_str(), "default");
+        assert!(
+            format!("{error:#}").contains(
+                "branch 'by_tenant' changes its partition count only while its domain is stopped: \
+                 STOP domain 'default', run ALTER BRANCH, then START it"
+            ),
+            "{error:#}"
+        );
+    }
+    ensure_branch_partitions_change_is_stopped(
+        &domain_state(DomainStatus::Stopped),
+        &alter,
+        operation,
+    )
+    .expect("a stopped domain accepts a partition count change");
+}
+
 fn wasm_reset_fixture() -> (
     TransactionPlanningSnapshot,
     Statement,
@@ -460,6 +497,7 @@ fn ownership_moves_raise_a_running_step_to_entity_pause() {
             schedule: current.cloned(),
             ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
                 node: nervix_models::ImpactNodeCoverage::all_executions(moved.clone()),
+                unit: nervix_models::Unit::Single,
                 source: source.clone(),
                 destination: destination.clone(),
                 attribution: attribution.clone(),
@@ -511,6 +549,7 @@ fn stopped_schedule_move_keeps_the_execution_gate_without_reporting_a_pause() {
             }),
             ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
                 node: ImpactNodeCoverage::all_executions(moved.clone()),
+                unit: nervix_models::Unit::Single,
                 source: source.clone(),
                 destination: destination.clone(),
                 attribution: attribution.clone(),

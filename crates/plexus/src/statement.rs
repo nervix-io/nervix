@@ -117,6 +117,7 @@ pub fn statement_parser<'src>()
         crate::schema::alter_schema_parser().map(Statement::AlterSchema),
         crate::schema::alter_wire_schema_parser_any(),
         crate::relay::alter_relay_parser().map(Statement::AlterRelay),
+        crate::branch::alter_branch_parser().map(Statement::AlterBranch),
         crate::junction::alter_junction_parser().map(Statement::AlterJunction),
         crate::deduplicator::alter_deduplicator_parser().map(Statement::AlterDeduplicator),
         crate::reorderer::alter_reorderer_parser().map(Statement::AlterReorderer),
@@ -245,10 +246,37 @@ pub(crate) fn statement_tail(
         && normalized.ends_with(" PREFERENCES")
     {
         vec![";".to_string(), "FOR".to_string()]
+    } else if open
+        && let Statement::Create(create) = &statement
+        && let Model::Branch(branch) = create.body.as_ref()
+    {
+        create_branch_tail(branch, tokens)
     } else {
         Vec::new()
     };
     filter_by_prefix(optional_tail, prefix)
+}
+
+/// The optional clauses a complete `CREATE BRANCH` can still take, in the order its grammar reads
+/// them: the partition count, then the LRU eviction bound.
+fn create_branch_tail(branch: &nervix_models::CreateBranch, tokens: &[Token]) -> Vec<String> {
+    if branch.eviction.is_some() {
+        return vec![";".to_string()];
+    }
+    let partitions_written = tokens.iter().any(|token| {
+        matches!(
+            token,
+            Token::Word(crate::lexer::Word::KnownWord {
+                iden: crate::lexer::Identifier::Partitions,
+                ..
+            })
+        )
+    });
+    if partitions_written {
+        vec![";".to_string(), "MAX".to_string()]
+    } else {
+        vec![";".to_string(), "MAX".to_string(), "PARTITIONS".to_string()]
+    }
 }
 
 #[cfg(test)]

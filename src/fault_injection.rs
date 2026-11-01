@@ -66,6 +66,7 @@ mod materialized_reads;
 mod model_publication;
 mod pause;
 mod relay_memory;
+mod relay_partition_fanout;
 mod relocation_commit;
 mod resource_discovery;
 mod resource_publication;
@@ -290,8 +291,11 @@ struct FaultInjectionState {
     owner_relay_fanout_pauses: DashMap<String, Arc<TestPause>, RandomState>,
     /// The owner of one partition of one relay pauses its first buffered batch the same way, while
     /// the owners of the relay's other partitions fan out as usual.
-    owner_relay_partition_fanout_pauses:
-        DashMap<OwnerRelayPartitionFanoutPauseKey, Arc<TestPause>, RandomState>,
+    owner_relay_partition_fanout_pauses: DashMap<
+        relay_partition_fanout::OwnerRelayPartitionFanoutPauseKey,
+        Arc<TestPause>,
+        RandomState,
+    >,
     /// The owner waits this long before it fans out each buffered batch of a domain's relays, so
     /// the rows its sources admitted reach their consumers slowly, as on a loaded node.
     owner_relay_fanout_delays: DashMap<String, Duration, RandomState>,
@@ -387,25 +391,6 @@ impl std::fmt::Debug for ConsensusProbe {
 struct RemoteRelayAdmissionPauseKey {
     domain: String,
     branch: Option<String>,
-}
-
-/// One partition of one relay of a domain, as a scenario names it. The domain is kept lowercase,
-/// as every domain-keyed fault of this module keeps it.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct OwnerRelayPartitionFanoutPauseKey {
-    domain: String,
-    relay: String,
-    partition: u32,
-}
-
-impl OwnerRelayPartitionFanoutPauseKey {
-    fn new(domain: &str, relay: &str, partition: u32) -> Self {
-        Self {
-            domain: domain.to_ascii_lowercase(),
-            relay: relay.to_string(),
-            partition,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -1779,39 +1764,6 @@ impl FaultInjection {
         );
     }
 
-    /// Pauses the first batch the owner of `partition` of `relay` fans out, before it acquires a
-    /// dispatch permit. The owners of the relay's other partitions keep fanning out.
-    pub fn pause_owner_relay_partition_fanout(&self, domain: &str, relay: &str, partition: u32) {
-        self.inner.owner_relay_partition_fanout_pauses.insert(
-            OwnerRelayPartitionFanoutPauseKey::new(domain, relay, partition),
-            Arc::new(TestPause::default()),
-        );
-    }
-
-    pub async fn wait_for_owner_relay_partition_fanout_pause(
-        &self,
-        domain: &str,
-        relay: &str,
-        partition: u32,
-    ) {
-        let pause = self.owner_relay_partition_fanout_pause(
-            &OwnerRelayPartitionFanoutPauseKey::new(domain, relay, partition),
-        );
-        pause.wait_until_reached().await;
-    }
-
-    pub fn release_owner_relay_partition_fanout_pause(
-        &self,
-        domain: &str,
-        relay: &str,
-        partition: u32,
-    ) {
-        let pause = self.owner_relay_partition_fanout_pause(
-            &OwnerRelayPartitionFanoutPauseKey::new(domain, relay, partition),
-        );
-        pause.release();
-    }
-
     /// Makes the owner of each of `domain`'s relays wait `delay` before it fans out every batch.
     pub fn delay_owner_relay_fanout(&self, domain: impl Into<String>, delay: Duration) {
         self.inner
@@ -2923,20 +2875,6 @@ impl FaultInjection {
     fn remote_relay_dispatch_pause(&self, key: &str) -> Arc<TestPause> {
         let Some(pause) = self.inner.remote_relay_dispatch_pauses.get(key) else {
             panic!("remote relay dispatch pause for domain '{key}' is not armed");
-        };
-        pause.value().clone()
-    }
-
-    fn owner_relay_partition_fanout_pause(
-        &self,
-        key: &OwnerRelayPartitionFanoutPauseKey,
-    ) -> Arc<TestPause> {
-        let Some(pause) = self.inner.owner_relay_partition_fanout_pauses.get(key) else {
-            panic!(
-                "relay owner fan-out pause for partition {} of relay '{}' in domain '{}' is not \
-                 armed",
-                key.partition, key.relay, key.domain
-            );
         };
         pause.value().clone()
     }

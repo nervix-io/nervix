@@ -20,15 +20,15 @@ use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_execution::{ChargedBytes, MemoryClass};
 use nervix_interconnect::{RelayDelivery, RelayPayload};
 use nervix_models::{
-    AckMode, ClusterNodeName, DomainName, RelayName, RemoteAckRegistration, RemoteRuntimeField,
-    RemoteRuntimeValue,
+    AckMode, BranchPartitions, ClusterNodeName, DomainName, RelayName, RemoteAckRegistration,
+    RemoteRuntimeField, RemoteRuntimeValue, Unit,
 };
 use nervix_primitives::sync::Arc;
 
 use super::{RemoteRelayDecodeError, Runtime};
 use crate::{
     runtime::{
-        BranchKey, RecordMetadataColumns,
+        BranchKey, RecordMetadataColumns, RelayPartitioning,
         relay_batch::RelayRecordBatch,
         relay_boundary::{RemoteRuntimeConsumer, RoutedDelivery, routed_payload},
     },
@@ -42,6 +42,9 @@ use crate::{
 /// The bytes one case reads its batch, branch, watermarks and registrations from.
 const CASE_BYTES: usize = 2048;
 
+/// The most partitions the relay of a generated branched batch is divided into.
+const CASE_PARTITIONS: u64 = 4;
+
 /// One relay batch a node routes to a consumer on another node.
 struct RoutedCase {
     schema: GeneratedSchema,
@@ -50,6 +53,9 @@ struct RoutedCase {
     delivery: RelayDelivery,
     consumer: RemoteRuntimeConsumer,
     domain: DomainName,
+    /// How the relay's keys are divided among its units, and the unit that owns this batch's key.
+    partitioning: RelayPartitioning,
+    unit: Unit,
 }
 
 impl RoutedCase {
@@ -58,6 +64,21 @@ impl RoutedCase {
         // a batch is generated, and a choice read after that takes its first option, which would
         // leave nearly every case unbranched, attached and without a registration.
         let key = BranchKey::generated_scope(arbitrary);
+        // A branched batch belongs to a relay of one through a few partitions; an unbranched one to
+        // a relay with one owner.
+        let partitioning = match key.as_ref() {
+            Some(_) => {
+                let count = arbitrary.entropy().boundary_biased(1..=CASE_PARTITIONS);
+                let count = u16::try_from(count).verified("the range above ends below u16::MAX");
+                let count =
+                    std::num::NonZeroU16::new(count).verified("the range above starts at one");
+                RelayPartitioning::of_partitions(BranchPartitions::Direct(count))
+            }
+            None => RelayPartitioning::Whole,
+        };
+        let unit = partitioning
+            .unit_of(&key)
+            .assured("a branched batch has a partition and an unbranched one the single unit");
         let mode = arbitrary
             .entropy()
             .pick([AckMode::Attached, AckMode::Detached]);
@@ -107,6 +128,8 @@ impl RoutedCase {
                 mode,
             },
             domain: arbitrary.rule_name::<DomainName>(),
+            partitioning,
+            unit,
         }
     }
 
@@ -121,6 +144,7 @@ impl RoutedCase {
         routed_payload(RoutedDelivery {
             delivery: self.delivery,
             domain: &self.domain,
+            unit: self.unit,
             consumer: &self.consumer,
             batch: &self.batch,
             batch_ipc,
@@ -175,7 +199,8 @@ fn exact_element_bits(element: &nervix_models::RemoteRuntimeElementValue) -> Str
 /// the receiver decodes the routed payload into the same rows of the relay's exact schema, every
 /// value and null with floats by their bits, the same concrete branch or the absence of one, every
 /// row's watermarks, and one acknowledgement registration per row exactly as the sender
-/// registered them.
+/// registered them. The payload names the unit of the relay that owns its key, and the key the
+/// receiver decodes keeps its partition seed, so it lands in that same unit.
 #[test]
 fn bolero_routed_batches_arrive_with_their_rows_branch_and_watermarks() {
     let runtime = nervix_primitives::runtime::Builder::new_current_thread()
@@ -195,6 +220,10 @@ fn bolero_routed_batches_arrive_with_their_rows_branch_and_watermarks() {
                 assert_eq!(payload.domain, case.domain);
                 assert_eq!(payload.relay, case.consumer.relay);
                 assert_eq!(payload.acks, case.acks, "every row keeps its registration");
+                assert_eq!(
+                    payload.unit, case.unit,
+                    "the payload names the unit that owns its key"
+                );
                 let sent_key = exact_key(&payload.key);
                 let decoded = receiver
                     .decode_remote_rows(&case.schema.compiled, &mut payload)
@@ -210,6 +239,23 @@ fn bolero_routed_batches_arrive_with_their_rows_branch_and_watermarks() {
                     exact_key(&BranchKey::to_remote_key(&decoded.key)),
                     sent_key,
                     "the branch key's values are kept to the bit"
+                );
+                if let (Some(sent), Some(received)) =
+                    (case.batch.key.as_ref(), decoded.key.as_ref())
+                {
+                    assert_eq!(
+                        received.partition_seed(),
+                        sent.partition_seed(),
+                        "the branch key keeps its partition seed"
+                    );
+                }
+                let decoded_unit = case
+                    .partitioning
+                    .unit_of(&decoded.key)
+                    .assured("the decoded key names a unit of its relay");
+                assert_eq!(
+                    decoded_unit, payload.unit,
+                    "the decoded key lands in the unit the payload names"
                 );
                 let watermarks = RecordMetadataColumns::from_remote(payload.metadata.clone());
                 assert_eq!(

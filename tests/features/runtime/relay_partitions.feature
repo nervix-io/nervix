@@ -244,6 +244,9 @@ Feature: Relay partitions
       partition 1: owner={{relay_owner_1}} replicas=-
       partition 2: owner={{relay_owner_2}} replicas=-
       partition 3: owner={{relay_owner_3}} replicas=-
+      """
+    And the last command output contains
+      """
       capacity: 3
       """
 

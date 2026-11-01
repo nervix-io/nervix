@@ -10,7 +10,7 @@
     nervix::layer(decisions, reason = "owns the decisions boundary declared above")
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::{Report, ResultExt as _};
 use indexmap::IndexMap;
@@ -73,6 +73,17 @@ impl ExecutionUnit {
             .iter()
             .filter(|node| Some(*node) != self.primary_node.as_ref())
             .collect()
+    }
+
+    fn is_assigned_to(&self, node: &ClusterNodeName) -> bool {
+        self.assigned_nodes.contains(node)
+    }
+
+    fn is_primary_on(&self, node: &ClusterNodeName) -> bool {
+        match &self.primary_node {
+            Some(primary) => primary == node,
+            None => self.is_assigned_to(node),
+        }
     }
 }
 
@@ -139,50 +150,110 @@ impl ExecutionNode {
     }
 
     pub(crate) fn wasm_state_generations(&self) -> Option<&WasmStateGenerations> {
-        self.single_unit().wasm_state_generations.as_ref()
+        self.sole_unit()?.wasm_state_generations.as_ref()
     }
 
     pub(crate) fn single_unit(&self) -> &ExecutionUnit {
         self.units
             .get(&Unit::Single)
-            .assured("current revisions contain exactly one Single unit per node")
+            .assured("only relays of partitioned branches are revised without a Single unit")
+    }
+
+    /// Whether this node is revised as several partition units.
+    pub(crate) fn is_partitioned(&self) -> bool {
+        self.units
+            .keys()
+            .any(|unit| matches!(unit, Unit::Partition(_)))
+    }
+
+    /// The cluster node `unit` executes on, or `None` for a node that runs on every cluster node
+    /// and for a unit this node is not revised as.
+    pub(crate) fn unit_execution_node(&self, unit: Unit) -> Option<&ClusterNodeName> {
+        if self.executes_on_every_cluster_node {
+            return None;
+        }
+        self.units.get(&unit)?.execution_node()
+    }
+
+    /// Whether `unit` executes on `node`.
+    pub(crate) fn unit_executes_on(&self, unit: Unit, node: &ClusterNodeName) -> bool {
+        let Some(scheduled) = self.units.get(&unit) else {
+            return false;
+        };
+        if self.executes_on_every_cluster_node {
+            scheduled.is_assigned_to(node)
+        } else {
+            scheduled.is_primary_on(node)
+        }
+    }
+
+    /// The units that execute on `node`, in unit order.
+    pub(crate) fn units_executing_on(&self, node: &ClusterNodeName) -> BTreeSet<Unit> {
+        self.units
+            .keys()
+            .copied()
+            .filter(|unit| self.unit_executes_on(*unit, node))
+            .collect()
+    }
+
+    /// Where each unit's owner executes, for every unit a cluster node owns.
+    pub(crate) fn unit_execution_nodes(&self) -> BTreeMap<Unit, ClusterNodeName> {
+        let mut owners = BTreeMap::new();
+        for unit in self.units.keys() {
+            if let Some(owner) = self.unit_execution_node(*unit) {
+                owners.insert(*unit, owner.clone());
+            }
+        }
+        owners
     }
 
     pub(crate) fn ownership_state_components(&self) -> Vec<OwnershipStateComponent> {
         self.ownership_state_components.clone()
     }
 
+    /// Whether any unit of this node is assigned to `node`, as its primary or a replica.
     pub(crate) fn is_assigned_to(&self, node: &ClusterNodeName) -> bool {
-        self.single_unit().assigned_nodes.contains(node)
+        self.units.values().any(|unit| unit.is_assigned_to(node))
     }
 
+    /// The one unit of a node revised as a single unit, and `None` for a relay revised as several
+    /// partitions, whose units each have their own placement.
+    pub(crate) fn sole_unit(&self) -> Option<&ExecutionUnit> {
+        self.units.get(&Unit::Single)
+    }
+
+    /// The one node a single-unit node is assigned to, when it is assigned to exactly one. `None`
+    /// for a node revised as several units.
     pub(crate) fn assigned_single_node(&self) -> Option<&ClusterNodeName> {
-        match self.single_unit().assigned_nodes.as_slice() {
+        match self.sole_unit()?.assigned_nodes.as_slice() {
             [node] => Some(node),
             _ => None,
         }
     }
 
+    /// The primary of a single-unit node. `None` for a node revised as several units.
     pub(crate) fn primary_node(&self) -> Option<&ClusterNodeName> {
-        self.single_unit().primary_node.as_ref()
+        self.sole_unit()?.primary_node.as_ref()
     }
 
+    /// The replicas of a single-unit node. Empty for a node revised as several units.
     pub(crate) fn replica_nodes(&self) -> Vec<&ClusterNodeName> {
-        let primary = self.primary_node();
-        self.single_unit()
-            .assigned_nodes
+        let Some(unit) = self.sole_unit() else {
+            return Vec::new();
+        };
+        unit.assigned_nodes
             .iter()
-            .filter(|node| Some(*node) != primary)
+            .filter(|node| Some(*node) != unit.primary_node.as_ref())
             .collect()
     }
 
+    /// Whether any unit of this node is primary on `node`.
     pub(crate) fn is_primary_on(&self, node: &ClusterNodeName) -> bool {
-        match self.primary_node() {
-            Some(primary) => primary == node,
-            None => self.is_assigned_to(node),
-        }
+        self.units.values().any(|unit| unit.is_primary_on(node))
     }
 
+    /// The cluster node a single-unit node executes on. `None` for a node that runs on every
+    /// cluster node, and for a node revised as several units, which have no one execution node.
     pub(crate) fn execution_node(&self) -> Option<&ClusterNodeName> {
         if self.executes_on_every_cluster_node {
             None
@@ -191,6 +262,7 @@ impl ExecutionNode {
         }
     }
 
+    /// Whether any unit of this node executes on `node`.
     pub(crate) fn executes_on(&self, node: &ClusterNodeName) -> bool {
         if self.executes_on_every_cluster_node {
             self.is_assigned_to(node)

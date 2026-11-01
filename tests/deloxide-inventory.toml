@@ -166,6 +166,7 @@ tags = [
   "@mqtt_source_retirement",
   "@pulsar_source_retirement",
   "@forced_failover_delivery",
+  "@relay_partition_failover",
   "@mqtt_parallel_gather_at_quiesce",
   "@sqs_receive_at_quiesce",
   "@sqs_ingestor_receive_deadline",
@@ -2659,6 +2660,26 @@ scenario = "A forced failover and a later revision install while the former owne
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Failover of the owner of one partition of a partitioned relay: per-unit owner routes, the moved partition's channel retirement and owner task replacement while the other partitions keep their owners, channels and owner tasks. Exercises relay channel ordering, dispatch gate engagement, ACK ownership and consensus lifecycle locks; asynchronous admission and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/relay_partition_failover.feature"
+id = "scenario.relay-partition-failover"
+invariant = "Losing the owner of some partitions moves only those partitions to surviving nodes, the other partitions keep flowing and keep their owners, and every key's order to the emitter is kept."
+invocation = "scenarios"
+scenario = "Failover of one partition owner moves only its partitions and leaves the other partitions running"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: failover of one partition owner of a partitioned relay, with per-unit owner routes, channel retirement and owner task replacement for only the moved partitions. Asynchronous admission and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/relay_partition_failover.feature"
+id = "stress.relay-partition-failover"
+invariant = "Losing the owner of some partitions moves only those partitions to surviving nodes, the other partitions keep flowing and keep their owners, and every key's order to the emitter is kept."
+invocation = "stress-scenarios"
+scenario = "Failover of one partition owner moves only its partitions and leaves the other partitions running"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Transaction model application, tracked impact recording and domain pause release across two controlled leadership transfers. Async proposal waits and fault barriers remain untracked."
 examples = 1
 feature = "tests/features/runtime/client_wire_pause_recovery.feature"
@@ -3497,10 +3518,12 @@ workloads = [
   "scenario.forced-failover-delivery",
   "scenario.materialized-retention-activation",
   "scenario.materialized-restart-retention",
+  "scenario.relay-partition-failover",
   "stress.diagnostic-nodes",
   "stress.forced-failover-delivery",
   "stress.materialized-retention-activation",
   "stress.materialized-restart-retention",
+  "stress.relay-partition-failover",
 ]
 
 [[owner]]

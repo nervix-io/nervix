@@ -32,7 +32,7 @@ use nervix_models::{
     KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef, PlacementName,
     PlacementPolicy, ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion,
     ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
-    ResourceVersionEntries, ScheduledNode, WasmStateInspection, expression_to_plexus,
+    ResourceVersionEntries, ScheduledNode, Unit, WasmStateInspection, expression_to_plexus,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use sorted_vec::SortedSet;
@@ -612,6 +612,11 @@ pub(in crate::application) fn format_relay_describe_output(
 }
 
 fn format_schedule_placement_lines(scheduled_node: Option<&ScheduledNode>) -> Vec<String> {
+    if let Some(scheduled_node) = scheduled_node
+        && scheduled_node.is_partitioned()
+    {
+        return format_partition_placement_lines(scheduled_node);
+    }
     let owner = match scheduled_node.and_then(ScheduledNode::execution_node) {
         Some(owner) => owner.as_str(),
         None => "-",
@@ -624,6 +629,35 @@ fn format_schedule_placement_lines(scheduled_node: Option<&ScheduledNode>) -> Ve
         }
     }
     vec![format!("owner: {owner}"), format!("replicas: {replicas}")]
+}
+
+/// The partition count of a partitioned relay, then one line per partition naming its owner and
+/// its state replicas, in partition order.
+fn format_partition_placement_lines(scheduled_node: &ScheduledNode) -> Vec<String> {
+    let mut lines = vec![format!("partitions: {}", scheduled_node.units.len())];
+    for (unit, scheduled) in &scheduled_node.units {
+        let Unit::Partition(partition) = unit else {
+            continue;
+        };
+        let owner = match scheduled_node.unit_execution_node(*unit) {
+            Some(owner) => owner.as_str(),
+            None => "-",
+        };
+        let replicas = scheduled
+            .replica_nodes()
+            .iter()
+            .map(|node| node.as_str())
+            .collect::<Vec<_>>();
+        let replicas = if replicas.is_empty() {
+            "-".to_string()
+        } else {
+            replicas.join(",")
+        };
+        lines.push(format!(
+            "partition {partition}: owner={owner} replicas={replicas}"
+        ));
+    }
+    lines
 }
 
 fn format_replica_nodes(scheduled_node: &ScheduledNode) -> String {

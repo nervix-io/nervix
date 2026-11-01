@@ -981,6 +981,7 @@ fn every_role_is_attached_to_the_item_it_names() {
         topology: unchanged(side),
         ownership_moves: CanonicalImpactSet::new([nervix_models::OwnershipMoveImpact {
             node: junction.clone(),
+            unit: nervix_models::Unit::Single,
             source: named("node-1"),
             destination: named("node-2"),
             attribution: ops(&[1]),

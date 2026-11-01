@@ -64,7 +64,7 @@ use nervix_interconnect::SubscriptionInterestVisibilityRequest as RemoteSubscrip
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, CommandExecutionReference, CreateRelay, CreateSchema,
     DomainName, FieldName, ParseAsType, RelayName, ScheduledModel, SchemaName, SubscriptionBinding,
-    SubscriptionLiteral, SubscriptionName, TransactionPreviewIdentity, UserName,
+    SubscriptionLiteral, SubscriptionName, TransactionPreviewIdentity, Unit, UserName,
 };
 use nervix_plexus::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_primitives::{
@@ -1118,21 +1118,17 @@ impl SessionServiceImpl {
         })
     }
 
-    pub(in crate::application) async fn scheduled_stream_owner_nodes(
+    /// The node the committed schedule places the owner of `unit` of `relay` on, if it places one.
+    pub(in crate::application) async fn scheduled_stream_unit_owner(
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Vec<ClusterNodeName> {
+        unit: Unit,
+    ) -> Option<ClusterNodeName> {
         let schedule = self.inner.consensus.current_schedule().await;
-        let Some(domain_schedule) = schedule.domain(domain) else {
-            return Vec::new();
-        };
-        domain_schedule
-            .scheduled::<CreateRelay>(relay.clone())
-            .and_then(|scheduled| scheduled.node.execution_node())
-            .cloned()
-            .into_iter()
-            .collect()
+        let domain_schedule = schedule.domain(domain)?;
+        let scheduled = domain_schedule.scheduled::<CreateRelay>(relay.clone())?;
+        scheduled.node.unit_execution_node(unit).cloned()
     }
 
     async fn process_pending_session_commands(
@@ -1343,7 +1339,7 @@ impl SessionServiceImpl {
         let branch_fields = branching.field_names().cloned().collect::<Vec<_>>();
         let branch = match &branching {
             nervix_models::ResolvedBranching::Unbranched => None,
-            nervix_models::ResolvedBranching::Branched { branch, schema } => {
+            nervix_models::ResolvedBranching::Branched { branch, schema, .. } => {
                 Some(SubscriptionBranchSchema {
                     name: branch,
                     schema,
@@ -1946,6 +1942,7 @@ mod tests {
                     sensitive: false,
                 }],
             },
+            nervix_models::BranchPartitions::ONE,
         );
         let binding = SubscriptionBinding {
             field: field.clone(),

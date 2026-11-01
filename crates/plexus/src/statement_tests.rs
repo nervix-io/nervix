@@ -14,12 +14,13 @@
 
 use meticulous::ResultExt as _;
 use nervix_models::{
-    AckMode, AlterRelay, AlterRelayOperation, ClusterNodeName, CordonNode, CorrelatorName,
-    DeduplicatorName, DescribeRelay, DrainNode, DropModel, DropNode, EmitterName, EndpointName,
-    FieldName, FlushPolicy, IngestorName, JunctionName, Model, ModelKind, ModelName,
-    ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName, SchemaName,
-    ShowEmitters, ShowIngestors, Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode,
-    WasmProcessorName, WindowProcessorName,
+    AckMode, AlterBranch, AlterBranchOperation, AlterRelay, AlterRelayOperation, BranchName,
+    BranchPartitions, ClusterNodeName, CordonNode, CorrelatorName, DeduplicatorName, DescribeRelay,
+    DrainNode, DropModel, DropNode, EmitterName, EndpointName, FieldName, FlushPolicy,
+    IngestorName, JunctionName, Model, ModelKind, ModelName, ReingestorName, RelayName,
+    ReordererName, RequestedResourceVersion, ResourceName, SchemaName, ShowEmitters, ShowIngestors,
+    Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode, WasmProcessorName,
+    WindowProcessorName,
 };
 use nonzero_ext::nonzero;
 use rstest::rstest;
@@ -56,6 +57,11 @@ fn numeric_slots_offer_a_named_placeholder_rather_than_nothing() {
             "CREATE BRANCH b SCHEMA s TTL 1s MAX INSTANCES ",
             "max_instances",
         ),
+        (
+            "CREATE BRANCH b SCHEMA s TTL 1s PARTITIONS ",
+            "partition_count",
+        ),
+        ("ALTER BRANCH b SET PARTITIONS ", "partition_count"),
         (
             "CREATE RELAY r SCHEMA s UNBRANCHED CAPACITY ",
             "relay_capacity",
@@ -540,8 +546,73 @@ fn alter_context_suggestions_include_all_supported_model_families() {
     assert!(suggestions.contains(&"GENERATOR".to_string()));
     assert!(suggestions.contains(&"SCHEMA".to_string()));
     assert!(suggestions.contains(&"WIRE".to_string()));
+    assert!(suggestions.contains(&"BRANCH".to_string()));
     assert!(!suggestions.contains(&"JSON".to_string()));
     assert!(!suggestions.contains(&"AVRO".to_string()));
+}
+
+#[test]
+fn parses_alter_branch_set_partitions_statement() {
+    let parsed =
+        parse_statement("ALTER BRANCH by_tenant SET PARTITIONS 4;").expect("parse should succeed");
+    assert_eq!(
+        parsed,
+        Statement::AlterBranch(AlterBranch {
+            branch: BranchName::try_from("by_tenant").expect("valid branch name"),
+            operations: vec![AlterBranchOperation::SetPartitions {
+                partitions: BranchPartitions::Direct(nonzero!(4u16)),
+            }],
+        })
+    );
+}
+
+#[test]
+fn create_branch_tail_suggestions_offer_partitions_before_eviction_only() {
+    let input = "CREATE BRANCH b SCHEMA s TTL 1s ";
+    let suggestions = suggest_statement(input, input.len());
+    assert!(
+        suggestions.contains(&"PARTITIONS".to_string()),
+        "{suggestions:?}"
+    );
+    assert!(suggestions.contains(&"MAX".to_string()), "{suggestions:?}");
+    assert!(!suggestions.contains(&"SET".to_string()), "{suggestions:?}");
+    assert!(
+        !suggestions.contains(&"CAPACITY".to_string()),
+        "{suggestions:?}"
+    );
+
+    let input = "CREATE BRANCH b SCHEMA s TTL 1s PARTITIONS 4 ";
+    let suggestions = suggest_statement(input, input.len());
+    assert!(suggestions.contains(&"MAX".to_string()), "{suggestions:?}");
+    assert!(
+        !suggestions.contains(&"PARTITIONS".to_string()),
+        "{suggestions:?}"
+    );
+
+    let input = "CREATE BRANCH b SCHEMA s TTL 1s MAX INSTANCES 3 EVICT LRU ";
+    let suggestions = suggest_statement(input, input.len());
+    assert!(
+        !suggestions.contains(&"PARTITIONS".to_string()),
+        "{suggestions:?}"
+    );
+}
+
+#[test]
+fn alter_branch_suggestions_do_not_leak_relay_operations() {
+    let input = "ALTER BRANCH by_tenant SET ";
+    let suggestions = suggest_statement(input, input.len());
+    assert!(
+        suggestions.contains(&"PARTITIONS".to_string()),
+        "{suggestions:?}"
+    );
+    assert!(
+        !suggestions.contains(&"CAPACITY".to_string()),
+        "{suggestions:?}"
+    );
+    assert!(
+        !suggestions.contains(&"SCHEMA".to_string()),
+        "{suggestions:?}"
+    );
 }
 
 #[test]

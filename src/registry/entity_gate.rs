@@ -207,7 +207,7 @@ pub(crate) fn ownership_handoff_gate_participants(
                 None => false,
             };
             if is_affected || is_gated_relay || writes_gated_relay {
-                participants.extend(node.execution_nodes().iter().cloned());
+                participants.extend(node.execution_nodes());
             }
         }
     }

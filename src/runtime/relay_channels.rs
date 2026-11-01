@@ -32,7 +32,59 @@ type Destinations =
 pub(super) struct RelayChannels {
     branches: ArcSwap<Branches>,
     closed: CancellationToken,
-    routing: StdArc<ArcSwap<CancellationToken>>,
+    routing: RoutingGenerations,
+}
+
+/// The routing generation of each unit of one relay. The units are fixed when the relay's channels
+/// are created, so a branch binds the generation of the unit that owns it once, and a change of one
+/// unit's owner retires only the channels of the branches that unit owns.
+#[derive(Debug)]
+struct RoutingGenerations {
+    by_unit: BTreeMap<Unit, StdArc<ArcSwap<CancellationToken>>>,
+}
+
+impl RoutingGenerations {
+    fn for_units(units: &[Unit]) -> Self {
+        Self {
+            by_unit: units
+                .iter()
+                .map(|unit| {
+                    (
+                        *unit,
+                        StdArc::new(ArcSwap::from_pointee(CancellationToken::new())),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// The generation slot of `unit`, or `None` for a unit the relay is not scheduled as.
+    fn of(&self, unit: Unit) -> Option<StdArc<ArcSwap<CancellationToken>>> {
+        self.by_unit.get(&unit).cloned()
+    }
+
+    /// Ends the current generation of each of `units` without publishing a successor.
+    fn fence(&self, units: impl IntoIterator<Item = Unit>) {
+        for unit in units {
+            if let Some(routing) = self.by_unit.get(&unit) {
+                routing.load().cancel();
+            }
+        }
+    }
+
+    /// Ends the current generation of each of `units` and publishes its successor.
+    fn replace(&self, units: impl IntoIterator<Item = Unit>) {
+        for unit in units {
+            if let Some(routing) = self.by_unit.get(&unit) {
+                routing.load().cancel();
+                routing.store(StdArc::new(CancellationToken::new()));
+            }
+        }
+    }
+
+    fn units(&self) -> Vec<Unit> {
+        self.by_unit.keys().copied().collect()
+    }
 }
 
 /// This handle names a branch incarnation. Its routing publisher can replace channels without
@@ -64,30 +116,41 @@ pub(in crate::runtime) struct SubscriptionChannels {
 
 impl Default for RelayChannels {
     fn default() -> Self {
-        Self {
-            branches: ArcSwap::from_pointee(Branches::default()),
-            closed: CancellationToken::new(),
-            routing: StdArc::new(ArcSwap::from_pointee(CancellationToken::new())),
-        }
+        Self::for_units(&[Unit::Single])
     }
 }
 
 impl RelayChannels {
-    pub(super) fn bind(&self, key: &Option<BranchKey>) -> StdArc<RelayBranchChannels> {
-        if self.closed.is_cancelled() {
-            return StdArc::new(RelayBranchChannels::new(
-                self.routing.clone(),
+    /// The channels of a relay scheduled as `units`.
+    pub(super) fn for_units(units: &[Unit]) -> Self {
+        Self {
+            branches: ArcSwap::from_pointee(Branches::default()),
+            closed: CancellationToken::new(),
+            routing: RoutingGenerations::for_units(units),
+        }
+    }
+
+    /// The channels of branch `key`, which `unit` of the relay owns.
+    ///
+    /// A unit the relay is not scheduled as has no routing generation, so its channels are bound
+    /// already retired and refuse every delivery.
+    pub(super) fn bind(&self, key: &Option<BranchKey>, unit: Unit) -> StdArc<RelayBranchChannels> {
+        let Some(routing) = self.routing.of(unit) else {
+            let retired = StdArc::new(RelayBranchChannels::new(
+                StdArc::new(ArcSwap::from_pointee(CancellationToken::new())),
                 self.closed.clone(),
             ));
+            retired.retire();
+            return retired;
+        };
+        if self.closed.is_cancelled() {
+            return StdArc::new(RelayBranchChannels::new(routing, self.closed.clone()));
         }
         let mut current = self.branches.load_full();
         if let Some(branch) = current.get(key) {
             return branch.clone();
         }
-        let branch = StdArc::new(RelayBranchChannels::new(
-            self.routing.clone(),
-            self.closed.clone(),
-        ));
+        let branch = StdArc::new(RelayBranchChannels::new(routing, self.closed.clone()));
         loop {
             if self.closed.is_cancelled() {
                 return branch;
@@ -143,7 +206,20 @@ impl RelayChannels {
         )
     )]
     pub(super) fn fence_routing(&self) {
-        self.routing.load().cancel();
+        self.routing.fence(self.routing.units());
+    }
+
+    /// End the current routing generation of each of `units` without publishing a successor, as
+    /// [`Self::fence_routing`] does for every unit.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a committed forced move retires the preceding routes of the units it moved"
+        )
+    )]
+    pub(super) fn fence_routing_of(&self, units: impl IntoIterator<Item = Unit>) {
+        self.routing.fence(units);
     }
 
     /// Lifecycle writers are serialized by schedule application and its dispatch fence. Cancelling
@@ -155,12 +231,11 @@ impl RelayChannels {
             reason = "schedule publication installs the successor routing generation"
         )
     )]
-    pub(super) fn replace_owner(&self) {
+    pub(super) fn replace_owner_of(&self, units: impl IntoIterator<Item = Unit>) {
         if self.closed.is_cancelled() {
             return;
         }
-        self.fence_routing();
-        self.routing.store(StdArc::new(CancellationToken::new()));
+        self.routing.replace(units);
     }
 
     #[cfg_attr(
@@ -171,12 +246,12 @@ impl RelayChannels {
         )
     )]
     pub(super) fn replace_destinations(&self) {
-        self.replace_owner();
+        self.replace_owner_of(self.routing.units());
     }
 
     pub(super) fn retire_all(&self) {
         self.closed.cancel();
-        self.routing.load().cancel();
+        self.routing.fence(self.routing.units());
         for branch in self.branches.load().values() {
             branch.retire();
         }

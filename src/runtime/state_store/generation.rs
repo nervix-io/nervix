@@ -37,7 +37,10 @@ const MAX_STORAGE_KEY_BYTES: usize = (1_usize << u16::BITS) - 1;
 pub(super) const CHUNK_COORDINATE_BYTES: usize = 2 * std::mem::size_of::<u64>() + 2;
 const _: () = assert!(MAX_PLACEMENT_BYTES + CHUNK_COORDINATE_BYTES <= MAX_STORAGE_KEY_BYTES);
 const _: () = assert!(StoredCheckpoint::SEGMENTED_BYTES <= RESTORE_STATE_CHUNK_BYTES);
-pub(super) const STORAGE_FORMAT: &[u8] = b"unit-keyed-checkpoint-segments";
+/// The shape of everything the runtime state store keeps. It changes whenever a stored checkpoint,
+/// key or payload changes shape, such as the unit every branch-aggregated metric series carries, so
+/// a store written in an earlier shape fails to open instead of being read as the current one.
+pub(super) const STORAGE_FORMAT: &[u8] = b"unit-labelled-metric-checkpoint-segments";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StateNamespace {

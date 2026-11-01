@@ -277,6 +277,7 @@ declare_model_change_aspects! {
     EntityReplaced => Dynamic, None, false;
     EntityCreated => Dynamic, None, false;
     EntityDropped => Dynamic, None, false;
+    BranchPartitions => DomainPause, None, false;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1115,6 +1116,11 @@ fn branch_change_aspects(
         // TTL and eviction are baked into branch node specs when a branch task spawns, so they
         // only take effect once the domain rebuilds around the new models.
         changes.push(ModelChangeAspect::BranchLifecycle);
+    }
+    if base.partitions != candidate.partitions {
+        // The count decides which unit of every relay the branch branches owns each key, so it
+        // changes only on a stopped domain, whose next start schedules the new units.
+        changes.push(ModelChangeAspect::BranchPartitions);
     }
     changes
 }

@@ -550,8 +550,11 @@ mod tests {
                 named::<ModelName>("branched"),
             ))
             .expect("the fixture has a branched relay");
-        branched_node.resolved_branching =
-            Some(ResolvedBranching::branched(branch_name, branch_schema));
+        branched_node.resolved_branching = Some(ResolvedBranching::branched(
+            branch_name,
+            branch_schema,
+            nervix_models::BranchPartitions::ONE,
+        ));
 
         let plan = DomainActivationPlan::from_scheduled_nodes(&domain, &scheduled)
             .expect("all domain references resolve");
@@ -647,6 +650,7 @@ mod tests {
             .resolved_branching = Some(ResolvedBranching::branched(
             branch_name.clone(),
             branch_schema.clone(),
+            nervix_models::BranchPartitions::ONE,
         ));
         let error = DomainActivationPlan::from_scheduled_nodes(&domain, &branched_relay)
             .expect_err("the named branch must exist");

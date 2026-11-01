@@ -28,6 +28,11 @@ use crate::Arbitrary;
 /// How many entries a generated collection of stored records holds at most.
 const RECORDS: usize = 3;
 
+/// The most partitions the branch of a generated scheduled relay declares. A schedule holds one
+/// unit per partition, so a small bound keeps a generated schedule small while still covering a
+/// single partition and several.
+const SCHEDULED_PARTITIONS: u16 = 4;
+
 /// The characters a command execution reference or a resource upload identity holds, case kept.
 const IDENTITY_CHARACTERS: &[u8] =
     b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-";
@@ -102,6 +107,34 @@ impl Arbitrary<'_> {
         let node = self.rule_name::<ClusterNodeName>();
         let incarnation = self.incarnation();
         ClusterNodeIdentity::new(node, incarnation)
+    }
+
+    /// The partition count of a generated scheduled relay's branch, from one through
+    /// [`SCHEDULED_PARTITIONS`].
+    fn scheduled_branch_partitions(&mut self) -> nervix_models::BranchPartitions {
+        let count = self
+            .entropy
+            .boundary_biased(1..=u64::from(SCHEDULED_PARTITIONS));
+        let count = u16::try_from(count).verified("the range above ends below u16::MAX");
+        nervix_models::BranchPartitions::Direct(
+            std::num::NonZeroU16::new(count).verified("the range above starts at one"),
+        )
+    }
+
+    /// A placement unit of a scheduled node: its one `Single` unit, or a partition or instance
+    /// whose index is near either end of its range.
+    pub fn unit(&mut self) -> nervix_models::Unit {
+        match self.entropy.byte() % 3 {
+            0 => nervix_models::Unit::Single,
+            1 => nervix_models::Unit::Partition(self.unit_index()),
+            _ => nervix_models::Unit::Instance(self.unit_index()),
+        }
+    }
+
+    /// A unit index, landing on zero and the largest index as often as elsewhere.
+    fn unit_index(&mut self) -> u32 {
+        let index = self.entropy.boundary_biased(0..=u64::from(u32::MAX));
+        u32::try_from(index).verified("the range above ends at u32::MAX")
     }
 
     /// A cluster node's name, or none.
@@ -304,7 +337,7 @@ impl Arbitrary<'_> {
     }
 
     /// The branch declaration a scheduled node carries: none resolved yet, unbranched, or branched
-    /// by a named branch with its complete key schema.
+    /// by a named branch with its complete key schema and its partition count.
     fn resolved_branching(&mut self) -> Option<ResolvedBranching> {
         match self.entropy.byte() % 3 {
             0 => None,
@@ -312,7 +345,8 @@ impl Arbitrary<'_> {
             _ => {
                 let branch = self.name();
                 let schema = self.create_schema();
-                Some(ResolvedBranching::branched(branch, schema))
+                let partitions = self.scheduled_branch_partitions();
+                Some(ResolvedBranching::branched(branch, schema, partitions))
             }
         }
     }
@@ -457,7 +491,15 @@ impl Arbitrary<'_> {
         let assigned = self.records(Self::rule_name::<ClusterNodeName>);
         node = node.placed_on(primary, assigned);
         if self.entropy.flag() {
-            node.single_unit_mut().ownership_transition = Some(self.ownership_transition());
+            let transition = self.ownership_transition();
+            let units = std::num::NonZeroUsize::new(node.units.len())
+                .assured("every scheduled node is scheduled as at least one unit");
+            let moving = self.entropy.index(units);
+            let (_, unit) = node
+                .units
+                .get_index_mut(moving)
+                .verified("the index above is below the unit count");
+            unit.ownership_transition = Some(transition);
         }
         self.advance_wasm_state(&mut node);
         node

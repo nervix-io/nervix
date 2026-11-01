@@ -751,6 +751,7 @@ impl PeerHost {
             kind: RelayPayloadKind::Routed,
             domain: DomainName::parse("simulated").assured("fixture domain is valid"),
             relay: RelayName::parse("records").assured("fixture relay is valid"),
+            unit: nervix_models::Unit::Single,
             key: None,
             batch_ipc,
             metadata: Vec::new(),

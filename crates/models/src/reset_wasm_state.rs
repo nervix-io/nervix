@@ -204,6 +204,7 @@ mod tests {
                     sensitive: false,
                 }],
             },
+            crate::BranchPartitions::ONE,
         )
     }
 

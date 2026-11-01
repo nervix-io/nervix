@@ -12,8 +12,6 @@
 
 use std::collections::VecDeque;
 
-use meticulous::OptionExt as _;
-
 use super::*;
 
 /// The placement of one partition unit of a relay, as one `SHOW CLUSTER STATUS` schedule line
@@ -43,11 +41,10 @@ fn relay_partition_placements(status: &str, domain: &str, relay: &str) -> Vec<Pa
             } else if let Some(value) = field.strip_prefix("name=") {
                 line_name = Some(value);
             } else if let Some(value) = field.strip_prefix("unit=partition:") {
-                partition = Some(
-                    value
-                        .parse::<u32>()
-                        .unwrap_or_else(|error| panic!("unit {value:?} is not a partition: {error}")),
-                );
+                partition =
+                    Some(value.parse::<u32>().unwrap_or_else(|error| {
+                        panic!("unit {value:?} is not a partition: {error}")
+                    }));
             } else if let Some(value) = field.strip_prefix("owner=") {
                 owner = Some(value);
             }
@@ -186,10 +183,9 @@ async fn then_last_cluster_status_lists_relay_partitions(
         .collect::<BTreeSet<_>>();
     let expected_partitions = (0..expected).collect::<BTreeSet<_>>();
     assert_eq!(
-        partitions,
-        expected_partitions,
-        "relay '{relay}' must be scheduled as partitions {expected_partitions:?}; got {partitions:?} \
-         in: {:?}",
+        partitions, expected_partitions,
+        "relay '{relay}' must be scheduled as partitions {expected_partitions:?}; got \
+         {partitions:?} in: {:?}",
         world.last_command_output
     );
     assert_eq!(
@@ -424,7 +420,9 @@ async fn then_within_duration_failed_partition_keys_are_absent(
     }
 }
 
-#[then(expr = "within {string} the relay subscription receives payloads keeping the order of each key")]
+#[then(
+    expr = "within {string} the relay subscription receives payloads keeping the order of each key"
+)]
 async fn then_within_duration_the_subscription_keeps_each_key_in_order(
     world: &mut ScenarioWorld,
     duration: String,
@@ -439,7 +437,8 @@ async fn then_within_duration_the_subscription_keeps_each_key_in_order(
         let now = Instant::now();
         assert!(
             now < deadline,
-            "timed out waiting for subscription payloads; still expected {:?}, observed {observed:?}",
+            "timed out waiting for subscription payloads; still expected {:?}, observed \
+             {observed:?}",
             remaining.keys().collect::<Vec<_>>()
         );
         let wait = deadline.saturating_duration_since(now);
@@ -461,7 +460,9 @@ async fn then_within_duration_the_subscription_keeps_each_key_in_order(
     }
 }
 
-#[then(expr = "within {string} the observed broker receives payloads keeping the order of each key")]
+#[then(
+    expr = "within {string} the observed broker receives payloads keeping the order of each key"
+)]
 async fn then_within_duration_the_broker_keeps_each_key_in_order(
     world: &mut ScenarioWorld,
     duration: String,

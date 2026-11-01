@@ -1,3 +1,4 @@
+@relay_partition_failover @deloxide_stress
 Feature: Relay partition failover
   Every partition of a relay is its own placement unit with its own owner. When the cluster node
   owning some partitions fails, only those partitions move: the owners of the other partitions keep
@@ -53,6 +54,13 @@ Feature: Relay partition failover
       START;
       """
     Then the current leader node is saved as placeholder "leader"
+    When these Plexus commands are executed through the client on node "{{leader}}"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status places the partitions of relay "notifications" on at least 2 distinct owners
+    And the owner of every partition of relay "notifications" in the last cluster status is saved with placeholder prefix "owner_before"
+    And a node other than placeholder "leader" that owns a partition of relay "notifications" in the last cluster status is saved as placeholder "failed_owner"
     When these Plexus commands are executed on node "{{leader}}"
       """
       CREATE SUBSCRIPTION failover_subscription TO notifications;
@@ -80,13 +88,6 @@ Feature: Relay partition failover
       "tenant":"lambda" | "seq":1
       "tenant":"acme" | "seq":1
       """
-    When these Plexus commands are executed through the client on node "{{leader}}"
-      """
-      SHOW CLUSTER STATUS;
-      """
-    Then the last cluster status places the partitions of relay "notifications" on at least 2 distinct owners
-    And the owner of every partition of relay "notifications" in the last cluster status is saved with placeholder prefix "owner_before"
-    And a node other than placeholder "leader" that owns a partition of relay "notifications" in the last cluster status is saved as placeholder "failed_owner"
     When node "{{failed_owner}}" is stopped
     Then within "90s" node "{{leader}}" eventually reports no partition of relay "notifications" owned by node "{{failed_owner}}"
     And within "30s" node "{{leader}}" eventually reports relay "notifications" keys absent in the partitions node "{{failed_owner}}" owned under placeholder prefix "owner_before" and present in every other partition

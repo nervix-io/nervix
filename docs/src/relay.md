@@ -1,8 +1,9 @@
 # Streams And State
 
 `RELAY` declares a named, schedulable runtime node between producers and consumers. Every relay
-has one primary owner. Only that owner instantiates the relay buffer, concrete branch presence,
-relay metrics, subscription fan-out, and optional materialized state.
+has one primary owner, and a relay whose branch declares several partitions has one owner for each
+partition. Only an owner instantiates the relay buffer, concrete branch presence, relay metrics,
+subscription fan-out, and optional materialized state, each for the keys it owns.
 
 ```plexus
 CREATE IF NOT EXISTS RELAY notifications
@@ -20,17 +21,16 @@ Branching is defined by a schema name on a named branch:
 - `CREATE BRANCH by_user SCHEMA user_branch TTL 5m` isolates each user
 - `CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m` isolates each tenant
 - `CREATE BRANCH by_tenant_user SCHEMA tenant_user_branch TTL 5m` isolates each tenant/user pair
+- `PARTITIONS <n>` divides the branch's concrete keys into partitions that each have their own
+  relay owners; see [Relay Partitions](#relay-partitions)
 - `MAX INSTANCES <n> EVICT LRU` can cap active concrete branch instances for that branch
-
-Each branch declaration currently has one direct execution partition in its stored Model. Plexus
-has no `PARTITIONS` clause yet; concrete branch keys still isolate runtime state within that one
-partition.
 
 The web console's **Create** menu also has a branch form. Its schema picker searches internal
 schemas in the captured domain, including schemas staged earlier in the attached transaction; the
-form requires a TTL and accepts the optional positive LRU instance limit. Registry validation
-remains authoritative for whether the selected schema can serve as a branch key.
-`SHOW CREATE BRANCH <name>` returns the stored branch's canonical declaration.
+form requires a TTL, starts its partition count at 1, and accepts the optional positive LRU
+instance limit. Registry validation remains authoritative for whether the selected schema can
+serve as a branch key. `SHOW CREATE BRANCH <name>` returns the stored branch's canonical
+declaration.
 
 The same menu has a relay form. It selects the relay's schema and branch from server-backed lists
 of the captured domain, including models staged earlier in the attached transaction, and requires
@@ -45,6 +45,73 @@ Relays select an explicit branch or declare unbranched execution:
 CREATE RELAY notifications SCHEMA notification BRANCHED BY by_tenant_user;
 CREATE RELAY global_notifications SCHEMA notification UNBRANCHED;
 ```
+
+## Relay Partitions
+
+A branch declares how many partitions its concrete keys are divided into:
+
+```plexus
+CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS 4;
+```
+
+The count is a whole number from 1 through 65535. A declaration that writes no count has one
+partition, and `SHOW CREATE BRANCH` omits `PARTITIONS 1`. `PARTITIONS` follows `TTL` and precedes
+`MAX INSTANCES`.
+
+A concrete key lands in partition `seed mod n`. Its seed is the first eight bytes, read
+little-endian, of the key's fingerprint, the same fingerprint that names the branch in metrics and
+diagnostics. The seed depends on the key's fields alone, never on the branch, relay or domain the key
+appears in, so every node places a key in the same partition of every relay its branch branches, and
+it stays there for as long as the count stays the same.
+
+Every relay branched by a branch of several partitions is scheduled as one unit per partition,
+partition `0` through `n - 1`. Each partition has its own owner, its own state replicas and its own
+failover. The scheduler spreads a relay's partitions over the eligible nodes, least loaded first and
+then round-robin, so four partitions on three nodes span at least two of them. Placement rules move a
+partitioned relay as a whole only through `REQUIRE COLOCATION`, which keeps every partition with its
+placement group; preferences and soft separation leave its partitions where the scheduler spread
+them. See [Placement](placement.md).
+
+Each partition owner holds:
+
+- its own buffer of `CAPACITY` batches and its own dispatch gate
+- the presence of the keys of its partition, their TTL and their `MAX INSTANCES ... EVICT LRU` limit
+- the materialized rows of its keys, when the relay is materialized
+- its own relay metrics, labelled with the partition
+
+A producer resolves its key's partition once, when it binds a concrete branch, and sends that
+branch's batches to the owner of that partition. An owner accepts a batch from another node only for
+a partition it owns, and only when the key it decodes lands in that partition. Each partition owner
+fans its batches out to every runtime consumer and every session subscription of the relay, so a
+consumer and a subscription receive every partition. One key's records pass through one partition
+owner, which keeps their order; records of different keys in different partitions are not ordered
+with each other. Processors, generators and emitters stay single units that read every partition of
+their input relays.
+
+`SHOW CLUSTER STATUS` prints one schedule line per partition of a partitioned relay, naming the
+partition after the relay, such as
+`- domain=payments kind=relay name=tenant_events unit=partition:2 owner=node-3 replicas=-`.
+
+An unbranched relay and a relay of a branch with one partition have one owner.
+
+`ALTER BRANCH <branch> SET PARTITIONS <n>` changes the count:
+
+```plexus
+STOP;
+ALTER BRANCH by_tenant SET PARTITIONS 2;
+START;
+```
+
+The registry accepts it only while the branch's domain is stopped. On a running or paused domain it
+is refused before anything is committed:
+
+```text
+branch 'by_tenant' changes its partition count only while its domain is stopped: STOP domain 'payments', run ALTER BRANCH, then START it
+```
+
+`START` rebuilds every relay of the branch with the new set of partitions. Materialized relay state
+belongs to the domain start that began it and `START` clears it, so no row recorded under the
+previous count is read under the new one.
 
 ## Altering Relays
 
@@ -142,10 +209,12 @@ state, when enabled, is the only replicated part of the relay; it is not a secon
 
 ## Capacity
 
-`CAPACITY <n>` controls the single buffer on the relay owner. It is one cluster-wide
-backpressure boundary, not a per-producer, per-consumer, or per-branch capacity. If downstream
-runtime consumers cannot drain the relay quickly enough, upstream dispatch waits once the owner
-buffer and the fixed dispatch slots leading to it are occupied. A producer on another node also
+`CAPACITY <n>` controls the buffer on the relay owner: the single buffer of a relay with one
+owner, and the buffer of each partition owner of a partitioned relay. It is one cluster-wide
+backpressure boundary for each partition, not a per-producer, per-consumer, or per-branch capacity.
+If downstream runtime consumers cannot drain a partition quickly enough, upstream dispatch to that
+partition waits once its owner buffer and the fixed dispatch slots leading to it are occupied, while
+the relay's other partitions keep flowing. A producer on another node also
 waits while the owner has no relay memory left for the acknowledgement watches of the rows it
 sends, until the owner has reported enough earlier rows, or for the grant of its next delivery, and
 while its own node has no relay memory left to store the acknowledgements of the rows it sends; see
@@ -156,7 +225,8 @@ The capacity is a positive integer, through `18446744073709551615` on native 64-
 Creation and `ALTER RELAY ... SET CAPACITY` retain the exact accepted value in storage, replicated
 commands, and `SHOW CREATE` after a node or full-cluster restart.
 
-At most the following batches can be admitted or in dispatch for one relay:
+At most the following batches can be admitted or in dispatch for one relay partition, and for each
+partition of a partitioned relay:
 
 - `CAPACITY` batches in the owner buffer;
 - one batch from each producer cluster node to the owner; and
@@ -214,7 +284,8 @@ Expiration semantics:
   or processor that holds a branch with the same key, under this branch or another branch of the
   same schema, keeps its branch and the deliveries in flight on it
 - relay TTL and `MAX INSTANCES ... EVICT LRU` are enforced once by the relay owner across all
-  producers in the cluster
+  producers in the cluster. A partitioned relay enforces them in each partition owner on the keys
+  of that partition, so `MAX INSTANCES` caps each partition
 
 TTL is the expiration boundary; releasing the expired branch is a separate maintenance scan that
 runs on the physical clock. A branch is never released before its TTL has elapsed in the domain's
@@ -262,8 +333,15 @@ Operational notes:
 
 Materialized state is also the readable snapshot surface for `GENERATOR` nodes. A generator declares exactly one materialized relay with `USING MATERIALIZED STATE <relay>` and reads it through `relay_state.<relay>.<field>`.
 
+A partitioned materialized relay keeps each key's row with the owner of the key's partition and
+replicates each partition to its own state replicas. A materialized dependency reads one key's row
+from the owner of that key's partition, and a generator reads every partition's rows from their
+owners.
+
 `SHOW RELAY <relay> MATERIALIZED STATE` reports `kind: RELAY`, the relay owner, and its
-scheduler-selected state replicas before the materialized entries or empty-state message. Each
+scheduler-selected state replicas before the materialized entries or empty-state message. A
+partitioned relay reports its partitions instead of one owner, as `DESCRIBE RELAY` does, and gathers
+each partition's entries from its owner. Each
 entry keeps its typed branch key through collection and renders it at this reporting boundary;
 unbranched entries render as `key=(root)`. An entry's payload is written as JSON, which has no
 number for a NaN or an infinity, so a float field holding one is written as the string `NaN`,
@@ -272,16 +350,29 @@ range, or when an Avro payload or a producer's Arrow batch carries one.
 
 `DESCRIBE RELAY <relay>` reports the owner and state replicas immediately after `kind: RELAY`, then
 the logical definition and owner buffer-utilization metrics. An ordinary relay reports
-`replicas: -`. Traffic metrics remain on the producing or consuming runtime-node edge.
+`replicas: -`. Traffic metrics remain on the producing or consuming runtime-node edge. A partitioned
+relay reports its partition count and then one line per partition in place of the owner and replica
+lines, and its metric lines come from every partition owner, each naming its partition:
 
-`DESCRIBE RELAY <relay> WHERE (...)` is answered only by the current relay owner and reports
-owner-authoritative concrete-branch existence and buffer metrics. A branch exists from the moment
+```text
+partitions: 4
+partition 0: owner=node-2 replicas=-
+partition 1: owner=node-1 replicas=-
+partition 2: owner=node-3 replicas=-
+partition 3: owner=node-2 replicas=-
+```
+
+`DESCRIBE RELAY <relay> WHERE (...)` is answered only by the current owner of the key's partition
+and reports owner-authoritative concrete-branch existence and buffer metrics. A partitioned relay
+also reports the key's partition and the node that owns it, as `partition: <p>` and `owner: <node>`
+after the existence line. A branch exists from the moment
 the owner accepts a batch for it until the owner evicts or expires it. Relay presence and metrics
 are not replicated. A planned owner move drains admitted work before cutover; an owner failure loses
 buffered batches, presence, and relay metrics. A new owner, whether on another node or after the
 relay's execution is rebuilt on the same one, reports a branch only after it accepts a batch for
 that branch itself. Materialized records survive when a current state replica can become owner.
-Prometheus exports aggregate relay metrics without branch-key labels;
+Prometheus exports aggregate relay metrics without branch-key labels, with a `partition` label
+that names a partitioned relay's partition and is `-` for every other series;
 see [Metrics And Observability](metrics-and-observability.md).
 
 ## Other Replicated Runtime State

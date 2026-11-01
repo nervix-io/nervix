@@ -18,7 +18,7 @@ use std::time::Duration;
 #[cfg(not(feature = "testing"))]
 use nervix_models::{
     ClusterNodeName, DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName,
-    RelayName,
+    RelayName, Unit,
 };
 
 #[cfg(not(feature = "testing"))]
@@ -224,6 +224,14 @@ impl ConfiguredFaultInjection {
     }
 
     pub(in crate::runtime) async fn pause_owner_relay_fanout_if_armed(&self, _domain: &DomainName) {
+    }
+
+    pub(in crate::runtime) async fn pause_owner_relay_partition_fanout_if_armed(
+        &self,
+        _domain: &DomainName,
+        _relay: &RelayName,
+        _unit: Unit,
+    ) {
     }
 
     pub(in crate::runtime) fn mark_owner_relay_fanout_complete(&self, _domain: &DomainName) {}

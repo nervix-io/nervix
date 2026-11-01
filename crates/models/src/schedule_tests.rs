@@ -2,13 +2,15 @@ use nervix_arbitrary::{Arbitrary, Domain};
 use nonzero_ext::nonzero;
 
 use crate::{
-    AckMode, BranchSelection, ClusterNodeName, ClusterSchedule, CreateIngestor, CreateJunction,
-    CreateSchema, CreateWasmProcessor, DomainName, DomainSchedule, EndpointIngestMode, FlushPolicy,
+    AckMode, BranchKeyFingerprint, BranchSelection, ClusterNodeName, ClusterSchedule,
+    CommandExecutionReference, CreateIngestor, CreateJunction, CreateRelay, CreateSchema,
+    CreateWasmProcessor, DomainName, DomainSchedule, EndpointIngestMode, FlushPolicy,
     GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor, IngestQuiesceMode, IngestorEntity,
     KafkaPartitionSchedule, Model, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
     OwnershipTransition, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-    ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint, SyslogIngestMode,
-    SyslogIngestor, SyslogListenerIngestor, Unit, WasmProcessorLimits,
+    RelayBranching, ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint,
+    SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor, Unit, WasmProcessorLimits,
+    WasmStateResetReason, WasmStateResetScope,
 };
 
 #[test]
@@ -404,4 +406,46 @@ fn every_ownership_component_but_branch_aggregated_metrics_is_archived() {
     ] {
         assert!(component.is_archived(), "{component:?}");
     }
+}
+
+#[test]
+fn a_relay_scheduled_as_partitions_takes_no_guest_state_lifetime_or_reset() {
+    let owner = named::<ClusterNodeName>("node-a");
+    let mut relay = ScheduledNode::new(
+        Model::Relay(CreateRelay {
+            name: named("tenant_events"),
+            schema: named("event"),
+            buffer: nonzero!(1usize),
+            branching: RelayBranching::unbranched(),
+            materialized_state: None,
+        }),
+        SchemaFingerprint::from_digest([1; 32]),
+    )
+    .placed_on(Some(owner.clone()), vec![owner.clone()]);
+    let single = relay
+        .units
+        .shift_remove(&Unit::Single)
+        .expect("the fixture starts with one unit");
+    relay.units.insert(Unit::Partition(0), single.clone());
+    relay.units.insert(Unit::Partition(1), single);
+    let before = relay.clone();
+
+    // Failover and drain begin a new guest-state lifetime for every node they move, so these run
+    // for each partition of a relay too, which holds no guest state of any unit.
+    relay.begin_wasm_state_generation();
+    relay.begin_wasm_branch_state_generation(BranchKeyFingerprint::new([7; 32]));
+    let request = CommandExecutionReference::parse("reset-tenant-events")
+        .expect("the reset reference must be valid");
+    let published = relay.begin_wasm_state_reset(
+        request.clone(),
+        WasmStateResetScope::Unbranched,
+        WasmStateResetReason::Operator,
+    );
+    let completed = relay.complete_wasm_state_reset(&request);
+
+    assert!(!published);
+    assert!(!completed);
+    assert_eq!(relay, before);
+    assert_eq!(relay.wasm_state_generations(), None);
+    assert_eq!(relay.wasm_state_reset(), None);
 }

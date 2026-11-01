@@ -7,7 +7,7 @@
 //! - **Must not know.** Runtime graphs, persistent ACK stores, or connector behavior.
 
 use nervix_interconnect::{RelayAdmissionDecision, RelayAdmissionStatus};
-use nervix_models::{CoordinationIdentity, RemoteAckOutcome, RemoteAckResolution};
+use nervix_models::{CoordinationIdentity, RemoteAckOutcome, RemoteAckResolution, Unit};
 use nervix_primitives::{
     sync::atomic::{AtomicU8, AtomicUsize, Ordering},
     time::timeout,
@@ -100,6 +100,7 @@ fn relay_payload(delivery: RelayDelivery, ack_id: u64, sender: &Transport) -> Re
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("simulated").assured("fixture domain is valid"),
         relay: RelayName::parse("records").assured("fixture relay is valid"),
+        unit: nervix_models::Unit::Single,
         key: None,
         batch_ipc,
         metadata: Vec::new(),
@@ -426,6 +427,282 @@ fn relay_reconciliation_and_cancellation_survive_lost_replies() {
         };
         scenario.check(fault_config, |run| exercise_relay(case, run));
     }
+}
+
+/// One partition's delivery of a partitioned relay: the unit it names, its own channel and its
+/// acknowledgement registration.
+#[derive(Clone, Copy, Debug)]
+struct PartitionDelivery {
+    unit: Unit,
+    channel: u8,
+    ack_id: u64,
+}
+
+impl PartitionDelivery {
+    /// Partition 0, whose reply the scenario loses after admission, and partition 1, which is
+    /// delivered on its own channel after the link is repaired.
+    const LOST_REPLY: Self = Self {
+        unit: Unit::Partition(0),
+        channel: 121,
+        ack_id: 121,
+    };
+    const AFTER_REPAIR: Self = Self {
+        unit: Unit::Partition(1),
+        channel: 122,
+        ack_id: 122,
+    };
+
+    fn delivery(self) -> RelayDelivery {
+        RelayDelivery {
+            channel_incarnation: [self.channel; 16],
+            sequence: 0,
+        }
+    }
+
+    fn payload(self, sender: &Transport) -> RelayPayload {
+        let mut payload = relay_payload(self.delivery(), self.ack_id, sender);
+        payload.unit = self.unit;
+        payload
+    }
+}
+
+/// Two partitions of one relay deliver on their own channels: the receiver takes each payload
+/// with the partition it names, a reply lost after one partition's admission is reconciled on the
+/// reconnected link without a second enqueue, and the other partition's delivery is admitted on its
+/// own channel, each acknowledged once.
+fn exercise_partitioned_relay(run: ScenarioRun) -> Result<(), SimulationError> {
+    let seed = run.seed();
+    let server_trace = run.trace();
+    let client_trace = run.trace();
+    let authority = Authority::new();
+    let server_credentials = authority.issue("server");
+    let client_credentials = authority.issue("client");
+    let (ready_tx, ready_rx) = watch::channel(false);
+    let (received_tx, received_rx) = watch::channel(false);
+    let (done_tx, done_rx) = watch::channel(false);
+    let (finished_tx, finished_rx) = watch::channel(0_usize);
+    run.simulate(move |simulation| {
+        let server_finished = finished_tx.clone();
+        simulation.host("server", move || {
+            let credentials = server_credentials.clone();
+            let ready = ready_tx.clone();
+            let received = received_tx.clone();
+            let mut done = done_rx.clone();
+            let finished = server_finished.clone();
+            let trace = server_trace.clone();
+            async move {
+                let result = HostSupervisor::run(async move {
+                    let (server, mut incoming) =
+                        bind_with_incoming("server", credentials, seed).await;
+                    let live = ["client", "server"]
+                        .into_iter()
+                        .map(|name| {
+                            ClusterNodeName::parse(name).assured("fixture node name is valid")
+                        })
+                        .collect::<BTreeSet<_>>();
+                    server.replace_live_nodes(&live);
+                    ready.send_replace(true);
+
+                    let first = nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
+                        .await
+                        .assured("partition 0's relay reaches the receiver before the deadline")
+                        .assured("the relay receiver remains open");
+                    let Envelope::RelayPayload(ref body) = first.envelope else {
+                        panic!("the relay channel carries a relay payload");
+                    };
+                    assert_eq!(body.unit, PartitionDelivery::LOST_REPLY.unit);
+                    assert_eq!(body.delivery, PartitionDelivery::LOST_REPLY.delivery());
+                    assert_eq!(decode_arrow(&body.batch_ipc), 3);
+                    turmoil::partition_oneway("server", "client");
+                    trace.record(
+                        "server",
+                        "partition 0 Arrow body received; reply partitioned",
+                    );
+                    assert_eq!(
+                        first
+                            .relay_admission
+                            .assured("relay has admission token")
+                            .admit(),
+                        RelayAdmissionDecision::Admitted
+                    );
+                    trace.record("server", "partition 0 admitted");
+                    received.send_replace(true);
+
+                    let second = nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
+                        .await
+                        .assured("partition 1's relay reaches the receiver before the deadline")
+                        .assured("the relay receiver remains open");
+                    let Envelope::RelayPayload(ref body) = second.envelope else {
+                        panic!("the relay channel carries a relay payload");
+                    };
+                    assert_eq!(body.unit, PartitionDelivery::AFTER_REPAIR.unit);
+                    assert_eq!(body.delivery, PartitionDelivery::AFTER_REPAIR.delivery());
+                    assert_eq!(
+                        second
+                            .relay_admission
+                            .assured("relay has admission token")
+                            .admit(),
+                        RelayAdmissionDecision::Admitted
+                    );
+                    trace.record("server", "partition 1 admitted on its own channel");
+
+                    wait_for(&mut done).await;
+                    assert!(
+                        incoming.try_recv().is_err(),
+                        "each partition's delivery enters the application queue once"
+                    );
+                    server.shutdown().await;
+                    Ok::<(), io::Error>(())
+                })
+                .await;
+                finished.send_modify(|count| {
+                    *count = count.checked_add(1).assured("two fixture hosts finish")
+                });
+                result
+            }
+        });
+        let client_finished = finished_tx.clone();
+        simulation.host("client", move || {
+            let credentials = client_credentials.clone();
+            let mut ready = ready_rx.clone();
+            let mut received = received_rx.clone();
+            let done = done_tx.clone();
+            let finished = client_finished.clone();
+            let trace = client_trace.clone();
+            async move {
+                let result = HostSupervisor::run(async move {
+                    let (client, mut incoming) = bind_with_incoming(
+                        "client",
+                        credentials,
+                        seed.checked_add(1).assured("fixture seed fits"),
+                    )
+                    .await;
+                    let peer =
+                        ClusterNodeName::parse("server").assured("fixture node name is valid");
+                    client.replace_live_nodes(&BTreeSet::from([
+                        client.node_id().clone(),
+                        peer.clone(),
+                    ]));
+                    wait_for(&mut ready).await;
+                    register_peer(&client, "server").await;
+
+                    let sending = client.clone();
+                    let target = peer.clone();
+                    let first = PartitionDelivery::LOST_REPLY.payload(&client);
+                    let send_task = nervix_primitives::task::spawn(async move {
+                        sending.send(&target, Envelope::RelayPayload(first)).await
+                    });
+                    wait_for(&mut received).await;
+                    let error = match send_task.await.assured("relay sender task joins") {
+                        Ok(()) => panic!("the partition must hide partition 0's body response"),
+                        Err(error) => error,
+                    };
+                    assert!(
+                        matches!(
+                            error.current_context(),
+                            TransportError::RequestTimeout { .. }
+                                | TransportError::ProgressTimeout { .. }
+                                | TransportError::Closed(_)
+                                | TransportError::Http2(_)
+                        ),
+                        "{error:?}"
+                    );
+                    trace.record("client", "partition 0 body response lost after admission");
+
+                    turmoil::repair_oneway("server", "client");
+                    client.replace_outbound_targets(&Default::default());
+                    register_peer(&client, "server").await;
+                    wait_for_connection(&client, &peer).await;
+                    trace.record("client", "same receiver process reconnected");
+
+                    client
+                        .send(
+                            &peer,
+                            Envelope::RelayPayload(PartitionDelivery::LOST_REPLY.payload(&client)),
+                        )
+                        .await
+                        .assured("partition 0's same-epoch retry reconciles its admitted attempt");
+                    client
+                        .send(
+                            &peer,
+                            Envelope::RelayPayload(
+                                PartitionDelivery::AFTER_REPAIR.payload(&client),
+                            ),
+                        )
+                        .await
+                        .assured("partition 1 is admitted on its own channel");
+
+                    let mut acknowledged = BTreeSet::new();
+                    while acknowledged.len() < 2 {
+                        let outcome =
+                            nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
+                                .await
+                                .assured("each partition's semantic ACK arrives")
+                                .assured("sender queue remains open");
+                        let Envelope::Ack(RemoteAckResolution {
+                            registration: RemoteAckRegistration { ack_id, .. },
+                            outcome: RemoteAckOutcome::Ack,
+                        }) = outcome.envelope
+                        else {
+                            panic!("only the partitions' ACKs reach the sender");
+                        };
+                        assert!(
+                            acknowledged.insert(ack_id),
+                            "each partition's delivery is acknowledged once"
+                        );
+                    }
+                    assert_eq!(
+                        acknowledged,
+                        BTreeSet::from([
+                            PartitionDelivery::LOST_REPLY.ack_id,
+                            PartitionDelivery::AFTER_REPAIR.ack_id,
+                        ])
+                    );
+                    for partition in [
+                        PartitionDelivery::LOST_REPLY,
+                        PartitionDelivery::AFTER_REPAIR,
+                    ] {
+                        assert_eq!(
+                            client
+                                .relay_admission_status(&peer, partition.delivery())
+                                .await
+                                .assured("admission status is known"),
+                            RelayAdmissionStatus::Admitted
+                        );
+                    }
+                    trace.record(
+                        "client",
+                        "both partitions admitted and acknowledged once on their own channels",
+                    );
+                    done.send_replace(true);
+                    client.shutdown().await;
+                    Ok::<(), io::Error>(())
+                })
+                .await;
+                finished.send_modify(|count| {
+                    *count = count.checked_add(1).assured("two fixture hosts finish")
+                });
+                result
+            }
+        });
+        simulation.client("observer", async move {
+            let mut finished = finished_rx;
+            wait_for_count(&mut finished, 2).await;
+            Ok(())
+        });
+    })
+}
+
+#[test]
+fn partitioned_relay_deliveries_keep_their_units_across_lost_replies_and_reconnect() {
+    let scenario = Scenario {
+        name: "partitioned relay deliveries across a lost reply",
+        fault_plan: "deliver partition 0 of a relay, drop the receiver's replies once it admits \
+                     it, reconnect to the same receiver process, retry partition 0 and deliver \
+                     partition 1 on its own channel",
+        seeds: &[121],
+    };
+    scenario.check(fault_config, exercise_partitioned_relay);
 }
 
 #[derive(Clone, Copy, Debug)]

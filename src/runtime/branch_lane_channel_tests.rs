@@ -84,8 +84,8 @@ impl LaneRelays {
     /// The ingress channels of `key` on the relay the lane publishes through and on its sibling.
     fn ingress_slots(&self, key: &Option<BranchKey>) -> BranchKeyIngressSlots {
         BranchKeyIngressSlots {
-            published: self.published_services.ingress_slot(key),
-            sibling: self.sibling_services.ingress_slot(key),
+            published: self.published_services.ingress_slot(key, Unit::Single),
+            sibling: self.sibling_services.ingress_slot(key, Unit::Single),
         }
     }
 

@@ -587,6 +587,20 @@ impl SessionServiceImpl {
                     });
                     mutations.push(RegistryMutation::AlterRelay(alter));
                 }
+                Statement::AlterBranch(alter) => {
+                    let model_id = alter.branch.clone();
+                    applied.push(AppliedModelMutation {
+                        index,
+                        model: ModelName::from(&model_id),
+                        message: format!(
+                            "altered branch '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        )
+                        .into(),
+                    });
+                    mutations.push(RegistryMutation::AlterBranch(alter));
+                }
                 Statement::AlterJunction(alter) => {
                     let model_id = alter.junction.clone();
                     applied.push(AppliedModelMutation {
@@ -2213,6 +2227,7 @@ impl SessionServiceImpl {
             | Statement::AlterReingestor(_)
             | Statement::AlterGenerator(_)
             | Statement::AlterPlacement(_)
+            | Statement::AlterBranch(_)
             | Statement::RebindResource(_)
             | Statement::ResetWasmState(_)
             | Statement::Drop(_) => {

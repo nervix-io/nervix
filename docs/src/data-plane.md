@@ -53,9 +53,12 @@ The [Data-Plane Concurrency](./data-plane-concurrency.md) chapter defines how th
 shared lock acquisition, publishes reconfigurable state, owns per-row mutation, and retains only
 the ordering fences required by delivery and ownership contracts.
 
-Every relay has one scheduled owner. Producers on other cluster nodes use one fixed dispatch slot
-per relay and serialize each batch once for the owner. The owner alone maintains the bounded relay
-buffer, concrete branch presence, metrics, subscriptions, and fan-out. It sends at most one
+Every relay has one scheduled owner, and a relay whose branch declares several partitions has one
+owner per partition, each placed on its own; see [Relay Partitions](./relay.md#relay-partitions).
+Producers on other cluster nodes use one fixed dispatch slot per relay, and per partition of a
+partitioned relay, and serialize each batch once for the owner of its key. An owner alone maintains
+the bounded relay buffer, concrete branch presence, metrics, subscriptions, and fan-out for the keys
+it owns. It sends at most one
 serialized copy to each remote consuming cluster node, where all runtime consumers and any local
 subscription share that delivery. Only a relay's optional materialized records have
 scheduler-selected state replicas; the relay's hot-path runtime is never replicated.
@@ -63,14 +66,14 @@ scheduler-selected state replicas; the relay's hot-path runtime is never replica
 Nervix is not a durable event log for every in-flight row. If hot-path message or ACK state is lost, sources and ingestors react according to their delivery mode, offsets, and retry policy.
 
 Branch grouping is native runtime isolation based on explicit `CREATE BRANCH` declarations. A
-branch declares the branch-key schema shape with `SCHEMA <schema>`, TTL, and optional eviction
-policy. The branch name is part of its identity: differently named branches remain incompatible
+branch declares the branch-key schema shape with `SCHEMA <schema>`, TTL, its partition count, and
+optional eviction policy. The branch name is part of its identity: differently named branches remain incompatible
 even when they reference the same schema. Ingestor routes construct keys with `BRANCHED BY
 <branch> SET ...`; reingestor routes preserve the input key, construct another named branch, or
 become unbranched. Relays and branch-preserving processors use that exact named branch or declare
 `UNBRANCHED`. Relay presence, processor buffers, deduplicator state, window state, and materialized
 entries remain scoped to one concrete branch; batches for those branches share the declared
-relay's owner buffer.
+relay's owner buffer, or the buffer of the owner of their partition.
 
 Structured Model expressions are compiled into typed VM programs. The leader validates them when a
 statement is applied, so invalid scopes, construction, types, nullability, sensitivity, or branch

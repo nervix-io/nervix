@@ -292,6 +292,7 @@ mod tests {
             kind: nervix_interconnect::RelayPayloadKind::Routed,
             domain: DomainName::parse("default").expect("valid domain"),
             relay: named("incoming"),
+            unit: nervix_models::Unit::Single,
             key: None,
             batch_ipc: nervix_execution::Executor::default()
                 .try_charge_owned(MemoryClass::Relay, Vec::new())
