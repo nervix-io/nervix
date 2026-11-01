@@ -210,13 +210,24 @@ impl PreparedContent for EncodedPayload {
         )
     )]
     fn written(&self, record: EmitterRecordId, occurred_at: Timestamp) -> EmitterRecord {
-        let emitter_record = EmitterRecord::new(
-            record,
-            self.envelope.key.clone(),
-            self.payload.clone(),
-            self.envelope.headers.clone(),
-            occurred_at,
-        );
+        // A record carries its writes in the one form its entity's header model declares.
+        let emitter_record = match &self.envelope.headers {
+            EmitterHeaders::Text(headers) => EmitterRecord::new(
+                record,
+                self.envelope.key.clone(),
+                self.payload.clone(),
+                headers.clone(),
+                occurred_at,
+            ),
+            EmitterHeaders::Typed(headers) => EmitterRecord::new(
+                record,
+                self.envelope.key.clone(),
+                self.payload.clone(),
+                Vec::new(),
+                occurred_at,
+            )
+            .with_typed_headers(headers.clone()),
+        };
         let emitter_record = match &self.envelope.clauses {
             Some(clauses) => emitter_record.with_envelope(RecordEnvelope::clone(clauses)),
             None => emitter_record,
@@ -663,7 +674,7 @@ mod tests {
             content: EncodedPayload {
                 envelope: BatchEnvelope {
                     key: Some("key".to_string()),
-                    headers: vec![("source".to_string(), "a".to_string())],
+                    headers: EmitterHeaders::Text(vec![("source".to_string(), "a".to_string())]),
                     message_group: Some("group".to_string()),
                     clauses: None,
                 },
@@ -1513,23 +1524,38 @@ mod tests {
     }
 
     fn envelope_variant(variant: u8) -> BatchEnvelope {
-        match variant % 3 {
+        match variant % 4 {
             0 => BatchEnvelope {
                 key: None,
-                headers: Vec::new(),
+                headers: EmitterHeaders::Text(Vec::new()),
                 message_group: None,
                 clauses: None,
             },
             1 => BatchEnvelope {
                 key: Some(format!("key-{variant}")),
-                headers: vec![("trace".to_string(), variant.to_string())],
+                headers: EmitterHeaders::Text(vec![("trace".to_string(), variant.to_string())]),
                 message_group: None,
+                clauses: None,
+            },
+            2 => BatchEnvelope {
+                key: None,
+                headers: EmitterHeaders::Text(Vec::new()),
+                message_group: Some(format!("group-{variant}")),
                 clauses: None,
             },
             _ => BatchEnvelope {
                 key: None,
-                headers: Vec::new(),
-                message_group: Some(format!("group-{variant}")),
+                headers: EmitterHeaders::Typed(vec![
+                    nervix_connector::TypedRecordHeader {
+                        name: "attempt".to_string(),
+                        value: nervix_connector::PropertyValue::I64(i64::from(variant)),
+                    },
+                    nervix_connector::TypedRecordHeader {
+                        name: "digest".to_string(),
+                        value: nervix_connector::PropertyValue::Bytes(vec![variant, 0]),
+                    },
+                ]),
+                message_group: None,
                 clauses: None,
             },
         }
@@ -1716,7 +1742,16 @@ mod tests {
                 assert_eq!(record.id, EmitterRecordId::new(index));
                 assert_eq!(record.payload, model.payload);
                 assert_eq!(record.key, model.envelope.key);
-                assert_eq!(record.headers, model.envelope.headers);
+                match &model.envelope.headers {
+                    EmitterHeaders::Text(headers) => {
+                        assert_eq!(&record.headers, headers);
+                        assert!(record.typed_headers.is_empty());
+                    }
+                    EmitterHeaders::Typed(headers) => {
+                        assert!(record.headers.is_empty());
+                        assert_eq!(&record.typed_headers, headers);
+                    }
+                }
                 assert_eq!(record.message_group, model.envelope.message_group);
             }
         }

@@ -121,6 +121,7 @@ use tokio::io::AsyncBufReadExt as _;
 use uuid::Uuid;
 
 use crate::common::{
+    broker_observer::BROKER_TIMEOUT,
     cli_terminal::{CliTerminal, DisplayWaitError},
     client_conformance::{
         ATTACHED_LINE, ClientProbe, OPENED_LINE, ProbeExercise, ProbeRuntime, ProbeTarget,
@@ -130,10 +131,12 @@ use crate::common::{
         AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster, CommandHold,
         DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
         InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
-        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
-        assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
-        command_connect_options, delete_rabbitmq_queue, ensure_rabbitmq_queue, ensure_sqs_queue,
-        observe_kafka_through, observe_sqs, publish_kafka_record_through, publish_sqs,
+        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, TypedBrokerHeader,
+        WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
+        bind_rabbitmq_queue, client_connect_options, client_domain, command_connect_options,
+        delete_rabbitmq_queue, ensure_rabbitmq_exchange, ensure_rabbitmq_queue, ensure_sqs_queue,
+        observe_kafka_through, observe_sqs, observe_sqs_fifo_without_content_deduplication,
+        publish_kafka_record_through, publish_sqs,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
@@ -522,6 +525,8 @@ struct ScenarioWorld {
     external_kafka_members: BTreeMap<String, ExternalKafkaGroupMember>,
     last_broker_payload: Option<String>,
     last_broker_headers: Vec<(String, String)>,
+    /// The typed headers of the last observed broker message: SQS attributes with their data types.
+    last_broker_typed_headers: Vec<TypedBrokerHeader>,
     clickhouse_table: Option<String>,
     clickhouse_tls: bool,
     postgres_table: Option<String>,
@@ -7914,6 +7919,7 @@ async fn given_cluster_is_started(world: &mut ScenarioWorld, node_count: usize) 
     world.broker_observer = None;
     world.last_broker_payload = None;
     world.last_broker_headers.clear();
+    world.last_broker_typed_headers.clear();
     world.burst_raft_retention_peak = None;
     append_cucumber_log_line(&format!(
         "cluster start requested: nodes={node_count} domain={} test_id={}",
@@ -25236,6 +25242,52 @@ async fn given_rabbitmq_queue_exists(world: &mut ScenarioWorld, queue: String) {
         .expect("failed to declare rabbitmq queue");
 }
 
+/// An exchange of one of the types RabbitMQ routes by: `direct`, `topic` or `fanout`.
+#[given(expr = "RabbitMQ exchange {string} of type {word} exists")]
+#[when(expr = "the operator provisions RabbitMQ exchange {string} of type {word}")]
+async fn given_rabbitmq_exchange_exists(world: &mut ScenarioWorld, exchange: String, kind: String) {
+    let exchange = expand_placeholders(world, &exchange);
+    let kind = match kind.as_str() {
+        "direct" => lapin::ExchangeKind::Direct,
+        "topic" => lapin::ExchangeKind::Topic,
+        "fanout" => lapin::ExchangeKind::Fanout,
+        _ => {
+            panic!("a RabbitMQ exchange in these scenarios is direct, topic or fanout, not {kind}")
+        }
+    };
+    ensure_rabbitmq_exchange(world.dependencies.endpoints(), &exchange, kind)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to declare RabbitMQ exchange '{exchange}': {error}")
+        });
+}
+
+#[given(expr = "RabbitMQ queue {string} is bound to exchange {string} with routing key {string}")]
+#[when(
+    expr = "the operator binds RabbitMQ queue {string} to exchange {string} with routing key \
+            {string}"
+)]
+async fn given_rabbitmq_queue_is_bound(
+    world: &mut ScenarioWorld,
+    queue: String,
+    exchange: String,
+    routing_key: String,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let exchange = expand_placeholders(world, &exchange);
+    let routing_key = expand_placeholders(world, &routing_key);
+    bind_rabbitmq_queue(
+        world.dependencies.endpoints(),
+        &queue,
+        &exchange,
+        &routing_key,
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("failed to bind RabbitMQ queue '{queue}' to exchange '{exchange}': {error}")
+    });
+}
+
 #[when(expr = "RabbitMQ queue {string} is deleted")]
 async fn when_rabbitmq_queue_is_deleted(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
@@ -25603,7 +25655,10 @@ async fn given_pulsar_tls_topic_is_observed(world: &mut ScenarioWorld, topic: St
     );
 }
 
+/// Declares the queue, which creates it again after it was deleted, and observes what it receives
+/// from now on.
 #[given(expr = "RabbitMQ queue {string} is observed")]
+#[when(expr = "the operator recreates RabbitMQ queue {string} and observes it")]
 async fn given_rabbitmq_queue_is_observed(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
     world.broker_observer = Some(
@@ -25646,6 +25701,19 @@ async fn given_sqs_queue_is_observed(world: &mut ScenarioWorld, queue: String) {
         observe_sqs(world.dependencies.endpoints(), &queue)
             .await
             .expect("failed to observe sqs queue"),
+    );
+}
+
+#[given(expr = "SQS FIFO queue {string} without content-based deduplication is observed")]
+async fn given_sqs_fifo_queue_without_content_deduplication_is_observed(
+    world: &mut ScenarioWorld,
+    queue: String,
+) {
+    let queue = expand_placeholders(world, &queue);
+    world.broker_observer = Some(
+        observe_sqs_fifo_without_content_deduplication(world.dependencies.endpoints(), &queue)
+            .await
+            .expect("failed to observe the SQS FIFO queue"),
     );
 }
 
@@ -26502,6 +26570,7 @@ async fn when_mqtt_message_is_published(
     let topic = expand_placeholders(world, &topic);
     let payload = expand_placeholders(world, docstring(step));
     wait_for_mqtt_ingestors_ready(world).await;
+    world.last_publish_at = Some(Instant::now());
     world
         .cluster()
         .publish_mqtt(&topic, &payload)
@@ -28452,6 +28521,44 @@ async fn when_http_payload_is_posted_to_node_with_header(
         )
         .await
         .expect("failed to post http payload with header");
+}
+
+#[when(
+    expr = "http payload is posted to node {string} with host {string} path {string} and header \
+            {string} with base64 bytes {string}"
+)]
+async fn when_http_payload_is_posted_to_node_with_header_bytes(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    header_name: String,
+    header_bytes: String,
+    #[step] step: &Step,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let header_bytes = BASE64_STANDARD
+        .decode(header_bytes.trim())
+        .unwrap_or_else(|error| panic!("invalid base64 header value '{header_bytes}': {error}"));
+    append_cucumber_log_line(&format!(
+        "http publish: node={node_id} host={host} path={path} header={header_name} \
+         header_bytes={header_bytes:02x?} payload={payload}"
+    ));
+    world.last_publish_at = Some(Instant::now());
+    world
+        .cluster()
+        .publish_http_with_header_bytes(
+            &node_id,
+            &host,
+            &path,
+            &payload,
+            &header_name,
+            &header_bytes,
+        )
+        .await
+        .expect("failed to post http payload with a header of raw bytes");
 }
 
 #[when(expr = "http payload is posted to node {string} with host {string} path {string} and fails")]
@@ -30745,6 +30852,7 @@ async fn then_observed_broker_receives_payload(world: &mut ScenarioWorld, #[step
         .expect("failed to receive broker payload");
     world.last_broker_payload = Some(message.payload);
     world.last_broker_headers = message.headers;
+    world.last_broker_typed_headers = message.typed_headers;
 
     let actual = world
         .last_broker_payload
@@ -30754,6 +30862,105 @@ async fn then_observed_broker_receives_payload(world: &mut ScenarioWorld, #[step
         payload_matches_expected(actual, &expected_payload),
         "expected payload fragment {} in broker payload, got: {actual}",
         expected_payload.trim()
+    );
+}
+
+/// Measures when the message reached the broker rather than asserting that it had not yet: the
+/// publishing step records its instant before the message leaves the harness, so load only
+/// lengthens the measured delay.
+#[then(
+    expr = "the observed broker receives a payload no sooner than {string} after it was published"
+)]
+async fn then_observed_broker_receives_payload_no_sooner_than(
+    world: &mut ScenarioWorld,
+    delay: String,
+    #[step] step: &Step,
+) {
+    let expected_delay = parse_duration_text(&delay).expect("step delay must be a valid duration");
+    let published_at = world
+        .last_publish_at
+        .expect("a delivery-delay assertion must follow a publishing step");
+    let expected_payload = expand_placeholders(world, docstring(step));
+    let observer = world
+        .broker_observer
+        .as_mut()
+        .expect("a broker observer must exist before assertion");
+    let message = observer
+        .try_next_message(expected_delay + BROKER_TIMEOUT)
+        .await
+        .expect("failed to receive broker payload")
+        .unwrap_or_else(|| {
+            panic!(
+                "timed out waiting for a broker payload {} more than {expected_delay:?} after it \
+                 was published",
+                expected_payload.trim()
+            )
+        });
+    let arrived_after = published_at.elapsed();
+    append_cucumber_log_line(&format!(
+        "broker payload arrived {arrived_after:?} after it was published"
+    ));
+    assert!(
+        payload_matches_expected(&message.payload, &expected_payload),
+        "expected payload fragment {} in broker payload, got: {}",
+        expected_payload.trim(),
+        message.payload
+    );
+    assert!(
+        arrived_after >= expected_delay,
+        "expected the broker payload no sooner than {expected_delay:?} after publishing, but it \
+         arrived after {arrived_after:?}"
+    );
+    world.last_broker_payload = Some(message.payload);
+    world.last_broker_headers = message.headers;
+    world.last_broker_typed_headers = message.typed_headers;
+}
+
+/// Every docstring line is one typed header the last observed message carries, written
+/// `<name>: <data type> <value>`, with a binary value as its bytes in lowercase hex.
+#[then("the last observed broker message has typed headers")]
+async fn then_last_observed_broker_message_has_typed_headers(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let expected = expand_placeholders(world, docstring(step));
+    for line in expected
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let (name, typed_value) = line.split_once(": ").unwrap_or_else(|| {
+            panic!("typed header assertion '{line}' is written '<name>: <data type> <value>'")
+        });
+        let (data_type, value) = typed_value.split_once(' ').unwrap_or_else(|| {
+            panic!("typed header assertion '{line}' is written '<name>: <data type> <value>'")
+        });
+        let expected_header = TypedBrokerHeader {
+            name: name.to_string(),
+            data_type: data_type.to_string(),
+            value: value.to_string(),
+        };
+        assert!(
+            world.last_broker_typed_headers.contains(&expected_header),
+            "expected typed broker header {expected_header:?}, got {:?}",
+            world.last_broker_typed_headers
+        );
+    }
+}
+
+#[then(expr = "the last observed broker payload is at least {int} bytes long")]
+async fn then_last_observed_broker_payload_is_at_least_bytes_long(
+    world: &mut ScenarioWorld,
+    bytes: usize,
+) {
+    let payload = world
+        .last_broker_payload
+        .as_deref()
+        .expect("broker payload must be captured before assertion");
+    assert!(
+        payload.len() >= bytes,
+        "expected a broker payload of at least {bytes} bytes, got {} bytes",
+        payload.len()
     );
 }
 
