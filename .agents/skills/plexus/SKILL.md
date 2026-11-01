@@ -550,7 +550,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   TLS-file interface, certificate and key must be supplied together, and TLS files require
   `verify-full`. A `POSTGRES TABLE` names `'Orders'` or `'sales.Orders'`, each part sent with its
   case kept; `ON CONFLICT (...) DO UPDATE` needs a target and a mapped column outside it, and
-  `MAX SIZE` is at most `1073741822B`. Read
+  `MAX SIZE` is at most `1073741822B`. Keep its optional statement `timeout_ms` separate from
+  `pool_acquire_timeout_ms`; read their bounds and retry semantics in
   [Emitters → Postgres](../../../docs/src/emitters.md#postgres).
 - Give a `RABBITMQ` client an `amqp://` or `amqps://` `addr` that names a host and no port 0; Nervix
   refuses any other address before commit. Mounted `tls_ca_file`, `tls_cert_file` and

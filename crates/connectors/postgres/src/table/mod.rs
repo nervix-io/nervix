@@ -7,7 +7,7 @@
 //!   metadata lookup and the row-by-row isolation of a refused insert, the declared type of each
 //!   mapped column, the `unnest` insert every write becomes under the emitter's `BATCH` limits and
 //!   the size of one protocol message, its text parameters and their exact encoded size, the
-//!   `ON CONFLICT` clause of a conflict action, and SQLSTATE classification.
+//!   `ON CONFLICT` clause of a conflict action, statement deadlines and SQLSTATE classification.
 //! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
 //!   and the `sqlx` driver.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -58,6 +58,10 @@ use sqlx::{
 use tracing::{debug, trace};
 use url::Url;
 
+mod statement_deadline;
+
+use statement_deadline::PostgresStatementDeadline;
+
 const POSTGRES: &str = "postgres";
 
 /// What `MAX SIZE` measures on a Postgres write, which an oversized row's rejection names.
@@ -86,10 +90,20 @@ pub struct PostgresPool {
     connections: sqlx::postgres::PgPool,
     /// The deadline each checkout keeps, which one that runs out of it names.
     checkout: ConfiguredDeadline,
+    statement: Option<PostgresStatementDeadline>,
 }
 
 /// One connection borrowed from the shared pool, returned to it when this is dropped.
-pub struct PostgresConnection(PoolConnection<Postgres>);
+pub struct PostgresConnection {
+    connection: PoolConnection<Postgres>,
+    statement: Option<PostgresStatementDeadline>,
+}
+
+/// Driver options and the statement bound validated together before opening the pool.
+pub(crate) struct PostgresConnectionOptions {
+    driver: PgConnectOptions,
+    statement: Option<PostgresStatementDeadline>,
+}
 
 /// The node-owned pool this emitter borrows connections from while its host holds the lease.
 #[async_trait]
@@ -143,6 +157,13 @@ enum PostgresWriteError {
     /// The pool handed no connection over; what it reported is beneath this context.
     #[error("failed to borrow a Postgres connection")]
     Pool,
+    #[error("{} statement response deadline expired", ConnectorKind::Postgres)]
+    Deadline,
+    #[error(
+        "{} statement canceled with SQLSTATE 57014 ({deadline} configured)",
+        ConnectorKind::Postgres
+    )]
+    StatementCanceled { deadline: PostgresStatementDeadline },
 }
 
 /// A SQLSTATE the server reports for a row, or for a set of rows, it will never accept.
@@ -155,7 +176,36 @@ fn is_record_sqlstate(code: &str) -> bool {
 }
 
 impl PostgresWriteError {
-    fn report_execute(error: sqlx::Error) -> Report<Self> {
+    fn report_cancellation(
+        error: &sqlx::Error,
+        deadline: Option<PostgresStatementDeadline>,
+    ) -> Option<Report<Self>> {
+        let deadline = deadline?;
+        let database = error.as_database_error()?;
+        let code = database.code()?;
+        if code == "57014" {
+            return Some(Report::new(Self::StatementCanceled { deadline }));
+        }
+        None
+    }
+
+    fn report_metadata(
+        error: sqlx::Error,
+        deadline: Option<PostgresStatementDeadline>,
+    ) -> Report<Self> {
+        if let Some(canceled) = Self::report_cancellation(&error, deadline) {
+            return canceled;
+        }
+        Report::new(Self::Metadata(error))
+    }
+
+    fn report_execute(
+        error: sqlx::Error,
+        deadline: Option<PostgresStatementDeadline>,
+    ) -> Report<Self> {
+        if let Some(canceled) = Self::report_cancellation(&error, deadline) {
+            return canceled;
+        }
         match error {
             // A database response can quote rejected values. Retain its safe SQLSTATE only.
             sqlx::Error::Database(error) => Report::new(Self::Server {
@@ -194,7 +244,7 @@ impl PostgresWriteError {
                 Some(format!("failed to load Postgres table metadata: {error}"))
             }
             // The pool describes its own failure beneath this context.
-            Self::Pool => None,
+            Self::Pool | Self::Deadline => None,
             error => Some(error.to_string()),
         };
         let report = report.change_context(EmitterWriteError::Publish {
@@ -296,13 +346,14 @@ impl PostgresPool {
             })
             .attach_printable("missing Postgres client config key 'addr'"));
         };
-        let options = connect_options(addr, config)?;
+        let PostgresConnectionOptions { driver, statement } = connect_options(addr, config)?;
         let policy = PostgresPoolPolicy::read(config)?;
-        let opened = policy.pool_options(bounds).connect_with(options).await;
+        let opened = policy.pool_options(bounds).connect_with(driver).await;
         match opened {
             Ok(connections) => Ok(Self {
                 connections,
                 checkout: policy.checkout,
+                statement,
             }),
             Err(source) => Err(checkout_failure(
                 source,
@@ -318,7 +369,10 @@ impl PostgresPool {
     pub async fn connection(&self) -> EmitterWriteResult<PostgresConnection> {
         let acquired = self.connections.acquire().await;
         match acquired {
-            Ok(connection) => Ok(PostgresConnection(connection)),
+            Ok(connection) => Ok(PostgresConnection {
+                connection,
+                statement: self.statement,
+            }),
             Err(source) => Err(checkout_failure(
                 source,
                 self.checkout,
@@ -361,7 +415,7 @@ fn checkout_failure<C: Context>(
 pub(crate) fn connect_options(
     addr: &str,
     config: &[ClientConfigEntry],
-) -> EmitterStartResult<PgConnectOptions> {
+) -> EmitterStartResult<PostgresConnectionOptions> {
     let invalid = |reason: String| {
         Report::new(EmitterOpenError::InvalidConfiguration {
             connector: POSTGRES,
@@ -412,7 +466,18 @@ pub(crate) fn connect_options(
     if let Some(ca_file) = &tls.ca_file {
         options = options.ssl_root_cert(ca_file);
     }
-    Ok(options)
+    let statement = PostgresStatementDeadline::read(config).change_context(
+        EmitterOpenError::InvalidConfiguration {
+            connector: POSTGRES,
+        },
+    )?;
+    if let Some(deadline) = statement {
+        options = deadline.configure(options);
+    }
+    Ok(PostgresConnectionOptions {
+        driver: options,
+        statement,
+    })
 }
 
 impl PostgresTableEmitter {
@@ -484,16 +549,29 @@ impl PostgresTableEmitter {
     ) -> error_stack::Result<Vec<String>, PostgresWriteError> {
         let table_name = self.table_sql();
         let column_refs = columns.to_vec();
-        let rows = sqlx::query(
+        let statement = connection.statement;
+        let reading = sqlx::query(
             "SELECT a.attname, a.atttypid::regtype::text FROM pg_attribute a WHERE a.attrelid = \
              to_regclass($1) AND a.attname = ANY($2::text[]) AND a.attnum > 0 AND NOT \
              a.attisdropped",
         )
         .bind(table_name)
         .bind(column_refs)
-        .fetch_all(&mut *connection.0)
-        .await
-        .map_err(|error| Report::new(PostgresWriteError::Metadata(error)))?;
+        .fetch_all(&mut *connection.connection);
+        let response = match statement {
+            Some(deadline) => match deadline.wait("the catalog query", reading).await {
+                Ok(response) => response,
+                Err(error) => {
+                    // SQLx bounds close-on-drop by five seconds and retains the pool permit
+                    // through closing. A pending response must never return to the idle pool.
+                    connection.connection.close_on_drop();
+                    return Err(error.change_context(PostgresWriteError::Deadline));
+                }
+            },
+            None => reading.await,
+        };
+        let rows =
+            response.map_err(|error| PostgresWriteError::report_metadata(error, statement))?;
         let types_by_column = rows
             .into_iter()
             .map(|row| {
@@ -569,11 +647,20 @@ impl PostgresTableEmitter {
                 .assured("an insert carries rows of the write whose texts were bound");
             query = query.bind(texts);
         }
-        let result = connection
-            .0
-            .execute(query)
-            .await
-            .map_err(PostgresWriteError::report_execute)?;
+        let statement = connection.statement;
+        let execution = connection.connection.execute(query);
+        let response = match statement {
+            Some(deadline) => match deadline.wait("the insert", execution).await {
+                Ok(response) => response,
+                Err(error) => {
+                    connection.connection.close_on_drop();
+                    return Err(error.change_context(PostgresWriteError::Deadline));
+                }
+            },
+            None => execution.await,
+        };
+        let result =
+            response.map_err(|error| PostgresWriteError::report_execute(error, statement))?;
         Ok(result.rows_affected())
     }
 
@@ -1341,7 +1428,7 @@ mod tests {
     #[test]
     fn a_driver_failure_names_its_cause_once_and_keeps_it_at_the_host_boundary() {
         let cause = sqlx::Error::PoolTimedOut.to_string();
-        let execute = PostgresWriteError::report_execute(sqlx::Error::PoolTimedOut);
+        let execute = PostgresWriteError::report_execute(sqlx::Error::PoolTimedOut, None);
         let metadata = Report::new(PostgresWriteError::Metadata(sqlx::Error::PoolTimedOut));
 
         assert_eq!(
@@ -1583,8 +1670,10 @@ mod tests {
 
     #[test]
     fn connection_options_read_the_declared_tls_policy() {
-        let refusal = connect_options("postgres://127.0.0.1/nervix?sslmode=require", &[])
-            .expect_err("only a declared policy connects");
+        let refusal = match connect_options("postgres://127.0.0.1/nervix?sslmode=require", &[]) {
+            Ok(_) => panic!("only a declared policy connects"),
+            Err(refusal) => refusal,
+        };
         assert!(matches!(
             refusal.current_context(),
             EmitterOpenError::InvalidConfiguration { .. }

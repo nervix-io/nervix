@@ -699,9 +699,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |  |
-| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>an insert and its metadata query: unbounded |  |
-| Driver limits | None declared. |  |
-| Stalled-peer checks | `STALLED PEER pool_acquire_timeout_ms` |  |
+| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>each catalog query and each insert: `timeout_ms`; unbounded when omitted<br>closing an interrupted query connection: driver default, SQLx close-on-drop timeout, 5 s |  |
+| Driver limits | timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout maximum.<br>Without timeout_ms, catalog queries and inserts have no Nervix response deadline. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER pool_acquire_timeout_ms` |  |
 
 ### MYSQL TABLE emit
 
@@ -1135,6 +1135,7 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `pool_idle_timeout_ms` | optional; default `600000` | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 | `pool_max_lifetime_ms` | optional; default `1800000` | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 | `pool_test_before_acquire` | optional; default `true` | boolean | Nervix; strict | no | none |
+| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 | `tls_ca_file` | optional; requires `addr` to set `sslmode=verify-full` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
 | `tls_cert_file` | optional; requires `addr` to set `sslmode=verify-full` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
 | `tls_key_file` | optional; requires `addr` to set `sslmode=verify-full` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |

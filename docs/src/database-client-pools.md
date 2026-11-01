@@ -102,7 +102,12 @@ authentication. A refused connection is tried again within that bound, and the b
 of how long an accepted query then runs. A checkout that runs out of it reports `checking out a
 Postgres connection did not finish within pool_acquire_timeout_ms` with the bound, then the emitter
 retries on its policy. Opening the pool takes the same bound to establish `MIN` connections and
-another for its first checkout, which opens one where `MIN` is zero. A MySQL client
+another for its first checkout, which opens one where `MIN` is zero. Its separate optional
+`timeout_ms` bounds every catalog query and INSERT response after checkout, with the same bound
+installed as PostgreSQL's `statement_timeout`. Each isolated INSERT has its own budget; a local
+timeout closes the interrupted connection instead of returning a pending response to the pool.
+See the [Postgres emitter contract](emitters.md#postgres) for its range and retry semantics.
+A MySQL client
 that sets `timeout_ms` bounds each checkout, including connection establishment and authentication,
 by that value, and bounds initial validation and each insert separately. Its minimum keeper uses
 the same checkout bound. An exhausted pool reports `checking out a MySQL connection did not finish

@@ -154,7 +154,7 @@ delegated configuration values through JSON/archive equality and public inspecti
 ## Client Configuration And Inspection
 
 `client-config-schema` includes omitted ClickHouse connection defaults, Redis command-pool
-lifetimes and Postgres pool keys, and explicit typed TCP and pool intervals, lifetimes, checkout
+lifetimes and Postgres pool and statement-deadline keys, and explicit typed TCP and pool intervals, lifetimes, checkout
 deadlines and borrow tests. JSON and archive equality preserve the authored entries; the
 effective-default projection preserves those entries and is idempotent, and public inspection
 remains idempotent.
