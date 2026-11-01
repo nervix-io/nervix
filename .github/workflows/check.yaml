@@ -623,7 +623,7 @@ jobs:
   tests:
     name: tests
     needs: [scenarios-build]
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: boat-xlarge
     timeout-minutes: 30
     permissions:
       contents: read
@@ -659,6 +659,16 @@ jobs:
       # The tests sync their storage below /tmp and the checkout. A single-use runner needs no crash
       # consistency, so those volumes drop their write barriers, as the build job's kache start step
       # drops them for its store.
+      # The archives restore only at the checkout path they were built in, and Blacksmith's differs
+      # from Boat's, so this checkout also appears at the build's path. A bind mount, unlike a
+      # symbolic link, keeps that path through `pwd -P` and the path of a running executable.
+      - name: Mount the checkout at the build's path
+        env:
+          BUILD_CHECKOUT: ${{ needs.scenarios-build.outputs.checkout }}
+        run: |
+          sudo mkdir -p "${BUILD_CHECKOUT}"
+          sudo mount --bind "${GITHUB_WORKSPACE}" "${BUILD_CHECKOUT}"
+
       - name: Lighten the test volumes
         run: |
           python3 scripts/kache_remote.py lighten-volume /tmp
@@ -686,11 +696,13 @@ jobs:
           path: ${{ runner.temp }}/unit-tests
 
       - name: Restore the unit tests
+        working-directory: ${{ needs.scenarios-build.outputs.checkout }}
         run: |
           just test-coverage-unpack "${RUNNER_TEMP}/unit-tests/unit-tests.tar.zst"
           rm "${RUNNER_TEMP}/unit-tests/unit-tests.tar.zst"
 
       - name: Tests coverage
+        working-directory: ${{ needs.scenarios-build.outputs.checkout }}
         run: just test-coverage-run
 
       - name: Upload tests coverage
@@ -749,13 +761,14 @@ jobs:
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # The build and its readers use the same runner provider so the archives restore at their
-    # compiled checkout path. The limit funds a cold build, cache publication, packing and uploads.
+    # The limit funds a cold build, cache publication, packing and the uploads.
     timeout-minutes: 120
     permissions:
       contents: read
     outputs:
       shards: ${{ steps.shards.outputs.shards }}
+      # The jobs that restore the archives run on another provider, at this path.
+      checkout: ${{ github.workspace }}
     env:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
@@ -1014,7 +1027,7 @@ jobs:
   scenarios:
     name: scenarios (${{ matrix.shard }} of ${{ strategy.job-total }})
     needs: [scenarios-build]
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: boat-xlarge
     # The harness derives each shard's 85-minute suite budget from this limit, with 15 minutes for
     # setup and the archive's restore before it and 15 for cleanup, export and uploads after it.
     # Keep tests/common/suite_watchdog.rs in step.
@@ -1075,6 +1088,16 @@ jobs:
       # The nodes a scenario starts sync their storage below /tmp. A single-use runner needs no crash
       # consistency, so the volumes holding it and the checkout drop their write barriers, as the
       # build job's kache start step drops them for its store.
+      # The archives restore only at the checkout path they were built in, and Blacksmith's differs
+      # from Boat's, so this checkout also appears at the build's path. A bind mount, unlike a
+      # symbolic link, keeps that path through `pwd -P` and the path of a running executable.
+      - name: Mount the checkout at the build's path
+        env:
+          BUILD_CHECKOUT: ${{ needs.scenarios-build.outputs.checkout }}
+        run: |
+          sudo mkdir -p "${BUILD_CHECKOUT}"
+          sudo mount --bind "${GITHUB_WORKSPACE}" "${BUILD_CHECKOUT}"
+
       - name: Lighten the scenario volume
         run: |
           python3 scripts/kache_remote.py lighten-volume /tmp
@@ -1102,11 +1125,13 @@ jobs:
           path: ${{ runner.temp }}/scenario-suite
 
       - name: Restore the scenario suite
+        working-directory: ${{ needs.scenarios-build.outputs.checkout }}
         run: |
           just test-scenarios-coverage-unpack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
           rm "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
 
       - name: Scenario coverage
+        working-directory: ${{ needs.scenarios-build.outputs.checkout }}
         env:
           SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
         run: just test-scenarios-coverage-shard "${SHARD}"

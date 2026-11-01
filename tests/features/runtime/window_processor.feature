@@ -1009,6 +1009,7 @@ Feature: Window processor runtime behavior
       | 3            | 0             |
       | 3            | 1             |
 
+  @slots_3
   Scenario Outline: Branched window chains preserve concrete branch keys through output routes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -1268,6 +1269,7 @@ Feature: Window processor runtime behavior
       | 3            | 0             |
       | 3            | 1             |
 
+  @slots_3
   Scenario Outline: Kafka ACK PARALLEL replays when an attached window branch output fails
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -1359,6 +1361,7 @@ Feature: Window processor runtime behavior
       | 3            | 0             |
       | 3            | 1             |
 
+  @slots_3
   Scenario Outline: Kafka ACK PARALLEL does not replay when a detached window branch output fails
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

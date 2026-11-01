@@ -1674,6 +1674,7 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
+  @slots_3
   Scenario Outline: Rust and Go WASM processors emit one final value for four one-row ingests
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

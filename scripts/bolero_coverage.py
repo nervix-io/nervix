@@ -387,12 +387,16 @@ def combine(
         selected = [target_id for shard in shards for target_id in shard.record["selection"]]
         if sorted(selected) != sorted(target.id for target in inventory.targets):
             raise native.RunnerError("the shards together did not select every registered target once")
+        # A rerun of one shard runs in a later attempt of the same run, so the shards share a run,
+        # and the combined record names the latest attempt among them.
         run = [{key: value for key, value in shard.record["run"].items() if key != "job"} for shard in shards]
-        if any(identity != run[0] for identity in run):
+        identities = [{key: value for key, value in entry.items() if key != "attempt"} for entry in run]
+        if any(identity != identities[0] for identity in identities):
             raise native.RunnerError(f"the shards come from different runs: {run}")
+        latest = max(run, key=lambda entry: int(entry.get("attempt", 0)))
         merge_lcov([shard.directory / native.REPORT for shard in shards], output / native.REPORT)
         record.content.update({
-            "run": run[0],
+            "run": latest,
             "revision": shared(shards, "revision"),
             "toolchain": shared(shards, "toolchain"),
             "event": shared(shards, "event"),

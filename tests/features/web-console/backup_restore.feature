@@ -303,7 +303,7 @@ Feature: Web console backup and restore
       | 1            |
       | 3            |
 
-  @console_backup_shared_session
+  @console_backup_shared_session @slots_3
   Scenario: The REPL and the backup controls share one console session and its leader redirect
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -436,7 +436,7 @@ Feature: Web console backup and restore
       {{domain}}_typed pace=UNPACED status=STOPPED
       """
 
-  @console_backup_shared_session
+  @console_backup_shared_session @slots_3
   Scenario: The REPL's backup keeps one console session when leadership moved after the redirect and the session's connection is lost
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
