@@ -121,6 +121,18 @@ and requires only new records after `RESUME`. Both topologies use the production
 for recovery from persisted state. Their diagnostic inventory includes active/order execution and
 the corresponding lifecycle or restore stress selection. No phase or suite budget changes.
 
+The Kafka record-metadata fixture sends explicit binary keys, millisecond-aligned timestamps and
+null or non-null payloads, with one delivery pending at a time. Its isolated topics explicitly use
+`CreateTime` and disable time and size retention: the historical record timestamps must not make
+their segments eligible for the broker's periodic cleanup before Nervix reads them. It uses the
+existing Kafka fixture's five-second delivery, request and queue limits, observed through a
+six-second whole-send bound;
+timeout and driver causes remain typed. It adds no transport retry. The one- and three-node
+outlines check all three ACK modes, null versus empty values, and historical event-time windows in
+two branches. Their sixty-second output assertions observe the graph's result. The metadata
+mapping and native driver waits are untracked by Deloxide; the diagnostic selections reach the
+host's tracked ingestion and lifecycle locks.
+
 The Kafka consumer-retirement scenario holds the same broker's replies before it drops an ingestor
 whose eight instances joined their group, so destroying each consumer waits for its LeaveGroup
 answer. It waits for a running connector-storage job before sending a record through an HTTP
@@ -3828,25 +3840,8 @@ address for the ZeroMQ address, and a UDP socket on every address for the syslog
 and three-node clusters. Each asserts that the ingestor becomes ready within 30 seconds and that a
 message sent to the address the scenario names reaches its relay.
 
-The high-parallelism qualification was recorded on 23 September 2026 for the change that landed as
-`cec5f764`, at the CI concurrency factor of two scenarios per CPU with Cucumber's two retries unless
-a run says otherwise. The local runs used a 24-CPU workstation shared with other builds, whose load
-average stayed between 7 and 40, so 48 scenarios ran at once; CI used its 16-CPU runner, so 32 did.
-
-| Run | Result |
-| --- | --- |
-| `just test-harness-liveness`, 20 repetitions | Every repetition passed, 48 regressions in 4.0 seconds each |
-| `WASM processor restores guest state after cluster restart`, all three example rows, three runs with `--retry 0` | Every run passed. Every node became ready on its first attempt within 2.1 seconds, and the slowest cleanup took 8.7 of its 60 seconds, so none reached its budget |
-| `tests/features/cluster/*.feature` | 206 scenarios passed in 500 seconds with 16 retries. 553 node startups: median 2.04, 99th percentile 22.0, and slowest 41.3 seconds; two became ready on their second attempt, after a 36-second readiness deadline whose last probe was a typed `Unauthenticated` reply. 200 cleanups, the slowest 45.1 seconds, so none reached its budget |
-| `tests/features/runtime/wasm_*.feature` | 95 scenarios passed in 583 seconds with 18 retries. 288 startups, the slowest 17.4 seconds. Two cleanups reached the 60-second budget with a node still running, each recorded with that node and the scenarios live beside it, and both scenarios passed when retried |
-| The whole suite with `--suite-budget 4m` | Exit `124` after 313 seconds: the 240-second budget, the 60-second cleanup window, and 13 seconds of dependency and runtime teardown. The diagnostic named all 49 registered scenarios with their attempt, phase, phase age, and nodes, and the cleanup named the one node still running at the end of its window |
-| The whole suite with a deliberately failing scenario added | Exit `101` reporting `3 step(s) failed` after 1,676 seconds. The failing scenario failed all three attempts while the rest of the suite ran beside it, and each attempt reached `finished` within 0.32 seconds of its body ending. 3,926 startups, 99th percentile 4.14 and slowest 21.4 seconds; eight transient bind failures were relaunched on fresh ports and became ready. Six cleanups reached their budget with a node still running and were recorded |
-| The whole suite | Exit `101` after 1,490 seconds, with 1,749 of 1,752 scenarios passing. The three that did not are throughput and deadline assertions that failed only under the shared machine's load and pass in isolation and in CI. 3,937 startups, the slowest 20.7 seconds; four cleanups reached their budget with a node still running and were recorded |
-| CI `tests` job with `NERVIX_TEST_SUITE_BUDGET=4m` | The job ended itself in 16m30s. The suite started 11m54s into the job, and its budget expired with 32 scenarios active, 29 in their body and 3 stopping, each named. All 53 live nodes stopped within 9.96 seconds of the cleanup window, the process exited `124`, and the `test-logs` artifact was uploaded 2 seconds later |
-| CI `tests` job of the merged revision | Passed in 34m15s. The suite started 12m01s into the job and ran 1,754 scenarios and 19,384 steps in 19m26s with 2 retries. 3,832 node startups, all on their first attempt: median 1.77, 99th percentile 4.91, and slowest 6.37 seconds. No cleanup reached its budget |
-
-After every run, no `nervix-server` process, scenario binary, or dependency container remained. The
-[harness liveness qualification
-ledger](https://github.com/nervix-io/nervix/blob/main/tests/harness-liveness-qualification-ledger.md)
-records each run in full, with its artifacts, the executable evidence for every item of the
-qualification matrix, and the comparison with the run the job limit cancelled.
+The [harness liveness qualification map](https://github.com/nervix-io/nervix/blob/main/tests/harness-liveness-qualification-ledger.md)
+maps lifecycle and failure-handling contracts to their executable checks.
+[Test Liveness 06](https://app.clickup.com/t/86bc2wugx) retains the historical high-parallelism run
+results, comparison with the interrupted run, startup and cleanup distributions, and CI artifacts.
+Those results qualify their recorded revision and workload.

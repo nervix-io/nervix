@@ -10,8 +10,7 @@ steady-poll path has a concrete disposition and names the delivery that removes 
 that adds a concurrent map, or changes how often one is reached or what disposes of it, updates this
 ledger in the same change.
 
-The inventory was traced at revision `edc1c8f9`, the parent of the relay presence repair, and
-covers the runtime, the connector contract and connector crates, the interconnect, metrics, the
+The inventory covers the runtime, connector contract and connector crates, interconnect, metrics,
 authored primitive wrappers, and the application, consensus and client maps next to them.
 
 The compiler synchronization gate derives execution contracts and operation-specific exceptions
@@ -21,7 +20,7 @@ belongs at the owning function, trait, type, module or exact exceptional operati
 qualification evidence, and [Data-Plane Concurrency](../docs/src/data-plane-concurrency.md#ratchet-and-review)
 states the current compiler contract. The executor-saturation lookup is testing fault control.
 Replica catch-up retains the entity's lifecycle handle and the replica task's own record of each
-branch (see [Replica catch-up](#replica-catch-up-the-repair-typed-ratchet-14-makes)); Typed
+branch (see [Replica catch-up](#replica-catch-up)); Typed
 Ratchet 15 owns the remaining state-replication frame, synchronization, listing and announcer
 reads, including the lifecycle lookup those requests share. The primary's synchronization request
 handler remains recurring debt. Source hosts retain an exact instance readiness handle; installation and observers alone reach
@@ -84,7 +83,7 @@ The frequency of a map is its hottest access:
 
 Dispositions:
 
-- **Typed Ratchet 01** — repaired by this delivery.
+- **Typed Ratchet 01** — relay branch membership publication.
 - **[Typed Ratchet 03](https://app.clickup.com/t/86bc9eqjv)** — retain generation-aware relay,
   channel, route and connection-selection handles instead of recurring shared-map discovery,
   preserving cancellation, replacement and single-slot creation.
@@ -100,10 +99,10 @@ Dispositions:
   one immutable route table.
 - **[Typed Ratchet 13](https://app.clickup.com/t/86bc9v77p)** — gave state-replication progress and
   checkpoint notifications bounded owners; see
-  [Checkpoint replication](#checkpoint-replication-the-repair-typed-ratchet-13-makes).
+  [Checkpoint replication](#checkpoint-replication).
 - **[Typed Ratchet 14](https://app.clickup.com/t/86bca1wch)** — caught replica branch states up once
   per entity from the owner's catalog of branch checkpoints instead of once per branch; see
-  [Replica catch-up](#replica-catch-up-the-repair-typed-ratchet-14-makes).
+  [Replica catch-up](#replica-catch-up).
 - **[Typed Ratchet 15](https://app.clickup.com/t/86bca1web)** — resolve state-replication frames,
   synchronization and listing requests, and announcer steps through retained, generation-fenced
   handles instead of node-wide registry reads.
@@ -112,44 +111,18 @@ Dispositions:
 - **retain: lifecycle registry**, **retain: observer**, **retain: single owner** — no recurring
   path reaches it, or only its one owner does.
 
-## Relay branch presence: the repair this delivery makes
+## Relay branch presence
 
-Before this delivery every relay owner batch called `RelayRegistry::touch`: a shard read of a
-node-shared `DashMap<Option<BranchKey>, Arc<RelayPresence>>` and a store of `last_seen_at`, or a
-shard write on first sight. No reader ever read `last_seen_at`; expiry and eviction used the owner
-task's own `BranchInstanceRegistry`. The presence handle was also cloned into every ingress path,
-branch template, error route, generator route and remote relay target, and each handed it to relay
-ingress, which ignored it; the remote relay path looked it up and cloned it for every frame.
+The relay owner task holds its branch instances and a persistent set of their keys. It publishes
+complete membership when a branch appears, is evicted or expires, or the owner starts or stops.
+An established branch's batch takes no lock and publishes nothing. The presence handle lives in
+the relay's boundary services and state placement. Observer reads load the immutable publication.
+See [Relay branch presence](../docs/src/data-plane-concurrency.md#relay-branch-presence).
+[Typed Ratchet 01](https://app.clickup.com/t/86bc9eqfu) retains the source audit and validation record.
 
-Now the owner task alone holds its branch instances and a persistent set of their keys, and
-publishes a complete membership only when a branch appears, is evicted or expires, or the owner
-starts or stops. An established branch's batch takes no lock and publishes nothing. The presence
-handle lives in the relay's boundary services and in the relay's state placement, and the
-pass-throughs are gone. See
-[Relay branch presence](../docs/src/data-plane-concurrency.md#relay-branch-presence).
+## Checkpoint replication
 
-| Access | Frequency before | Frequency now |
-| --- | --- | --- |
-| `touch` on every owner batch | per batch, shard read and atomic store | none: the owner's own `IndexMap` |
-| presence insert on a new branch | per new branch, shard write | one publication per changed step |
-| presence remove on eviction or expiry | per released branch, shard write | folded into that step's publication |
-| presence clear at owner teardown | lifecycle | release on drop, fenced by the owner lifetime |
-| registry lookup and clone per remote relay frame | per remote frame | none |
-| `DESCRIBE RELAY ... WHERE`, materialized visibility, console branch list | observer, shard read | observer, lock-free load |
-
-## Checkpoint replication: the repair Typed Ratchet 13 makes
-
-Before this repair, the owner of a placement kept what its replicas acknowledged, and the revision
-it announced to them, in `pending_state_checkpoint_announcements`: every WASM checkpoint and every
-Kafka offset commit awaiting replicas entered that node-wide map, and every replica acknowledgement
-took its write side. A replica woke its synchronization through `state_checkpoint_notifications`,
-which every checkpoint-available frame entered, creating entries for per-branch placements nothing
-waited on. The Kafka offset state kept a second record of replica progress, overwritten rather than
-raised and keyed by `String`, and its quorum wait read it before registering for the next report,
-so an acknowledgement landing in between left the commit to its five-second deadline. The
-branch-aggregated state kept a third record that nothing read.
-
-Now each replicated state owns one checkpoint replication from `nervix-checkpoint-replication`: the
+Each replicated state owns one checkpoint replication from `nervix-checkpoint-replication`: the
 Kafka offset state, the deduplicator, window and WASM branch states, the materialized relay state,
 the branch-aggregated state, and the branch lifecycle handle that `replicated_branch_lifecycles`
 keeps for each branch-keyed entity. It records each replica's highest reported revision, offers the
@@ -157,16 +130,16 @@ newest checkpoint through one announcer at a time, and carries the owner's annou
 replica's synchronization task, and it retires with the state, ending its announcer. See
 [Checkpoint replication](../docs/src/data-plane-concurrency.md#checkpoint-replication).
 
-| Access | Before | Now |
-| --- | --- | --- |
-| announcement per WASM checkpoint and per Kafka commit awaiting replicas | `entry` in the node-wide `pending_state_checkpoint_announcements` | the replication of the state the checkpointer or committer holds; one placement's lock, no map |
-| replica acknowledgement | `get_mut` in `pending_state_checkpoint_announcements`, then reads of the Kafka, WASM and branch-aggregated registries | one borrowed read of the registry that keeps the placement's kind of state |
-| checkpoint-available frame | `entry` in `state_checkpoint_notifications`, creating an entry for every placement announced | one borrowed read of the placement's state registry; a placement without state wakes nothing |
-| Kafka replica quorum wait | reads progress, then registers; an acknowledgement in between waited for the deadline | registers, then reads a monotonic maximum keyed by `ClusterNodeName` |
-| a WASM state reset confirming its branch lifecycle | a read of `pending_state_checkpoint_announcements` every 10 ms | registers, then reads the lifecycle's replication |
-| branch-keyed replica installation | a clone and decode of the whole branch lifecycle per checkpoint | one lookup in the lifecycle's branch set, decoded once per lifecycle checkpoint |
-| a replica's copy of a branch checkpoint | a full payload clone under the `passive_runtime_state_snapshots` write guard | a revision comparison and a move under the guard |
-| `ReplicatedBranchAggregatedState::replica_progress` and its notification | written per acknowledgement and never read | deleted |
+| Access | Current owner and access |
+| --- | --- |
+| Owner checkpoint announcement | The replication handle the checkpointer or committer holds; one placement's lock |
+| Replica acknowledgement | The placement's state route and retained replication owner |
+| Checkpoint-available frame | The placement's state route; a placement without state wakes nothing |
+| Kafka quorum and lifecycle confirmation | Register before reading monotonic progress keyed by `ClusterNodeName` |
+| Branch checkpoint installation | The lifecycle's branch set, decoded once per lifecycle checkpoint |
+| Replica checkpoint replacement | Compare revisions and move the payload under the snapshot guard |
+
+[Typed Ratchet 13](https://app.clickup.com/t/86bc9v77p) retains its audit and run results.
 
 Kafka offset replica polling first describes the revision through the immutable published state
 routes. An advancing revision opens one Snapshot stream and resolves its placement once more; an
@@ -180,36 +153,25 @@ acknowledgement resolves the owner's immutable replication route once per poll a
 retained replica assignment for its report; it neither opens the Kafka state registry nor adds a
 lookup per partition or transport chunk. Repeating this progress recovers a lost acknowledgement.
 
-## Replica catch-up: the repair Typed Ratchet 14 makes
+## Replica catch-up
 
-Before this repair, a replica's poll task walked every branch its entity's lifecycle named once
-every replication poll interval. For each branch it resolved the placement through
-`state_placement`, a read of `state_identities`, read the revision it held through
-`passive_state_replica_lsm`, a read of `passive_runtime_state_snapshots` and a storage read when it
-held nothing, and sent one synchronization request whether or not the branch changed. The owner
-answered each request by probing the deduplicator, Kafka offset, window, WASM and branch-aggregated
-registries in turn, and a window or WASM branch with nothing newer fell through to
-`replicated_branch_lifecycles` and a storage read. A replica also spawned one reconcile task per
-announced placement, keyed in `pending_state_replica_syncs`, which read the held revision and, to
-install a branch checkpoint, `state_identities` and `replicated_branch_lifecycles` again. With no
-branch changing, a replica's catch-up cost grew with the number of branches, not with the rate of
-change.
-
-Now one replica task per entity owns everything it learns of the entity's branch checkpoints and
+One replica task per entity owns everything it learns of the entity's branch checkpoints and
 retains the entity's lifecycle handle. The owner catalogues the newest replicable revision of every
 branch state it owns with the entity's lifecycle, and a round reads only what changed after the
 cursor its previous read returned. Announcements are left with the entity's lifecycle and taken by
-the task in its next round, and `pending_state_replica_syncs` is deleted. See
+the task in its next round. See
 [Replica catch-up](../docs/src/data-plane-concurrency.md#replica-catch-up).
 
-| Access | Before | Now |
-| --- | --- | --- |
-| synchronization requests per round with no branch changing | one for the lifecycle and one per branch | one for the lifecycle and one catalog listing |
-| `state_identities` read per named branch per round | `state_placement` for every branch | none: a catalog entry names its state; once per task start for the lifecycle |
-| held revision per branch per round | `passive_runtime_state_snapshots` get, or a storage read | none: the task's own record, read once per branch it looks at |
-| lifecycle discovery per round and per installation | `replicated_branch_lifecycles` get, and get or `entry` on installation | none: the handle the task retains |
-| owner answer to a synchronization request | up to five registry probes, then the lifecycle registry and storage | the one registry of the placement's kind; storage only without state |
-| announcement of a branch checkpoint or lifecycle | `entry` in `pending_state_replica_syncs` and a reconcile task per placement | one short entity-scoped lock on the lifecycle's pending announcements |
+| Access | Current owner and access |
+| --- | --- |
+| An unchanged catch-up round | One lifecycle synchronization and one catalog listing |
+| State identity | Catalog entries name branch state; resolve the lifecycle at task startup |
+| Held branch revisions | The replica task's own record, initialized when it first reads a branch |
+| Lifecycle discovery | The retained lifecycle handle |
+| Owner synchronization answer | The registry for the placement's kind; storage only without state |
+| Branch checkpoint announcement | One short entity-scoped lock on pending lifecycle announcements |
+
+[Typed Ratchet 14](https://app.clickup.com/t/86bca1wch) retains its audit and run results.
 
 ## Recurring sites and their dispositions
 
@@ -456,10 +418,10 @@ epic, but tracing them found defects:
 
 ## Task dependency qualification
 
-The retained owners are measured individually by `just bench-task-handles`, including allocations
-for 100 samples of 1,000 operations on one host. The [measurement report](https://app.clickup.com/t/86bc9v74y)
-records the host, operation timings, allocation samples and limits. Status and freeze transition sequences use the
-registered `task-status-transitions` and `entity-freeze-transitions` Bolero properties. The
+`just bench-task-handles` measures the retained owners and their allocations.
+The [measurement report](https://app.clickup.com/t/86bc9v74y) records the host, operation timings,
+allocation samples and limits. Status and freeze transition sequences use the registered
+`task-status-transitions` and `entity-freeze-transitions` Bolero properties. The
 production freeze release, status observer and force-flush generation checks run through the
 Shuttle inventory. The idle/claimed force-flush regression counts coordinator acquisitions and
 requires zero for repeated idle polls. Pool regressions cover ready, pending, completed, cancelled
@@ -469,79 +431,29 @@ outcomes. External smoke and soak integration belongs to Typed Ratchet 10.
 
 ## Endpoint intake publication evidence
 
-Typed Ratchet 12 publishes configured definitions and bound source lifetimes through
-`EndpointIntakeRoutes`. HTTP resolves a borrowed host/path once; an established WebSocket keeps its
-route and signaling protocol, including signaling data intake. The source lifetime's optional
-intake fences admission through retained routes before unbind or domain withdrawal publishes the
-replacement. A lease already admitted may finish; closing a preceding source removes only its
-exact allocation. Intakes need not implement `Clone`.
-
-Both endpoint DashMap mutation sites are gone. The current spelling-based ratchet also counts the
-replacement table's ordinary, privately owned `HashMap::entry` during cold publication, so its
-complete count falls from 161 to 160. That local entry is permitted and acquires no lock; Typed
-Ratchet 02's resolved synchronization detector owns correcting this classification.
+Configured definitions and bound source lifetimes are published through `EndpointIntakeRoutes`.
+HTTP resolves a borrowed host/path once; an established WebSocket keeps its route and signaling
+protocol, including signaling data intake. The source lifetime's optional intake fences admission
+through retained routes before unbind or domain withdrawal publishes the replacement. A lease
+already admitted may finish; closing a preceding source removes only its exact allocation.
+Intakes need not implement `Clone`.
 
 `endpoint_requests_reuse_bound_routes` dispatches real JSON requests and observes the prepared
-output-route reference count during header capture. It holds steady across requests. The registered
-`endpoint-route-table` Bolero target exercises bind, unbind, replace, domain withdrawal, and clear
-against an independent visible-route and retained-lifetime reference; its two committed corpus
-inputs and 256 randomized sequences passed. Unit regressions cover shared intake allocations,
-other-domain preservation, exact unbind identity, teardown, and retained signaling allocation.
+output-route reference count during header capture, requiring it to stay steady across requests.
+The registered `endpoint-route-table` Bolero target exercises bind, unbind, replace, domain
+withdrawal and clear against an independent visible-route and retained-lifetime reference.
+Unit regressions cover shared intake allocations, other-domain preservation, exact unbind
+identity, teardown and retained signaling allocation.
 
 The production owner uses the existing opaque `ArcSwap` and `ArcSwapOption` boundary. Shuttle
 checks whole-domain publication, concurrent replacement and unbind with a retained request, and
-teardown with a retained table. Loom does not model those publication internals; this change adds
-no independent memory-ordering protocol. Listener ownership and network primitives retain their
-existing contracts, so Turmoil is outside this owner's scope. The endpoint Chaos workload remains
-owned by Typed Ratchet 10.
+teardown with a retained table. Loom does not model those publication internals. Listener and
+network contracts remain with their existing owners.
 
-Local verification passed 1,538 instrumented server unit tests and 83 public endpoint scenarios
-covering HTTP, WebSockets, signaling, codecs, virtual hosts, shared-domain withdrawal and retained
-connection lifetimes. The three new Shuttle checks passed their random, PCT and bounded DFS
-schedules and replay. `just validate`, `just book` and `just ratchet` passed. Combined LLVM and
-Python runner reports cover 329 of 339 executable changed lines (97.05%) before integration with
-the latest main branch.
-
-After integrating main's codec error-reporting, representation properties and checked arithmetic,
-all 1,589 instrumented server unit tests passed with the downloaded ONNX runtime configured. The
-merged runner passed 30 unit tests against the complete 26-target inventory, and `just book`
-passed its 282 Python checks and documentation build. Fresh server and Python reports cover
-301 of 331 executable patch lines (90.94%) against the merged main. Public endpoint scenarios and
-Shuttle evidence above were collected before this integration; unchanged endpoint HTTP edge
-paths are exercised by the full PR scenario gate as well.
-
-The final pre-push integration also preserves the subsequent Plexus repairs and Typed Ratchet 13's
-checkpoint-replication publication. Endpoint owner and HTTP edge code are unchanged by that merge;
-server Clippy across all targets with `testing`, formatting, the 30 runner tests and the debt
-ratchet passed. The inventory now has 27 Bolero targets, and the combined recurring-lock count is
-157 (main's 158 minus this delivery's one-site decrease).
-
-The full-server sanitizer compilation exceeded the existing 1,800-second local build limit under
-shared-host paging. Its failed and interrupted run evidence remains in `target/bolero/runs`.
-The server's fuzz package profile uses lighter optimization without debug output; assertions,
-AddressSanitizer, coverage feedback, target selection and case/input/campaign bounds are unchanged.
-The real sanitizer CI campaign remains a required merge gate; local compilation is not reported
-as completed fuzz execution.
-
-### Same-host routing measurement
-
-`just bench-endpoint-routing` ran before and after on the same Intel Core i9-14900HX host with
-Rust 1.99.0, the repository's kache wrapper, and the debug test profile (`testing,benchmarks`).
-Each run used five samples of 10,000 operations against the same live endpoint ingestor, with
-per-thread jemalloc allocated-byte counters and the cooperative budget inside the loop. The request
-case measures endpoint selection and intake admission; the retained case measures intake admission
-without route resolution. Neither includes payload copying, codec work, or relay delivery. Timing
-is subject to other work on the host; byte averages below are whole bytes per operation.
-
-| Case | Median ns per operation | Range ns | Allocated bytes per operation after warm-up |
-| --- | ---: | ---: | ---: |
-| Request routing and admission, before | 6,268 | 4,930–7,979 | 424 |
-| Published request routing and admission | 1,552 | 1,542–1,838 | 0 |
-| Retained route admission | 331 | 330–334 | 0 |
-
-The request measurement is approximately 4.0 times faster on this host. The allocation result,
-non-Clone intake type, and prepared-route reference probe establish that endpoint routing shares
-its prepared state. They do not claim an end-to-end ingestion throughput improvement.
+[Typed Ratchet 12](https://app.clickup.com/t/86bc9v76a) retains the validation counts, coverage,
+sanitizer-build limitations and same-host routing measurements. `just bench-endpoint-routing`
+measures request resolution and retained intake admission separately; neither workload measures
+codec work or end-to-end relay throughput.
 
 ## Restore generation installation
 
