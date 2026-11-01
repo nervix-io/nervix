@@ -105,7 +105,7 @@ fn subject_and_stream_emission_declare_their_publication_contracts() {
         })
     );
     assert!(emit.options.is_empty());
-    assert!(emit.envelope.is_empty());
+    assert_eq!(emit.envelope, &[EnvelopeClauseKind::ReplyTo]);
     assert!(emit.properties.is_empty());
 
     let stream = EmitterEntityKind::Nats(NatsEmitterEntity::Stream).capabilities();
@@ -134,15 +134,47 @@ fn subject_and_stream_emission_declare_their_publication_contracts() {
 }
 
 #[test]
-fn both_subject_directions_carry_headers_by_name_and_no_typed_metadata() {
-    let ingest = IngestorEntityKind::Nats(NatsIngestorEntity::Subject).capabilities();
-    let emit = EmitterEntityKind::Nats(NatsEmitterEntity::Subject).capabilities();
-    let headers = Some(HeaderModel::exact(HeaderLayout::RepeatsByName));
-
-    assert_eq!(ingest.headers, headers);
-    assert_eq!(emit.headers, headers);
-    assert!(ingest.reads_headers());
-    assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
+fn both_entities_declare_ordered_headers_and_their_complete_metadata() {
+    let headers = Some(HeaderModel::exact(HeaderLayout::OrderedRepeats));
+    for entity in [NatsIngestorEntity::Subject, NatsIngestorEntity::Stream] {
+        let ingest = IngestorEntityKind::Nats(entity).capabilities();
+        assert_eq!(ingest.headers, headers);
+        assert!(ingest.reads_headers());
+    }
+    for entity in [NatsEmitterEntity::Subject, NatsEmitterEntity::Stream] {
+        assert_eq!(
+            EmitterEntityKind::Nats(entity).capabilities().headers,
+            headers
+        );
+    }
+    let fields = |entity| {
+        IngestorEntityKind::Nats(entity)
+            .capabilities()
+            .metadata
+            .fields()
+            .iter()
+            .map(|field| (field.name(), field.ty()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        fields(NatsIngestorEntity::Subject),
+        vec![
+            ("subject", IngestorMetadataType::String),
+            ("reply", IngestorMetadataType::String),
+        ]
+    );
+    assert_eq!(
+        fields(NatsIngestorEntity::Stream),
+        vec![
+            ("subject", IngestorMetadataType::String),
+            ("reply", IngestorMetadataType::String),
+            ("stream", IngestorMetadataType::String),
+            ("consumer", IngestorMetadataType::String),
+            ("sequence", IngestorMetadataType::U64),
+            ("timestamp", IngestorMetadataType::Datetime),
+            ("delivered", IngestorMetadataType::U64),
+        ]
+    );
 }
 
 #[test]
@@ -524,9 +556,8 @@ fn stream_ingestion_declares_acknowledged_pulls_answered_by_the_server() {
     );
     assert_eq!(
         ingest.headers,
-        Some(HeaderModel::exact(HeaderLayout::RepeatsByName))
+        Some(HeaderModel::exact(HeaderLayout::OrderedRepeats))
     );
-    assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
 }
 
 #[test]

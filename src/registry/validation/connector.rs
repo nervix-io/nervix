@@ -365,6 +365,9 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         EmitterEntity::Otel(connector) => {
             validate_otel_mapping_contract(domain, identifier, connector)?;
         }
+        EmitterEntity::Nats(nervix_models::NatsEmitter::Subject(_)) => {
+            validate_nats_reply_subject(domain, identifier, &emitter.envelope)?;
+        }
         EmitterEntity::Client(_)
         | EmitterEntity::Http(_)
         | EmitterEntity::Kafka(_)
@@ -372,7 +375,7 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         | EmitterEntity::RabbitMq(_)
         | EmitterEntity::Redis(_)
         | EmitterEntity::Mqtt(_)
-        | EmitterEntity::Nats(_)
+        | EmitterEntity::Nats(nervix_models::NatsEmitter::Stream(_))
         | EmitterEntity::ZeroMq(_)
         | EmitterEntity::Syslog(_)
         | EmitterEntity::Sentry(_)
@@ -384,6 +387,27 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
     }
 
     validate_emitter_value_keys(domain, identifier, emitter)?;
+    Ok(())
+}
+
+/// A literal reply subject is known before execution; computed subjects are validated by the
+/// connector when each record is handed over.
+fn validate_nats_reply_subject(
+    domain: &DomainName,
+    identifier: &ModelName,
+    envelope: &EmitterEnvelope,
+) -> Result<(), Report<RegistryError>> {
+    let Some(Expression::Literal(nervix_models::Literal::String(reply))) = &envelope.reply_to
+    else {
+        return Ok(());
+    };
+    nervix_models::NatsPublishSubjectName::try_from(reply.as_str()).map_err(|cause| {
+        Report::new(cause).change_context(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: NodeRef::new(ModelKind::Emitter, identifier.clone()),
+            issue: ConnectorDeclarationIssue::NatsReplySubject,
+        })
+    })?;
     Ok(())
 }
 

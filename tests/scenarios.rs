@@ -1788,6 +1788,18 @@ async fn given_nats_is_running(world: &mut ScenarioWorld) {
     refresh_dependency_configuration(world);
 }
 
+#[given("the plaintext NATS endpoint is addressed with the TLS scheme")]
+async fn given_plaintext_nats_has_tls_scheme(world: &mut ScenarioWorld) {
+    let address = expand_placeholders(world, "{{nats_addr}}");
+    let mut url = url::Url::parse(&address).expect("the NATS test endpoint is a URL");
+    url.set_scheme("tls")
+        .expect("a NATS URL accepts the TLS scheme");
+    world.placeholders.insert(
+        "nats_tls_scheme_addr".to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+}
+
 #[given("NATS TLS is running")]
 async fn given_nats_tls_is_running(world: &mut ScenarioWorld) {
     initialize_scenario_identity(world);
@@ -25758,6 +25770,27 @@ async fn given_nats_subject_is_observed(world: &mut ScenarioWorld, subject: Stri
     );
 }
 
+#[when(expr = "the observed NATS request to reply subject {string} is answered")]
+async fn when_observed_nats_request_is_answered(
+    world: &mut ScenarioWorld,
+    reply: String,
+    #[step] step: &Step,
+) {
+    let reply = expand_placeholders(world, &reply);
+    let payload = expand_placeholders(world, docstring(step));
+    let observer = world
+        .broker_observer
+        .as_mut()
+        .expect("the request subject is observed");
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        observer.answer_nats_request(&reply, &payload),
+    )
+    .await
+    .expect("the NATS request did not reach the responder")
+    .expect("the NATS request could not be answered");
+}
+
 /// Another socket listens on the port the scenario drew for its ZeroMQ ingest address before any
 /// statement names it, as a port Docker publishes for a container, or a server bound to that port
 /// explicitly, would: a listener with `SO_REUSEADDR` on every address, which the port's hold does
@@ -27010,6 +27043,23 @@ async fn when_nats_message_is_published(
         .publish_nats(&subject, &payload)
         .await
         .expect("failed to publish nats message");
+}
+
+#[when(expr = "NATS message with reply {string} is published to subject {string}")]
+async fn when_nats_message_with_reply_is_published(
+    world: &mut ScenarioWorld,
+    reply: String,
+    subject: String,
+    #[step] step: &Step,
+) {
+    let reply = expand_placeholders(world, &reply);
+    let subject = expand_placeholders(world, &subject);
+    let payload = expand_placeholders(world, docstring(step));
+    world
+        .cluster()
+        .publish_nats_with_reply(&subject, &reply, &payload)
+        .await
+        .expect("failed to publish the NATS message with its reply subject");
 }
 
 /// Provisions JetStream stream `stream` capturing `subject`, as an operator does.

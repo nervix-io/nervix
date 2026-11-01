@@ -687,13 +687,14 @@ dependencies = [
 [[package]]
 name = "async-nats"
 version = "0.49.1"
-source = "git+https://github.com/glebpom/nats.rs.git?rev=d131b7bc954fc57b8447e0d402a896b4b67010b1#d131b7bc954fc57b8447e0d402a896b4b67010b1"
+source = "git+https://github.com/glebpom/nats.rs.git?rev=d8dced4222568fe3935fcbdb81d66b6f89bfbaca#d8dced4222568fe3935fcbdb81d66b6f89bfbaca"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
  "bytes",
  "futures-util",
  "memchr",
+ "ordered-multimap",
  "pin-project",
  "portable-atomic",
  "rand 0.10.3",
@@ -7081,10 +7082,12 @@ version = "0.1.0-dev"
 dependencies = [
  "async-nats",
  "async-trait",
+ "bolero",
  "bytes",
  "error-stack",
  "futures-util",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",

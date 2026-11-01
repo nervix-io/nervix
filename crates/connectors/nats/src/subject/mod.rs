@@ -50,9 +50,9 @@ use nervix_connector::{
     ConfiguredDeadline, EmitterFinish, EmitterFinishError, EmitterFinishResult, EmitterHost,
     EmitterLifecycle, EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult,
     EmitterWriteError, ParsedRetryPolicy, PerRecordOutcome, RecordEmitter, RejectedEmitterMember,
-    client_config_value, client_tls_paths,
+    ServiceUrl, client_config_value, client_tls_paths,
 };
-use nervix_models::{ClientConfigEntry, NatsPublishSubjectName};
+use nervix_models::{ClientConfigEntry, ConnectorKind, NatsPublishSubjectName};
 use nervix_primitives::{
     sync::{
         StdArc,
@@ -255,6 +255,21 @@ impl CoreWrites {
             nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
+            let reply = match record.envelope.reply_to {
+                Some(reply) => match NatsPublishSubjectName::try_from(reply) {
+                    Ok(reply) => Some(Subject::from(reply.to_string())),
+                    Err(cause) => {
+                        let report = Report::new(cause);
+                        outcome.reject(RejectedEmitterMember::external(
+                            record_id,
+                            occurred_at,
+                            format!("{} reply subject rejected: {report:#}", ConnectorKind::Nats),
+                        ));
+                        continue;
+                    }
+                },
+                None => None,
+            };
             let headers = if record.headers.is_empty() {
                 None
             } else {
@@ -263,7 +278,7 @@ impl CoreWrites {
             let result = connector
                 .feed(OutboundMessage {
                     subject: subject.clone(),
-                    reply: None,
+                    reply,
                     payload: record.payload.into(),
                     headers,
                 })
@@ -403,6 +418,12 @@ impl NatsSubjectEmitter {
                      'tls_key_file'",
                 ));
             }
+        }
+        if ServiceUrl::new(&addr, "NATS addr")
+            .has_scheme("tls")
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: NATS })?
+        {
+            options = options.require_tls(true);
         }
         options.connect(addr).await.map_err(Self::start_error)
     }
@@ -636,6 +657,41 @@ mod tests {
             headers,
             Timestamp::from_unix_nanos(0),
         )
+    }
+
+    #[nervix_primitives::test]
+    async fn a_core_write_keeps_each_reply_subject_and_rejects_an_invalid_one() {
+        let server = ScriptedServer::start().await;
+        let addr = server.addr();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = server.accept(1024 * 1024).await;
+            let first = connection.expect_publish().await;
+            let second = connection.expect_publish().await;
+            (first, second, connection)
+        });
+        let mut connector = core_emitter(&addr, &[]).await;
+        let mut first = record(0, b"first", &[]);
+        first.envelope.reply_to = Some("reply.first".to_string());
+        let mut second = record(1, b"second", &[("trace", "a")]);
+        second.envelope.reply_to = Some("reply.second".to_string());
+        let mut invalid = record(2, b"refused", &[]);
+        invalid.envelope.reply_to = Some("reply.*".to_string());
+        let outcome = bounded(connector.publish(vec![first, second, invalid]))
+            .await
+            .into_parts();
+        assert_eq!(
+            outcome.delivered,
+            vec![EmitterRecordId::new(0), EmitterRecordId::new(1)]
+        );
+        assert_eq!(outcome.rejected.len(), 1);
+        assert_eq!(outcome.rejected[0].id, EmitterRecordId::new(2));
+        assert!(outcome.infrastructure_error.is_none());
+        let (first, second, _connection) =
+            script.await.expect("both valid records reached the server");
+        assert_eq!(first.reply.as_deref(), Some("reply.first"));
+        assert_eq!(second.reply.as_deref(), Some("reply.second"));
+        assert_eq!(first.message, b"first");
+        assert_eq!(second.message, b"NATS/1.0\r\ntrace: a\r\n\r\nsecond");
     }
 
     /// A core write whose client cannot flush, because its server went down and refuses every

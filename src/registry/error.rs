@@ -146,6 +146,11 @@ pub(crate) enum ConnectorDeclarationIssue {
     },
     #[error("{0}")]
     Envelope(nervix_models::EnvelopeDeclarationError),
+    #[error(
+        "{} REPLY TO requires a valid publication subject",
+        ConnectorKind::Nats
+    )]
+    NatsReplySubject,
     #[error("{site} requires an exact, non-null, non-sensitive {expected} value")]
     EnvelopeValue {
         site: EnvelopeValueSite,

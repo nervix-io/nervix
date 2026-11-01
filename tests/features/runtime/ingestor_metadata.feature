@@ -103,7 +103,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'nats_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but NATS SUBJECT ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'nats_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but NATS SUBJECT ingestors declare only metadata.subject and metadata.reply"
       """
       CREATE NATS SUBJECT INGESTOR nats_source
         FROM nats_main SUBJECT 'orders.*' QUEUE GROUP 'Readers' INSTANCES 1
@@ -111,7 +111,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'nats_stream_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but NATS STREAM ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'nats_stream_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but NATS STREAM ingestors declare only metadata.subject, metadata.reply, metadata.stream, metadata.consumer, metadata.sequence, metadata.timestamp and metadata.delivered"
       """
       CREATE NATS STREAM INGESTOR nats_stream_source
         FROM nats_main STREAM 'Orders' CONSUMER 'Readers'

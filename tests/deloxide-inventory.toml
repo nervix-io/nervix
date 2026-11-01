@@ -170,6 +170,7 @@ tags = [
   "@mqtt_parallel_gather_at_quiesce",
   "@sqs_receive_at_quiesce",
   "@nats_stream_suspend",
+  "@nats_envelope_metadata",
   "@sqs_ingestor_receive_deadline",
   "@kept_ingestor_offsets",
   "@redis_subscription_backpressure",
@@ -3433,6 +3434,14 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.nats-stream-metadata",
+  "stress.nats-stream-metadata",
+  "scenario.nats-subject-metadata",
+  "stress.nats-subject-metadata",
+  "scenario.nats-reply-subject",
+  "stress.nats-reply-subject",
+  "scenario.nats-header-order",
+  "stress.nats-header-order",
   "scenario.websocket-declaration-buffer",
   "stress.websocket-declaration-buffer",
   "scenario.syslog-suspend-handoff",
@@ -4039,3 +4048,103 @@ invariant = "A restored START AT generation resumes its archived positions witho
 invocation = "stress-restore-scenarios"
 scenario = "A backup preserves the applied START AT Kafka generation on <cluster_size> nodes"
 selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "A TLS-addressed emitter fails against a plaintext broker. Start, failure observation and teardown reach tracked graph lifecycle owners; TLS and socket I/O are outside Deloxide."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "scenario.nats-tls-required"
+invariant = "A NATS SUBJECT emitter refuses a plaintext server when the client requires TLS."
+invocation = "scenarios"
+scenario = "A NATS SUBJECT emitter refuses a plaintext server when the client requires TLS"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: A TLS-addressed emitter fails against a plaintext broker. Start, failure observation and teardown reach tracked graph lifecycle owners; TLS and socket I/O are outside Deloxide."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "stress.nats-tls-required"
+invariant = "A NATS SUBJECT emitter refuses a plaintext server when the client requires TLS."
+invocation = "stress-scenarios"
+scenario = "A NATS SUBJECT emitter refuses a plaintext server when the client requires TLS"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "A durable consumer delivers all seven metadata fields through source projection and TIMESTAMP AT on one and three nodes, then confirms the transport acknowledgement. Source startup and teardown reach tracked lifecycle owners; metadata parsing and projection add no lock and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "scenario.nats-stream-metadata"
+invariant = "NATS STREAM metadata carries the server's delivery identity and event time."
+invocation = "scenarios"
+scenario = "NATS STREAM metadata carries the server's delivery identity and event time"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: A durable consumer delivers all seven metadata fields through source projection and TIMESTAMP AT on one and three nodes, then confirms the transport acknowledgement. Source startup and teardown reach tracked lifecycle owners; metadata parsing and projection add no lock and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "stress.nats-stream-metadata"
+invariant = "NATS STREAM metadata carries the server's delivery identity and event time."
+invocation = "stress-scenarios"
+scenario = "NATS STREAM metadata carries the server's delivery identity and event time"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Wildcard deliveries retain their concrete subject and absent or present reply through the ingest group. Startup and teardown reach tracked lifecycle owners; metadata reads and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "scenario.nats-subject-metadata"
+invariant = "NATS wildcard messages project the concrete subject and optional reply."
+invocation = "scenarios"
+scenario = "NATS wildcard messages project the concrete subject and optional reply"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Wildcard deliveries retain their concrete subject and absent or present reply through the ingest group. Startup and teardown reach tracked lifecycle owners; metadata reads and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "stress.nats-subject-metadata"
+invariant = "NATS wildcard messages project the concrete subject and optional reply."
+invocation = "stress-scenarios"
+scenario = "NATS wildcard messages project the concrete subject and optional reply"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "A request traverses an ingest group, relay, reply envelope and Core publication, and its external response returns through a second ingest group. Graph startup, routing and teardown reach tracked lifecycle owners; the borrowed envelope and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "scenario.nats-reply-subject"
+invariant = "A NATS SUBJECT emitter sends a request with its evaluated reply subject."
+invocation = "scenarios"
+scenario = "A NATS SUBJECT emitter sends a request with its evaluated reply subject"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: A request traverses an ingest group, relay, reply envelope and Core publication, and its external response returns through a second ingest group. Graph startup, routing and teardown reach tracked lifecycle owners; the borrowed envelope and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "stress.nats-reply-subject"
+invariant = "A NATS SUBJECT emitter sends a request with its evaluated reply subject."
+invocation = "stress-scenarios"
+scenario = "A NATS SUBJECT emitter sends a request with its evaluated reply subject"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "A Core publication through an ingest group and relay retains interleaved repeated headers at the external broker. Startup and teardown reach tracked lifecycle owners; header encoding and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "scenario.nats-header-order"
+invariant = "NATS publication preserves interleaved repeated header names."
+invocation = "scenarios"
+scenario = "NATS publication preserves interleaved repeated header names"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: A Core publication through an ingest group and relay retains interleaved repeated headers at the external broker. Startup and teardown reach tracked lifecycle owners; header encoding and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "stress.nats-header-order"
+invariant = "NATS publication preserves interleaved repeated header names."
+invocation = "stress-scenarios"
+scenario = "NATS publication preserves interleaved repeated header names"
+selections = ["deloxide-stress"]

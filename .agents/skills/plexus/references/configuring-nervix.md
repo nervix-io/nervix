@@ -451,6 +451,10 @@ current connection, retry and deadline limits.
   `SUSPEND`, `BUFFER` or `DROP` quiesce. Nervix creates neither the stream nor the consumer, and it
   refuses a push consumer and one whose acknowledgement policy is not explicit. Read `Ingestors` →
   `NATS` for redelivery, `MaxRequestBatch`, `MaxRequestExpires` and `AckWait`.
+- For NATS routing by the actual delivery, use the metadata fields declared in `Ingestors` →
+  `NATS`; a wildcard subscription's subject is concrete, and a stream's reply is its acknowledgement
+  subject. `NATS SUBJECT` emitters can write `REPLY TO`; read `Emitters` → `NATS` for its value
+  rules and retry boundary. Both directions preserve header order and require TLS for `tls://`.
 - A `NATS STREAM` emitter publishes to an operator-provisioned `STREAM '<stream>'` and a literal
   `SUBJECT '<subject>'` that stream captures. Use `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX
   <n>` with an `ACK TIMEOUT` and retry policy. The stream is checked when the emitter opens;

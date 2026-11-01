@@ -39,13 +39,10 @@ mirror = "Subscription options select the session and inbound QoS; emitter QoS i
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."NATS SUBJECT"]
-envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
-metadata = "The current subject declaration exposes message headers but no typed subject or JetStream metadata namespace."
 mirror = "Subject consumption can join a queue group; Core publication completes after its flush. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."NATS STREAM"]
-metadata = "The current stream declaration exposes message headers but no typed stream, consumer, sequence, timestamp or delivery-count metadata namespace."
 mirror = "A durable pull consumer an operator provisioned acknowledges or negatively acknowledges each delivery on its own subject. A stream emitter names a provisioned stream, sends its expected-stream header with each message and waits for PubAck."
 properties = "This entity declares no typed PROPERTIES block; its MESSAGE ID envelope and written headers travel with the payload."
 

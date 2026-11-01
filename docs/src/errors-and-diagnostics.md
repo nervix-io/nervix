@@ -19,6 +19,14 @@ RabbitMQ's TLS file keys declare `amqps` as their permitted address scheme. The 
 and commit, naming the key, `addr` and `amqps` without the configured values. The existing
 certificate/key pairing refusal remains independent of the scheme check.
 
+NATS stream delivery metadata is checked at the connector boundary before its values enter the
+host. A malformed acknowledgement subject retains the driver's parsing cause; a nonpositive
+sequence or delivery count and an out-of-range publication timestamp have distinct typed causes.
+These end the source attempt without acknowledging the delivery. A computed Core reply subject
+that violates the publication-subject rule instead becomes a per-record rejection before hand-over.
+An invalid literal reply subject is refused by registry preflight with `NatsReplySubject` and the
+external-name validation cause, before the emitter starts.
+
 An OTEL literal outside its declared field domain is a typed registry mapping issue that names
 the signal, key and required constraint. It carries no literal value. A TLS file key with a
 plaintext endpoint is a typed client-schema scheme refusal before file inspection, for either

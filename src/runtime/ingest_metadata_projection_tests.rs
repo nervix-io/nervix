@@ -21,7 +21,7 @@ use std::{
 use arrow_array::{
     Array,
     cast::AsArray as _,
-    types::{Int32Type, Int64Type, TimestampNanosecondType, UInt16Type},
+    types::{Int32Type, Int64Type, TimestampNanosecondType, UInt16Type, UInt64Type},
 };
 use nervix_arbitrary::Entropy;
 use nervix_connector::{
@@ -47,6 +47,7 @@ const DECLARED_FIELDS: &[IngestorMetadataField] = &[
     IngestorMetadataField::new("status", IngestorMetadataType::U16),
     IngestorMetadataField::new("partition", IngestorMetadataType::I32),
     IngestorMetadataField::new("offset", IngestorMetadataType::I64),
+    IngestorMetadataField::new("stream_sequence", IngestorMetadataType::U64),
     IngestorMetadataField::new("polled_at", IngestorMetadataType::Datetime),
     IngestorMetadataField::new("peer_addr", IngestorMetadataType::String),
     IngestorMetadataField::new("token", IngestorMetadataType::Bytes),
@@ -54,6 +55,7 @@ const DECLARED_FIELDS: &[IngestorMetadataField] = &[
     IngestorMetadataField::new("code", IngestorMetadataType::U16),
     IngestorMetadataField::new("sequence", IngestorMetadataType::I32),
     IngestorMetadataField::new("lag", IngestorMetadataType::I64),
+    IngestorMetadataField::new("delivered", IngestorMetadataType::U64),
     IngestorMetadataField::new("published_at", IngestorMetadataType::Datetime),
 ];
 
@@ -157,6 +159,7 @@ impl IngestMessageMetadata for GeneratedMessage {
                 Value::Bytes(bytes) => values.bytes(bytes),
                 Value::Bool(value) => values.bool(*value),
                 Value::U16(value) => values.u16(*value),
+                Value::U64(value) => values.u64(*value),
                 Value::I32(value) => values.i32(*value),
                 Value::I64(value) => values.i64(*value),
                 Value::Datetime(value) => values.datetime(*value),
@@ -270,6 +273,7 @@ impl Cases<'_> {
             IngestorMetadataType::Bytes => Value::Bytes(self.bytes()),
             IngestorMetadataType::Bool => Value::Bool(self.entropy.flag()),
             IngestorMetadataType::U16 => Value::U16(self.u16()),
+            IngestorMetadataType::U64 => Value::U64(self.entropy.any_u64()),
             IngestorMetadataType::I32 => Value::I32(self.i32()),
             IngestorMetadataType::I64 => Value::I64(self.entropy.any_i64()),
             IngestorMetadataType::Datetime => {
@@ -537,6 +541,10 @@ fn column_value(column: &dyn Array, ty: IngestorMetadataType, row: usize) -> Val
         IngestorMetadataType::U16 => {
             let column = column.as_primitive_opt::<UInt16Type>().verified(TYPED);
             Value::U16(column.value(row))
+        }
+        IngestorMetadataType::U64 => {
+            let column = column.as_primitive_opt::<UInt64Type>().verified(TYPED);
+            Value::U64(column.value(row))
         }
         IngestorMetadataType::I32 => {
             let column = column.as_primitive_opt::<Int32Type>().verified(TYPED);

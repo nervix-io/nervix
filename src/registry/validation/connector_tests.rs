@@ -2445,6 +2445,50 @@ fn kafka_emitter() -> CreateEmitter {
     emitter
 }
 
+#[test]
+fn literal_nats_reply_subjects_are_validated_before_execution() {
+    let domain: DomainName = named("validation");
+    let mut emitter = kafka_emitter();
+    *emitter.connector = EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
+        client: named("nats_main"),
+        subject: named("requests"),
+        mode: nervix_models::NatsSubjectPublishingMode::NoAck {
+            retry_policy: RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+    }));
+    let check = |emitter: &CreateEmitter| {
+        validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &ModelIndex::new(),
+            emitter,
+        )
+    };
+    for value in ["", "replies.*", "replies..x", "reply space"] {
+        emitter.envelope.reply_to = Some(Expression::Literal(nervix_models::Literal::String(
+            value.to_string(),
+        )));
+        let error = check(&emitter).expect_err("an invalid literal is refused at preflight");
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::InvalidConnectorDeclaration {
+                issue: ConnectorDeclarationIssue::NatsReplySubject,
+                ..
+            }
+        ));
+        assert!(error.contains::<nervix_models::ExternalNameError>());
+    }
+    for reply in [None, Some("'Replies.Created'"), Some("input.tenant")] {
+        emitter.envelope.reply_to = reply.map(|value| {
+            nervix_plexus::parse_expression(value).expect("the current reply expression parses")
+        });
+        check(&emitter).expect("an absent, valid literal or computed reply is admitted");
+    }
+}
+
 fn envelope_schema() -> CreateSchema {
     let field = |name: &str, ty: ParseAsType, optional: bool, sensitive: bool| SchemaField {
         name: named(name),

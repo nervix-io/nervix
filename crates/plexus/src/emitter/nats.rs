@@ -152,6 +152,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_subject_emitter_keeps_its_reply_expression_in_the_shared_envelope() {
+        let text = statement("orders.created", NO_ACK)
+            .replace("INHERIT ALL", "REPLY TO input.reply INHERIT ALL");
+        let Some(Model::Emitter(emitter)) = created_model(&text) else {
+            panic!("the subject emitter declares REPLY TO: {text}");
+        };
+        assert_eq!(
+            emitter.envelope.reply_to,
+            Some(crate::parse_expression("input.reply").expect("a field expression parses"))
+        );
+    }
+
+    #[test]
+    fn reply_to_completion_keeps_the_composed_phrase_and_its_expression_context() {
+        let prefix = format!(
+            "CREATE NATS SUBJECT EMITTER publishing FROM events TO nats_main SUBJECT \
+             'orders.created' MODE {NO_ACK} ENCODE USING event_codec "
+        );
+        assert_offers_exactly(
+            &prefix,
+            &[
+                "REPLY TO 'replies'",
+                "INHERIT ALL",
+                "SET value = 1",
+                "WHERE true",
+                "INVOKE write_header('trace', 'one')",
+                "BATCH MAX MESSAGES 2 MAX SIZE 1KiB",
+                "FLUSH EACH 1s",
+                "FLUSH IMMEDIATE",
+            ],
+        );
+        assert_offers_exactly(&format!("{prefix}REPLY TO "), &["string_expression"]);
+    }
+
+    #[rstest]
+    #[case("REPLY TO")]
+    #[case("REPLY TO 'first' REPLY TO 'second'")]
+    fn the_reply_clause_requires_one_expression(#[case] clause: &str) {
+        assert!(refused(
+            &statement("orders.created", NO_ACK)
+                .replace("INHERIT ALL", &format!("{clause} INHERIT ALL"))
+        ));
+    }
+
     #[rstest]
     #[case("orders.*")]
     #[case("orders.>")]
