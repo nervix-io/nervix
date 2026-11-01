@@ -1263,9 +1263,9 @@ the processor waiting and repeats its warning on every attempt.
 ### Checkpoint Identity
 
 A restart reopens a runtime-state checkpoint only under the identity the committed schedule
-publishes for its entity. Kafka domain offsets and the metric summaries behind `DESCRIBE` output
-depend on no schema: they are keyed by their entity alone and survive a restart whatever schemas
-changed while the node was down. Every other checkpoint, including deduplicator, window, and
+publishes for its scheduled unit. Kafka domain offsets and the metric summaries behind `DESCRIBE`
+output depend on no schema: they are keyed by their entity and unit alone and survive a restart
+whatever schemas changed while the node was down. Every other checkpoint, including deduplicator, window, and
 materialized relay state, branch lifecycle records, and WASM guest state, is keyed by the
 fingerprint of the schemas its entity lays records out by, and WASM guest state also by its
 generation. Window state additionally includes the current window model in its identity, so a
@@ -1487,5 +1487,5 @@ even when its buffer is empty. Idle and already-claimed force-flush participants
 readiness hint; only an available obligation enters the coordinator to claim its generation. A
 released claim becomes available again. Task teardown removes its confirmation/status registration,
 and pooled emitter teardown removes its wait registration; cancellation clears a pending borrow's
-wait through its guard. Handoff watches register before reading their retained entity publication,
-and release publishes thaw before waking them.
+wait through its guard. Handoff watches register before reading their unit's retained freeze
+publication, and release publishes thaw before waking them.

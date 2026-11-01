@@ -309,9 +309,10 @@ name again for every new connection it opens.
 | MQTT sources, emitters and input retirement | The connector's socket connector, installed with `MqttOptions::set_socket_connector`, for every connection the driver's event loop opens | The driver's five-second connect timeout; retirement also encloses its unsubscribe and disconnect within that budget | [DNS for MQTT](./connector-contract.md#dns-for-mqtt), [MQTT session retirement](./connector-contract.md#mqtt-session-retirement) |
 | Native CLI and SDK sessions | The client's resolver, as Hyper's resolver service under Tonic 0.13's connector, for the first connection, seeds, redirects and reconnects | The session's connect timeout, ten seconds by default, which encloses the lookup, the attempts and TLS | [Leader Discovery, Redirect, And Reconnect](./client-session-protocol.md#leader-discovery-redirect-and-reconnect) |
 
-Iceberg's Azure locations use the account's `blob` service for `wasb`/`wasbs` and its `dfs`
-service for `abfs`/`abfss`. Their OpenDAL operator uses the node resolver and the storage-client
-deadline from the table above for either service.
+Iceberg's Azure locations name the account's `blob` service for `wasb`/`wasbs` and its `dfs`
+service for `abfs`/`abfss`, but their OpenDAL operator reaches every one of them at the account's
+Data Lake host, `<account>.dfs.<suffix>`. It resolves that host through the node resolver, under the
+storage-client deadline from the table above.
 
 Two interconnect uses are resolved once, when the node starts: the address that identifies the
 node in gossip, which is the first answer for its own advertised endpoint, and its bootstrap seeds,

@@ -797,12 +797,34 @@ body size and the limit as typed fields and becomes a record rejection of that m
 lost connection, and a close whose reason never arrives fail the attempt as an infrastructure
 failure, which the emitter retries on its backoff.
 
+A message the broker returns unrouted under `MANDATORY`, with its publisher confirm under `ACK` or
+before the round trip that ends a `NO ACK` write, is a record rejection with code `external` and
+operation `publish` whose message names the broker's reply code and text, such as `rabbitmq
+returned the message unrouted with reply code 312: NO_ROUTE`. A routing key longer than an AMQP
+short string carries is a `RabbitMqRecordError` keeping the driver's `ShortStringError` as its
+source and the key's length as a typed field, and becomes the same kind of rejection before the
+message is written. A return the emitter cannot attribute to a message of its write fails the
+attempt instead, because no record can be named as unrouted. An exchange emitter whose passive check
+finds no exchange fails to open with `EmitterOpenError::MissingExternalEntity`, naming the exchange
+and keeping the broker's `NOT_FOUND` answer, a `lapin::Error`, as its typed cause; `DESCRIBE EMITTER`
+shows it as `RabbitMQ exchange '<name>' does not exist`. Any other failure of that check is an
+initialization failure. Both are retried on the emitter's backoff.
+
+The registry refuses a `ROUTING KEY` that does not compute an exact, non-null, non-sensitive
+`STRING` as `ConnectorDeclarationIssue::EnvelopeValue`, the issue envelope values share, with the
+site written as the statement writes it: `ROUTING KEY requires an exact, non-null, non-sensitive
+STRING value`. The host reports a routing key that fails or produces no value for a record as an
+`evaluation` error of the `publish` operation whose message begins `ROUTING KEY`.
+
 Syslog emission and WebSocket-client ingestion retain DNS failures from the node resolver beneath
 their existing infrastructure contexts: `EmitterOpenError::Initialize` while a Syslog sender opens
 and `IngestorError::Resume` while a WebSocket source connects or reconnects. The resolver's typed
 missing-name, no-address, timeout, invalid-name or transport cause stays in the error report.
-Address, TLS and WebSocket-upgrade failures remain connection outcomes. None is a record rejection,
-and a DNS result by itself never marks a Syslog record delivered.
+Address, TLS and WebSocket-upgrade failures remain connection outcomes. A WebSocket peer whose
+upgrade answer contradicts the request's subprotocol offer fails resume with the connector's typed
+refusal, which keeps the transport's refusal attached for typed inspection and prints no
+subprotocol, since an offer can carry a credential. None is a record rejection, and a DNS result
+by itself never marks a Syslog record delivered.
 
 Redis command connections receive the node resolver through the driver's DNS hook. A failed
 initial or later pool connection keeps the resolver's typed failure in
@@ -2880,14 +2902,18 @@ The compiler architecture gate owns typed tooling failures for invalid source co
 conflicting findings and incomplete compiler passes. `ContractProblem` retains the specific
 argument, kind or missing contract coordinate inside an `error-stack` report until the Rust
 diagnostic boundary formats it. Reports preserve source location, resolved receiver/operation,
-owner and compiled configuration context. Missing or stale analysis fails rather than becoming a
-zero debt count. These are repository validation errors and add no runtime failure variants.
+owner and compiled configuration context. Missing, stale or incomplete compiler evidence fails the
+gate; compiler findings feed no debt count. These are repository validation errors and add no
+runtime failure variants.
 [Data-Plane Concurrency](data-plane-concurrency.md) owns the gate's coverage and synchronization policy.
 
-The isolated architecture compiler emits ordinary Rust tool diagnostics:
+The isolated architecture compiler emits sixteen ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and
-`nervix::invalid_contract`, together with the typed error diagnostics above. Source contracts and narrow reason-bearing expectations own the
-architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
+`nervix::invalid_contract`; the four failure diagnostics above; the six architecture diagnostics
+[Data-Plane Concurrency](./data-plane-concurrency.md#resolved-architecture-boundaries) describes;
+and `nervix::clamped_arithmetic` and `nervix::combinator_control_flow`. The
+[architecture rule matrix](./architecture-enforcement.md#rule-contracts) lists them by family.
+Source contracts and narrow reason-bearing expectations own the architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
 compiler reports and changed inputs fail the repository command; they are tooling failures, with
 no runtime error or public protocol disposition. The diagnostic gate rejects unresolved Nervix
 warnings too. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostics-and-reviewed-exceptions)
@@ -3034,8 +3060,9 @@ commands and the gate.
 Paired `compile_fail` and compiling doctests hold current APIs beside their failure paths. The DNS
 hook accepts `DnsLookupReport` as a standard error, and the recovery API classifies a real outcome.
 The VM's function injection receives the selected rows' earlier errors together with domain time.
-Resolved compiler fixtures hold the contextual-report, discarded-outcome and canonical panic rules;
-the source guard separately rejects textual string errors, including inactive code.
+Resolved compiler fixtures hold the contextual-report, discarded-outcome, informative-replacement
+and canonical panic rules; the source guard separately rejects textual string errors, including
+inactive code.
 
 ## Adding A Fallible Operation
 

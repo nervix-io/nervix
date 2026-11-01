@@ -73,16 +73,13 @@ pub(in crate::registry) fn validate_ingestor_source(
     if let Some(nervix_models::IngestorEntity::Websockets(
         nervix_models::WebsocketsIngestor::Connection(source),
     )) = ingestor.input.transport_entity()
-        && let Err(report) = nervix_models::WebsocketsUpgradeHeaders::parse(&source.headers)
     {
-        let issue = report.current_context().clone();
-        return Err(
-            report.change_context(RegistryError::InvalidWebsocketsUpgradeHeaders {
+        nervix_models::WebsocketsUpgradeHeaders::parse(&source.headers).change_context(
+            RegistryError::InvalidWebsocketsUpgradeHeaders {
                 domain: domain.clone(),
                 ingestor: identifier.clone(),
-                issue,
-            }),
-        );
+            },
+        )?;
     }
     let invalid = |reason: String| {
         Report::new(RegistryError::InvalidModel {
@@ -970,12 +967,20 @@ struct EnvelopeValue<'a> {
     expected: ParseAsType,
 }
 
-/// The values an emitter's envelope computes, in the order its statement writes them.
+/// The values an emitter computes for every record beside its payload, in the order its statement
+/// writes them: its destination's routing key, then its envelope's clauses and properties.
 ///
 /// A property its entity does not declare has no type to check against here; the publishing
 /// contract refuses it.
 fn envelope_values(emitter: &CreateEmitter) -> Vec<EnvelopeValue<'_>> {
     let mut values = Vec::new();
+    if let Some(expression) = emitter.connector.routing_key() {
+        values.push(EnvelopeValue {
+            site: EnvelopeValueSite::RoutingKey,
+            expression,
+            expected: ParseAsType::String,
+        });
+    }
     for clause in emitter.envelope.clauses() {
         let EnvelopeClauseForm::Expression(expected) = clause.kind().form() else {
             continue;
