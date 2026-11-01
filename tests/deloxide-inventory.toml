@@ -332,8 +332,8 @@ target = "test:scenarios"
 # a time in the restore selection's lane.
 # Check 41311131846 ran 78 of 80 examples within the former 3840s suite budget after the two
 # NATS STREAM lost-PubAck examples joined this serial selection. Both passed in 30.6s total;
-# the last window example finished its body at 3835s and another remained queued. The 72-minute
-# process bound gives all 80 examples 3960s while retaining the 360s suite teardown reserve.
+# the last window example finished its body at 3835s and another remained queued. The current
+# 82-example inventory has a 3960s suite budget and a 360s teardown reserve in this bound.
 [[invocation]]
 bound_seconds = 4320
 concurrency = 1
