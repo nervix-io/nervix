@@ -366,7 +366,7 @@ services:
       - ./tls/dev:/etc/nats/certs:ro,Z
 
   elasticmq:
-    image: softwaremill/elasticmq-native:1.6.12
+    image: softwaremill/elasticmq-native:1.7.1
     container_name: nervix-elasticmq
     ports:
       - "9324:9324"

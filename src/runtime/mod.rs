@@ -445,7 +445,10 @@ use emitter_task_programs::EmitterTaskPrograms;
 use emitter_values::{
     MappedRequestEmitter, MappedRowEmitter, MappedValuesProjection, MappedValuesProjectionInit,
 };
-pub(crate) use endpoint::{EndpointDispatchOutcome, ResolvedEndpointRoute};
+pub(crate) use endpoint::{
+    EndpointDispatchOutcome, HttpEndpointRequestMetadata, ResolvedEndpointRoute,
+    WebsocketsEndpointFrameMetadata,
+};
 use endpoint::{EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint};
 use endpoint_acknowledgement::EndpointRequestPolicy;
 pub(crate) use endpoint_acknowledgement::{EndpointRequestOutcome, EndpointRequestReply};

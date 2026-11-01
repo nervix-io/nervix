@@ -2571,8 +2571,9 @@ mod tests {
             },
             EmbeddedRejection {
                 statement: "CREATE SQS QUEUE EMITTER e FROM r TO sqs_main QUEUE 'q.fifo' FIFO \
-                            GROUP input.a + / 1 MODE SINGLE RETRY POLICY BACKOFF 1s MAX 5s ENCODE \
-                            USING c FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+                            GROUP input.a + / 1 SEND SINGLE MODE ACK RETRY POLICY BACKOFF 1s MAX \
+                            5s ENCODE USING c FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
+                            ERROR LOG;",
                 token: "/",
                 standalone: expression("input.a + / 1"),
             },
@@ -2630,7 +2631,7 @@ mod tests {
             ),
             (
                 "CREATE SQS QUEUE EMITTER e FROM r TO sqs_main QUEUE 'q.fifo' FIFO GROUP input.a ",
-                vec!["MODE"],
+                vec!["SEND"],
             ),
         ] {
             assert_eq!(

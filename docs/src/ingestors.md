@@ -488,9 +488,11 @@ General notes:
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
   `metadata.topic`, `metadata.partition`, and `metadata.offset`, `SYSLOG LISTENER` declares
-  `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`, and
-  `WEBSOCKETS CONNECTION` declares `metadata.frame_type`; every field is optional and none is
-  sensitive
+  `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
+  `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
+  `metadata.remote_addr`, and `metadata.host`, `WEBSOCKETS CONNECTION` declares
+  `metadata.frame_type`, and `WEBSOCKETS ENDPOINT` declares `metadata.frame_type`,
+  `metadata.remote_addr`, and `metadata.path`; every field is optional and none is sensitive
 - a route expression may read any declared field; `CREATE` and `ALTER` refuse a route that reads a
   field its entity does not declare, naming the ingestor, the route's relay and the fields the
   entity does declare. `FILTER WHERE` reads headers but not `metadata.<field>`
@@ -534,8 +536,11 @@ Some ingestors receive additional source data alongside the decoded payload body
 
 The `name` argument can be any expression that returns `STRING`. Both functions are available in top-level `FILTER WHERE` and in per-route `SET` / `WHERE` expressions for these sources:
 
-- `HTTP ENDPOINT` and `HTTP REQUEST` expose HTTP headers with UTF-8 values
-- `WEBSOCKETS ENDPOINT` exposes UTF-8 headers from the opening HTTP upgrade request
+- `HTTP ENDPOINT` and `HTTP REQUEST` expose HTTP headers with UTF-8 values; an `HTTP ENDPOINT`
+  drops a request header value that is not UTF-8 and counts it in
+  `nervix_ingestor_header_values_dropped_total`
+- `WEBSOCKETS ENDPOINT` exposes UTF-8 headers from the opening HTTP upgrade request, dropping and
+  counting a value that is not UTF-8 the same way
 - `WEBSOCKETS CONNECTION` exposes printable ASCII headers from its opening HTTP upgrade response
 - `KAFKA TOPIC` exposes Kafka record headers
 - `NATS SUBJECT` exposes message headers
@@ -604,7 +609,10 @@ Transport-specific schemes and keys:
 - `KAFKA`: librdkafka properties with the [reserved keys and consumer settings](#kafka) described below. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `HTTP`: use an `https://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
 - `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file` and `tls_key_file`, and the client requires `timeout_ms`; see [Prometheus](#prometheus) for every key it declares.
-- `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
+- `WEBSOCKETS`: use a `wss://...` endpoint. Nervix trusts `tls_ca_file` beside the bundled WebPKI
+  roots and the platform's native roots, and presents `tls_cert_file` with `tls_key_file` as its
+  client certificate. A plaintext `ws://...` endpoint reads no TLS file, so `CREATE WEBSOCKETS
+  CLIENT` refuses all three with it; see [`WEBSOCKETS CONNECTION`](#websockets-connection).
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
@@ -624,6 +632,9 @@ Redis Pub/Sub also resolves its `addr` hostname through the node resolver for ea
 subscription connection; see [Redis Pub/Sub](#redis-pubsub).
 MQTT resolves the host of its `addr` through the node resolver for every connection and verifies
 an `mqtts` broker certificate against that host; see [MQTT](#mqtt).
+A `WEBSOCKETS CONNECTION` resolves the host of its client's `endpoint` the same way for every
+connection and resume, and verifies a `wss` server certificate against that host; see
+[`WEBSOCKETS CONNECTION`](#websockets-connection).
 
 Example Kafka TLS client:
 
@@ -659,7 +670,9 @@ connection: name resolution, the address attempts, TLS and the protocol's own ha
 from it. Each value is a positive whole number of milliseconds.
 
 `HTTP` and `PROMETHEUS` clients read `timeout_ms`. `RABBITMQ`, `REDIS` and `WEBSOCKETS` clients read
-`connect_timeout_ms`, and allow 30 seconds when it is left out. A `ZEROMQ PULL` ingestor reads
+`connect_timeout_ms`, and allow 30 seconds when it is left out. A `WEBSOCKETS` client also reads
+`idle_timeout_ms`: where it is left out, three `ping_interval_ms` intervals bound the silence, or 30
+seconds without configured pings; see [`WEBSOCKETS CONNECTION`](#websockets-connection). A `ZEROMQ PULL` ingestor reads
 none of these keys, so nothing bounds its connection; see [ZeroMQ](#zeromq). A `RABBITMQ` client's
 deadline covers resolving the broker, the address attempts, TLS, the AMQP handshake, opening the
 ingestor's channel, setting its prefetch window and starting its consumer. A request or connection
@@ -2046,7 +2059,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | No entity-specific options. |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
-| Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |
+| Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2081,7 +2094,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | No entity-specific options. |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
-| Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |
+| Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2105,8 +2118,49 @@ The ACK window is explicit: `MAX` is 1–65,535 outstanding payloads per ingesto
 An acknowledged endpoint requires `ON QUIESCE REJECT RETRY AFTER <duration>`. The sender owns
 retry; there is no endpoint `RETRY POLICY`, `ACK PARALLEL`, or `BATCH` clause. `BUFFER MAX SIZE`
 is available with `MODE NO ACK`. Transport headers are available through `read_header` and
-`read_headers`; these declarations have no typed request metadata namespace. Both ingestors
+`read_headers`, and each entity declares the typed metadata of a request or a frame. Both ingestors
 execute on every cluster node and are excluded from placement members and placement completion.
+
+An `HTTP ENDPOINT` ingestor reads each admitted request's metadata in its route expressions:
+
+| Field | Value |
+| --- | --- |
+| `metadata.method` | The request's method. The endpoint admits only `POST`, so an admitted request always reads `POST`. |
+| `metadata.path` | The path of the request target, exactly as the request wrote it, without its query. Routing matches it exactly, so it is the endpoint's `PATH`. |
+| `metadata.query` | The query of the request target after `?`, exactly as written and not decoded: empty for a target that ends with `?`, and absent for one with no `?`. |
+| `metadata.remote_addr` | The address and port of the peer whose TCP connection carried the request, such as `127.0.0.1:52144` or `[2001:db8::1]:52144`. It is the connection's peer, not a forwarding header such as `X-Forwarded-For`. |
+| `metadata.host` | The host the request was routed by: its `Host` value in ASCII lowercase and without its port, one of the names of the endpoint's `VHOST`. |
+
+A `WEBSOCKETS ENDPOINT` ingestor reads each data frame's metadata:
+
+| Field | Value |
+| --- | --- |
+| `metadata.frame_type` | `text` or `binary`, the kind of the data frame. |
+| `metadata.remote_addr` | The address and port of the peer whose TCP connection opened the WebSocket. |
+| `metadata.path` | The path the connection's upgrade request named, which is the endpoint's `PATH`. |
+
+Every field is a `STRING`, and every frame of a connection reads the same `remote_addr` and `path`,
+including frames its signaling protocol accepts before the handshake ends. Each node reads the
+requests and frames it receives, so a field never depends on the node that owns the ingestor's
+output. A body that `BUFFER` retains keeps its metadata, and its replay reads the values it
+arrived with. This route keeps only acme's requests and records the peer that sent each one:
+
+```plexus
+CREATE HTTP ENDPOINT INGESTOR tenant_requests
+  FROM intake MODE NO ACK
+  ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
+  TO acme_events
+    INHERIT ALL
+    SET peer = metadata.remote_addr, query = metadata.query
+    WHERE metadata.query = 'tenant=acme'
+    UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+Header values follow the same contract on both endpoints: a value that is UTF-8, whether or not it
+is ASCII, reaches `read_header` and `read_headers` unchanged, and a value that is not UTF-8 is
+dropped and counted in `nervix_ingestor_header_values_dropped_total` for every ingestor the request
+or WebSocket upgrade was routed to.
 
 For example, this Plexus declaration holds the HTTP response while its payload's acknowledgement
 root waits for every attached downstream route:
@@ -2234,7 +2288,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Acknowledgement confirmation | none |
 | Buffers | accepted signaling frames retained for source reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |
 | Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |
-| Driver limits | None declared. |
+| Driver limits | The opening upgrade response carries at most 124 header fields, and at most 64 KiB arrives before its head ends; a larger response fails that connection attempt.<br>The response head arrives within 512 reads that, after the 64th, average at least 128 bytes; a peer that trickles it fails that connection attempt. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
 
 See the [WEBSOCKETS CONNECTION capability and mirror reference](connector-capabilities.md#websockets-connection-ingest).
@@ -2245,7 +2299,8 @@ binary frames. Its optional `HEADERS { 'authorization' = 'Bearer token' }` claus
 <client>` and takes literal string names and values. Names are case-insensitive; repeated names,
 protocol-owned fields (`Host`, hop-by-hop framing fields and every `Sec-WebSocket-*` field except
 `Sec-WebSocket-Protocol`), malformed values, more than 128 fields, or more than 32 KiB of field
-name/value bytes are refused before activation.
+name/value bytes are refused before activation. Each value, a credential included, is visible in
+`DESCRIBE INGESTOR` and `SHOW CREATE INGESTOR`.
 
 `HEADERS { 'sec-websocket-protocol' = 'v2.events, v1.events' }` offers subprotocols in the order
 of preference written. The value lists one or more subprotocol tokens (RFC 6455): elements
@@ -2263,24 +2318,58 @@ never its value. The selected subprotocol is the opening response's
 `sec-websocket-protocol` header, which `read_header('sec-websocket-protocol')` reads.
 
 Each data frame exposes `metadata.frame_type` as `text` or `binary`. `read_header` and
-`read_headers` read the opening response's printable ASCII header values, including repeated values in their
-transport order. These values belong to the frame's exact connection: accepted signaling frames
+`read_headers` read the opening response's header values that hold only printable ASCII and tabs,
+including repeated values in their transport order; a value holding any other byte is left out.
+These values belong to the frame's exact connection: accepted signaling frames
 and quiesce-buffered frames retain that snapshot across suspension, reconnection and replay.
 Headers are not copied into every frame and are not propagated to a relay unless mapped explicitly.
 The connection is ingest-only; it declares no emitter envelope or `BATCH` clause.
+
+This client reaches a TLS endpoint signed by its own certificate authority and pings it every 20
+seconds; the connection offers two subprotocols and records the one its peer selects and each
+frame's kind:
+
+```plexus
+CREATE WEBSOCKETS CLIENT market_feed
+  MOUNT feed_tls VERSION 1
+  CONFIG {
+    'endpoint' = 'wss://stream.example.com/trades',
+    'ping_interval_ms' = 20000,
+    'tls_ca_file' = '{{ feed_tls }}/ca.pem'
+  };
+
+CREATE WEBSOCKETS CONNECTION INGESTOR market_trades
+  FROM market_feed
+  HEADERS { 'sec-websocket-protocol' = 'v2.trades, v1.trades' }
+  MODE NO ACK
+  ON QUIESCE BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST
+  DECODE USING trade_codec
+  TO trades
+    INHERIT ALL
+    SET protocol = read_header('sec-websocket-protocol'),
+        frame_type = metadata.frame_type
+    UNBRANCHED
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+With no `idle_timeout_ms`, a peer that sends nothing for three ping intervals, 60 seconds here, is
+reconnected. A client without `ping_interval_ms` only answers its peer's pings and allows 30 seconds
+of silence.
 
 The client's Nervix-owned `CONFIG` is strict, with lowercase, case-sensitive keys:
 
 | Key | Contract |
 | --- | --- |
-| `endpoint` | Required `ws://` or `wss://` URL with a host and without a fragment. |
+| `endpoint` | Required `ws://` or `wss://` URL with a host and without a fragment. Its path and query are sent in the upgrade request. |
 | `connect_timeout_ms` | Positive whole milliseconds for DNS, TCP, TLS and upgrade together; omitted means 30000. |
 | `ping_interval_ms` | Positive whole milliseconds between client pings after signaling completes; omitted means only answering peer pings. |
 | `idle_timeout_ms` | Positive whole milliseconds without an inbound frame before reconnecting. When omitted, three configured ping intervals apply, or 30000 without configured pings. |
 | `handshake_buffer_capacity` | Accepted signaling messages retained before readiness: 1–65535, default 16. A full queue backpressures the connection within the signaling `TIMEOUT`. |
 | `max_message_size` | Positive whole bytes per incoming message, including fragmented messages: at most 4294967295, default 67108864 (64 MiB). |
 | `max_frame_size` | Positive whole bytes per incoming frame: at most 4294967295, default 16777216 (16 MiB). |
-| `tls_ca_file` | Optional CA file; only with a `wss://` endpoint. |
+| `tls_ca_file` | Optional PEM CA file; only with a `wss://` endpoint. Its certificates are trusted beside the bundled WebPKI roots and the platform's native roots, never instead of them. |
 | `tls_cert_file`, `tls_key_file` | Optional client identity files, supplied together; only with a `wss://` endpoint. |
 
 The client's declared key schema refuses unknown, repeated or mistyped keys and TLS file keys with
@@ -2290,6 +2379,16 @@ intervals beyond the schedulable bound. Durations obey the shared schedulable ph
 bound. Resource mounts and configuration templates keep their shared client contract; rendered
 values are checked before commitment and again when opening the source. A ping write has a
 one-second physical budget and a failure triggers recovery.
+
+No WebSockets key is declared confidential, but `DESCRIBE CLIENT` and `SHOW CREATE CLIENT` show an
+`endpoint` that carries user information or a query as `********`, because either can hold a
+credential. User information in the `endpoint` is not sent with the upgrade; a peer that needs
+credentials receives them as a `HEADERS` field, such as `authorization`, or in the query. `CREATE WEBSOCKETS CLIENT` requires each TLS file key, once its resource mount template
+is rendered, to name a readable regular file. The source parses the files when it opens: a CA
+certificate it cannot parse, or a client certificate chain and private key it cannot read or pair,
+fails the ingestor's start, which `DESCRIBE INGESTOR` shows as its transient status. A
+`tls_ca_file` that holds no PEM certificate adds no trust root, so the bundled and native roots
+alone verify the server. The server certificate is always verified against the endpoint's host.
 
 After signaling succeeds, the idle timer starts. An explicit idle timeout overrides the
 ping-derived value. Every received frame, including a ping or pong, refreshes activity. Sending a
@@ -2311,6 +2410,10 @@ For `ws` and `wss`, each initial connection and resume resolves the URL host thr
 asynchronous resolver. It tries the returned addresses in order within the configured
 `connect_timeout_ms` budget for DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
 header, TLS server name, path and query; custom TLS roots and client identity remain in effect.
+An address whose connection, TLS handshake or upgrade fails, including an answer other than
+`101 Switching Protocols` and an opening response beyond the transport's limits under Driver
+limits above, gives way to the next address within the same budget; only a refused subprotocol
+offer ends the attempts at once.
 An expired DNS answer is refreshed on a new attempt, while a healthy connection stays open.
 Resolution, connection and read failures are transient source failures. Nervix answers a peer's
 Close before releasing the connection and reports any supplied code and reason in `DESCRIBE INGESTOR`;

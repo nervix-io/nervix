@@ -21,13 +21,14 @@ use nervix_models::{
     Assignment, AssignmentTarget, ClientConfigEntry, ClientDeadline, ClientIngestMode,
     CodecBatchContainer, CreateClientHttp, CreateCodec, CreateEmitter, CreateIngestor,
     CreateSchema, CreateSignalingProtocol, DomainName, EmitterEntity, EmitterEntityModel,
-    EndpointName, EnvelopeClauseForm, Expression, FieldName, HttpApplicationHeaders, HttpBodyMode,
-    HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, HttpRequestEmitter,
-    IcebergCatalogProperties, IcebergStorageBackend, IcebergTableEmitter, IngestTimestampSource,
-    IngestorInput, IngestorMetadataType, LiteralHeaderWrite, Model, ModelIndex, ModelKind,
-    ModelName, NodeRef, OtelEmitter, OtelMappings, OtelMetricKind, OtelMetricsEmitter, ParseAsType,
-    ProcessorOutput, RelayName, RouteConstruction, SchemaField, SchemaName, SignalingWireFormat,
-    SqsEmitter, SqsFifoGroup, SqsQueueEmitter, VhostName, parse_duration_text,
+    EmitterEnvelope, EndpointName, EnvelopeClauseForm, Expression, FieldName,
+    HttpApplicationHeaders, HttpBodyMode, HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod,
+    HttpOrigin, HttpRequestEmitter, IcebergCatalogProperties, IcebergStorageBackend,
+    IcebergTableEmitter, IngestTimestampSource, IngestorInput, IngestorMetadataType,
+    LiteralHeaderWrite, Model, ModelIndex, ModelKind, ModelName, NodeRef, OtelEmitter,
+    OtelMappings, OtelMetricKind, OtelMetricsEmitter, ParseAsType, ProcessorOutput, RelayName,
+    RouteConstruction, SQS_DELAY_MAXIMUM, SchemaField, SchemaName, SignalingWireFormat, SqsEmitter,
+    SqsFifoGroup, SqsQueueEmitter, SqsQueueName, VhostName, parse_duration_text,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
@@ -342,6 +343,7 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
                     "SQS FIFO GROUP requires a queue name ending in .fifo, found '{queue}'"
                 )));
             }
+            validate_sqs_queue_envelope(domain, identifier, queue, &emitter.envelope)?;
             if let Some(SqsFifoGroup::FromBranch) = fifo_group {
                 processor_first_input_relay(
                     domain,
@@ -959,6 +961,46 @@ fn validate_emitter_envelope_declaration(
     Ok(())
 }
 
+/// Checks the envelope an SQS QUEUE emitter writes against its queue. SQS delays a standard
+/// queue's messages one by one, by whole seconds up to its maximum, and deduplicates a FIFO
+/// queue's by the id each message carries, and it refuses each clause on the other kind of queue.
+fn validate_sqs_queue_envelope(
+    domain: &DomainName,
+    identifier: &ModelName,
+    queue: &SqsQueueName,
+    envelope: &EmitterEnvelope,
+) -> Result<(), Report<RegistryError>> {
+    let node = NodeRef::new(ModelKind::Emitter, identifier.clone());
+    let refused = |issue| {
+        Report::new(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: node.clone(),
+            issue,
+        })
+    };
+    if let Some(delay) = &envelope.delay {
+        if queue.is_fifo() {
+            return Err(refused(ConnectorDeclarationIssue::SqsFifoQueueDelay {
+                queue: queue.clone(),
+            }));
+        }
+        let duration = ConnectorDurationSetting::Delay.parse(delay, domain, &node)?;
+        if duration.subsec_nanos() != 0 || duration > SQS_DELAY_MAXIMUM {
+            return Err(refused(ConnectorDeclarationIssue::SqsDelay {
+                value: delay.clone(),
+            }));
+        }
+    }
+    if !queue.is_fifo() && envelope.deduplication_id.is_some() {
+        return Err(refused(
+            ConnectorDeclarationIssue::SqsStandardQueueDeduplication {
+                queue: queue.clone(),
+            },
+        ));
+    }
+    Ok(())
+}
+
 /// One value an emitter's envelope computes for every record: where it is written, the
 /// expression that computes it and the exact type it has.
 struct EnvelopeValue<'a> {
@@ -967,12 +1009,20 @@ struct EnvelopeValue<'a> {
     expected: ParseAsType,
 }
 
-/// The values an emitter's envelope computes, in the order its statement writes them.
+/// The values an emitter computes for every record beside its payload, in the order its statement
+/// writes them: its destination's routing key, then its envelope's clauses and properties.
 ///
 /// A property its entity does not declare has no type to check against here; the publishing
 /// contract refuses it.
 fn envelope_values(emitter: &CreateEmitter) -> Vec<EnvelopeValue<'_>> {
     let mut values = Vec::new();
+    if let Some(expression) = emitter.connector.routing_key() {
+        values.push(EnvelopeValue {
+            site: EnvelopeValueSite::RoutingKey,
+            expression,
+            expected: ParseAsType::String,
+        });
+    }
     for clause in emitter.envelope.clauses() {
         let EnvelopeClauseForm::Expression(expected) = clause.kind().form() else {
             continue;
@@ -1821,7 +1871,11 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
                         OutputMode::PassthroughByName
                     },
                     allow_sensitive_output: false,
-                    allow_header_writes: true,
+                    header_writes: emitter
+                        .connector
+                        .capabilities()
+                        .headers
+                        .map(|model| model.values),
                     ..CompileOptions::default()
                 },
             ),

@@ -229,14 +229,15 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX PART META` archive signature identifies the current Model layout, including
-the required 16-bit branch partition count, Sentry platform, and an ingestor's
-`TIMESTAMP AT metadata.<field>` source. Consensus's `raft_partition_unit_timestamp_` keyspaces and
-current state metadata encoding identify its stored shapes, including the partition count of every
-resolved branch declaration in the committed schedule. The runtime state store's
-`unit-labelled-metric-checkpoint-segments` format identifies the checkpoints it keeps, including the
-unit every branch-aggregated metric series carries. An unrecognized signature, namespace or
-encoding fails with the owning storage error and requires the stored data to be recreated.
+The registry's `NERVIX PART SEND` archive signature identifies the current Model layout, including
+the required 16-bit branch partition count, Sentry platform, an ingestor's
+`TIMESTAMP AT metadata.<field>` source and an SQS QUEUE emitter's `SEND` request shape. Consensus's
+`raft_partition_send_` keyspaces and current state metadata encoding identify its stored shapes,
+including the partition count of every resolved branch declaration in the committed schedule. The
+runtime state store's `unit-labelled-metric-checkpoint-segments` format identifies the checkpoints it
+keeps, including the unit every branch-aggregated metric series carries. An unrecognized signature,
+namespace or encoding fails with the owning storage error and requires the stored data to be
+recreated.
 
 ## Absence And Distinct States
 

@@ -276,19 +276,20 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     assert!(format!("{error:#}").contains("ACK TIMEOUT must be greater than zero"));
 
     *emitter.connector = EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-        mode: nervix_models::SqsQueuePublishingMode::Single {
+        mode: nervix_models::SqsQueuePublishingMode::Ack {
             retry_policy: nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
             },
         },
         client: named("sqs_main"),
+        send: nervix_models::SqsSend::Single,
         queue: nervix_models::SqsQueueName::parse("events").expect("valid queue"),
         fifo_group: Some(SqsFifoGroup::Expression(Expression::Literal(
             nervix_models::Literal::String("group".to_string()),
         ))),
     }));
-    *sqs_publication(&mut emitter) = nervix_models::SqsQueuePublishingMode::Single {
+    *sqs_publication(&mut emitter) = nervix_models::SqsQueuePublishingMode::Ack {
         retry_policy: RetryPolicy {
             backoff: "1s".to_string(),
             max_backoff: "100ms".to_string(),
@@ -303,11 +304,8 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     .expect_err("retry maxima below their initial backoff must be rejected");
     assert!(format!("{error:#}").contains("must be at least BACKOFF"));
 
-    if let nervix_models::SqsQueuePublishingMode::Single { retry_policy } =
-        sqs_publication(&mut emitter)
-    {
-        retry_policy.max_backoff = "1s".to_string();
-    }
+    let nervix_models::SqsQueuePublishingMode::Ack { retry_policy } = sqs_publication(&mut emitter);
+    retry_policy.max_backoff = "1s".to_string();
     let error = validate_emitter_publishing_contract(
         &domain,
         &ModelName::from(&emitter.name),
@@ -363,20 +361,21 @@ fn publishing_contract_checks_the_batch_clause_against_its_emitter() {
         .expect("a Postgres emitter with BATCH is valid");
 
     *emitter.connector = EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-        mode: nervix_models::SqsQueuePublishingMode::Single {
+        mode: nervix_models::SqsQueuePublishingMode::Ack {
             retry_policy: nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
             },
         },
         client: named("sqs_main"),
+        send: nervix_models::SqsSend::Single,
         queue: nervix_models::SqsQueueName::parse("events").expect("valid queue"),
         fifo_group: None,
     }));
     emitter.body = nervix_models::EmitterBody::Codec {
         codec: named("event_codec"),
     };
-    *sqs_publication(&mut emitter) = nervix_models::SqsQueuePublishingMode::Batch {
+    *sqs_publication(&mut emitter) = nervix_models::SqsQueuePublishingMode::Ack {
         retry_policy: RetryPolicy {
             backoff: "10ms".to_string(),
             max_backoff: "1s".to_string(),
@@ -385,7 +384,7 @@ fn publishing_contract_checks_the_batch_clause_against_its_emitter() {
     let error = validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
         .expect_err("an SQS batch larger than one SQS message must be rejected");
     assert!(
-        format!("{error:#}").contains("accept BATCH MAX SIZE up to 256KiB"),
+        format!("{error:#}").contains("accept BATCH MAX SIZE up to 1MiB"),
         "unexpected error: {error:#}"
     );
 }
@@ -848,13 +847,14 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
         unreachable!("emitter helper must build an emitter model")
     };
     valid.connector = Box::new(EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-        mode: nervix_models::SqsQueuePublishingMode::Single {
+        mode: nervix_models::SqsQueuePublishingMode::Ack {
             retry_policy: nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
             },
         },
         client: named("sqs_main"),
+        send: nervix_models::SqsSend::Single,
         queue: nervix_models::SqsQueueName::parse("events.fifo").expect("valid queue"),
         fifo_group: Some(SqsFifoGroup::Expression(
             nervix_plexus::parse_expression("input.value").expect("valid FIFO group expression"),
@@ -1121,13 +1121,14 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
     );
 
     *emitter.connector = EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-        mode: nervix_models::SqsQueuePublishingMode::Single {
+        mode: nervix_models::SqsQueuePublishingMode::Ack {
             retry_policy: nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
             },
         },
         client: named("sqs_main"),
+        send: nervix_models::SqsSend::Single,
         queue: nervix_models::SqsQueueName::parse("events").expect("valid queue"),
         fifo_group: None,
     }));
@@ -2524,6 +2525,98 @@ fn an_envelope_duration_is_a_positive_schedulable_duration() {
     }
 }
 
+/// An SQS QUEUE emitter sending to `queue`, which groups a FIFO queue's messages under one literal
+/// group.
+fn sqs_emitter(queue: &str) -> CreateEmitter {
+    let mut emitter = kafka_emitter();
+    let queue = nervix_models::SqsQueueName::parse(queue).expect("the fixture queue is valid");
+    let fifo_group = if queue.is_fifo() {
+        Some(SqsFifoGroup::Expression(Expression::Literal(
+            nervix_models::Literal::String("group".to_string()),
+        )))
+    } else {
+        None
+    };
+    *emitter.connector = EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
+        client: named("sqs_main"),
+        queue,
+        fifo_group,
+        send: nervix_models::SqsSend::Single,
+        mode: nervix_models::SqsQueuePublishingMode::Ack {
+            retry_policy: RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+    }));
+    emitter
+}
+
+#[test]
+fn an_sqs_queue_takes_a_delay_on_a_standard_queue_and_a_deduplication_id_on_a_fifo_queue() {
+    let domain: DomainName = named("validation");
+    let check = |emitter: &CreateEmitter| {
+        validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &ModelIndex::new(),
+            emitter,
+        )
+    };
+    let refusal = |emitter: &CreateEmitter| {
+        let refused = check(emitter).expect_err("the queue refuses the clause");
+        let RegistryError::InvalidConnectorDeclaration { issue, .. } = refused.current_context()
+        else {
+            panic!("an SQS envelope refusal is a declaration refusal: {refused:?}");
+        };
+        issue.clone()
+    };
+    let deduplication_id =
+        || Some(nervix_plexus::parse_expression("input.tenant").expect("parses"));
+
+    let mut standard = sqs_emitter("orders");
+    for delay in ["1s", "900s"] {
+        standard.envelope.delay = Some(delay.to_string());
+        check(&standard).expect("SQS delays a standard queue's message by whole seconds");
+    }
+    for delay in ["1500ms", "901s"] {
+        standard.envelope.delay = Some(delay.to_string());
+        assert_eq!(
+            refusal(&standard),
+            ConnectorDeclarationIssue::SqsDelay {
+                value: delay.to_string()
+            }
+        );
+    }
+    standard.envelope.delay = None;
+    standard.envelope.deduplication_id = deduplication_id();
+    assert_eq!(
+        refusal(&standard),
+        ConnectorDeclarationIssue::SqsStandardQueueDeduplication {
+            queue: nervix_models::SqsQueueName::parse("orders").expect("valid queue"),
+        }
+    );
+
+    let mut fifo = sqs_emitter("orders.fifo");
+    fifo.envelope.deduplication_id = deduplication_id();
+    check(&fifo).expect("SQS deduplicates a FIFO queue's messages by the id each carries");
+    fifo.envelope.delay = Some("5s".to_string());
+    assert_eq!(
+        refusal(&fifo),
+        ConnectorDeclarationIssue::SqsFifoQueueDelay {
+            queue: nervix_models::SqsQueueName::parse("orders.fifo").expect("valid queue"),
+        }
+    );
+
+    assert_eq!(
+        ConnectorDeclarationIssue::SqsDelay {
+            value: "1500ms".to_string()
+        }
+        .to_string(),
+        "SQS DELAY must be whole seconds from 1s to 900s, found '1500ms'"
+    );
+}
+
 #[test]
 fn an_envelope_value_is_an_exact_non_null_non_sensitive_value_of_its_clause_type() {
     let domain: DomainName = named("validation");
@@ -2591,4 +2684,69 @@ fn an_envelope_value_is_an_exact_non_null_non_sensitive_value_of_its_clause_type
     assert!(check(&unconstructed).is_err());
     unconstructed.envelope.reply_to = Some(expression("message.tenant"));
     check(&unconstructed).expect("message is the source record an emitter publishes as it is");
+}
+
+/// A RabbitMQ exchange emitter's routing key reads what an envelope value reads and computes an
+/// exact, non-null, non-sensitive STRING, which the registry checks with the envelope's values and
+/// names as the statement writes it.
+#[test]
+fn a_routing_key_is_an_exact_non_null_non_sensitive_string() {
+    let domain: DomainName = named("validation");
+    let schema = envelope_schema();
+    let expression =
+        |text: &str| nervix_plexus::parse_expression(text).expect("the case expression parses");
+    let exchange_emitter = |routing_key: &str| {
+        let mut emitter = kafka_emitter();
+        emitter.connector = Box::new(EmitterEntity::RabbitMq(
+            nervix_models::RabbitMqEmitter::Exchange(nervix_models::RabbitMqExchangeEmitter {
+                mode: nervix_models::RabbitMqExchangePublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "1s".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                client: named("rabbit_main"),
+                exchange: nervix_models::RabbitMqExchangeName::parse("events")
+                    .expect("events is an exchange name"),
+                routing_key: expression(routing_key),
+            }),
+        ));
+        emitter
+    };
+    let check = |emitter: &CreateEmitter| {
+        validate_emitter_envelope_expressions(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &ModelIndex::new(),
+            emitter,
+            &schema,
+            &schema,
+        )
+    };
+
+    for accepted in [
+        "input.tenant",
+        "concat('orders.', output.tenant)",
+        "leak_sensitive(input.secret)",
+    ] {
+        check(&exchange_emitter(accepted)).expect("an exact STRING routing key is accepted");
+    }
+    for refused in ["input.at", "input.secret", "input.maybe"] {
+        let refused = check(&exchange_emitter(refused)).expect_err("the routing key is refused");
+        let RegistryError::InvalidConnectorDeclaration { issue, .. } = refused.current_context()
+        else {
+            panic!("a refused routing key is a declaration refusal: {refused:?}");
+        };
+        assert_eq!(
+            issue,
+            &ConnectorDeclarationIssue::EnvelopeValue {
+                site: EnvelopeValueSite::RoutingKey,
+                expected: ParseAsType::String,
+            }
+        );
+        assert_eq!(
+            issue.to_string(),
+            "ROUTING KEY requires an exact, non-null, non-sensitive STRING value"
+        );
+    }
 }

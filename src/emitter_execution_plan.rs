@@ -22,9 +22,9 @@ use nervix_connector::RecordEnvelope;
 use nervix_models::{
     AckMode, Assignment, AssignmentTarget, CodecName, CreateEmitter, CreateSchema, EmitterName,
     EnvelopeClauseForm, EnvelopeClauseKind, ErrorPolicies, Expression, FieldName, FlushPolicy,
-    InputCollectPolicy, MaterializedStateDependency, Model, ModelKind, ModelName, NodeRef,
-    PropertyDeclaration, RelayName, RouteConstruction, ScheduledNodes, SchemaField, SchemaName,
-    SqsFifoGroup, parse_duration_text,
+    HeaderValues, InputCollectPolicy, MaterializedStateDependency, Model, ModelKind, ModelName,
+    NodeRef, PropertyDeclaration, RelayName, RouteConstruction, ScheduledNodes, SchemaField,
+    SchemaName, SqsFifoGroup, parse_duration_text,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_vm::{
@@ -103,6 +103,9 @@ pub(crate) struct EmitterRoutePlan {
     pub(crate) program: SpannedNode<Program>,
     pub(crate) inherited_count: usize,
     pub(crate) codec_route: bool,
+    /// The values the route's `write_header` calls write, as the emitter's entity declares them,
+    /// or `None` for an entity whose messages carry no transport headers, whose route writes none.
+    pub(crate) header_writes: Option<HeaderValues>,
 }
 
 /// The source-row group that the host evaluates before handing an SQS record to its emitter.
@@ -112,10 +115,11 @@ pub(crate) enum EmitterOrderingGroupPlan {
     Expression(SpannedNode<Program>),
 }
 
-/// What the value one field of an envelope program computes sets on a record: a clause, or a
-/// property.
+/// What the value one field of an envelope program computes sets on a record: the routing key its
+/// destination computes, a clause, or a property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EnvelopeTarget {
+    RoutingKey,
     Clause(EnvelopeClauseKind),
     Property(PropertyDeclaration),
 }
@@ -369,10 +373,16 @@ impl EmitterExecutionPlan {
         } else {
             0
         };
+        let header_writes = emitter
+            .connector
+            .capabilities()
+            .headers
+            .map(|model| model.values);
         Ok(Some(EmitterRoutePlan {
             program,
             inherited_count,
             codec_route,
+            header_writes,
         }))
     }
 
@@ -471,8 +481,8 @@ pub(crate) struct EnvelopeValue {
 }
 
 impl EmitterEnvelopePlan {
-    /// The envelope plan of `emitter`, absent where it writes no envelope clause and sets no
-    /// property.
+    /// The envelope plan of `emitter`, absent where it writes no envelope clause, sets no property
+    /// and its destination computes no routing key.
     ///
     /// The registry has checked every clause and property against the emitter's entity and every
     /// duration and expression type, so a failure here is a Model that skipped that validation.
@@ -481,7 +491,8 @@ impl EmitterEnvelopePlan {
         reads_output: bool,
     ) -> error_stack::Result<Option<Self>, EmitterExecutionPlanError> {
         let envelope = &emitter.envelope;
-        if envelope.is_empty() {
+        let routing_key = emitter.connector.routing_key();
+        if envelope.is_empty() && routing_key.is_none() {
             return Ok(None);
         }
         let invalid = || EmitterExecutionPlanError::Envelope {
@@ -506,6 +517,15 @@ impl EmitterEnvelopePlan {
 
         let declared = emitter.connector.capabilities();
         let mut values = Vec::new();
+        // The destination comes before the envelope in a statement, so the routing key is the first
+        // value a record's evaluation can fail at.
+        if let Some(expression) = routing_key {
+            values.push(EnvelopeValue {
+                target: EnvelopeTarget::RoutingKey,
+                ty: nervix_models::ParseAsType::String,
+                expression: expression.clone(),
+            });
+        }
         for clause in envelope.clauses() {
             let EnvelopeClauseForm::Expression(ty) = clause.kind().form() else {
                 continue;
@@ -755,12 +775,13 @@ mod tests {
     fn sqs_ordering_group_is_lowered_or_reads_the_branch() {
         let mut sqs = emitter(
             EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-                mode: nervix_models::SqsQueuePublishingMode::Single {
+                mode: nervix_models::SqsQueuePublishingMode::Ack {
                     retry_policy: retry_policy(),
                 },
                 client: named("queue_client"),
                 queue: named("events.fifo"),
                 fifo_group: Some(SqsFifoGroup::Expression(expression("'group'"))),
+                send: nervix_models::SqsSend::Single,
             })),
             EmitterBody::Codec {
                 codec: named("codec"),
@@ -850,6 +871,62 @@ mod tests {
         );
         assert_eq!(computed.program.inner.set.len(), 2);
         assert!(!computed.reads_output);
+    }
+
+    /// A RabbitMQ exchange emitter's routing key is computed by the envelope program, first, so a
+    /// record carries it with its envelope even where its statement writes no envelope clause.
+    #[test]
+    fn a_routing_key_is_the_first_value_the_envelope_program_computes() {
+        let exchange = |envelope: nervix_models::EmitterEnvelope| {
+            let mut emitter = emitter(
+                EmitterEntity::RabbitMq(nervix_models::RabbitMqEmitter::Exchange(
+                    nervix_models::RabbitMqExchangeEmitter {
+                        mode: nervix_models::RabbitMqExchangePublishingMode::NoAck {
+                            retry_policy: retry_policy(),
+                        },
+                        client: named("emitter"),
+                        exchange: nervix_models::RabbitMqExchangeName::parse("events")
+                            .expect("events is an exchange name"),
+                        routing_key: expression("input.category"),
+                    },
+                )),
+                codec_body(),
+            );
+            *emitter.envelope = envelope;
+            emitter
+        };
+
+        let routed = EmitterEnvelopePlan::decide(
+            &exchange(nervix_models::EmitterEnvelope::default()),
+            false,
+        )
+        .expect("the routing key plans")
+        .expect("the emitter computes a routing key for every record");
+        assert_eq!(routed.fixed, RecordEnvelope::default());
+        let computed = routed
+            .computed
+            .expect("the routing key is a computed value");
+        assert_eq!(computed.targets, vec![EnvelopeTarget::RoutingKey]);
+        assert_eq!(
+            computed.schema.fields[0].ty,
+            nervix_models::ParseAsType::String
+        );
+
+        let mandatory = EmitterEnvelopePlan::decide(
+            &exchange(nervix_models::EmitterEnvelope {
+                mandatory: true,
+                ..nervix_models::EmitterEnvelope::default()
+            }),
+            true,
+        )
+        .expect("the routing key and MANDATORY plan")
+        .expect("the emitter writes an envelope");
+        assert!(mandatory.fixed.mandatory);
+        let computed = mandatory
+            .computed
+            .expect("the routing key is a computed value");
+        assert_eq!(computed.targets, vec![EnvelopeTarget::RoutingKey]);
+        assert!(computed.reads_output);
     }
 
     #[test]

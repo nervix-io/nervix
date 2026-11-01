@@ -173,6 +173,7 @@ fn the_emitter_kinds_name_every_pair_once_with_its_phrase() {
             "KAFKA TOPIC",
             "PULSAR TOPIC",
             "RABBITMQ QUEUE",
+            "RABBITMQ EXCHANGE",
             "REDIS PUBSUB",
             "MQTT TOPIC",
             "NATS SUBJECT",
@@ -318,7 +319,13 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
         ),
         IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-            metadata: &[],
+            metadata: &[
+                ("method", IngestorMetadataType::String),
+                ("path", IngestorMetadataType::String),
+                ("query", IngestorMetadataType::String),
+                ("remote_addr", IngestorMetadataType::String),
+                ("host", IngestorMetadataType::String),
+            ],
             every_node: true,
             reference: IngestorReferenceKind::Endpoint(EndpointType::Http),
         },
@@ -332,7 +339,11 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
         }
         IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-            metadata: &[],
+            metadata: &[
+                ("frame_type", IngestorMetadataType::String),
+                ("remote_addr", IngestorMetadataType::String),
+                ("path", IngestorMetadataType::String),
+            ],
             every_node: true,
             reference: IngestorReferenceKind::Endpoint(EndpointType::Websockets),
         },
@@ -618,7 +629,9 @@ fn emitter_declaration(kind: EmitterEntityKind) -> EmitterDeclaration {
             Some(HeaderModel::exact(HeaderLayout::LastWins)),
             &["NoAck", "BrokerAck"],
         ),
-        EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Queue) => codec(
+        EmitterEntityKind::RabbitMq(
+            RabbitMqEmitterEntity::Queue | RabbitMqEmitterEntity::Exchange,
+        ) => codec(
             Some(HeaderModel::exact(HeaderLayout::SortedByName)),
             &["NoAck", "BrokerAck"],
         ),
@@ -634,15 +647,14 @@ fn emitter_declaration(kind: EmitterEntityKind) -> EmitterDeclaration {
         ),
         EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => EmitterDeclaration {
             batch: EmitterBatchLegality::Optional {
-                maximum: Some(
-                    "256KiB"
-                        .parse()
-                        .assured("256 KiB is a whole number of bytes"),
-                ),
+                maximum: Some("1MiB".parse().assured("1 MiB is a whole number of bytes")),
             },
             ..codec(
-                Some(HeaderModel::exact(HeaderLayout::LastWins)),
-                &["SqsSingle", "SqsBatch"],
+                Some(
+                    HeaderModel::exact(HeaderLayout::LastWins)
+                        .with_typed_values(nervix_models::SQS_ATTRIBUTE_VALUES),
+                ),
+                &["RequestAck"],
             )
         },
         EmitterEntityKind::Sentry(SentryEmitterEntity::Event) => EmitterDeclaration {
@@ -706,7 +718,7 @@ fn the_sqs_emitter_admits_at_most_the_message_size_sqs_does() {
     else {
         panic!("SQS batches optionally, up to the message size it fixes");
     };
-    assert_eq!(maximum.bytes().get(), 256 * 1024);
+    assert_eq!(maximum.bytes().get(), 1024 * 1024);
 }
 
 #[test]

@@ -22,8 +22,9 @@ lowercase HTTP field names, and on an emitter that keeps one value per header na
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, subprotocol offers, response-header reads, frame metadata and the closed client CONFIG key
-set. Offer subprotocols only through `HEADERS { 'sec-websocket-protocol' = '...' }`, and expect
-the peer to select one of them: any other answer fails the connection.
+set, including the trust roots `tls_ca_file` adds to and how inspection redacts an endpoint. Offer
+subprotocols only through `HEADERS { 'sec-websocket-protocol' = '...' }`, and expect the peer to
+select one of them: any other answer fails the connection.
 For ClickHouse HTTP connection tuning, client certificates, compression and which insert failures
 reject a row rather than retry, read the ClickHouse Emitters section and the generated client key
 reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured values;
@@ -510,7 +511,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   [HTTP inspection](../../../docs/src/emitters.md#http-inspection-and-metrics).
 - Write a supported emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
   emitter clause and route construction, before `FLUSH`; it is required for CLIENT, ClickHouse,
-  Postgres, MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
+  Postgres, MySQL, and MongoDB emitters and limited to `1MiB` for SQS. A batching Sentry emitter needs a
   codec with `ON EMITTING BATCH`, and a batching protobuf codec needs `BATCH MESSAGE`. Compatible
   rows from successive Arrow carriers in one flush may share a payload, but rows from different
   source relays or concrete branches cannot. For the database emitters, the clause bounds each insert

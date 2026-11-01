@@ -194,8 +194,8 @@ current connection, retry and deadline limits.
   `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
   schedule recomputation.
 - For `WEBSOCKETS CONNECTION` literal upgrade headers, subprotocol offers, frame metadata, strict client CONFIG,
-  handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close, read `Ingestors` →
-  `WEBSOCKETS CONNECTION` in the selected documentation index.
+  TLS trust roots, handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close,
+  read `Ingestors` → `WEBSOCKETS CONNECTION` in the selected documentation index.
   A successful upgrade does not establish data delivery or reset repeated-failure backoff.
   Check the effective idle bound together with the ping cadence and the peer's inbound activity.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
@@ -239,12 +239,21 @@ current connection, retry and deadline limits.
   outcome; a rejection requeues that delivery. `NO ACK` disables broker prefetch and cannot
   recover a delivery already consumed before downstream completion. See
   [Ingestors → RabbitMQ](../../../../docs/src/ingestors.md#rabbitmq).
+- A RabbitMQ emitter publishes to a queue through the default exchange with
+  `RABBITMQ QUEUE EMITTER … TO <client> QUEUE '<queue>'`, or to a declared exchange with
+  `RABBITMQ EXCHANGE EMITTER … TO <client> EXCHANGE '<exchange>' ROUTING KEY <expression>`, whose
+  expression computes every record's key as an exact, non-null, non-sensitive `STRING`. Nervix never
+  declares the exchange or its bindings, and an emitter whose exchange is missing stays unavailable
+  until it exists. Without `MANDATORY` a message no binding routes is dropped by the broker and its
+  record reported delivered; write `MANDATORY` after the payload, on either entity, to reject such a
+  record through `ON MESSAGE ERROR` instead. See
+  [Emitters → RabbitMQ](../../../../docs/src/emitters.md#rabbitmq).
 - For Core NATS completion, reconnect retries and finish outcomes, read
   [Emitters → NATS](../../../../docs/src/emitters.md#nats) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
   <bytes>` before `FLUSH`; other supported emitters may, with `MAX MESSAGES` from 1 to 65,536, a positive
-  whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
+  whole-unit `MAX SIZE`, at most `1MiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
   emitter's codec, and `BATCH MESSAGE` in a batching emitter's protobuf codec. A batching Kafka,
   Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, Sentry or Syslog emitter publishes each run of
   compatible records from successive Arrow carriers in one flush, one source relay and one exact
@@ -337,9 +346,18 @@ current connection, retry and deadline limits.
   column into the table column of its name, in any `VALUES` order, and a null into each optional
   column `VALUES` leaves out. Opening the emitter refuses, before staging records, a mapped column
   the table lacks or types differently, a required table column `VALUES` leaves out, and a required
-  column mapped from an expression that can produce a null, such as an `OPTIONAL` field; wrap it in
-  `coalesce(...)` with a never-null argument. A commit refuses a table changed after open in the same
-  way, naming the column, and retries until the table can take the mapped columns again.
+  column, or a column whose nested values are required, mapped from an expression that can produce
+  a null, such as an `OPTIONAL` field; wrap it in `coalesce(...)` with a never-null argument. A
+  commit refuses a table changed after open in the same way, naming the column, and retries until
+  the table can take the mapped columns again.
+- Point an Iceberg emitter at an unpartitioned table. Its data files carry no partition values, so
+  a table whose current partition spec has a field opens but fails every commit, and the emitter
+  retries it without end. The emitter only appends Parquet data files with the Parquet library's
+  default writer properties: it writes no deletes or upserts, never changes the table's schema and
+  commits only through an `ICEBERG_REST` catalog client. Set `'path_style_access' = true` on an
+  `S3` client whose S3-compatible store serves buckets as paths, or whose bucket name contains a
+  dot; requests otherwise address the bucket as a virtual host. Read `Emitters` → `Iceberg data
+  files` and `Iceberg object storage`.
 - Set each Iceberg file I/O property on one client only. An Iceberg emitter whose catalog client
   sets a storage property its storage client already supplies, such as `s3.endpoint` beside the S3
   client's `endpoint`, is refused at `CREATE` or `ALTER`. Put each client's `tls_*` files on that
@@ -396,6 +414,12 @@ current connection, retry and deadline limits.
   And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
   shared client outcome labels, and sender retry semantics. Check that a WebSocket endpoint's
   declared signaling format can encode its acknowledgements, including during `ACCEPT DATA`.
+- To route endpoint requests by their method, path, query, peer address or host, or WebSocket
+  frames by their kind, read the metadata tables in that same section before writing a
+  `metadata.<field>`. An endpoint admits only `POST` at its exact `PATH`, so route on
+  `metadata.query`, `metadata.host` or `metadata.remote_addr` rather than expecting the method or
+  path to vary, and read a forwarding header such as `X-Forwarded-For` with `read_header`, because
+  `metadata.remote_addr` is the TCP peer.
 - Every external name an ingestor reads, such as a topic, consumer group, subscription, queue,
   channel, subject, queue group, or MQTT topic filter, is a string literal spelled exactly as the
   external system names it and within the rules of `Ingestors` → `External Names`.
@@ -418,10 +442,14 @@ current connection, retry and deadline limits.
   `BUFFER` or `DROP` policy in generated Plexus.
 - Redis Pub/Sub uses `NO ACK` in both directions. Treat `CHANNEL` as a literal, case-preserving
   name and consult the Redis manual sections for its byte bound and unavailable header operations.
-- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`, and an emitter
-  `MODE SINGLE` or `MODE BATCH`. Treat `QUEUE` as a literal, case-preserving SQS name, and check
-  `SQS CLIENT` keys against `Ingestors` → `SQS`: `endpoint`, `region`, `access_key_id` and
-  `secret_access_key` are required, and it declares no proxy or client certificate keys.
+- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`. An emitter writes
+  its request shape, `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat
+  `QUEUE` as a literal, case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` →
+  `SQS`: `endpoint`, `region`, `access_key_id` and `secret_access_key` are required, and it
+  declares no proxy or client certificate keys. After `ENCODE USING`, an emitter may write
+  `DELAY <whole seconds from 1s to 900s>` for a standard queue or `DEDUPLICATION ID <string_expression>`
+  for a `.fifo` queue. Its `write_header` values may be `STRING`, an integer type or `BYTES`, sent
+  as `String`, `Number` and `Binary` attributes; read `Emitters` → `SQS`.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS

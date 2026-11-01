@@ -16,7 +16,6 @@ properties = "This entity declares no typed PROPERTIES block; any encoded record
 
 [entity."HTTP ENDPOINT"]
 ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
-metadata = "HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields."
 mirror = "Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position."
 
 [entity."KAFKA TOPIC"]
@@ -45,9 +44,12 @@ mirror = "Subject consumption can join a queue group; publication chooses Core f
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."RABBITMQ QUEUE"]
-envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
 metadata = "The current queue declaration exposes transport headers but no typed AMQP delivery metadata namespace."
 mirror = "A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."RABBITMQ EXCHANGE"]
+mirror = "No ingestor consumes an exchange: the exchange routes each message by the key its record computes to the queues bound to it, and a RABBITMQ QUEUE ingestor consumes one of those queues. Publishing waits for a channel answer or publisher confirmation, as it does for a queue."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."REDIS PUBSUB"]
@@ -71,9 +73,8 @@ metadata = "The driver exposes no peer identity on receive. Only frame 0 is inge
 mirror = "The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map."
 
 [entity."SQS QUEUE"]
-envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
 metadata = "The current queue declaration exposes message attributes through headers but no separate typed receipt metadata namespace."
-mirror = "Receiving uses a visibility timeout and deletion; publishing uses single or batch service requests and may declare a FIFO group. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix."
+mirror = "Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."WEBSOCKETS CONNECTION"]
@@ -82,7 +83,6 @@ mirror = "An outbound connection or server endpoint receives frames. The declare
 
 [entity."WEBSOCKETS ENDPOINT"]
 ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
-metadata = "The current frame declaration has no typed frame or handshake metadata namespace."
 mirror = "An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload."
 
 [entity."SYSLOG LISTENER"]
