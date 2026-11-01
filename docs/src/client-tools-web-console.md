@@ -248,7 +248,9 @@ on quiesce. Buttons whose declared option requirements are unmet stay disabled, 
 ACK or SUSPEND without `SESSION PERSISTENT QOS 1`. The draft validates those requirements too.
 Switching sources refreshes the option controls and quiesce choices from the selected entity.
 A WebSocket connection edits literal upgrade headers as
-ordered name/value rows. A RabbitMQ queue offers its declared `NO ACK`, `ACK SEQUENTIAL` and
+ordered name/value rows. An `HTTP REQUEST` edits its request headers as ordered rows too: a row
+holds a literal value, or, with **Client secret** checked, the client key it reads, and the preview
+shows `CLIENT SECRET '<key>'`. A RabbitMQ queue offers its declared `NO ACK`, `ACK SEQUENTIAL` and
 `ACK PARALLEL` modes; the parallel window, batch timeout and retry settings are retained in the
 preview and submitted command. A topic,
 queue, subject, channel, consumer group, queue group or subscription keeps its text exactly as

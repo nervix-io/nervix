@@ -224,10 +224,13 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX UNIT META` archive signature identifies the current Model layout, including
-the required branch partition count, Sentry platform, and an ingestor's
-`TIMESTAMP AT metadata.<field>` source. Consensus's `raft_unit_timestamp_` keyspaces and current
-state metadata encoding identify its stored shapes. An unrecognized signature, namespace or
+A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
+so a value cannot be both or neither, and the Model that names a secret holds its key and never its
+value.
+The registry's `NERVIX HDR VALUE` archive signature identifies the current Model layout, including
+the required branch partition count, Sentry platform, an ingestor's
+`TIMESTAMP AT metadata.<field>` source and that header state. Consensus's `raft_header_value_`
+keyspaces and current state metadata encoding identify its stored shapes. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States

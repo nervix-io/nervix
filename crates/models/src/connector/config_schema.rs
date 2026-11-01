@@ -2,7 +2,7 @@
 //!
 //! Layer: vocabulary.
 //! - **Owns.** Key names, presence, types, confidentiality, file roles, the entities that read each
-//!   key and delegated namespaces.
+//!   key, delegated namespaces and the family of secret keys an operator names.
 //! - **Depends on.** Configuration entries, the shared deadline contract and URL values.
 //! - **Must not know.** Driver implementations, resource installation or network operations.
 
@@ -509,6 +509,8 @@ pub struct ClientConfigSchema {
     keys: &'static [ClientConfigKey],
     namespaces: &'static [ClientConfigNamespace],
     reserved: &'static [&'static str],
+    /// The prefix of the secret keys an operator names on this client, when it declares them.
+    secret_key_prefix: Option<&'static str>,
 }
 
 #[derive(Clone, Copy)]
@@ -593,6 +595,20 @@ impl ClientConfigSchema {
             keys,
             namespaces,
             reserved,
+            secret_key_prefix: None,
+        }
+    }
+
+    /// Declares a family of secret keys: the operator names each one after `prefix`, and each holds
+    /// a string that a statement reads by the whole key.
+    ///
+    /// Nervix owns these keys, so this is not a delegated namespace: no driver reads them, and a
+    /// client that declares them stays strict about every other key. Inspection masks each one as
+    /// it does any key without a public declaration.
+    pub const fn with_secret_keys(self, prefix: &'static str) -> Self {
+        Self {
+            secret_key_prefix: Some(prefix),
+            ..self
         }
     }
 
@@ -665,6 +681,11 @@ impl ClientConfigSchema {
         self.reserved
     }
 
+    /// The prefix of the secret keys an operator names on this client, when it declares them.
+    pub const fn secret_key_prefix(self) -> Option<&'static str> {
+        self.secret_key_prefix
+    }
+
     /// The summary is derived from the same per-key and namespace declarations as validation.
     pub fn ownership_label(self) -> &'static str {
         if !self.namespaces.is_empty() {
@@ -693,6 +714,29 @@ impl ClientConfigSchema {
         self.namespaces
             .iter()
             .any(|namespace| namespace.accepts(key))
+    }
+
+    /// Whether `key` is a key of the family `with_secret_keys` declares: its prefix and a name.
+    fn names_secret_key(self, key: &str) -> bool {
+        let Some(prefix) = self.secret_key_prefix else {
+            return false;
+        };
+        match key.strip_prefix(prefix) {
+            Some(name) => !name.is_empty(),
+            None => false,
+        }
+    }
+
+    /// Whether `key` holds a value no inspection prints, which is what lets a statement read it by
+    /// name instead of writing the value itself.
+    pub fn is_secret(self, key: &str) -> bool {
+        if self.names_secret_key(key) {
+            return true;
+        }
+        match self.key(key) {
+            Some(declared) => declared.confidential,
+            None => false,
+        }
     }
 
     pub fn validate(
@@ -737,7 +781,7 @@ impl ClientConfigSchema {
                 }));
             }
             let Some(key) = self.key(&entry.key) else {
-                if self.delegates(&entry.key) {
+                if self.delegates(&entry.key) || self.names_secret_key(&entry.key) {
                     continue;
                 }
                 return Err(Report::new(ClientConfigSchemaError::UnknownKey {
@@ -917,8 +961,9 @@ impl ClientConfigSchema {
         effective
     }
 
-    /// Delegated keys without an explicit public declaration remain confidential. Complete
-    /// serialization never calls this projection, so the stored configuration is preserved.
+    /// Delegated keys without an explicit public declaration remain confidential, as do the secret
+    /// keys an operator names. Complete serialization never calls this projection, so the stored
+    /// configuration is preserved.
     pub fn inspection_entries(self, entries: &[ClientConfigEntry]) -> Vec<ClientConfigEntry> {
         entries
             .iter()

@@ -205,8 +205,9 @@ again under the other head instead.
 
 `SET FROM` accepts the complete body that follows `FROM` in a `CREATE` statement with the same
 head, and only that pair's body. Change a client or endpoint, a Kafka topic or offset mode,
-`INSTANCES`, the delivery mode, or source-specific subscription settings by supplying that complete
-body, including its required `ON QUIESCE` clause. `SET QUIESCE` changes only the quiesce mode and
+`INSTANCES`, the delivery mode, an `HTTP REQUEST`'s `METHOD`, `HEADERS` or `MAX BODY SIZE`, or
+source-specific subscription settings by supplying that complete body, including its required
+`ON QUIESCE` clause. `SET QUIESCE` changes only the quiesce mode and
 its variables. It parses every quiesce body, and the stored source refuses one it does not honor,
 for example with `HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND`; there is no
 `DROP QUIESCE` operation. `SET DECODE USING` exists under every head except `CLIENT PRODUCER`,
@@ -965,7 +966,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | HTTP client |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
+| Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals or client secrets); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |
@@ -980,10 +981,39 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-ingest).
 <!-- connector-matrix:ingest-http-request:end -->
 
-- `METHOD '<token>'` is required on the ingestor. `HEADERS { '<name>' = '<value>', … }` writes
-  literal request fields; each value is visible in `SHOW CREATE`. `MAX BODY SIZE` bounds the
-  response body at its declared size, or 16 MiB where omitted. A response above that bound fails
-  its poll.
+- `METHOD '<token>'` is required on the ingestor. `HEADERS { '<name>' = <value>, … }` writes request
+  fields. Names are case-insensitive, and `CREATE` and `ALTER` refuse a name written twice.
+  `MAX BODY SIZE` bounds the response body at its declared size, or 16 MiB where omitted. A response
+  above that bound fails its poll.
+- A header's value is a string literal or `CLIENT SECRET '<key>'`. A literal is part of the statement,
+  so `SHOW CREATE` and `DESCRIBE INGESTOR` print it, and a credential does not belong in one.
+  `CLIENT SECRET` names a key of the ingestor's client and sends that key's value:
+
+  ```plexus
+  CREATE HTTP CLIENT orders_api CONFIG {
+    'endpoint' = 'https://api.example.com/orders',
+    'timeout_ms' = 5000,
+    'secret.api_token' = 'Bearer example-token'
+  };
+
+  CREATE HTTP REQUEST INGESTOR orders
+    FROM orders_api
+    METHOD 'GET'
+    HEADERS { 'accept' = 'application/json', 'authorization' = CLIENT SECRET 'secret.api_token' }
+    EVERY 30s MODE NO ACK ON QUIESCE SUSPEND DECODE USING orders_codec
+    TO orders_relay INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+    ON GENERAL ERROR LOG;
+  ```
+
+  The operator names each `secret.<name>` key of an `HTTP` client. Inspection prints the reference:
+  `SHOW CREATE`, `DESCRIBE INGESTOR` and the console show `CLIENT SECRET 'secret.api_token'`, and
+  `SHOW CREATE CLIENT` and `DESCRIBE CLIENT` mask the key as `********`. `CREATE` and `ALTER` refuse a
+  reference to a key the client does not hold, to a key that is not a secret, and to a value that
+  cannot be a header, naming the header and the key and never quoting the value. A value that keeps a
+  `{{ … }}` template is rendered and checked where the ingestor opens instead, and one that cannot be
+  a header fails the open. A poll sends the value only to the client's origin, because it follows a
+  redirect nowhere else. Complete serialization keeps the value, as it keeps every client secret, so
+  a backup archive holds it; see [Backup And Restore](backup-and-restore.md).
 - The HTTP client requires `endpoint` and `timeout_ms`. It also declares optional
   `follow_redirects` and `proxy` settings, plus TLS trust and client identity files. Polling follows
   a redirect only to the client's own origin and only with `follow_redirects = true`, sends its

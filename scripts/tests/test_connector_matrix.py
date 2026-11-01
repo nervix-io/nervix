@@ -54,7 +54,8 @@ def declarations():
                      "keys": [{"name": "sasl.password", "presence": "optional", "type": "string",
                                "owner": "driver; best effort", "confidential": True, "file": "none",
                                "readers": "every"}],
-                     "namespaces": ["all driver property names"], "reserved": ["group.id"], "constraints": []}],
+                     "namespaces": ["all driver property names"], "reserved": ["group.id"], "secret_keys": None,
+                     "constraints": []}],
     }
 
 

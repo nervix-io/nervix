@@ -96,19 +96,6 @@ pub(in crate::registry) fn validate_ingestor_source(
     {
         HttpMethod::parse(&source.method, HttpBodyMode::WithoutBody)
             .map_err(|report| invalid(report.current_context().to_string()))?;
-        let mut headers = HttpApplicationHeaders::default();
-        for header in &source.headers {
-            let name = HttpHeaderName::parse(&header.name)
-                .map_err(|report| invalid(report.current_context().to_string()))?;
-            let value = HttpHeaderValue::parse(&header.value)
-                .map_err(|report| invalid(report.current_context().to_string()))?;
-            headers
-                .insert(name, value)
-                .map_err(|report| invalid(report.current_context().to_string()))?;
-        }
-        headers
-            .validate_total()
-            .map_err(|report| invalid(report.current_context().to_string()))?;
     }
     let quiesce = ingestor.input.quiesce();
     if !ingestor.input.supports_quiesce(quiesce) {

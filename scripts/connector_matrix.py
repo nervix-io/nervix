@@ -245,9 +245,15 @@ def render_matrix(surface, notes):
              key["file"])
             for key in client["keys"]
         ], ("CONFIG key", "Presence", "Value", "Owner", "Confidential", "File role")))
-        namespaces = ", ".join(client["namespaces"]) or "none; only declared keys are accepted"
+        secret_keys = client["secret_keys"]
+        only_declared = "none" if secret_keys else "none; only declared keys are accepted"
+        namespaces = ", ".join(client["namespaces"]) or only_declared
         reserved = ", ".join(f"`{key}`" for key in client["reserved"]) or "none"
         lines.append(f"Delegated property namespaces: {namespaces}. Reserved keys: {reserved}.\n")
+        if secret_keys:
+            lines.append(f"Secret keys an operator names: `{secret_keys}`, each a confidential "
+                         "string a statement reads by its whole key. Nervix owns them; no driver "
+                         "reads them, and every other key must be declared.\n")
         readers = readers_text(surface, client)
         if readers:
             lines.append(readers)
