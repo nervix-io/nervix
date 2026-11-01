@@ -41,6 +41,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions, placeholder and packet limits, operation deadlines, TLS verification and identity file formats, URL lifetime settings and maintained pool minimums | `Emitters` → `MySQL`, `Database Client Connection Pools`, then `Connector Capabilities` → `MYSQL client` |
+| Postgres table path parts, conflict rules, the `sslmode` policy, TLS identity files, the checkout deadline, connection lifetimes and the borrow test | `Emitters` → `Postgres`, and `Database Client Connection Pools` |
 | Sentry platform options, event defaults and limit, batch transformations, strict DSN/timeout configuration, the inherited HTTP transport, rejected versus retried statuses and retry hints | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
@@ -371,6 +372,8 @@ current connection, retry and deadline limits.
   Treat `TOPIC` as a literal, case-preserving Kafka topic name in both directions, and give every
   `KAFKA TOPIC` ingestor `OFFSET BY DOMAIN` or `OFFSET BY CONSUMER GROUP '<group>'` and
   `ON QUIESCE SUSPEND`.
+- For Kafka record metadata, nullable keys, tombstones and `TIMESTAMP AT metadata.timestamp`,
+  follow `Ingestors` → `Kafka`; convert a binary key explicitly before using it as text.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default. Under `OFFSET BY DOMAIN` in an unpaced domain the same policy places a
@@ -415,6 +418,9 @@ current connection, retry and deadline limits.
   And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
   shared client outcome labels, and sender retry semantics. Check that a WebSocket endpoint's
   declared signaling format can encode its acknowledgements, including during `ACCEPT DATA`.
+  That response deadline is absolute on the physical clock, so keepalive cannot extend it and
+  retry can duplicate admitted effects. Use `BUFFER MAX SIZE <bytes>` only with `MODE NO ACK`,
+  without an overflow clause; an endpoint refuses new input when that buffer is full.
 - To route endpoint requests by their method, path, query, peer address or host, or WebSocket
   frames by their kind, read the metadata tables in that same section before writing a
   `metadata.<field>`. An endpoint admits only `POST` at its exact `PATH`, so route on

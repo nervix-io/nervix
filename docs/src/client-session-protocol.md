@@ -221,6 +221,14 @@ sanitizer-backed fuzzing run the same assertions through the
 Every live node runs both client listeners. Neither depends on leadership or placement, and both
 close only when the node begins to stop.
 
+Configured `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT` ingestors use the server's VHOST listeners on
+every live node. Their codec payloads and configured WebSocket signaling follow the
+[endpoint ingestion contract](ingestors.md#http-endpoint-and-websockets-endpoint), independently of
+the session framing and attachment recovery described here. Endpoint `MODE ACK` reuses the client
+submission outcome labels in an HTTP JSON response or a signaling frame; it has its own per-node
+response window and absolute ACK deadline. `MODE NO ACK` confirms HTTP admission with 202 and sends
+no per-frame graph acknowledgement on WebSockets.
+
 ### Native gRPC
 
 Native clients reach the gRPC service `nervix.session.Session`, which serves four methods and
