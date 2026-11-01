@@ -1600,9 +1600,14 @@ failure. An error handler whose own construction fails does not recursively invo
 
 Paced ingest admission reports a rejected event timestamp as a message error with code
 `validation` and operation `admit`. A null declared timestamp has the same classification and
-names its field. The host keeps the rejected row's source metadata and ACK attached while each
-output route applies its message-error policy. Accepted rows from the same decoded group continue
-through their normal routes.
+names its field. So does a transport metadata value its declared type cannot hold, such as an AMQP
+timestamp after the last `DATETIME` instant, wherever the ingestor's programs or its
+`TIMESTAMP AT` read that field: the connector hands the value over as unrepresentable with a
+description of it, the host refuses the message after `FILTER WHERE` and before event-time
+selection, and the message names `metadata.<field>` and that description, never a payload value.
+The host keeps the rejected row's source metadata and ACK attached while each output route applies
+its message-error policy. Accepted rows from the same decoded group continue through their normal
+routes.
 
 Before a domain execution or replacement becomes active, the registry selects each DLQ route and
 resolves its source, partial-output and destination schemas, branch declarations and flush

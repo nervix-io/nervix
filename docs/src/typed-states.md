@@ -667,6 +667,14 @@ conflict key. An actual null remains null, and other valid records in the batch 
 the connector's record outcome contract. See [Connector Crates And The Connector Contract](./connector-contract.md)
 for the host's publish and acknowledgement boundaries.
 
+Ingest metadata keeps the same three states apart. A message hands each declared field a value of
+the field's exact type, an absence where its transport carries none, or an unrepresentable value
+where its transport carries one the type cannot hold, such as an AMQP timestamp after the last
+`DATETIME` instant. An unrepresentable value never reads as null and never becomes a nearby
+instant: a program or `TIMESTAMP AT` that reads the field refuses the message with a `validation`
+message error naming the field, and a field nothing reads costs nothing. The retained copy a quiesce
+buffer replays keeps the unrepresentable state with its description.
+
 The MongoDB sink also distinguishes each failed write's document answers: delivered, rejected with
 the server's definitive refusal code, or unresolved. An insert's implicit applied-document account
 and a verbose bulk write's explicit applied indexes are separate request variants. The unsatisfied

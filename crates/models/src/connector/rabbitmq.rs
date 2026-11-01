@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** The RabbitMQ client Model, the queue source and emitter Models with their delivery
 //!   mode, the queue name a source consumes with the rule AMQP holds it to, and what each entity
-//!   declares.
+//!   declares, the metadata a delivery exposes included.
 //!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The AMQP driver, or how a queue is consumed or
@@ -34,9 +34,9 @@ use crate::{
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
-    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionDeclaration, PositionClass,
-    RetryPolicy,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration,
+    IngestorMetadataField, IngestorMetadataType, IngestorReference, IngestorReferenceKind,
+    LocatorDeclaration, LocatorName, OptionDeclaration, PositionClass, RetryPolicy,
 };
 
 configured_client!(RabbitMq: unpooled, config CLIENT_CONFIG, CreateClientRabbitMq => RabbitMqConfigEntry);
@@ -178,11 +178,32 @@ const RABBITMQ_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["A frame above the negotiated frame_max ends the connection."],
 };
 
+/// What a RabbitMQ delivery exposes: the envelope its broker attached to it, then the AMQP basic
+/// properties its publisher set, each in the exact type AMQP 0-9-1 writes. The timestamp is the
+/// instant AMQP's count of whole seconds since the Unix epoch names.
+const RABBITMQ_QUEUE_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("exchange", IngestorMetadataType::String),
+    IngestorMetadataField::new("routing_key", IngestorMetadataType::String),
+    IngestorMetadataField::new("delivery_tag", IngestorMetadataType::U64),
+    IngestorMetadataField::new("redelivered", IngestorMetadataType::Bool),
+    IngestorMetadataField::new("content_type", IngestorMetadataType::String),
+    IngestorMetadataField::new("content_encoding", IngestorMetadataType::String),
+    IngestorMetadataField::new("message_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("correlation_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("reply_to", IngestorMetadataType::String),
+    IngestorMetadataField::new("type", IngestorMetadataType::String),
+    IngestorMetadataField::new("app_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("user_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("priority", IngestorMetadataType::U8),
+    IngestorMetadataField::new("expiration", IngestorMetadataType::String),
+    IngestorMetadataField::new("timestamp", IngestorMetadataType::Datetime),
+]);
+
 impl IngestorDeclaration for RabbitMqQueueIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // An AMQP field table holds one value per name, in ascending order of name.
         headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
-        metadata: IngestorMetadataDeclaration::NONE,
+        metadata: RABBITMQ_QUEUE_METADATA,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::RabbitMq),
         position_class: PositionClass::BrokerRedelivered,

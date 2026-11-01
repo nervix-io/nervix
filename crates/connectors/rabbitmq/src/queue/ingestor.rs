@@ -3,8 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The AMQP connection, channel and consumer each ingestor instance reads through, its
-//!   declared consumer mode and prefetch window, AMQP headers as ingest headers, and per-delivery
-//!   acknowledgement and requeue.
+//!   declared consumer mode and prefetch window, AMQP headers as ingest headers, the delivery's
+//!   envelope and basic properties as its typed metadata, and per-delivery acknowledgement and
+//!   requeue.
 //! - **Depends on.** The connector contract, typed client configuration entries, the crate's
 //!   broker connection, `error-stack`, Tokio and `lapin`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
@@ -23,7 +24,7 @@
 
 mod reader;
 
-use std::{borrow::Cow, num::NonZeroU16};
+use std::{borrow::Cow, fmt, num::NonZeroU16, time::Duration};
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
@@ -31,15 +32,15 @@ use lapin::{
     Acker, Channel, Connection, Consumer,
     message::Delivery,
     options::{BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicQosOptions},
-    types::{AMQPValue, FieldTable},
+    types::{AMQPValue, FieldTable, ShortString},
 };
 use nervix_connector::{
-    BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestorBatch,
-    IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
-    IngestorReadCancellation, IngestorResult, IngestorResume,
+    BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow,
+    IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest, IngestorConnector,
+    IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult, IngestorResume,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, RabbitMqQueueName};
+use nervix_models::{ClientConfigEntry, IngestorMetadataType, RabbitMqQueueName, Timestamp};
 use reader::RabbitMqBatchReader;
 use thiserror::Error;
 
@@ -243,6 +244,35 @@ impl IngestMessageHeaders for RabbitMqDeliveryHeaders {
     }
 }
 
+/// The AMQP timestamp of a delivery: a count of whole seconds since the Unix epoch, as AMQP 0-9-1
+/// writes it.
+#[derive(Debug, Clone, Copy)]
+struct AmqpTimestamp(u64);
+
+impl AmqpTimestamp {
+    /// The instant this timestamp names, or `None` past 2262-04-11, the last whole second a signed
+    /// count of nanoseconds holds.
+    fn instant(self) -> Option<Timestamp> {
+        let nanos = Duration::from_secs(self.0).as_nanos();
+        let Ok(nanos) = i64::try_from(nanos) else {
+            return None;
+        };
+        Some(Timestamp::from_unix_nanos(nanos))
+    }
+}
+
+impl fmt::Display for AmqpTimestamp {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "the AMQP timestamp {} seconds after the Unix epoch",
+            self.0
+        )
+    }
+}
+
+/// One received delivery: its payload, its AMQP headers, its envelope and basic properties as its
+/// metadata, and the position that settles it.
 pub struct RabbitMqQueueIngestorMessage {
     headers: RabbitMqDeliveryHeaders,
     position: RabbitMqQueueIngestorPosition,
@@ -257,6 +287,56 @@ impl RabbitMqQueueIngestorMessage {
             headers: RabbitMqDeliveryHeaders { delivery },
             position,
         }
+    }
+
+    /// Hands over a text property, absent where the publisher left it unset.
+    fn visit_text(values: &mut dyn IngestMetadataValues, property: Option<&ShortString>) {
+        match property {
+            Some(text) => values.string(text.as_str()),
+            None => values.absent(),
+        }
+    }
+
+    /// Hands over the AMQP timestamp as the instant it names, absent where the publisher left it
+    /// unset, and unrepresentable where no `DATETIME` holds that instant.
+    fn visit_timestamp(values: &mut dyn IngestMetadataValues, property: Option<u64>) {
+        let Some(seconds) = property else {
+            values.absent();
+            return;
+        };
+        let timestamp = AmqpTimestamp(seconds);
+        match timestamp.instant() {
+            Some(instant) => values.datetime(instant),
+            None => values.unrepresentable(IngestorMetadataType::Datetime, &timestamp),
+        }
+    }
+}
+
+/// The values of the metadata `RABBITMQ QUEUE` declares, in its order: the delivery's exchange,
+/// routing key, delivery tag and redelivery flag, then the basic properties it carries. Each value is
+/// read from the borrowed delivery, so handing them over copies nothing.
+impl IngestMessageMetadata for RabbitMqQueueIngestorMessage {
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+        let delivery = &self.headers.delivery;
+        values.string(delivery.exchange.as_str());
+        values.string(delivery.routing_key.as_str());
+        values.u64(delivery.delivery_tag);
+        values.bool(delivery.redelivered);
+        let properties = &delivery.properties;
+        Self::visit_text(values, properties.content_type().as_ref());
+        Self::visit_text(values, properties.content_encoding().as_ref());
+        Self::visit_text(values, properties.message_id().as_ref());
+        Self::visit_text(values, properties.correlation_id().as_ref());
+        Self::visit_text(values, properties.reply_to().as_ref());
+        Self::visit_text(values, properties.kind().as_ref());
+        Self::visit_text(values, properties.app_id().as_ref());
+        Self::visit_text(values, properties.user_id().as_ref());
+        match properties.priority() {
+            Some(priority) => values.u8(*priority),
+            None => values.absent(),
+        }
+        Self::visit_text(values, properties.expiration().as_ref());
+        Self::visit_timestamp(values, *properties.timestamp());
     }
 }
 
@@ -276,7 +356,11 @@ impl IngestorMessage for RabbitMqQueueIngestorMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::headers(&self.headers)
+        IngestMetadataRow {
+            fields: self,
+            headers: IngestRowHeaders::Borrowed(&self.headers),
+            position: None,
+        }
     }
 }
 
@@ -422,7 +506,168 @@ impl BrokerIngestorConnector for RabbitMqQueueIngestor {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use lapin::BasicProperties;
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_connector::{RetainedIngestMetadata, RetainedIngestMetadataValue as Value};
+
     use super::*;
+
+    /// A delivery of the `orders.exchange` exchange with routing key `orders.created`, tag 7,
+    /// delivered before, carrying `properties`.
+    fn delivered(properties: BasicProperties) -> RabbitMqQueueIngestorMessage {
+        let mut delivery = Delivery::mock(
+            7,
+            "orders.exchange".into(),
+            "orders.created".into(),
+            true,
+            b"{}".to_vec(),
+        );
+        delivery.properties = properties;
+        RabbitMqQueueIngestorMessage::new(delivery)
+    }
+
+    /// The last whole second after the Unix epoch that a signed count of nanoseconds holds.
+    fn last_datetime_second() -> u64 {
+        let nanos_per_second = Duration::from_secs(1).as_nanos();
+        let last = u128::try_from(i64::MAX)
+            .assured("i64::MAX is positive")
+            .checked_div(nanos_per_second)
+            .assured("one second is a nonzero count of nanoseconds");
+        u64::try_from(last).assured("a quotient of i64::MAX fits in a u64")
+    }
+
+    fn instant_of(seconds: u64) -> Timestamp {
+        let nanos = i64::try_from(Duration::from_secs(seconds).as_nanos())
+            .assured("the fixture's seconds lie inside the DATETIME range");
+        Timestamp::from_unix_nanos(nanos)
+    }
+
+    #[test]
+    fn a_delivery_hands_over_its_envelope_and_every_basic_property_in_declared_order() {
+        let message = delivered(
+            BasicProperties::default()
+                .with_content_type("application/json".into())
+                .with_content_encoding("identity".into())
+                .with_message_id("order-42".into())
+                .with_correlation_id("request-7".into())
+                .with_reply_to("order-replies".into())
+                .with_type("order.created".into())
+                .with_app_id("billing".into())
+                .with_user_id("guest".into())
+                .with_priority(u8::MAX)
+                .with_expiration("600000".into())
+                .with_timestamp(946_684_800)
+                .with_delivery_mode(2)
+                .with_cluster_id("unused".into()),
+        );
+
+        let retained = RetainedIngestMetadata::capture(&message);
+
+        assert_eq!(
+            retained.values(),
+            [
+                Value::String("orders.exchange".to_string()),
+                Value::String("orders.created".to_string()),
+                Value::U64(7),
+                Value::Bool(true),
+                Value::String("application/json".to_string()),
+                Value::String("identity".to_string()),
+                Value::String("order-42".to_string()),
+                Value::String("request-7".to_string()),
+                Value::String("order-replies".to_string()),
+                Value::String("order.created".to_string()),
+                Value::String("billing".to_string()),
+                Value::String("guest".to_string()),
+                Value::U8(u8::MAX),
+                Value::String("600000".to_string()),
+                Value::Datetime(instant_of(946_684_800)),
+            ]
+        );
+        let declared = RabbitMqQueueIngestor::KIND.capabilities().metadata;
+        assert_eq!(declared.fields().len(), retained.values().len());
+        for (field, value) in declared.fields().iter().zip(retained.values()) {
+            assert_eq!(value.ty(), Some(field.ty()), "metadata.{}", field.name());
+        }
+    }
+
+    #[test]
+    fn a_delivery_without_properties_hands_over_its_envelope_and_absent_properties() {
+        let message = RabbitMqQueueIngestorMessage::new(Delivery::mock(
+            1,
+            "".into(),
+            "orders".into(),
+            false,
+            Vec::new(),
+        ));
+
+        let retained = RetainedIngestMetadata::capture(&message);
+
+        let mut expected = vec![
+            Value::String(String::new()),
+            Value::String("orders".to_string()),
+            Value::U64(1),
+            Value::Bool(false),
+        ];
+        expected.extend(std::iter::repeat_n(Value::Absent, 11));
+        assert_eq!(retained.values(), expected.as_slice());
+    }
+
+    #[test]
+    fn an_amqp_timestamp_past_the_last_datetime_second_is_handed_over_unrepresentable() {
+        let last = last_datetime_second();
+        let past = last
+            .checked_add(1)
+            .assured("the last DATETIME second lies far below u64::MAX");
+        for (seconds, expected) in [
+            (0, Value::Datetime(instant_of(0))),
+            (last, Value::Datetime(instant_of(last))),
+            (
+                past,
+                Value::Unrepresentable {
+                    ty: IngestorMetadataType::Datetime,
+                    value: format!("the AMQP timestamp {past} seconds after the Unix epoch"),
+                },
+            ),
+            (
+                u64::MAX,
+                Value::Unrepresentable {
+                    ty: IngestorMetadataType::Datetime,
+                    value: format!(
+                        "the AMQP timestamp {} seconds after the Unix epoch",
+                        u64::MAX
+                    ),
+                },
+            ),
+        ] {
+            let message = delivered(BasicProperties::default().with_timestamp(seconds));
+            let retained = RetainedIngestMetadata::capture(&message);
+            let timestamp = retained
+                .values()
+                .last()
+                .verified("the declaration ends with metadata.timestamp");
+            assert_eq!(timestamp, &expected, "{seconds} seconds");
+        }
+    }
+
+    #[test]
+    fn a_message_lends_its_metadata_and_headers_from_the_delivery() {
+        let mut headers = FieldTable::default();
+        headers.insert("tenant".into(), AMQPValue::LongString("north".into()));
+        let message = delivered(BasicProperties::default().with_headers(headers));
+
+        let row = message.metadata();
+
+        assert_eq!(
+            RetainedIngestMetadata::capture(row.fields),
+            RetainedIngestMetadata::capture(&message)
+        );
+        let mut visited = Vec::new();
+        row.headers
+            .headers()
+            .visit(&mut |name, value| visited.push(format!("{name}={value}")));
+        assert_eq!(visited, ["tenant=north"]);
+        assert!(row.position.is_none());
+    }
 
     /// A resolver for literal addresses only: they need no query, so its name server is never
     /// asked.
