@@ -57,7 +57,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] <CONNECTOR> <ENTITY> EMITTER <name>
 ```
 
 The declared pairs are `CLIENT CONSUMER`, `HTTP REQUEST`, `KAFKA TOPIC`, `PULSAR TOPIC`,
-`RABBITMQ QUEUE`, `REDIS PUBSUB`, `MQTT TOPIC`, `NATS SUBJECT`, `ZEROMQ PUSH`, `SQS QUEUE`,
+`RABBITMQ QUEUE`, `RABBITMQ EXCHANGE`, `REDIS PUBSUB`, `MQTT TOPIC`, `NATS SUBJECT`, `ZEROMQ PUSH`, `SQS QUEUE`,
 `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`,
 `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION` and `ICEBERG TABLE`.
 A client consumer uses `TO SCHEMA <schema> MODE ACK ...`, with native output in place of a codec.
@@ -68,7 +68,8 @@ Nervix resolves S3, GCS or Azure Blob from that client's kind. Its `NAMESPACE`, 
 Database conflict clauses follow `VALUES`.
 
 External locators are string literals and retain their exact spelling, including case. Each
-entity validates its own name: Kafka and Pulsar topics, RabbitMQ and SQS queues, Redis channels,
+entity validates its own name: Kafka and Pulsar topics, RabbitMQ and SQS queues, RabbitMQ
+exchanges, Redis channels,
 MQTT publication topics and NATS publication subjects. Publication names contain no MQTT or NATS
 subscription wildcards. Table names contain 1–128 ASCII letters, digits, `_`, `-`,
 `~` or `.`, with uppercase letters preserved. MongoDB collection names follow their own
@@ -1050,6 +1051,7 @@ Each emitter that writes transport headers declares a
 | `KAFKA TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `PULSAR TOPIC` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| `RABBITMQ EXCHANGE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `SQS QUEUE` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 
@@ -1110,8 +1112,9 @@ the entity's closed property set, each at most once and in any order. A clause o
 does not declare is refused where it is written, with the entity and the clause or key named, and
 the registry refuses it again in a Model that reaches it another way. The
 [capability matrix](connector-capabilities.md) lists the clauses and properties each entity
-declares, and each entity's section below says what its transport does with them. No entity
-declares one yet, so every emitter refuses every clause today.
+declares, and each entity's section below says what its transport does with them. Today only the
+two [RabbitMQ](#rabbitmq) entities declare a clause, `MANDATORY`, and every other emitter refuses
+every clause.
 
 | Clause | Written with | Value every record carries |
 | --- | --- | --- |
@@ -1414,6 +1417,7 @@ CREATE RABBITMQ QUEUE EMITTER <name>
   TO <client> QUEUE 'orders'
     MODE <mode>
     ENCODE USING <codec>
+    [MANDATORY]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1434,9 +1438,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
+| Envelope | MANDATORY |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
-| Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>unroutable messages the broker returns under NO ACK: unbounded |
+| Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |
 | Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the queue check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |
 | Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |
@@ -1444,13 +1448,90 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-emit).
 <!-- connector-matrix:emit-rabbitmq-queue:end -->
 
-`QUEUE` names an existing queue through the broker's default exchange. The same case-preserving
-queue-name type is used for ingestion and emission: 1 to 255 UTF-8 bytes, including every byte of
-a multibyte character. `SHOW CREATE EMITTER` retains the external name and the complete publishing
-and optional batching policy.
+<!-- connector-matrix:emit-rabbitmq-exchange:start -->
+```plexus,ignore
+CREATE RABBITMQ EXCHANGE EMITTER <name>
+  FROM <relay>
+  TO <client> EXCHANGE 'events'
+  (ROUTING KEY input.category)
+    MODE <mode>
+    ENCODE USING <codec>
+    [MANDATORY]
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
 
-`ACK` enables publisher confirms and waits for the confirm of each message. A broker nack is an
-infrastructure failure and is retried with backpressure. In `NO ACK` the broker confirms nothing,
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | RABBITMQ client |
+| Locator and validation rule | EXCHANGE 'events' (rabbitmq_exchange) |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `ROUTING KEY input.category` (expression); required |
+| Headers | `write_header`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| Body | ENCODE USING &lt;codec&gt; |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | MANDATORY |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |
+| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the exchange check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |
+| Driver limits | A frame above the negotiated frame_max ends the connection.<br>A routing key longer than the 255 bytes an AMQP short string carries is not sent; its record is rejected. |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |
+
+See the [RABBITMQ EXCHANGE capability and mirror reference](connector-capabilities.md#rabbitmq-exchange-emit).
+<!-- connector-matrix:emit-rabbitmq-exchange:end -->
+
+`RABBITMQ QUEUE` is the default-exchange shorthand: `QUEUE` names an existing queue, and the
+emitter publishes each message to the broker's default exchange with the queue's name as its
+routing key, which routes it to that queue. The same case-preserving queue-name type is used for
+ingestion and emission: 1 to 255 UTF-8 bytes, including every byte of a multibyte character.
+`SHOW CREATE EMITTER` retains the external name and the complete publishing and optional batching
+policy.
+
+`RABBITMQ EXCHANGE` publishes to an exchange the operator declared. `EXCHANGE` names it, 1 to 255
+UTF-8 bytes kept as written, and `ROUTING KEY` computes the key the exchange routes each record by.
+The expression reads what an [envelope expression](#envelope-clauses) reads and must compute an
+exact, non-null, non-sensitive `STRING`, as `CREATE` and `ALTER` check with the message
+`ROUTING KEY requires an exact, non-null, non-sensitive STRING value`; `leak_sensitive` admits a
+sensitive key. Nervix evaluates it once for every batch it admits, together with the envelope,
+after the route kept and finalized its rows. A record whose routing key fails or produces no value
+is not sent: it follows `ON MESSAGE ERROR` as an `evaluation` error of the `publish` operation whose
+message begins `ROUTING KEY`, such as `ROUTING KEY expression produced NULL`. A key longer than the
+255 bytes an AMQP short string carries is not sent either: its record is rejected as an `external`
+error of the `publish` operation that names the key's length. The exchange's type decides where the
+key leads: a direct exchange routes to the queues bound under exactly that key, a topic exchange to
+the queues whose binding pattern matches it, and a fanout exchange to every bound queue, whatever
+the key. Records whose keys differ never share a [batch payload](#batch-payloads), so a batch
+message carries the one key its members share. `SHOW CREATE EMITTER` retains the exchange's name
+and the routing key's expression.
+
+Nervix never declares an exchange or a binding. When an exchange emitter opens, it checks that its
+exchange exists with a passive declaration; while it is missing, the emitter stays unavailable with
+`RabbitMQ exchange '<name>' does not exist` as its transient error, confirms nothing, so its input
+stays unacknowledged, and opens on its `RETRY POLICY` backoff once the exchange is declared.
+
+A message no binding routes, such as one whose key no binding of a direct exchange names or one for
+a queue deleted under a `RABBITMQ QUEUE` emitter, is the broker's to drop unless the emitter writes
+`MANDATORY`. Without it the broker drops the message and answers it as taken, so the emitter reports
+its record delivered and the record is lost. With `MANDATORY`, on either entity, the broker returns
+the message, and the emitter rejects its record through `ON MESSAGE ERROR` as an `external` error of
+the `publish` operation naming the broker's reply, such as `rabbitmq returned the message unrouted
+with reply code 312: NO_ROUTE`, in every mode, and keeps publishing the write's other records.
+Under `ACK` the broker returns the message ahead of its confirmation. Under `NO ACK` it returns the
+message ahead of its answer to the round trip that ends the write, so the emitter reads every return
+of the write once that answer arrives, and holds none of them beyond the write that published it.
+A return names the message's exchange, routing key, headers and body but not which record it was,
+so the emitter attributes it to the first message of the write, in written order, that carries all
+four; of messages identical in all four, the earlier one is rejected.
+
+Both entities publish the same way. `ACK` enables publisher confirms and waits for the confirm of
+each message. A broker nack is an infrastructure failure and is retried with backpressure. In `NO ACK` the broker confirms nothing,
 so once a write's messages are on the channel, the emitter asks the channel for one round trip,
 which the broker answers only after it has taken every message written before it, and that answer
 acknowledges them. A `NO ACK` write therefore waits for one round trip to the broker however many
@@ -1471,7 +1552,7 @@ when it opens and whenever it reopens after a failed publish, so a changed DNS a
 on the next connection, and tries the addresses it receives in order. A literal IPv4 address, or
 an IPv6 address in brackets, is connected to as written. Resolution, the TCP connection, for
 `amqps` the TLS handshake, the AMQP handshake, opening the channel, selecting publisher confirms
-under `ACK` and checking the queue share the client's `connect_timeout_ms`, 30 seconds when it is
+under `ACK` and checking the queue or the exchange share the client's `connect_timeout_ms`, 30 seconds when it is
 left out; the broker certificate must name the host `addr` names. A connection that fails or runs
 out of that deadline, including a name that does not resolve, leaves the emitter unavailable with
 the failure as its transient error; it confirms nothing, so its input stays unacknowledged, and it
@@ -3553,7 +3634,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | Kafka | `ACK` retry after an ambiguous delivery report or timeout; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after local producer-queue admission; broker durability follows Kafka client and topic configuration | None; Kafka producer idempotence is pass-through client configuration |
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
 | NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a timed-out write or a connection change, including records the server may already have received; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` confirms a local drain and flush on the write's connection, without durable stream acknowledgement; a connection failure after that completion can lose what the server has not read | None |
-| RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after the broker's channel has taken it; queue durability and message persistence remain broker policy | None |
+| RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; queue durability and message persistence remain broker policy | None |
 | SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
 | Redis Pub/Sub | Retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
