@@ -13,8 +13,9 @@ Plexus contract and field-level rules. The [Connector Crates And The Connector C
 chapter owns the shared host and connector boundary; [Control Plane](./control-plane.md),
 [Domain Clock](./domain-clock.md), [Resource Versions And Bindings](./resource-versions.md), and
 [Shutdown And Recovery](./shutdown.md) remain authoritative for their respective lifecycle,
-time, binding, and recovery rules. The [HTTP emitter acceptance ledger](https://github.com/nervix-io/nervix/blob/main/tests/http-emitter-acceptance-ledger.md#http-emitter-09-qualification)
-records the public qualification evidence summarized below.
+time, binding, and recovery rules. The [HTTP emitter acceptance map](https://github.com/nervix-io/nervix/blob/main/tests/http-emitter-acceptance-ledger.md#http-emitter-09-qualification)
+maps the public contracts to executable evidence. [HTTP Emitter 09](https://app.clickup.com/t/86bc78nrz)
+retains its qualification results.
 
 ## From Plexus to an active emitter
 
@@ -414,11 +415,11 @@ source recovery boundary; this chapter adds no alternate shutdown protocol.
 ## Qualification and practical limits
 
 The [completed 14-criterion matrix](https://github.com/nervix-io/nervix/blob/main/tests/http-emitter-acceptance-ledger.md#the-completed-matrix)
-names each public scenario and the receiver observation that closed it. Every HTTP feature case
-ran on one-node and three-node clusters. Each row below identifies its primary public evidence;
-the ledger gives the exact scenario names, example counts, and receiver controls.
+names each public scenario and its receiver assertions. The HTTP feature outlines cover one-node
+and three-node clusters. Each row below identifies its primary public evidence; the map gives
+the scenario names and receiver controls, while the owning task records run counts and results.
 
-| Criterion | Primary evidence | Observed result |
+| Criterion | Primary evidence | Contract exercised |
 | --- | --- | --- |
 | 1. Constant and computed requests | `http_emitter.feature` | Two records send distinct methods, targets, headers and exact codec bytes; a constant request and an encoding rejection are observed. |
 | 2. Absent body and method rule | `http_emitter.feature` | Bodyless `DELETE`, `GET` and `HEAD` send zero content; literal and computed GET/HEAD with a codec are refused. |
@@ -435,23 +436,21 @@ the ledger gives the exact scenario names, example counts, and receiver controls
 | 13. Inspection and replacement | `http_emitter_lifecycle.feature`, `http_emitter.feature`, `tools/plexus_format.feature` | Both body modes round-trip; failed ALTER and COMMIT preserve the active emitter; admitted requests drain to their original destination. |
 | 14. Drain and replay | `http_emitter_lifecycle.feature`, `http_emitter_retries.feature` | Graceful shutdown force-flushes; forced ending leaves a Kafka offset for replay; a lost response permits the same effect twice. |
 
-The receiver's high-water mark stayed at one request awaiting a final head for one emitter serving
-two relays and two branches; a separate regression observed two for two concurrent clients. A
-stalled or 32 MiB response body did not delay the next record, and the receiver observed abandoned
-connections after timeout, stop, and forced drain. Shuttle checks covered cancelled attempts and
-unresolved membership. Attached Kafka offsets remained uncommitted while a request was pending.
-The emitter publishes no per-emitter memory figure, so this evidence does not establish a fixed
-per-emitter memory ceiling; retained encoded bodies are governed by node memory pressure.
+The receiver assertions require at most one request awaiting a final head for one emitter serving
+two relays and two branches; a fixture regression distinguishes two concurrent clients. The
+response-body scenarios require the next record to proceed while a response body stalls or holds
+32 MiB, and cancellation scenarios check abandoned connections after timeout, stop, and forced
+drain. Shuttle checks cover cancelled attempts and unresolved membership. Attached-source scenarios
+require Kafka offsets to remain uncommitted while a request is pending. The emitter publishes no
+per-emitter memory figure, so these checks establish no fixed per-emitter memory ceiling; retained
+encoded bodies are governed by node memory pressure.
 
-After the receiver fixture update, all seven HTTP features ran together with **180 scenarios and
-2,870 steps passing without a retry**. The affected HTTP polling, shared emitter, and shutdown
-suites passed another **168 scenarios and 1,764 steps**. The ledger records the exact commands,
-focused unit and Shuttle results, documentation build, validation, and an earlier saturated
-cluster run whose three-node setup commands met leadership changes. These results qualify the
-implemented behavior and its stated limits; the ledger remains the detailed evidence record.
+[HTTP Emitter 09](https://app.clickup.com/t/86bc78nrz) retains the tested revisions, exact commands,
+scenario counts, affected-suite results, focused unit and Shuttle results, documentation checks
+and saturated-cluster observations. Those results qualify their recorded revision and workload.
 
-Two outlines added after that run qualify the attempt budget and the bodyless framing described
-above, each on one-node and three-node clusters:
+Two outlines qualify the attempt budget and bodyless framing described above, each on one-node
+and three-node clusters:
 
 - `@http_emitter_bodyless_length` in `http_emitter.feature` sends a bodyless `POST`, `PUT`,
   `PATCH` and `DELETE` to a receiver that answers `411` to a `POST`, `PUT` or `PATCH` declaring
