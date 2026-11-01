@@ -1049,6 +1049,15 @@ client failure the source does not classify keeps the driver's error as the type
 `Acknowledge` or `NegativelyAcknowledge`. The innermost context is the reason `DESCRIBE INGESTOR`
 shows.
 
+Both Pulsar directions connect through one builder, whose `PulsarClientError` says why a client did
+not connect. `Configuration` keeps the client configuration or TLS cause beneath it. `Refused`
+carries the `PulsarRefusal` a broker answered the connection with, such as an `AuthenticationError`
+for a missing or rejected credential, so the refusal is the innermost context an emitter's transient
+status shows. `NotOpened` keeps the driver's `pulsar::Error` beneath it for a connection that never
+opened, including a TLS handshake that failed, so that status shows the driver's error. A source
+reports it beneath `PulsarTopicIngestorError::Connect`. An emitter reports `Configuration` beneath
+`EmitterOpenError::InvalidConfiguration` and the others beneath `EmitterOpenError::Initialize`.
+
 A NATS source whose client loses its connection to the server reports
 `NatsSubjectIngestorError::ConnectionLost` beneath `IngestorError::Read` once it has handed over what the client
 received, and each reconnect that fails reports `NatsSubjectIngestorError::Connect` beneath

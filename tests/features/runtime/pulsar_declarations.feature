@@ -223,6 +223,89 @@ Feature: Pulsar topic declarations
       | 1            | tls_ca_file                       | /tmp/missing-pulsar-ca.pem |
       | 3            | tls_ca_file                       | /tmp/missing-pulsar-ca.pem |
 
+  Scenario Outline: Pulsar clients refuse half of a client certificate
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands fail with "client config key '<present>' requires '<missing>'"
+      """
+      CREATE PULSAR CLIENT refused CONFIG {
+        'addr' = 'pulsar+ssl://127.0.0.1:6651', '<present>' = '/mounted/identity.pem'
+      };
+      """
+
+    Examples:
+      | cluster_size | present       | missing       |
+      | 1            | tls_cert_file | tls_key_file  |
+      | 3            | tls_cert_file | tls_key_file  |
+      | 1            | tls_key_file  | tls_cert_file |
+      | 3            | tls_key_file  | tls_cert_file |
+
+  Scenario Outline: Pulsar clients refuse a client certificate on a plaintext pulsar address
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands fail
+      """
+      CREATE PULSAR CLIENT refused CONFIG {
+        'addr' = 'pulsar://127.0.0.1:6650',
+        'tls_cert_file' = '/mounted/client.pem',
+        'tls_key_file' = '/mounted/client-key.pem'
+      };
+      """
+    Then the last command error contains
+      """
+      requires 'addr' to use pulsar+ssl
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: Pulsar client inspection never shows the token it authenticates with
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PULSAR CLIENT authenticated CONFIG {
+        'addr' = 'pulsar://127.0.0.1:6650', 'auth_token' = 'scenario-pulsar-credential'
+      };
+      """
+    When these Plexus commands are executed
+      """
+      DESCRIBE CLIENT authenticated;
+      """
+    Then the last command output contains
+      """
+      auth_token: ********
+      """
+    And the last command output does not contain
+      """
+      scenario-pulsar-credential
+      """
+    When these Plexus commands are executed
+      """
+      SHOW CREATE CLIENT authenticated;
+      """
+    Then the last command output contains
+      """
+      'auth_token' = '********'
+      """
+    And the last command output does not contain
+      """
+      scenario-pulsar-credential
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Pulsar clients refuse a namespace that is not a tenant and a namespace
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands

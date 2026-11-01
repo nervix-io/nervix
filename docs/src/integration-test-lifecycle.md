@@ -2554,6 +2554,13 @@ a short collection window, leaving one retained window row waiting for input whi
 for that partial batch's ACK. The fixture retains its five-second ACK timeout and exact four-record
 replay assertion within eight seconds.
 
+A second standalone Pulsar broker authenticates every client, so a scenario can show a client
+refused without disturbing the shared broker, which keeps accepting every client. Its plaintext
+listener takes a token, and its TLS listener also requires a certificate of the scenario certificate
+authority. It verifies tokens against a fixed test key that protects nothing outside its own
+container, and takes much less memory than the shared broker, since few scenarios run on it. Its
+readiness request carries a token, because its admin listener authenticates too.
+
 The Pulsar broker announces a `maxMessageSize` of 1 MiB rather than Pulsar's 5 MiB default, the
 same limit the MQTT and NATS brokers keep, so one scenario message can exceed each broker's limit.
 Dependency startup waits for HTTP `200 OK` from `/admin/v2/namespaces/public/default` on its

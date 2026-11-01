@@ -607,7 +607,7 @@ Transport-specific schemes and keys:
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
+- `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file`, presents `tls_cert_file` with `tls_key_file` as its client certificate, and honors optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, all of which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address; see [Pulsar](#pulsar).
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`, which is primarily useful for SQS-compatible local/test endpoints. An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
@@ -1253,21 +1253,47 @@ in the declared `options:` row.
 Client config currently supports:
 
 - `'addr'`: broker address such as `'pulsar://127.0.0.1:6650'`
+- optional `'auth_token'`: the token the client authenticates with. `DESCRIBE CLIENT` and
+  `SHOW CREATE CLIENT` show it redacted.
 - optional `'namespace'`: the tenant and namespace, written `'tenant/namespace'`, that a short
   topic name is placed in, so `TOPIC 'orders'` reads `persistent://<namespace>/orders`; defaults to
   `public/default`, which `DESCRIBE CLIENT` shows as a default. Fully qualified topic names are sent
   as written.
-- optional `'tls_ca_file'`: PEM-encoded CA bundle for `pulsar+ssl://...` connections
-- optional `'tls_allow_insecure_connection'`: `true` or `false`; defaults to `false`
-- optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
+- optional `'tls_ca_file'`: PEM-encoded CA bundle a `pulsar+ssl://...` connection trusts beside the
+  bundled public roots and the host's trust store
+- optional `'tls_cert_file'` and `'tls_key_file'`: the PEM-encoded client certificate the client
+  presents and its private key. `CREATE PULSAR CLIENT` refuses one without the other.
+- optional `'tls_allow_insecure_connection'`: `true` accepts any certificate a broker presents,
+  whoever signed it and whatever it names, so the connection is encrypted but says nothing about
+  who holds it; defaults to `false`
+- optional `'tls_hostname_verification_enabled'`: `false` accepts a certificate from a trusted
+  authority whatever address it names; defaults to `true`
 
-The three TLS keys apply only to a `pulsar+ssl://...` address. A plaintext `pulsar://...`
+The five TLS keys apply only to a `pulsar+ssl://...` address. A plaintext `pulsar://...`
 connection uses none of them, so `CREATE PULSAR CLIENT` refuses them there. It also refuses a
 `namespace` that is not exactly a tenant and a namespace, each nonempty and without whitespace or
 control characters, such as `'tenant-a'` or `'tenant-a/orders/eu'`, because no topic qualified
 with it is a valid Pulsar topic.
 
-Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
+A client authenticates with what its keys hold, and both directions connect the same way. With
+`'auth_token'` the broker takes the client's role from the token. With `'tls_cert_file'` and
+`'tls_key_file'` alone it takes the role from the certificate, which the client presents in the TLS
+handshake. With both, the token names the role and the certificate satisfies a broker that requires
+one on connect. A client with neither presents no credential.
+
+The Pulsar driver makes one attempt at a connection or an operation, and the host owns every retry.
+An ingestor that loses its broker shows the failure as its transient error and reconnects on its
+`RETRY POLICY`, or on the reconnect policy under `MODE NO ACK`. A consumer of one partition of a
+partitioned topic that cannot reconnect at once rejoins within 30 seconds instead, while the
+partitions it did not lose keep flowing.
+
+An ingestor whose client cannot connect when its domain starts does not start on the node that runs
+it, and that node keeps trying until the client connects, so the ingestor comes up once the broker
+can be reached. A failure that `START` reports names its cause: a broker that refuses the
+connection, such as for a missing or rejected credential, shows
+`failed to connect PULSAR client: the PULSAR broker refused the connection with AuthenticationError: ...`,
+and a connection that never opened, such as a TLS handshake the broker or the client refused, shows
+`no connection to the PULSAR broker opened` with the driver's error beneath it.
 
 In an `ACK` mode the ingestor acknowledges the messages a batch read from each topic in one
 acknowledgement and waits for the broker's answer, within the client's 30-second operation

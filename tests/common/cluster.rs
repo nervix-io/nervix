@@ -90,8 +90,8 @@ use nervix_server::{
     },
 };
 use pulsar::{
-    ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
-    consumer::InitialPosition as PulsarInitialPosition,
+    Authentication, ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType,
+    TokioExecutor, consumer::InitialPosition as PulsarInitialPosition,
 };
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
@@ -121,8 +121,8 @@ use super::{
     command_recovery::LeaderRoutes,
     dependencies::{
         DependencyEndpoints, KAFKA_ADDR, MQTT_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
-        PULSAR_ADMIN_ADDR, PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT,
-        SQS_TLS_ENDPOINT,
+        PULSAR_ADMIN_ADDR, PULSAR_AUTH_ADDR, PULSAR_AUTH_TOKEN, PULSAR_TLS_ADDR, RABBITMQ_ADDR,
+        REDIS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
     },
     kafka_group_member::ExternalKafkaGroupMember,
     nats_observer::NatsObserver,
@@ -2428,6 +2428,11 @@ impl Cluster {
         publish_pulsar_tls(&self.dependencies, topic, payload).await
     }
 
+    /// Publishes to the broker that authenticates its clients, with the token it accepts.
+    pub(crate) async fn publish_pulsar_auth(&self, topic: &str, payload: &str) -> io::Result<()> {
+        publish_pulsar_auth(&self.dependencies, topic, payload).await
+    }
+
     pub(crate) async fn limit_pulsar_topic_message_size(
         &self,
         topic: &str,
@@ -2952,6 +2957,11 @@ impl Cluster {
 
     pub(crate) async fn observe_pulsar_tls(&self, topic: &str) -> io::Result<BrokerObserver> {
         observe_pulsar_tls(&self.dependencies, topic).await
+    }
+
+    /// Observes a topic of the broker that authenticates its clients, with the token it accepts.
+    pub(crate) async fn observe_pulsar_auth(&self, topic: &str) -> io::Result<BrokerObserver> {
+        observe_pulsar_auth(&self.dependencies, topic).await
     }
 
     pub(crate) async fn observe_sqs(&self, queue: &str) -> io::Result<BrokerObserver> {
@@ -5547,7 +5557,7 @@ async fn publish_pulsar(
     topic: &str,
     payload: &str,
 ) -> io::Result<()> {
-    publish_pulsar_with_addr(dependencies.get(PULSAR_ADDR)?, None, topic, payload).await
+    publish_pulsar_with_addr(dependencies.get(PULSAR_ADDR)?, None, None, topic, payload).await
 }
 
 async fn publish_pulsar_tls(
@@ -5558,15 +5568,40 @@ async fn publish_pulsar_tls(
     publish_pulsar_with_addr(
         dependencies.get(PULSAR_TLS_ADDR)?,
         Some(dependencies.tls_ca_pem()?),
+        None,
         topic,
         payload,
     )
     .await
 }
 
+async fn publish_pulsar_auth(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    payload: &str,
+) -> io::Result<()> {
+    publish_pulsar_with_addr(
+        dependencies.get(PULSAR_AUTH_ADDR)?,
+        None,
+        Some(pulsar_token_authentication(dependencies)?),
+        topic,
+        payload,
+    )
+    .await
+}
+
+/// The credential the broker that authenticates its clients accepts.
+fn pulsar_token_authentication(dependencies: &DependencyEndpoints) -> io::Result<Authentication> {
+    Ok(Authentication {
+        name: "token".to_string(),
+        data: dependencies.get(PULSAR_AUTH_TOKEN)?.as_bytes().to_vec(),
+    })
+}
+
 async fn publish_pulsar_with_addr(
     addr: &str,
     ca_certificate_chain: Option<Vec<u8>>,
+    authentication: Option<Authentication>,
     topic: &str,
     payload: &str,
 ) -> io::Result<()> {
@@ -5577,6 +5612,9 @@ async fn publish_pulsar_with_addr(
             let mut builder = Pulsar::builder(addr, TokioExecutor);
             if let Some(ca_certificate_chain) = ca_certificate_chain.clone() {
                 builder = builder.with_certificate_chain(ca_certificate_chain);
+            }
+            if let Some(authentication) = authentication.clone() {
+                builder = builder.with_auth(authentication);
             }
             let pulsar: Pulsar<_> = builder.build().await.map_err(io::Error::other)?;
             let mut producer = pulsar
@@ -6630,7 +6668,7 @@ async fn observe_pulsar(
     dependencies: &DependencyEndpoints,
     topic: &str,
 ) -> io::Result<BrokerObserver> {
-    observe_pulsar_with_addr(dependencies.get(PULSAR_ADDR)?, None, topic).await
+    observe_pulsar_with_addr(dependencies.get(PULSAR_ADDR)?, None, None, topic).await
 }
 
 async fn observe_pulsar_tls(
@@ -6640,6 +6678,20 @@ async fn observe_pulsar_tls(
     observe_pulsar_with_addr(
         dependencies.get(PULSAR_TLS_ADDR)?,
         Some(dependencies.tls_ca_pem()?),
+        None,
+        topic,
+    )
+    .await
+}
+
+async fn observe_pulsar_auth(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+) -> io::Result<BrokerObserver> {
+    observe_pulsar_with_addr(
+        dependencies.get(PULSAR_AUTH_ADDR)?,
+        None,
+        Some(pulsar_token_authentication(dependencies)?),
         topic,
     )
     .await
@@ -6648,6 +6700,7 @@ async fn observe_pulsar_tls(
 async fn observe_pulsar_with_addr(
     addr: &str,
     ca_certificate_chain: Option<Vec<u8>>,
+    authentication: Option<Authentication>,
     topic: &str,
 ) -> io::Result<BrokerObserver> {
     let subscription = format!(
@@ -6666,6 +6719,9 @@ async fn observe_pulsar_with_addr(
             let mut builder = Pulsar::builder(addr, TokioExecutor);
             if let Some(ca_certificate_chain) = ca_certificate_chain.clone() {
                 builder = builder.with_certificate_chain(ca_certificate_chain);
+            }
+            if let Some(authentication) = authentication.clone() {
+                builder = builder.with_auth(authentication);
             }
             let pulsar: Pulsar<_> = builder.build().await.map_err(io::Error::other)?;
             let mut consumer = pulsar

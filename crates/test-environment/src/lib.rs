@@ -65,6 +65,20 @@ pub use postgres_clients::PostgresClients;
 use reaper::ResourceReaper;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+/// The key the authenticating Pulsar broker verifies tokens with, in base64. It protects nothing
+/// outside that broker's own scenario container.
+const PULSAR_AUTH_SIGNING_KEY: &str = "bmVydml4LXNjZW5hcmlvLXB1bHNhci10b2tlbi1rZXk=";
+/// The role [`PULSAR_AUTH_ACCEPTED_TOKEN`] names, which is also the broker's own superuser.
+const PULSAR_AUTH_ROLE: &str = "nervix";
+/// An HS256 token for [`PULSAR_AUTH_ROLE`], signed with [`PULSAR_AUTH_SIGNING_KEY`].
+const PULSAR_AUTH_ACCEPTED_TOKEN: &str =
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJuZXJ2aXgifQ.zWV7XjUC1T7Ax-6JB6dR4YB0uVZUiIfkGo48cpdyuo0";
+/// The claims of [`PULSAR_AUTH_ACCEPTED_TOKEN`] signed with another key.
+const PULSAR_AUTH_FORGED: &str =
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJuZXJ2aXgifQ.jsC6MyqBudjrNmsNb6km1OQKy7pWG5Uj4ObwGes15eA";
+/// A few scenarios run on the authenticating broker, so it takes far less memory than the shared
+/// one beside it.
+const PULSAR_AUTH_MEMORY: &str = "-Xms512m -Xmx1g -XX:MaxDirectMemorySize=1g";
 const REUSABLE_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const TEST_CONCURRENCY_FACTOR_ENV: &str = "NERVIX_TEST_CONCURRENCY_FACTOR";
 const TESTCONTAINERS_MODE_ENV: &str = "NERVIX_TESTCONTAINERS_MODE";
@@ -160,6 +174,19 @@ pub const KAFKA_DOCKER_NETWORK: &str = "kafka_docker_network";
 pub const PULSAR_ADDR: &str = "pulsar_addr";
 pub const PULSAR_TLS_ADDR: &str = "pulsar_tls_addr";
 pub const PULSAR_ADMIN_ADDR: &str = "pulsar_admin_addr";
+/// The TLS port of the Pulsar broker, dialled through a loopback address its certificate does not
+/// name.
+pub const PULSAR_TLS_UNNAMED_ADDR: &str = "pulsar_tls_unnamed_addr";
+/// The plaintext port of the broker that authenticates its clients, which refuses a client without
+/// [`PULSAR_AUTH_TOKEN`].
+pub const PULSAR_AUTH_ADDR: &str = "pulsar_auth_addr";
+/// The TLS port of the broker that authenticates its clients, which refuses a client that presents
+/// no certificate of the scenario certificate authority.
+pub const PULSAR_AUTH_TLS_ADDR: &str = "pulsar_auth_tls_addr";
+/// A token the broker at [`PULSAR_AUTH_ADDR`] accepts.
+pub const PULSAR_AUTH_TOKEN: &str = "pulsar_auth_token";
+/// A well-formed token signed by a key the broker at [`PULSAR_AUTH_ADDR`] does not hold.
+pub const PULSAR_AUTH_FORGED_TOKEN: &str = "pulsar_auth_forged_token";
 pub const RABBITMQ_ADDR: &str = "rabbitmq_addr";
 pub const RABBITMQ_MANAGEMENT_ADDR: &str = "rabbitmq_management_addr";
 pub const RABBITMQ_TLS_ADDR: &str = "rabbitmq_tls_addr";
@@ -287,6 +314,8 @@ pub enum ContainerReadiness {
     Http {
         port: ContainerPort,
         path: &'static str,
+        /// The token a dependency that authenticates its HTTP API takes for this request.
+        bearer_token: Option<&'static str>,
     },
     Running,
 }
@@ -527,6 +556,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                 ContainerReadiness::Http {
                     port: 8080.tcp(),
                     path: namespace_path,
+                    bearer_token: None,
                 },
                 "Pulsar public/default namespace",
                 || {
@@ -565,8 +595,102 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             PULSAR_TLS_ADDR,
             format!("pulsar+ssl://127.0.0.1:{tls_port}"),
         );
+        self.endpoints.insert(
+            PULSAR_TLS_UNNAMED_ADDR,
+            format!("pulsar+ssl://127.0.0.2:{tls_port}"),
+        );
         self.endpoints
             .insert(PULSAR_ADMIN_ADDR, format!("http://127.0.0.1:{admin_port}"));
+        self.containers.push(RunningContainer::Generic(container));
+        Ok(())
+    }
+
+    /// A second standalone broker that authenticates every client: its plaintext port takes a
+    /// token, and its TLS port also requires a certificate of the scenario certificate authority.
+    /// A scenario on this broker cannot disturb the shared one, which accepts every client.
+    pub async fn start_pulsar_auth(&mut self) -> io::Result<()> {
+        if !self.mark_starting("pulsar-auth").await? {
+            return Ok(());
+        }
+        let tls = self.ensure_tls()?.clone();
+        let start_script = format!(
+            r#"#!/bin/sh
+set -eu
+config=/tmp/standalone-auth.conf
+cp /pulsar/conf/standalone.conf "$config"
+cat >>"$config" <<'EOF'
+brokerServicePortTls=6651
+webServicePortTls=8443
+tlsEnabled=true
+tlsCertificateFilePath=/pulsar/certs/node.pem
+tlsKeyFilePath=/pulsar/certs/node-key.pem
+tlsTrustCertsFilePath=/pulsar/certs/ca.pem
+tlsAllowInsecureConnection=false
+tlsRequireTrustedClientCertOnConnect=true
+authenticationEnabled=true
+authenticationProviders=org.apache.pulsar.broker.authentication.AuthenticationProviderToken,org.apache.pulsar.broker.authentication.AuthenticationProviderTls
+tokenSecretKey=data:;base64,{PULSAR_AUTH_SIGNING_KEY}
+brokerClientAuthenticationPlugin=org.apache.pulsar.client.impl.auth.AuthenticationToken
+brokerClientAuthenticationParameters=token:{PULSAR_AUTH_ACCEPTED_TOKEN}
+superUserRoles={PULSAR_AUTH_ROLE}
+EOF
+exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c "$config"
+"#
+        );
+        let namespace_path = "/admin/v2/namespaces/public/default";
+        let readiness_client = HttpReadiness::client()?;
+        let container = self
+            .start_container_with_readiness(
+                "pulsar-auth",
+                ContainerReadiness::Http {
+                    port: 8080.tcp(),
+                    path: namespace_path,
+                    bearer_token: Some(PULSAR_AUTH_ACCEPTED_TOKEN),
+                },
+                "authenticated Pulsar public/default namespace",
+                || {
+                    GenericImage::new("apachepulsar/pulsar", "4.1.0")
+                        .with_exposed_port(6650.tcp())
+                        .with_exposed_port(6651.tcp())
+                        .with_exposed_port(8080.tcp())
+                        .with_wait_for(WaitFor::http(
+                            HttpWaitStrategy::new(namespace_path)
+                                .with_port(8080.tcp())
+                                .with_client(readiness_client.clone())
+                                .with_bearer_auth(PULSAR_AUTH_ACCEPTED_TOKEN)
+                                .with_expected_status_code(200_u16),
+                        ))
+                        .with_env_var("PULSAR_MEM", PULSAR_AUTH_MEMORY)
+                        .with_copy_to(
+                            CopyTargetOptions::new("/pulsar/bin/nervix-start-auth.sh")
+                                .with_mode(0o755),
+                            start_script.clone().into_bytes(),
+                        )
+                        .with_copy_to("/pulsar/certs/ca.pem", tls.ca_pem.clone())
+                        .with_copy_to("/pulsar/certs/node.pem", tls.node_pem.clone())
+                        .with_copy_to(
+                            CopyTargetOptions::new("/pulsar/certs/node-key.pem").with_mode(0o644),
+                            tls.node_key_pem.clone(),
+                        )
+                        .with_cmd(["sh", "/pulsar/bin/nervix-start-auth.sh"])
+                        .with_startup_timeout(STARTUP_TIMEOUT)
+                },
+            )
+            .await?;
+        let plaintext_port = mapped_port(&container, 6650, "authenticated Pulsar").await?;
+        let tls_port = mapped_port(&container, 6651, "authenticated Pulsar TLS").await?;
+        self.endpoints.insert(
+            PULSAR_AUTH_ADDR,
+            format!("pulsar://127.0.0.1:{plaintext_port}"),
+        );
+        self.endpoints.insert(
+            PULSAR_AUTH_TLS_ADDR,
+            format!("pulsar+ssl://127.0.0.1:{tls_port}"),
+        );
+        self.endpoints
+            .insert(PULSAR_AUTH_TOKEN, PULSAR_AUTH_ACCEPTED_TOKEN.to_string());
+        self.endpoints
+            .insert(PULSAR_AUTH_FORGED_TOKEN, PULSAR_AUTH_FORGED.to_string());
         self.containers.push(RunningContainer::Generic(container));
         Ok(())
     }
@@ -2444,12 +2568,16 @@ async fn wait_for_container<I: Image>(
         ContainerReadiness::MappedTcp(port) => {
             wait_for_container_tcp(container, port, dependency).await
         }
-        ContainerReadiness::Http { port, path } => {
+        ContainerReadiness::Http {
+            port,
+            path,
+            bearer_token,
+        } => {
             let host_port = container
                 .get_host_port_ipv4(port)
                 .await
                 .map_err(testcontainers_error(dependency))?;
-            HttpReadiness::new(host_port, path)
+            HttpReadiness::new(host_port, path, bearer_token)
                 .wait(REUSABLE_READY_TIMEOUT)
                 .await
                 .map_err(|error| {

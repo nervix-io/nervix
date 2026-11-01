@@ -165,6 +165,7 @@ tags = [
   "@websocket_declaration_lifecycle",
   "@mqtt_source_retirement",
   "@pulsar_source_retirement",
+  "@pulsar_ingestor_reconnect",
   "@forced_failover_delivery",
   "@mqtt_parallel_gather_at_quiesce",
   "@sqs_receive_at_quiesce",
@@ -2558,6 +2559,26 @@ scenario = "An MQTT input moves away from an unavailable endpoint without retain
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "The ingestor loop's failed read, its resume on the declared retry policy and the consumer it opens again, with no driver retry between a lost broker and the host. Broker I/O, TLS and async waits are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/pulsar_client_authentication.feature"
+id = "scenario.pulsar-ingestor-reconnect"
+invariant = "A Pulsar ingestor that loses its broker reports each failed reconnect to the host, whose backoff grows on its RETRY POLICY, and clears its status once the broker returns, on one and three nodes."
+invocation = "scenarios"
+scenario = "A Pulsar ingestor leaves reconnecting to its declared RETRY POLICY"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the ingestor loop's failed read, its resume on the declared retry policy and the consumer it opens again, with no driver retry between a lost broker and the host. Broker I/O, TLS and async waits are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/pulsar_client_authentication.feature"
+id = "stress.pulsar-ingestor-reconnect"
+invariant = "A Pulsar ingestor that loses its broker reports each failed reconnect to the host, whose backoff grows on its RETRY POLICY, and clears its status once the broker returns, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "A Pulsar ingestor leaves reconnecting to its declared RETRY POLICY"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Typed input retirement during domain rebuild after source tasks stop, removing the Pulsar subscription a dropped ingestor owned. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
 examples = 4
 feature = "tests/features/runtime/pulsar_subscriptions.feature"
@@ -3409,6 +3430,8 @@ workloads = [
   "stress.pulsar-subscription-replacement",
   "scenario.pulsar-subscription-retention",
   "stress.pulsar-subscription-retention",
+  "scenario.pulsar-ingestor-reconnect",
+  "stress.pulsar-ingestor-reconnect",
   "scenario.websocket-source-drop",
   "scenario.websocket-source-reconnect",
   "scenario.websocket-source-move",
