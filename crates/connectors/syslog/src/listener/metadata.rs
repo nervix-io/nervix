@@ -174,43 +174,41 @@ mod tests {
                 let count = bytes.len().min(input.len());
                 input[..count].copy_from_slice(&bytes[..count]);
                 let port = u16::from_be_bytes([input[2], input[3]]);
-                let address;
-                if input[1] & 1 == 0 {
-                    address = SocketAddr::from(([input[4], input[5], input[6], input[7]], port));
+                let address = if input[1] & 1 == 0 {
+                    SocketAddr::from(([input[4], input[5], input[6], input[7]], port))
                 } else {
                     let mut segments = [0_u16; 8];
-                    for (segment, pair) in segments.iter_mut().zip(input[4..20].chunks_exact(2)) {
+                    for (segment, pair) in segments.iter_mut().zip(input[4..20].as_chunks::<2>().0)
+                    {
                         *segment = u16::from_be_bytes([pair[0], pair[1]]);
                     }
-                    address = SocketAddr::from((segments, port));
-                }
-                let peer;
-                let transport;
+                    SocketAddr::from((segments, port))
+                };
                 let mut expected_subject = Value::Absent;
-                match input[0] % 3 {
-                    0 => {
-                        peer = SyslogPeer::Udp(address);
-                        transport = "udp";
-                    }
-                    1 => {
-                        peer = SyslogPeer::Tcp(address);
-                        transport = "tcp";
-                    }
+                let (peer, transport) = match input[0] % 3 {
+                    0 => (SyslogPeer::Udp(address), "udp"),
+                    1 => (SyslogPeer::Tcp(address), "tcp"),
                     _ => {
                         let mut subject = None;
                         if input[20] & 1 != 0 {
-                            let mut name = String::from("CN=");
-                            for byte in &input[21..] {
-                                let letter = b"abcdefghijklmnopqrstuvwxyz"[usize::from(byte % 26)];
-                                name.push(char::from(letter));
+                            let mut name = String::new();
+                            if input[20] & 2 != 0 {
+                                name.push_str("CN=");
+                                for byte in &input[21..] {
+                                    let letter =
+                                        b"abcdefghijklmnopqrstuvwxyz"[usize::from(byte % 26)];
+                                    name.push(char::from(letter));
+                                }
                             }
                             expected_subject = Value::String(name.clone());
                             subject = Some(name);
                         }
-                        peer = SyslogPeer::Tls(Arc::new(SyslogTlsPeer { address, subject }));
-                        transport = "tls";
+                        (
+                            SyslogPeer::Tls(Arc::new(SyslogTlsPeer { address, subject })),
+                            "tls",
+                        )
                     }
-                }
+                };
                 let message = SyslogListenerIngestorMessage::new(bytes.to_vec(), peer);
                 let row = message.metadata();
                 assert_eq!(
