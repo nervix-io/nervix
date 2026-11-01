@@ -62,6 +62,90 @@ pub(crate) fn validate_resource_parameters(
     Ok(())
 }
 
+fn validate_ingestor_header_parameters(
+    domain: &DomainName,
+    ingestor: &nervix_models::CreateIngestor,
+    parameters: &ClusterParameterValues,
+    check: impl Fn(ClusterParameterKey, u64, u64) -> error_stack::Result<(), RegistryError>,
+) -> error_stack::Result<(), RegistryError> {
+    if let Some(nervix_models::IngestorEntity::Websockets(
+        nervix_models::WebsocketsIngestor::Connection(source),
+    )) = ingestor.input.transport_entity()
+    {
+        let headers = nervix_models::WebsocketsUpgradeHeaders::parse(&source.headers)
+            .change_context(RegistryError::InvalidWebsocketsUpgradeHeaders {
+                domain: domain.clone(),
+                ingestor: ingestor.name.clone().into(),
+            })?;
+        check(
+            ClusterParameterKey::HttpHeaderFields,
+            headers.iter().count().arch_into(),
+            parameters.http_header_fields(),
+        )?;
+        let mut total = 0_u64;
+        for (name, value) in headers.iter() {
+            let bytes = name
+                .as_str()
+                .len()
+                .checked_add(value.as_str().len())
+                .assured("literal header bytes fit the process address space");
+            let bytes: u64 = bytes.arch_into();
+            check(
+                ClusterParameterKey::HttpHeaderBytes,
+                bytes,
+                parameters.http_header_bytes(),
+            )?;
+            total = total
+                .checked_add(bytes)
+                .assured("literal headers fit the process address space");
+        }
+        check(
+            ClusterParameterKey::HttpHeaderBytes,
+            total,
+            parameters.http_header_bytes(),
+        )?;
+    }
+    if let Some(nervix_models::IngestorEntity::Http(nervix_models::HttpIngestor::Request(source))) =
+        ingestor.input.transport_entity()
+    {
+        let mut headers = std::collections::BTreeMap::<String, u64>::new();
+        for header in &source.headers {
+            let bytes = header
+                .name
+                .len()
+                .checked_add(header.value.len())
+                .assured("literal header bytes fit the process address space");
+            check(
+                ClusterParameterKey::HttpHeaderBytes,
+                bytes.arch_into(),
+                parameters.http_header_bytes(),
+            )?;
+            headers.insert(
+                header.name.to_ascii_lowercase(),
+                header.value.len().arch_into(),
+            );
+        }
+        check(
+            ClusterParameterKey::HttpHeaderFields,
+            headers.len().arch_into(),
+            parameters.http_header_fields(),
+        )?;
+        let total = headers.iter().fold(0_u64, |total, (name, value_bytes)| {
+            total
+                .checked_add(name.len().arch_into())
+                .assured("literal headers fit the process address space")
+                .checked_add(*value_bytes)
+                .assured("literal headers fit the process address space")
+        });
+        check(
+            ClusterParameterKey::HttpHeaderBytes,
+            total,
+            parameters.http_header_bytes(),
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_model_parameters<'a>(
     domain: &DomainName,
     models: impl IntoIterator<Item = &'a Model>,
@@ -83,83 +167,7 @@ pub(crate) fn validate_model_parameters<'a>(
         };
         match model {
             Model::Ingestor(ingestor) => {
-                if let Some(nervix_models::IngestorEntity::Websockets(
-                    nervix_models::WebsocketsIngestor::Connection(source),
-                )) = ingestor.input.transport_entity()
-                {
-                    let headers =
-                        nervix_models::WebsocketsUpgradeHeaders::parse(&source.headers)
-                            .change_context(RegistryError::InvalidWebsocketsUpgradeHeaders {
-                                domain: domain.clone(),
-                                ingestor: ingestor.name.clone().into(),
-                            })?;
-                    check(
-                        ClusterParameterKey::HttpHeaderFields,
-                        headers.iter().count().arch_into(),
-                        parameters.http_header_fields(),
-                    )?;
-                    let mut total = 0_u64;
-                    for (name, value) in headers.iter() {
-                        let bytes = name
-                            .as_str()
-                            .len()
-                            .checked_add(value.as_str().len())
-                            .assured("literal header bytes fit the process address space");
-                        let bytes: u64 = bytes.arch_into();
-                        check(
-                            ClusterParameterKey::HttpHeaderBytes,
-                            bytes,
-                            parameters.http_header_bytes(),
-                        )?;
-                        total = total
-                            .checked_add(bytes)
-                            .assured("literal headers fit the process address space");
-                    }
-                    check(
-                        ClusterParameterKey::HttpHeaderBytes,
-                        total,
-                        parameters.http_header_bytes(),
-                    )?;
-                }
-                if let Some(nervix_models::IngestorEntity::Http(
-                    nervix_models::HttpIngestor::Request(source),
-                )) = ingestor.input.transport_entity()
-                {
-                    let mut headers = std::collections::BTreeMap::<String, u64>::new();
-                    for header in &source.headers {
-                        let bytes = header
-                            .name
-                            .len()
-                            .checked_add(header.value.len())
-                            .assured("literal header bytes fit the process address space");
-                        check(
-                            ClusterParameterKey::HttpHeaderBytes,
-                            bytes.arch_into(),
-                            parameters.http_header_bytes(),
-                        )?;
-                        headers.insert(
-                            header.name.to_ascii_lowercase(),
-                            header.value.len().arch_into(),
-                        );
-                    }
-                    check(
-                        ClusterParameterKey::HttpHeaderFields,
-                        headers.len().arch_into(),
-                        parameters.http_header_fields(),
-                    )?;
-                    let total = headers.iter().fold(0_u64, |total, (name, value_bytes)| {
-                        total
-                            .checked_add(name.len().arch_into())
-                            .assured("literal headers fit the process address space")
-                            .checked_add(*value_bytes)
-                            .assured("literal headers fit the process address space")
-                    });
-                    check(
-                        ClusterParameterKey::HttpHeaderBytes,
-                        total,
-                        parameters.http_header_bytes(),
-                    )?;
-                }
+                validate_ingestor_header_parameters(domain, ingestor, parameters, check)?;
             }
             Model::Udf(udf) => check(
                 ClusterParameterKey::UdfCodeBytes,
