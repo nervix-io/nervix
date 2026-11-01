@@ -277,12 +277,18 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
         EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => {
             located(ConnectorKind::Nats, "SUBJECT", "nats_publish_subject", &[])
         }
-        EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => located(
-            ConnectorKind::Sqs,
-            "QUEUE",
-            "sqs_queue",
-            &[("FIFO GROUP", false)],
-        ),
+        EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => EmitterSurface {
+            envelope: &[
+                EnvelopeClauseKind::Delay,
+                EnvelopeClauseKind::DeduplicationId,
+            ],
+            ..located(
+                ConnectorKind::Sqs,
+                "QUEUE",
+                "sqs_queue",
+                &[("FIFO GROUP", false), ("SEND", true)],
+            )
+        },
         EmitterEntityKind::ZeroMq(ZeroMqEmitterEntity::Push) => {
             unlocated(ConnectorKind::ZeroMq, &[])
         }
@@ -643,11 +649,14 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
                 .runtime_capabilities()
         ),
         [
-            "MODE SINGLE",
-            "MODE BATCH",
+            "MODE ACK",
             "FIFO GROUP <expression>",
             "FIFO GROUP FROM BRANCH",
+            "SEND SINGLE",
+            "SEND BATCH",
             "BATCH",
+            "DELAY",
+            "DEDUPLICATION ID",
             "STALLED PEER timeout_ms",
         ]
     );

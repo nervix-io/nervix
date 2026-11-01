@@ -251,7 +251,7 @@ current connection, retry and deadline limits.
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
   <bytes>` before `FLUSH`; other supported emitters may, with `MAX MESSAGES` from 1 to 65,536, a positive
-  whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
+  whole-unit `MAX SIZE`, at most `1MiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
   emitter's codec, and `BATCH MESSAGE` in a batching emitter's protobuf codec. A batching Kafka,
   Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, Sentry or Syslog emitter publishes each run of
   compatible records from successive Arrow carriers in one flush, one source relay and one exact
@@ -434,10 +434,14 @@ current connection, retry and deadline limits.
   `BUFFER` or `DROP` policy in generated Plexus.
 - Redis Pub/Sub uses `NO ACK` in both directions. Treat `CHANNEL` as a literal, case-preserving
   name and consult the Redis manual sections for its byte bound and unavailable header operations.
-- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`, and an emitter
-  `MODE SINGLE` or `MODE BATCH`. Treat `QUEUE` as a literal, case-preserving SQS name, and check
-  `SQS CLIENT` keys against `Ingestors` → `SQS`: `endpoint`, `region`, `access_key_id` and
-  `secret_access_key` are required, and it declares no proxy or client certificate keys.
+- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`. An emitter writes
+  its request shape, `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat
+  `QUEUE` as a literal, case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` →
+  `SQS`: `endpoint`, `region`, `access_key_id` and `secret_access_key` are required, and it
+  declares no proxy or client certificate keys. After `ENCODE USING`, an emitter may write
+  `DELAY <whole seconds from 1s to 900s>` for a standard queue or `DEDUPLICATION ID <string_expression>`
+  for a `.fifo` queue. Its `write_header` values may be `STRING`, an integer type or `BYTES`, sent
+  as `String`, `Number` and `Binary` attributes; read `Emitters` → `SQS`.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
