@@ -1019,6 +1019,20 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "metadata.channel"
+entity = "REDIS PUBSUB INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/redis_ingestion.feature", scenario = "A Redis pattern subscription delivers every channel it matches with the delivering channel and pattern as metadata" },
+]
+
+[[capability]]
+capability = "metadata.pattern"
+entity = "REDIS PUBSUB INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/redis_ingestion.feature", scenario = "A Redis pattern subscription delivers every channel it matches with the delivering channel and pattern as metadata" },
+]
+
+[[capability]]
 capability = "STALLED PEER connect_timeout_ms"
 entity = "REDIS PUBSUB INGESTOR"
 scenarios = [

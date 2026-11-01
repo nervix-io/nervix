@@ -2,8 +2,8 @@
 //! lapsed refuses a write.
 //!
 //! Layer: engines and infrastructure; arming is exposed only to test harnesses.
-//! - **Owns.** One armed refusal of a command execution's admission or finalization proposal, and
-//!   whether a proposal met it.
+//! - **Owns.** One armed refusal of a command execution's admission, domain-mutation release or
+//!   finalization proposal, and whether a proposal met it.
 //! - **Depends on.** The vocabulary's execution references and asynchronous synchronization.
 //! - **Must not know.** How the refusal is classified, answered or recovered.
 
@@ -37,6 +37,8 @@ mod enabled {
         Admission,
         /// The proposal that records the execution's outcome.
         Finalization,
+        /// The proposal that releases one domain's mutation lease after its cut.
+        DomainMutationRelease,
     }
 
     /// The refusal a test harness armed for one command execution's proposal on this node.
@@ -85,6 +87,9 @@ mod enabled {
                 }
                 ConsensusCommand::FinishCommandExecution { reference, .. } => {
                     (reference, CommandWrite::Finalization)
+                }
+                ConsensusCommand::ReleaseCommandDomainMutation { reference, .. } => {
+                    (reference, CommandWrite::DomainMutationRelease)
                 }
                 _ => return false,
             };
@@ -172,5 +177,28 @@ mod tests {
         );
         assert!(refusal.delivered(&armed, CommandWrite::Finalization).await);
         assert!(!refusal.delivered(&armed, CommandWrite::Admission).await);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_domain_mutation_release_refusal_leaves_the_next_attempt_available() {
+        let refusal = LeaseRefusal::default();
+        let armed = reference(1);
+        refusal
+            .arm(armed.clone(), CommandWrite::DomainMutationRelease)
+            .await;
+        let release = ConsensusCommand::ReleaseCommandDomainMutation {
+            reference: armed.clone(),
+            owner: owner(),
+            request_digest: [1; 32],
+            domain: DomainName::try_from("tenant").assured("the test domain is valid"),
+        };
+        assert!(refusal.take(&release).await);
+        assert!(
+            refusal
+                .delivered(&armed, CommandWrite::DomainMutationRelease)
+                .await
+        );
+        assert!(!refusal.take(&release).await);
+        assert!(!refusal.take(&finalization(armed)).await);
     }
 }
