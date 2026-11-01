@@ -2426,6 +2426,11 @@ impl Cluster {
         publish_mqtt_with_qos(&self.dependencies, topic, payload, QoS::AtLeastOnce, true).await
     }
 
+    /// Publishes `payload` at QoS 2 and returns once the broker completed its PUBCOMP exchange.
+    pub(crate) async fn publish_mqtt_qos2(&self, topic: &str, payload: &str) -> io::Result<()> {
+        publish_mqtt_with_qos(&self.dependencies, topic, payload, QoS::ExactlyOnce, true).await
+    }
+
     pub(crate) async fn publish_mqtt_burst(
         &self,
         topic: &str,
@@ -2442,6 +2447,16 @@ impl Cluster {
         count: usize,
     ) -> io::Result<()> {
         publish_mqtt_burst_with_qos(&self.dependencies, topic, payload, count, QoS::AtLeastOnce)
+            .await
+    }
+
+    pub(crate) async fn publish_mqtt_qos2_burst(
+        &self,
+        topic: &str,
+        payload: &str,
+        count: usize,
+    ) -> io::Result<()> {
+        publish_mqtt_burst_with_qos(&self.dependencies, topic, payload, count, QoS::ExactlyOnce)
             .await
     }
 

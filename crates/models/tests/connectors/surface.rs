@@ -125,7 +125,7 @@ fn source_surface(kind: IngestorEntityKind) -> IngestorSurface {
                 (IngestQuiesceKind::Drop, false),
             ],
             locator: Some(("TOPIC", "mqtt_topic_filter")),
-            options: &[("INSTANCES", false), ("SESSION", false), ("QOS", false)],
+            options: &[("INSTANCES", false), ("SESSION", true), ("QOS", true)],
         },
         IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => IngestorSurface {
             delivery: NO_ACK,
@@ -490,11 +490,17 @@ fn every_requirement_names_a_choice_its_entity_declares() {
                 .option(requirement.option)
                 .unwrap_or_else(|| panic!("{kind} declares no {}", requirement.option));
             assert!(
-                option.choice(requirement.choice).is_some(),
-                "{kind}: {} offers no {}",
-                requirement.option,
-                requirement.choice
+                !requirement.choices.is_empty(),
+                "{kind}: a requirement of {} accepts no choice",
+                requirement.option
             );
+            for choice in requirement.choices {
+                assert!(
+                    option.choice(choice).is_some(),
+                    "{kind}: {} offers no {choice}",
+                    requirement.option
+                );
+            }
         }
     }
 }
@@ -700,7 +706,7 @@ fn an_mqtt_source_answers_the_session_and_quality_of_service_it_subscribes_with(
             .chosen("QOS")
             .assured("MQTT answers its quality of service");
         assert!(matches!(session, "CLEAN" | "PERSISTENT"), "{session}");
-        assert!(matches!(qos, "0" | "1"), "{qos}");
+        assert!(matches!(qos, "0" | "1" | "2"), "{qos}");
         assert_eq!(source.chosen("INSTANCES"), None);
     }
     let kafka = IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic);
@@ -737,10 +743,20 @@ fn assert_generated_ingestor_states_what_its_entity_declares(bytes: &[u8]) {
         let delivery = declared
             .declared_delivery(source.acknowledgement().kind())
             .unwrap_or_else(|| panic!("{entity_kind} names an undeclared mode: {source:?}"));
+        assert_eq!(
+            source.unmet_delivery(),
+            None,
+            "{entity_kind} names a mode without its requirements: {source:?}"
+        );
         for requirement in delivery.requires {
-            assert_eq!(
-                source.chosen(requirement.option),
-                Some(requirement.choice),
+            let Some(chosen) = source.chosen(requirement.option) else {
+                panic!(
+                    "{entity_kind} answers for no {}: {source:?}",
+                    requirement.option
+                );
+            };
+            assert!(
+                requirement.accepts(chosen),
                 "{entity_kind} names a mode without its requirements: {source:?}"
             );
         }

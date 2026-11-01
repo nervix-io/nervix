@@ -101,6 +101,16 @@ pub(in crate::registry) fn validate_ingestor_source(
                 .map_err(|report| invalid(report.current_context().to_string()))?;
         }
     }
+    if let Some(unmet) = ingestor.input.unmet_delivery() {
+        return Err(Report::new(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: nervix_models::NodeRef::new(
+                nervix_models::ModelKind::Ingestor,
+                identifier.clone(),
+            ),
+            issue: ConnectorDeclarationIssue::Delivery(unmet),
+        }));
+    }
     let quiesce = ingestor.input.quiesce();
     if !ingestor.input.supports_quiesce(quiesce) {
         return Err(invalid(format!(

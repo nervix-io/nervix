@@ -50,7 +50,7 @@ Feature: Ingestor branch consistency
           'subscription_buffer_messages' = '1024',
           'idle_timeout_ms' = '30000'
         }; CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK
+        FROM mqtt_main TOPIC 'notifications_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -124,7 +124,7 @@ Feature: Ingestor branch consistency
         };
 
       CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_user_branch TTL 5m; CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_main TOPIC 'notifications_a_{{test_id}}' MODE NO ACK
+        FROM mqtt_main TOPIC 'notifications_a_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -133,7 +133,7 @@ Feature: Ingestor branch consistency
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG; CREATE MQTT TOPIC INGESTOR mqtt_notifications_secondary
-        FROM mqtt_secondary TOPIC 'notifications_b_{{test_id}}' MODE NO ACK
+        FROM mqtt_secondary TOPIC 'notifications_b_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
