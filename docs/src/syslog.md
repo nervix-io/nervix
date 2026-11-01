@@ -110,7 +110,7 @@ Record-specific encoding failures follow the emitter's `ON MESSAGE ERROR` policy
 
 ## Client
 
-A syslog client describes one direction-dependent socket endpoint:
+A syslog client declares one socket endpoint, which a listener binds and a collector sends to:
 
 ```plexus,ignore
 CREATE SYSLOG CLIENT <name>
@@ -122,39 +122,48 @@ CREATE SYSLOG CLIENT <name>
   };
 ```
 
-One client may be referenced by both ingestors and emitters. An ingestor binds `addr`; an emitter
-connects or sends to it.
+One client may be referenced by both ingestors and emitters while it sets only keys both sides read
+and its `addr` suits each of them.
 
-An emitter resolves the host in `addr` through the node's asynchronous resolver each time it
-opens a sender. Literal IPv4 and IPv6 addresses are used directly; hosts-file names and DNS
-answers follow the node's configured resolver and TTL policy. Opening a sender spends one budget,
-the client's `connect_timeout_ms`, 30 seconds when it is left out: name resolution first, then the
-answers in order, each with an equal share of the time left. UDP binds each socket to the answer's
-IP family and sends to the first address whose setup succeeds; TCP and TLS use the first address
-that accepts a connection, and TLS completes its handshake within that address's share. A name the
-resolver cannot answer is the emitter's transient status, with the lookup's failure, and address
-attempts that run out of the budget are its transient status naming the key and its bound. TLS
-verifies the original host from `addr`, whichever address accepted the connection. A new sender
-after a failure resolves again, so an expired answer can be replaced without restarting the node.
+A listener binds `addr` as written and asks no resolver: a host name there refuses the statement
+that binds the client. A collector resolves the host in `addr` through the node's asynchronous
+resolver each time it opens a sender. Literal IPv4 and IPv6 addresses are used directly; hosts-file
+names and DNS answers follow the node's configured resolver and TTL policy. Opening a sender spends
+one budget, the client's `connect_timeout_ms`, 30 seconds when it is left out: name resolution
+first, then the answers in order, each with an equal share of the time left. UDP binds each socket
+to the answer's IP family and sends to the first address whose setup succeeds; TCP and TLS use the
+first address that accepts a connection, and TLS completes its handshake within that address's
+share. A name the resolver cannot answer is the emitter's transient status, with the lookup's
+failure, and address attempts that run out of the budget are its transient status naming the key and
+its bound. TLS verifies the original host from `addr`, whichever address accepted the connection. A
+new sender after a failure resolves again, so an expired answer can be replaced without restarting
+the node.
 
-| Config key | Required | Meaning |
-| --- | --- | --- |
-| `protocol` | Yes | `udp`, `tcp`, or `tls` |
-| `addr` | Yes | `host:port`; bind address for ingestion and destination for emission |
-| `max_message_size` | No | Ingested-message byte cap; defaults to `131072` |
-| `framing` | No | TCP emitter framing: `octet-counting` by default or `non-transparent` |
-| `connect_timeout_ms` | No | For an emitter, positive whole milliseconds opening a new sender may take, name resolution, address attempts and TLS included; for a TLS listener, how long each accepted connection's TLS handshake may take. Defaults to 30 seconds |
-| `timeout_ms` | No | Emitter only: positive whole milliseconds writing and flushing one frame may take; unbounded when omitted |
-| `idle_timeout_ms` | No | TCP or TLS listener only: positive whole milliseconds an accepted connection may send nothing while the listener reads it before the listener closes it; unbounded when omitted |
-| `tls_cert_file` | Directional | TLS ingestor server certificate; optional emitter client certificate |
-| `tls_key_file` | Directional | Private key paired with `tls_cert_file` |
-| `tls_ca_file` | No | Ingestor client-certificate CA, or emitter server trust root |
+Every key means one thing, and belongs to the side that reads it:
 
-The SYSLOG client declaration states which side reads each key, as the generated
-[SYSLOG client reference](connector-capabilities.md#syslog-client) lists: only a listener reads
-`max_message_size` and `idle_timeout_ms`, and only a collector reads `framing` and `timeout_ms`.
-A listener takes each TCP frame's framing from the frame's first byte. Every other key is read on
-both sides.
+| Config key | Read by | Required | Meaning |
+| --- | --- | --- | --- |
+| `protocol` | Both | Yes | `udp`, `tcp`, or `tls` |
+| `addr` | Both | Yes | `host:port`. A listener's bind address, which must be a literal IP address and port; a collector's destination, which may be a name |
+| `framing` | Both | No | TCP or TLS only: `octet-counting` or `non-transparent`, and only `octet-counting` over TLS. A collector writes `octet-counting` without it; a TCP listener reads each frame's own framing without it |
+| `connect_timeout_ms` | Both | No | For a collector, positive whole milliseconds opening a new sender may take, name resolution, address attempts and TLS included; for a listener, TLS only, how long each accepted connection's TLS handshake may take. Defaults to 30 seconds |
+| `tls_cert_file` | Both | TLS listener | TLS only: a listener's server certificate, or a collector's optional client certificate |
+| `tls_key_file` | Both | TLS listener | TLS only: the private key paired with `tls_cert_file` |
+| `max_message_size` | Listener | No | The most bytes one message may hold; defaults to `131072` |
+| `idle_timeout_ms` | Listener | No | TCP or TLS only: positive whole milliseconds an accepted connection may send nothing while the listener reads it before the listener closes it; unbounded when omitted |
+| `tls_client_ca_file` | Listener | No | TLS only: the authority client certificates must chain to, which turns on client-certificate verification |
+| `timeout_ms` | Collector | No | Positive whole milliseconds writing and flushing one frame may take; unbounded when omitted |
+| `tls_ca_file` | Collector | No | TLS only: a server trust root |
+
+The generated [SYSLOG client reference](connector-capabilities.md#syslog-client) states the same
+keys from the client declaration.
+
+The client alone cannot know its side, so the statement that binds it checks the keys that side
+reads: `CREATE SYSLOG LISTENER INGESTOR` and `ALTER SYSLOG LISTENER INGESTOR ... SET FROM` for a
+listener, `CREATE SYSLOG COLLECTOR EMITTER` and `ALTER SYSLOG COLLECTOR EMITTER ... SET CLIENT` for a
+collector, and the transaction that replaces a client its entities reference with `DROP CLIENT` and
+`CREATE SYSLOG CLIENT`. A key only the other side reads refuses the statement, naming the key and
+the side that reads it.
 
 TLS file paths use normal client resource mounts. For example:
 
@@ -166,28 +175,29 @@ CREATE SYSLOG CLIENT syslog_tls
     'addr' = '0.0.0.0:6514',
     'tls_cert_file' = '{{ syslog_identity }}/server.crt',
     'tls_key_file' = '{{ syslog_identity }}/server.key',
-    'tls_ca_file' = '{{ syslog_identity }}/clients-ca.crt'
+    'tls_client_ca_file' = '{{ syslog_identity }}/clients-ca.crt'
   };
 ```
 
-For a TLS ingestor, `tls_cert_file` and `tls_key_file` are both required. Supplying
-`tls_ca_file` additionally enables mutual TLS and requires every client to present a certificate
-that chains to that CA. Without it, the server does not request client certificates.
+For a TLS listener, `tls_cert_file` and `tls_key_file` are both required. Supplying
+`tls_client_ca_file` additionally enables mutual TLS and requires every client to present a
+certificate that chains to that CA. Without it, the server does not request client certificates.
 
-For a TLS emitter, the certificate and key are optional, but must appear together when used for
+For a TLS collector, the certificate and key are optional, but must appear together when used for
 client authentication. `tls_ca_file` adds a server trust root; platform roots are used when it is
 absent. TLS verifies the server name derived from `addr`.
 
-Configuration fails with a key-specific error for an unknown protocol, malformed address,
-`framing` on UDP, non-transparent framing on TLS, a missing TLS server identity, only one half
-of an emitter client identity, or a deadline key that is not a positive whole number of
-milliseconds. It also fails for a deadline key on a client whose direction and protocol perform no
-wait that key bounds: `connect_timeout_ms` on a UDP or TCP listener's client, which neither opens
-connections nor performs a handshake, `timeout_ms` on a listener's client, which writes nothing,
-and `idle_timeout_ms` on an emitter's client or a UDP listener's, neither of which reads a
-connection. TLS keys are invalid with UDP or plain TCP.
-Startup diagnostics retain the failed TLS file, certificate, or key cause beneath the Syslog
-configuration error, with the setting or path that failed. They do not include TLS file contents.
+`CREATE SYSLOG CLIENT` refuses, naming the key, what no side can use: an unknown protocol, an `addr`
+that is not `host:port`, `framing` or `idle_timeout_ms` over UDP, non-transparent framing over TLS,
+a TLS file over UDP or plain TCP, only one half of a TLS identity, or a deadline key that is not a
+positive whole number of milliseconds. The statement that binds a client to a listener also refuses
+a host name in `addr`, a TLS client without a server identity, and `connect_timeout_ms` over UDP or
+TCP, where a listener opens no connection and performs no handshake.
+
+A TLS file that is readable but holds no usable certificate or key fails the listener's or the
+collector's start. Startup diagnostics retain the failed TLS file, certificate, or key cause beneath
+the Syslog configuration error, with the setting or path that failed. They do not include TLS file
+contents.
 
 ## Ingestor
 
@@ -240,12 +250,16 @@ what does not fit without anything counting it.
 
 ### TCP
 
-TCP follows RFC 6587. The listener accepts any number of concurrent connections and detects
-framing for every frame:
+TCP follows RFC 6587. The listener accepts any number of concurrent connections. Without `framing`,
+it detects framing for every frame:
 
 - a frame beginning with a digit uses octet counting
 - any other frame is terminated by LF; a CR immediately before the LF is removed
 - both framing forms may be interleaved on one connection
+
+With `framing`, every frame of every connection uses that framing. Under `octet-counting`, a frame
+that does not begin with an octet count is malformed and closes its connection. Under
+`non-transparent`, every frame ends at LF, so a line that begins with a digit is an ordinary frame.
 
 An octet count must be a positive decimal number with at most ten digits. Each connection holds at
 most `max_message_size` bytes, plus one octet count and its space, of what it has read but not yet
@@ -287,7 +301,7 @@ counting, so a frame that does not begin with an octet count is malformed and cl
 connection. A failed handshake closes only that connection, and so does a handshake that does not
 complete within the client's `connect_timeout_ms`, 30 seconds when it is left out, so a client that
 opens a connection and never completes its handshake holds nothing past that bound. The
-client-authentication behavior is controlled by `tls_ca_file` as described above.
+client-authentication behavior is controlled by `tls_client_ca_file` as described above.
 
 ### Quiesce
 

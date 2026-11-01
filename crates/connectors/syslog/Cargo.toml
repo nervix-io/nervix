@@ -1,5 +1,5 @@
 [package]
-description = "The Syslog source and sink transports and their shared client configuration for Nervix"
+description = "The Syslog source and sink transports for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-syslog"
@@ -21,7 +21,6 @@ shuttle = [
 testing = []
 
 [dependencies]
-ahash = { workspace = true }
 arch-into = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -32,11 +31,9 @@ nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
-nonzero_ext = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 shuttle = { workspace = true, optional = true }
-strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "io-util",
@@ -48,12 +45,12 @@ tokio = { workspace = true, features = [
 ] }
 tokio-rustls = { workspace = true }
 tracing = { workspace = true }
-url = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
 criterion = { workspace = true }
 nervix-model-harness = { workspace = true }
+nonzero_ext = { workspace = true }
 # The connection deadline checks run on a paused clock.
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 nervix-test-environment = { workspace = true }

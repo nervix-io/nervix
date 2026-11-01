@@ -175,6 +175,17 @@ macro_rules! connector_ingestors {
                     $(Self::$Variant(source) => $crate::IngestorEntityBody::chosen(source, option),)+
                 }
             }
+
+            fn validate_client_config(
+                &self,
+                config: &[$crate::ClientConfigEntry],
+            ) -> Result<(), ::error_stack::Report<$crate::ClientConfigSchemaError>> {
+                match self {
+                    $(Self::$Variant(source) => {
+                        $crate::IngestorEntityBody::validate_client_config(source, config)
+                    })+
+                }
+            }
         }
 
         $(

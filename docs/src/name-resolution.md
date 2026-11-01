@@ -459,7 +459,8 @@ Nervix-authored code cannot reach the operating system's resolver at all.
 and the `ToSocketAddrs` traits wherever Nervix code names them, and the primitive boundary's sockets
 offer a lookup only in the Turmoil build, where it answers from the simulated DNS table, as
 [Execution Primitives](./execution-primitives.md)
-describes. A dependency that resolves inside itself is outside that check, which is why [Residual
+describes. A Syslog listener binds a literal socket address, which its client's `addr` must be, so
+that bind resolves nothing; a host name there refuses the statement that binds the client. A dependency that resolves inside itself is outside that check, which is why [Residual
 Resolution](#residual-resolution) lists each one.
 
 ## Residual Resolution

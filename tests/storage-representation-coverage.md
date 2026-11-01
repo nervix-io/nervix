@@ -145,7 +145,10 @@ property retains their complete ordered trust and identity entries through both 
 Driver URLs with Nervix-owned query options include Postgres addresses, which set `sslmode` once
 to a declared choice; a TLS file conditioned on `verify-full` fixes that choice in the generated
 address, and the property retains the address, its file entries and their acceptance through
-both encodings.
+both encodings. Keys conditioned on a choice include SYSLOG's stream and TLS keys, which fix the
+generated `protocol` to a choice every one of them permits, and `host:port` addresses include
+SYSLOG's `addr`. `syslog-client-sides` separately reads every valid SYSLOG client of either side
+back through the entries that declare it and refuses a key only the other side reads.
 `models-archived-models` includes the typed `DESCRIBE CLIENT` statement and its client identity;
 the Plexus statement targets check its canonical text through both composed statement readers.
 

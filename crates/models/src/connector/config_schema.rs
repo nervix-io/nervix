@@ -59,6 +59,11 @@ pub enum ClientConfigPresence {
         option: &'static str,
         value: &'static str,
     },
+    /// The key may be written only while the named choice key selects one of these values.
+    OptionalForChoice {
+        selector: &'static str,
+        choices: &'static [&'static str],
+    },
 }
 
 /// A query option of a driver URL whose value Nervix owns rather than the driver.
@@ -156,7 +161,8 @@ impl DriverUrl {
 ///
 /// A connector whose ingestors and emitters read different keys from one client declares which
 /// side reads each; a key every entity reads means the same thing wherever the client is used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "lowercase")]
 pub enum ClientConfigReaders {
     /// Every ingestor and emitter that references the client.
     Every,
@@ -167,21 +173,23 @@ pub enum ClientConfigReaders {
 }
 
 impl ClientConfigReaders {
-    /// Whether an ingestor that reads through the client reads the key.
-    pub const fn include_ingestors(self) -> bool {
-        match self {
-            Self::Every | Self::Ingestors => true,
-            Self::Emitters => false,
+    /// Whether an entity on `side` reads the key.
+    pub const fn read_on(self, side: ClientConfigSide) -> bool {
+        match (self, side) {
+            (Self::Every, _)
+            | (Self::Ingestors, ClientConfigSide::Ingestor)
+            | (Self::Emitters, ClientConfigSide::Emitter) => true,
+            (Self::Ingestors, ClientConfigSide::Emitter)
+            | (Self::Emitters, ClientConfigSide::Ingestor) => false,
         }
     }
+}
 
-    /// Whether an emitter that writes through the client reads the key.
-    pub const fn include_emitters(self) -> bool {
-        match self {
-            Self::Every | Self::Emitters => true,
-            Self::Ingestors => false,
-        }
-    }
+/// The side of a connector an entity that binds a client sits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientConfigSide {
+    Ingestor,
+    Emitter,
 }
 
 /// A file's role, including the two halves of a TLS client identity.
@@ -206,6 +214,8 @@ pub enum ClientConfigValue {
     Url(&'static [&'static str]),
     DriverAddress,
     DriverUrl(DriverUrl),
+    /// A `host:port` address, with nothing else beside them.
+    HostPort,
     Choice(&'static [&'static str]),
     File(ClientConfigFile),
     /// Exactly the levels its template names, such as `tenant/namespace`: each nonempty, without
@@ -230,6 +240,7 @@ impl ClientConfigValue {
             Self::DriverUrl(_) => {
                 "driver URL with Nervix-owned query options, including its delegated query options"
             }
+            Self::HostPort => "host:port",
             Self::Choice(_) => "declared choice",
             Self::File(_) => "file path, with resource mount templates resolved before use",
             Self::Levels(template) => template,
@@ -308,6 +319,9 @@ impl ClientConfigValue {
             Self::DriverUrl(url) => {
                 let parsed = Url::parse(value).change_context(invalid())?;
                 url.validate(key, &parsed)?;
+            }
+            Self::HostPort => {
+                crate::HostPort::parse(value).change_context(invalid())?;
             }
             Self::DriverAddress | Self::File(_) => {
                 if value.is_empty() {
@@ -463,6 +477,18 @@ impl ClientConfigKey {
         }
     }
 
+    /// Permit this key only while the choice key `selector` selects one of `choices`.
+    pub const fn only_for_choice(
+        self,
+        selector: &'static str,
+        choices: &'static [&'static str],
+    ) -> Self {
+        Self {
+            presence: ClientConfigPresence::OptionalForChoice { selector, choices },
+            ..self
+        }
+    }
+
     pub const fn driver(self) -> Self {
         Self {
             owner: ClientConfigOwner::Driver,
@@ -561,6 +587,20 @@ pub enum ClientConfigSchemaError {
         option: &'static str,
         value: &'static str,
     },
+    #[error(
+        "client config key '{key}' requires '{selector}' to be {}",
+        .choices.join(" or ")
+    )]
+    RequiresChoice {
+        key: &'static str,
+        selector: &'static str,
+        choices: &'static [&'static str],
+    },
+    #[error("client config key '{key}' is read only by {readers}")]
+    ReadByOtherSide {
+        key: &'static str,
+        readers: ClientConfigReaders,
+    },
     #[error("client config key '{key}' is reserved for Nervix")]
     Reserved { key: String },
 }
@@ -586,6 +626,11 @@ impl ClientConfigSchema {
             } = keys[index].presence
             {
                 assert!(Self::owns_choice(keys, address, option, value));
+            }
+            if let ClientConfigPresence::OptionalForChoice { selector, choices } =
+                keys[index].presence
+            {
+                assert!(Self::selects_choices(keys, selector, choices));
             }
             index += 1;
         }
@@ -621,15 +666,47 @@ impl ClientConfigSchema {
     const fn offers_choice(owned: &[OwnedQueryOption], option: &str, value: &str) -> bool {
         let mut index = 0;
         while index < owned.len() {
-            if Self::same_name(owned[index].name, option) {
-                let choices = owned[index].choices;
+            if Self::same_name(owned[index].name, option)
+                && Self::holds_name(owned[index].choices, value)
+            {
+                return true;
+            }
+            index += 1;
+        }
+        false
+    }
+
+    /// Whether `selector` is a choice key that offers every one of `choices`, which a key
+    /// conditioned on them requires of its declaration.
+    const fn selects_choices(
+        keys: &'static [ClientConfigKey],
+        selector: &str,
+        choices: &[&str],
+    ) -> bool {
+        let mut key = 0;
+        while key < keys.len() {
+            if let ClientConfigValue::Choice(offered) = keys[key].value
+                && Self::same_name(keys[key].name, selector)
+            {
                 let mut choice = 0;
                 while choice < choices.len() {
-                    if Self::same_name(choices[choice], value) {
-                        return true;
+                    if !Self::holds_name(offered, choices[choice]) {
+                        return false;
                     }
                     choice += 1;
                 }
+                return true;
+            }
+            key += 1;
+        }
+        false
+    }
+
+    const fn holds_name(names: &[&str], name: &str) -> bool {
+        let mut index = 0;
+        while index < names.len() {
+            if Self::same_name(names[index], name) {
+                return true;
             }
             index += 1;
         }
@@ -709,6 +786,28 @@ impl ClientConfigSchema {
         self.validate_at(entries, ConfigValueStage::Rendered)
     }
 
+    /// Refuses a key only the other side reads. The client alone cannot know its side, so the
+    /// statement that binds it to an entity asks. A key this schema does not declare is the
+    /// business of [`Self::validate`].
+    pub fn validate_side(
+        self,
+        entries: &[ClientConfigEntry],
+        side: ClientConfigSide,
+    ) -> Result<(), Report<ClientConfigSchemaError>> {
+        for entry in entries {
+            let Some(key) = self.key(&entry.key) else {
+                continue;
+            };
+            if !key.readers.read_on(side) {
+                return Err(Report::new(ClientConfigSchemaError::ReadByOtherSide {
+                    key: key.name,
+                    readers: key.readers,
+                }));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_at(
         self,
         entries: &[ClientConfigEntry],
@@ -762,7 +861,41 @@ impl ClientConfigSchema {
         }
         self.validate_identity_pair(&values)?;
         self.validate_conditional_presence(&values, stage)?;
-        self.validate_query_presence(&values, stage)
+        self.validate_query_presence(&values, stage)?;
+        self.validate_choice_presence(&values, stage)
+    }
+
+    /// Holds each key conditioned on a choice key to what that key selects.
+    fn validate_choice_presence(
+        self,
+        values: &BTreeMap<&str, &str>,
+        stage: ConfigValueStage,
+    ) -> Result<(), Report<ClientConfigSchemaError>> {
+        for key in self.keys {
+            let ClientConfigPresence::OptionalForChoice { selector, choices } = key.presence else {
+                continue;
+            };
+            if !values.contains_key(key.name) {
+                continue;
+            }
+            let refused = || {
+                Report::new(ClientConfigSchemaError::RequiresChoice {
+                    key: key.name,
+                    selector,
+                    choices,
+                })
+            };
+            let Some(selected) = values.get(selector) else {
+                return Err(refused());
+            };
+            if matches!(stage, ConfigValueStage::Declared) && selected.contains("{{") {
+                continue;
+            }
+            if !choices.contains(selected) {
+                return Err(refused());
+            }
+        }
+        Ok(())
     }
 
     /// Holds each key conditioned on a Nervix-owned query option to the choice its address sets.

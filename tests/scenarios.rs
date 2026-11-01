@@ -27282,19 +27282,19 @@ async fn connect_syslog_tcp(addr: &str) -> nervix_primitives::net::TcpStream {
     }
 }
 
-/// Prepare the Syslog sender's identity and trust before opening its connection.
-fn syslog_tls_sender(
-    world: &ScenarioWorld,
-    addr: &str,
-    resource_directory: &str,
-) -> common::syslog_tls::SyslogTlsSender {
-    nervix_interconnect::install_rustls_crypto_provider();
+/// The server name a Syslog TLS test sender verifies, which its address names.
+fn syslog_tls_server_name(addr: &str) -> ServerName<'static> {
     let parsed = url::Url::parse(&format!("syslog://{addr}"))
         .unwrap_or_else(|error| panic!("invalid Syslog TLS test address '{addr}': {error}"));
     let server_name = parsed
         .host_str()
         .expect("Syslog TLS test address must have a host")
         .to_string();
+    ServerName::try_from(server_name).expect("Syslog TLS test server name must be valid")
+}
+
+/// The roots a Syslog TLS test sender trusts, from a resource directory's CA.
+fn syslog_tls_roots(world: &ScenarioWorld, resource_directory: &str) -> RootCertStore {
     let ca_pem = resource_directory_ca_pem(world, resource_directory);
     let mut roots = RootCertStore::empty();
     for certificate in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
@@ -27302,6 +27302,29 @@ fn syslog_tls_sender(
             .add(certificate.expect("Syslog TLS test CA must contain a valid certificate"))
             .expect("Syslog TLS test CA certificate must be accepted");
     }
+    roots
+}
+
+/// Prepare a Syslog sender that presents no certificate before opening its connection.
+fn syslog_tls_sender_without_identity(
+    world: &ScenarioWorld,
+    addr: &str,
+    resource_directory: &str,
+) -> common::syslog_tls::SyslogTlsSender {
+    nervix_interconnect::install_rustls_crypto_provider();
+    let config = RustlsClientConfig::builder()
+        .with_root_certificates(syslog_tls_roots(world, resource_directory))
+        .with_no_client_auth();
+    common::syslog_tls::SyslogTlsSender::new(addr.to_owned(), syslog_tls_server_name(addr), config)
+}
+
+/// Prepare the Syslog sender's identity and trust before opening its connection.
+fn syslog_tls_sender(
+    world: &ScenarioWorld,
+    addr: &str,
+    resource_directory: &str,
+) -> common::syslog_tls::SyslogTlsSender {
+    nervix_interconnect::install_rustls_crypto_provider();
     let identity_dir = resource_directory_path(world, resource_directory);
     let certificate_pem = std::fs::read(identity_dir.join("tls.crt"))
         .expect("Syslog TLS test client certificate must be readable");
@@ -27313,12 +27336,10 @@ fn syslog_tls_sender(
     let key = PrivateKeyDer::from_pem_slice(&key_pem)
         .expect("Syslog TLS test client key must be valid PEM");
     let config = RustlsClientConfig::builder()
-        .with_root_certificates(roots)
+        .with_root_certificates(syslog_tls_roots(world, resource_directory))
         .with_client_auth_cert(certificates, key)
         .expect("Syslog TLS test client identity must be valid");
-    let server_name =
-        ServerName::try_from(server_name).expect("Syslog TLS test server name must be valid");
-    common::syslog_tls::SyslogTlsSender::new(addr.to_owned(), server_name, config)
+    common::syslog_tls::SyslogTlsSender::new(addr.to_owned(), syslog_tls_server_name(addr), config)
 }
 
 #[when(
@@ -27336,6 +27357,91 @@ async fn when_syslog_tls_message_is_published_to(
     let payload = expand_placeholders(world, docstring(step));
     let frame = syslog_stream_frame("octet-counted", payload.trim());
     sender.publish(frame).await;
+}
+
+/// Publishes one frame over TLS without presenting a certificate, and states how the listener
+/// answers: `accepted` keeps the session open for the frame, and `refused` ends it during the
+/// handshake or right after the sender's finished message.
+#[when(
+    expr = "a Syslog TLS sender trusting resource directory {string} presents no certificate to \
+            {string} and is {word}"
+)]
+async fn when_a_syslog_tls_sender_presents_no_certificate(
+    world: &mut ScenarioWorld,
+    resource_directory: String,
+    addr: String,
+    outcome: String,
+    #[step] step: &Step,
+) {
+    let addr = expand_placeholders(world, &addr);
+    let sender = syslog_tls_sender_without_identity(world, &addr, &resource_directory);
+    let payload = expand_placeholders(world, docstring(step));
+    let frame = syslog_stream_frame("octet-counted", payload.trim());
+    match outcome.as_str() {
+        "accepted" => sender.publish(frame).await,
+        "refused" => sender.refused(frame).await,
+        other => panic!("unknown Syslog TLS listener answer '{other}'"),
+    }
+}
+
+/// Publishes every line of the step's text as one frame of `framing` on one connection.
+#[when(expr = "these Syslog TCP {word} frames are published to {string}")]
+async fn when_these_syslog_tcp_frames_are_published(
+    world: &mut ScenarioWorld,
+    framing: String,
+    addr: String,
+    #[step] step: &Step,
+) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let addr = expand_placeholders(world, &addr);
+    let mut frames = Vec::new();
+    for line in expand_placeholders(world, docstring(step)).lines() {
+        let message = line.trim();
+        if !message.is_empty() {
+            frames.extend_from_slice(&syslog_stream_frame(&framing, message));
+        }
+    }
+    // A listener that holds this framing to another closes the connection while this writes, so
+    // the frames reach the socket whole and the sender closes without waiting on a reply.
+    crate::common::runner_observation::observe_off_the_runner(async move {
+        let mut stream = connect_syslog_tcp(&addr).await;
+        stream
+            .write_all(&frames)
+            .await
+            .expect("failed to write the Syslog TCP frames");
+    })
+    .await;
+}
+
+/// Writes an octet-counted frame of exactly `size` payload bytes and then the step's message, on
+/// one connection: both are on the wire before the listener reads the first count.
+#[when(expr = "a Syslog TCP sender writes a {int} byte frame and then this message to {string}")]
+async fn when_a_syslog_tcp_sender_writes_a_frame_of_size_and_a_message(
+    world: &mut ScenarioWorld,
+    size: usize,
+    addr: String,
+    #[step] step: &Step,
+) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let addr = expand_placeholders(world, &addr);
+    let message = expand_placeholders(world, docstring(step));
+    let header = "<13>1 2003-10-11T22:14:15.003Z edge-1 orders 123 ID47 - ";
+    let padding = size
+        .checked_sub(header.len())
+        .unwrap_or_else(|| panic!("a {size}-byte frame cannot hold the Syslog header"));
+    let mut frames =
+        syslog_stream_frame("octet-counted", &format!("{header}{}", "x".repeat(padding)));
+    frames.extend_from_slice(&syslog_stream_frame("octet-counted", message.trim()));
+    crate::common::runner_observation::observe_off_the_runner(async move {
+        let mut stream = connect_syslog_tcp(&addr).await;
+        stream
+            .write_all(&frames)
+            .await
+            .expect("failed to write the Syslog TCP frames");
+    })
+    .await;
 }
 
 /// One message in an RFC 6587 framing, as a stream carries it.

@@ -612,7 +612,7 @@ Transport-specific schemes and keys:
 - `REDIS`: use `rediss://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`, which is primarily useful for SQS-compatible local/test endpoints. An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
 - `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
-  `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
+  `tls_key_file`; optional `tls_client_ca_file` enables required client-certificate verification.
 
 `HTTP REQUEST` and `PROMETHEUS QUERY` ingestors resolve endpoint names through the node's
 configured DNS resolver.
@@ -1803,8 +1803,9 @@ Messages expose optional `metadata.peer_addr`. The source takes no `INSTANCES` c
 application acknowledgment. Every live cluster node runs the listener; it is independent of the
 leader and restarts or joins with its owning node. See [Syslog](syslog.md) for the client keys,
 cluster lifecycle, framing, TLS, limits, and failure semantics.
-An invalid client setting or unreadable TLS file fails listener startup with the Syslog key or
-file and its underlying cause. A frame or connection failure keeps its cause in the source
+A client key the listener does not read, a host name in its `addr` or a TLS client without a server
+identity refuses the statement that binds the client. A TLS file that holds no usable certificate or
+key fails listener startup with the file and its underlying cause. A frame or connection failure keeps its cause in the source
 diagnostic. These failures do not acknowledge a message; Syslog has no application ACK.
 
 ### SQS

@@ -835,7 +835,7 @@ remain in their owning work records until that delivery.
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
 | Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
-| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
+| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does. The registry enforces that declaration where a statement binds a client, at `CREATE` and at every alteration that changes the client: an entity refuses a client that sets a key only the other side reads, naming the key and the side that reads it. A key may also be conditioned on another key's declared choice, as a SYSLOG TLS file is on `protocol`, which `CREATE CLIENT` holds it to. What an entity demands of a client beyond those declarations is the entity's own rule, which it applies at the same binding: a SYSLOG LISTENER binds only a literal socket address, requires a TLS identity, and refuses `connect_timeout_ms` where it performs no handshake. The declaration explicitly names delegated property namespaces and reserved keys. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
 composed head and canonical rendering use the vocabulary's connector kind; a console choice uses
@@ -2716,9 +2716,9 @@ failure keeps staged ACKs pending and visible until retry or drain failure; it n
 into success. A forced ending loses in-memory batches and ACK state, leaving external redelivery to
 each source's contract.
 
-Connector-owned fallible helpers return contextual reports. Syslog configuration and frame
-decoding create a report at the failed parse, read, or framing check; the source adds its
-connection or lifecycle context before the host receives it. WebSocket signaling keeps its jaq,
+Connector-owned fallible helpers return contextual reports. Syslog TLS material and frame
+decoding create a report at the failed read or framing check; the source adds its connection or
+lifecycle context before the host receives it. WebSocket signaling keeps its jaq,
 frame encoding, and transport causes beneath the compiled protocol or session failure, and reads its
 connect timeout through the vocabulary's guarded duration parser, keeping its `DurationTextError`
 beneath the invalid-timeout failure. The server
@@ -2770,9 +2770,9 @@ A refusal for room keeps the executor's report beneath the intake's dispatch fai
 loop reports with its whole chain. A context whose
 parser or driver error is its `#[source]` leaves that error out of its own message, because the
 report carries the source as the frame beneath it: a rendered chain names each cause once. A
-Syslog `max_message_size` or `addr` value that does not parse therefore reads as the key and value
-followed by the parser's error, both at the source's start and in the Syslog emitter's configuration
-diagnostic.
+Syslog `addr` that does not parse therefore reads as the key and the shape it expected, followed by
+the address's failure and the parser's error, both at the source's start and in the Syslog emitter's
+configuration diagnostic.
 
 The endpoint ingestor also reports the full ingest-group dispatch or flush chain in its runtime event
 and log. A refusal to admit unfolding remains retryable and its diagnostic retains the executor

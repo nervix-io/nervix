@@ -247,6 +247,7 @@ class InventoryTests(unittest.TestCase):
             "simd-checked-lanes",
             "simd-byte-classes",
             "simd-xml-chars",
+            "syslog-client-sides",
             "syslog-stream-framing",
             "rabbitmq-client-address",
             "syslog-structured-data",

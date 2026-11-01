@@ -428,18 +428,18 @@ fn a_key_conditioned_on_an_owned_choice_requires_its_address_to_set_it() {
 fn a_key_is_read_by_every_entity_of_its_client_unless_declared_for_one_side() {
     let shared = ClientConfigKey::optional("addr", ClientConfigValue::String);
     assert_eq!(shared.readers, ClientConfigReaders::Every);
-    assert!(shared.readers.include_ingestors());
-    assert!(shared.readers.include_emitters());
+    assert!(shared.readers.read_on(ClientConfigSide::Ingestor));
+    assert!(shared.readers.read_on(ClientConfigSide::Emitter));
 
     let intake = ClientConfigKey::IDLE_TIMEOUT.read_by_ingestors();
     assert_eq!(intake.readers, ClientConfigReaders::Ingestors);
-    assert!(intake.readers.include_ingestors());
-    assert!(!intake.readers.include_emitters());
+    assert!(intake.readers.read_on(ClientConfigSide::Ingestor));
+    assert!(!intake.readers.read_on(ClientConfigSide::Emitter));
 
     let publication = ClientConfigKey::TIMEOUT.read_by_emitters();
     assert_eq!(publication.readers, ClientConfigReaders::Emitters);
-    assert!(!publication.readers.include_ingestors());
-    assert!(publication.readers.include_emitters());
+    assert!(!publication.readers.read_on(ClientConfigSide::Ingestor));
+    assert!(publication.readers.read_on(ClientConfigSide::Emitter));
 
     // The side that reads a key changes nothing else the key declares.
     assert_eq!(
@@ -456,6 +456,137 @@ fn a_key_is_read_by_every_entity_of_its_client_unless_declared_for_one_side() {
         },
         ClientConfigKey::TIMEOUT
     );
+}
+
+const SIDED_SCHEMA: ClientConfigSchema = ClientConfigSchema::new(
+    &[
+        ClientConfigKey::TIMEOUT.read_by_emitters(),
+        ClientConfigKey::optional("transport", ClientConfigValue::Choice(&["plain", "secure"])),
+        ClientConfigKey::optional("window", ClientConfigValue::PositiveInteger).read_by_ingestors(),
+    ],
+    &[ClientConfigNamespace::Prefix("driver.")],
+    &[],
+);
+
+#[test]
+fn a_side_refuses_a_key_only_the_other_side_reads() {
+    let intake = [entry("transport", "plain"), entry("window", "4")];
+    SIDED_SCHEMA
+        .validate_side(&intake, ClientConfigSide::Ingestor)
+        .expect("ingestors read every key of this client");
+    let refused = SIDED_SCHEMA
+        .validate_side(&intake, ClientConfigSide::Emitter)
+        .expect_err("emitters do not read the window");
+    assert_eq!(
+        refused.current_context(),
+        &ClientConfigSchemaError::ReadByOtherSide {
+            key: "window",
+            readers: ClientConfigReaders::Ingestors,
+        }
+    );
+    assert_eq!(
+        refused.current_context().to_string(),
+        "client config key 'window' is read only by ingestors"
+    );
+
+    let publication = [entry("timeout_ms", "1000")];
+    SIDED_SCHEMA
+        .validate_side(&publication, ClientConfigSide::Emitter)
+        .expect("emitters read the timeout");
+    let refused = SIDED_SCHEMA
+        .validate_side(&publication, ClientConfigSide::Ingestor)
+        .expect_err("ingestors do not read the timeout");
+    assert_eq!(
+        refused.current_context().to_string(),
+        "client config key 'timeout_ms' is read only by emitters"
+    );
+}
+
+#[test]
+fn a_side_leaves_keys_it_does_not_judge_to_the_schema() {
+    let entries = [entry("driver.anything", "1"), entry("undeclared", "1")];
+    for side in [ClientConfigSide::Ingestor, ClientConfigSide::Emitter] {
+        SIDED_SCHEMA
+            .validate_side(&entries, side)
+            .expect("delegated and undeclared keys are not a side's to refuse");
+    }
+}
+
+const CHOICE_SCHEMA: ClientConfigSchema = ClientConfigSchema::new(
+    &[
+        ClientConfigKey::TLS_CA.only_for_choice("transport", &["secure", "mutual"]),
+        ClientConfigKey::required(
+            "transport",
+            ClientConfigValue::Choice(&["plain", "secure", "mutual"]),
+        ),
+    ],
+    &[],
+    &[],
+);
+
+#[test]
+fn a_key_conditioned_on_a_choice_needs_its_selector_to_select_it() {
+    for selected in ["secure", "mutual"] {
+        CHOICE_SCHEMA
+            .validate(&[entry("transport", selected), entry("tls_ca_file", "/ca")])
+            .expect("the selector selects a value the key is declared for");
+    }
+    CHOICE_SCHEMA
+        .validate(&[entry("transport", "plain")])
+        .expect("the condition binds only a key that is written");
+    let refused = CHOICE_SCHEMA
+        .validate(&[entry("transport", "plain"), entry("tls_ca_file", "/ca")])
+        .expect_err("the selector selects another value");
+    assert_eq!(
+        refused.current_context(),
+        &ClientConfigSchemaError::RequiresChoice {
+            key: "tls_ca_file",
+            selector: "transport",
+            choices: &["secure", "mutual"],
+        }
+    );
+    assert_eq!(
+        refused.current_context().to_string(),
+        "client config key 'tls_ca_file' requires 'transport' to be secure or mutual"
+    );
+}
+
+#[test]
+fn a_templated_selector_waits_for_its_rendered_value() {
+    let declared = [
+        entry("transport", "{{ selected }}"),
+        entry("tls_ca_file", "/ca"),
+    ];
+    CHOICE_SCHEMA
+        .validate(&declared)
+        .expect("a declared template is judged once it is rendered");
+    let refused = CHOICE_SCHEMA
+        .validate_rendered(&declared)
+        .expect_err("a rendered value must be a declared choice");
+    assert!(matches!(
+        refused.current_context(),
+        ClientConfigSchemaError::InvalidValue { key, .. } if key == "transport"
+    ));
+}
+
+#[test]
+fn a_host_port_value_holds_a_host_and_a_port_and_nothing_else() {
+    let key = ClientConfigKey::required("addr", ClientConfigValue::HostPort);
+    for address in ["127.0.0.1:514", "[::1]:514", "syslog.example.test:514"] {
+        key.validate(address).expect("the value is host:port");
+    }
+    for address in ["missing-port", "syslog.example.test:514/path", ""] {
+        let refused = key
+            .validate(address)
+            .expect_err("the value is not host:port");
+        assert_eq!(
+            refused.current_context(),
+            &ClientConfigSchemaError::InvalidValue {
+                key: "addr".to_string(),
+                expected: "host:port",
+            }
+        );
+    }
 }
 
 #[test]
@@ -658,8 +789,17 @@ fn bolero_schema_checked_client_entries_round_trip() {
             }
             let mut address_schemes = BTreeMap::new();
             let mut address_choices = BTreeMap::new();
+            let mut conditioned_choices: BTreeMap<&str, Vec<&[&str]>> = BTreeMap::new();
             for key in schema.keys() {
                 match key.presence {
+                    // Every key is generated, so a key conditioned on a choice narrows that
+                    // choice to what every such key permits.
+                    ClientConfigPresence::OptionalForChoice { selector, choices } => {
+                        conditioned_choices
+                            .entry(selector)
+                            .or_default()
+                            .push(choices);
+                    }
                     ClientConfigPresence::OptionalForScheme { address, scheme } => {
                         address_schemes.insert(address, scheme);
                     }
@@ -758,11 +898,28 @@ fn bolero_schema_checked_client_entries_round_trip() {
                         }
                         url
                     }
+                    ClientConfigValue::HostPort => {
+                        format!("host-{}.example.test:514", arbitrary.entropy().byte())
+                    }
                     ClientConfigValue::Choice(choices) => {
+                        let conditions = conditioned_choices.get(key.name);
+                        let mut permitted = Vec::new();
+                        for choice in choices {
+                            let held = match conditions {
+                                Some(conditions) => {
+                                    conditions.iter().all(|allowed| allowed.contains(choice))
+                                }
+                                None => true,
+                            };
+                            if held {
+                                permitted.push(*choice);
+                            }
+                        }
                         let index = arbitrary.entropy().index(
-                            NonZeroUsize::new(choices.len()).assured("a choice declares values"),
+                            NonZeroUsize::new(permitted.len())
+                                .assured("the keys a schema conditions on a choice agree on one"),
                         );
-                        choices[index].to_string()
+                        permitted[index].to_string()
                     }
                     ClientConfigValue::File(_) => {
                         format!("/mount/{}.pem", arbitrary.entropy().byte())

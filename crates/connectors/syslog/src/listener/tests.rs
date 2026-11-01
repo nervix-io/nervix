@@ -55,7 +55,7 @@ enum FrameFailure {
     OversizedOctetCount { length: usize },
     OversizedNonTransparentFrame,
     OversizedBufferedFrame,
-    NonOctetTlsFrame,
+    NonOctetFrame,
 }
 
 impl FrameFailure {
@@ -70,7 +70,7 @@ impl FrameFailure {
                 Self::OversizedNonTransparentFrame
             }
             SyslogFrameError::OversizedBufferedFrame { .. } => Self::OversizedBufferedFrame,
-            SyslogFrameError::NonOctetTlsFrame => Self::NonOctetTlsFrame,
+            SyslogFrameError::NonOctetFrame => Self::NonOctetFrame,
         }
     }
 }
@@ -94,9 +94,9 @@ fn frame_in_reads(
     stream: &[u8],
     reads: &[usize],
     max_message_size: NonZeroUsize,
-    allow_non_transparent: bool,
+    framing: Option<SyslogFraming>,
 ) -> Framing {
-    let mut decoder = StreamFrameDecoder::new(max_message_size, allow_non_transparent);
+    let mut decoder = StreamFrameDecoder::new(max_message_size, framing);
     let mut frames = Vec::new();
     let mut position = 0;
     let mut reads = reads.iter().cycle();
@@ -140,13 +140,14 @@ fn frame_in_reads(
 }
 
 /// RFC 6587 framing of a whole stream, written from the framing rules rather than from the
-/// decoder: a frame beginning with a digit is octet counted, any other is terminated by LF with a
-/// CR before it removed, and TLS admits octet counting only. A frame the stream ends inside fails
-/// when its bytes already break a rule, and is incomplete otherwise.
+/// decoder: without a declared framing a frame beginning with a digit is octet counted and any
+/// other is terminated by LF with a CR before it removed, and a declared framing holds every frame
+/// to itself. A frame the stream ends inside fails when its bytes already break a rule, and is
+/// incomplete otherwise.
 fn reference_framing(
     stream: &[u8],
     max_message_size: usize,
-    allow_non_transparent: bool,
+    framing: Option<SyslogFraming>,
 ) -> Framing {
     let mut frames = Vec::new();
     let mut rest = stream;
@@ -154,7 +155,15 @@ fn reference_framing(
         let Some(first) = rest.first() else {
             break Ending::Clean;
         };
-        if first.is_ascii_digit() {
+        let octet_counted = match framing {
+            None => first.is_ascii_digit(),
+            Some(SyslogFraming::OctetCounting) => true,
+            Some(SyslogFraming::NonTransparent) => false,
+        };
+        if octet_counted {
+            if !first.is_ascii_digit() {
+                break Ending::Failed(FrameFailure::NonOctetFrame);
+            }
             let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
             if digits > SYSLOG_FRAME_LIMITS.octet_count_digits() {
                 break Ending::Failed(FrameFailure::MalformedOctetCount);
@@ -180,8 +189,6 @@ fn reference_framing(
             };
             frames.push(payload.to_vec());
             rest = &rest[payload_start + length..];
-        } else if !allow_non_transparent {
-            break Ending::Failed(FrameFailure::NonOctetTlsFrame);
         } else {
             let Some(delimiter) = rest.iter().position(|byte| *byte == b'\n') else {
                 let pending = rest.len() - usize::from(rest.last() == Some(&b'\r'));
@@ -204,9 +211,13 @@ fn reference_framing(
     Framing { frames, ending }
 }
 
-fn whole(stream: &[u8], max_message_size: NonZeroUsize, allow_non_transparent: bool) -> Framing {
-    frame_in_reads(stream, &[], max_message_size, allow_non_transparent)
+fn whole(stream: &[u8], max_message_size: NonZeroUsize, framing: Option<SyslogFraming>) -> Framing {
+    frame_in_reads(stream, &[], max_message_size, framing)
 }
+
+/// What a TLS connection and a TCP connection that declares octet counting read.
+const OCTET_COUNTED: Option<SyslogFraming> = Some(SyslogFraming::OctetCounting);
+const NON_TRANSPARENT: Option<SyslogFraming> = Some(SyslogFraming::NonTransparent);
 
 fn frames(frames: &[&[u8]]) -> Vec<Vec<u8>> {
     frames.iter().map(|frame| frame.to_vec()).collect()
@@ -215,7 +226,7 @@ fn frames(frames: &[&[u8]]) -> Vec<Vec<u8>> {
 #[test]
 fn stream_decoder_interleaves_both_rfc6587_framings() {
     assert_eq!(
-        whole(b"5 helloalpha\r\n4 test", nonzero!(128usize), true),
+        whole(b"5 helloalpha\r\n4 test", nonzero!(128usize), None),
         Framing {
             frames: frames(&[b"hello", b"alpha", b"test"]),
             ending: Ending::Clean,
@@ -225,7 +236,7 @@ fn stream_decoder_interleaves_both_rfc6587_framings() {
 
 #[test]
 fn stream_decoder_rejects_malformed_and_oversized_frames() {
-    let failure = |stream: &[u8], max: NonZeroUsize| whole(stream, max, true).ending;
+    let failure = |stream: &[u8], max: NonZeroUsize| whole(stream, max, None).ending;
     assert_eq!(
         failure(b"12x payload", nonzero!(128usize)),
         Ending::Failed(FrameFailure::MalformedOctetCount)
@@ -247,15 +258,15 @@ fn stream_decoder_rejects_malformed_and_oversized_frames() {
 #[test]
 fn stream_decoder_limits_octet_count_prefix_to_ten_digits() {
     assert_eq!(
-        whole(b"12345678901", nonzero!(128usize), true).ending,
+        whole(b"12345678901", nonzero!(128usize), None).ending,
         Ending::Failed(FrameFailure::MalformedOctetCount)
     );
     assert_eq!(
-        whole(b"12345678901 x", nonzero!(128usize), true).ending,
+        whole(b"12345678901 x", nonzero!(128usize), None).ending,
         Ending::Failed(FrameFailure::MalformedOctetCount)
     );
     assert_eq!(
-        whole(b"1234567890", nonzero!(128usize), true).ending,
+        whole(b"1234567890", nonzero!(128usize), None).ending,
         Ending::Incomplete
     );
 }
@@ -264,7 +275,7 @@ fn stream_decoder_limits_octet_count_prefix_to_ten_digits() {
 fn stream_decoder_rejects_zero_and_leading_zero_octet_counts() {
     for stream in [b"0 ".as_slice(), b"05 hello".as_slice()] {
         assert_eq!(
-            whole(stream, nonzero!(128usize), true).ending,
+            whole(stream, nonzero!(128usize), None).ending,
             Ending::Failed(FrameFailure::MalformedOctetCount)
         );
     }
@@ -273,7 +284,7 @@ fn stream_decoder_rejects_zero_and_leading_zero_octet_counts() {
 #[test]
 fn stream_decoder_accepts_a_maximum_size_frame_with_split_crlf() {
     assert_eq!(
-        frame_in_reads(b"hello\r\n", &[6, 1], nonzero!(5usize), true),
+        frame_in_reads(b"hello\r\n", &[6, 1], nonzero!(5usize), None),
         Framing {
             frames: frames(&[b"hello"]),
             ending: Ending::Clean,
@@ -282,16 +293,31 @@ fn stream_decoder_accepts_a_maximum_size_frame_with_split_crlf() {
 }
 
 #[test]
-fn stream_decoder_rejects_non_transparent_tls_framing() {
+fn stream_decoder_holds_an_octet_counted_connection_to_its_counts() {
     assert_eq!(
-        whole(b"<13>line framed\n", nonzero!(128usize), false).ending,
-        Ending::Failed(FrameFailure::NonOctetTlsFrame)
+        whole(b"<13>line framed\n", nonzero!(128usize), OCTET_COUNTED).ending,
+        Ending::Failed(FrameFailure::NonOctetFrame)
     );
     assert_eq!(
-        whole(b"4 tls!4 tl", nonzero!(128usize), false),
+        whole(b"4 tls!4 tl", nonzero!(128usize), OCTET_COUNTED),
         Framing {
             frames: frames(&[b"tls!"]),
             ending: Ending::Incomplete,
+        }
+    );
+}
+
+#[test]
+fn a_declared_non_transparent_connection_reads_a_leading_digit_as_its_line() {
+    assert_eq!(
+        whole(
+            b"2003 line\r\n<13>next\n",
+            nonzero!(128usize),
+            NON_TRANSPARENT
+        ),
+        Framing {
+            frames: frames(&[b"2003 line", b"<13>next"]),
+            ending: Ending::Clean,
         }
     );
 }
@@ -318,30 +344,32 @@ fn every_split_of_every_stream_frames_like_one_read() {
     ];
     let max_message_size = nonzero!(24usize);
     for stream in streams {
-        let expected = reference_framing(stream, max_message_size.get(), true);
-        assert_eq!(
-            whole(stream, max_message_size, true),
-            expected,
-            "{stream:?}"
-        );
-        assert_eq!(
-            frame_in_reads(stream, &[1], max_message_size, true),
-            expected,
-            "{stream:?}"
-        );
-        for split in 1..stream.len() {
+        for framing in [None, OCTET_COUNTED, NON_TRANSPARENT] {
+            let expected = reference_framing(stream, max_message_size.get(), framing);
             assert_eq!(
-                frame_in_reads(stream, &[split, usize::MAX], max_message_size, true),
+                whole(stream, max_message_size, framing),
                 expected,
-                "{stream:?} split at {split}"
+                "{stream:?} under {framing:?}"
             );
+            assert_eq!(
+                frame_in_reads(stream, &[1], max_message_size, framing),
+                expected,
+                "{stream:?} under {framing:?}"
+            );
+            for split in 1..stream.len() {
+                assert_eq!(
+                    frame_in_reads(stream, &[split, usize::MAX], max_message_size, framing),
+                    expected,
+                    "{stream:?} under {framing:?} split at {split}"
+                );
+            }
         }
     }
 }
 
 #[test]
 fn a_read_compacts_the_bytes_framed_before_it_once() {
-    let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), true);
+    let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), None);
     assert_eq!(read_into(&mut decoder, b"5 hello5 world4 te"), Ok(18));
     assert_eq!(
         decoder.next_frame().expect("valid frame"),
@@ -368,7 +396,7 @@ fn a_read_compacts_the_bytes_framed_before_it_once() {
 
 #[test]
 fn a_line_split_across_reads_is_searched_once() {
-    let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), true);
+    let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), None);
     assert_eq!(read_into(&mut decoder, b"<13>split"), Ok(9));
     assert_eq!(decoder.next_frame().expect("a line may continue"), None);
     assert_eq!(
@@ -391,7 +419,7 @@ fn a_line_split_across_reads_is_searched_once() {
 
 #[test]
 fn an_octet_counted_payload_split_across_reads_keeps_its_count() {
-    let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), true);
+    let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), None);
     assert_eq!(read_into(&mut decoder, b"12 octet"), Ok(8));
     assert_eq!(decoder.next_frame().expect("valid prefix"), None);
     assert_eq!(
@@ -411,7 +439,7 @@ fn an_octet_counted_payload_split_across_reads_keeps_its_count() {
 #[test]
 fn a_read_never_takes_more_than_the_frame_bound_admits() {
     let max_message_size = nonzero!(16usize);
-    let mut decoder = StreamFrameDecoder::new(max_message_size, true);
+    let mut decoder = StreamFrameDecoder::new(max_message_size, None);
     let bound = max_message_size.get() + SYSLOG_FRAME_LIMITS.octet_count_prefix();
     let stream = vec![b'7'; 64];
     assert_eq!(read_into(&mut decoder, &stream), Ok(bound));
@@ -428,10 +456,15 @@ fn bolero_stream_framing_matches_the_reference_however_reads_split_it() {
     bolero::check!()
         .with_iterations(256)
         .with_max_len(512)
-        .with_type::<(u8, bool, Vec<(u8, u8)>, Vec<u8>)>()
-        .for_each(|(max, allow_non_transparent, fragments, reads)| {
+        .with_type::<(u8, u8, Vec<(u8, u8)>, Vec<u8>)>()
+        .for_each(|(max, framing, fragments, reads)| {
             let max_message_size = NonZeroUsize::new(usize::from(*max % 48) + 1)
                 .expect("one is added to the remainder");
+            let framing = match framing % 3 {
+                0 => None,
+                1 => OCTET_COUNTED,
+                _ => NON_TRANSPARENT,
+            };
             // Frames of both kinds around the size limit, with stray bytes, digits, carriage
             // returns and line feeds between them, so streams reach every failure and ending.
             let mut stream = Vec::new();
@@ -461,16 +494,12 @@ fn bolero_stream_framing_matches_the_reference_however_reads_split_it() {
                 .iter()
                 .map(|read| usize::from(*read))
                 .collect::<Vec<_>>();
-            let expected =
-                reference_framing(&stream, max_message_size.get(), *allow_non_transparent);
+            let expected = reference_framing(&stream, max_message_size.get(), framing);
             assert_eq!(
-                frame_in_reads(&stream, &reads, max_message_size, *allow_non_transparent),
+                frame_in_reads(&stream, &reads, max_message_size, framing),
                 expected
             );
-            assert_eq!(
-                whole(&stream, max_message_size, *allow_non_transparent),
-                expected
-            );
+            assert_eq!(whole(&stream, max_message_size, framing), expected);
         });
 }
 
@@ -507,7 +536,7 @@ impl AsyncRead for ScriptedStream {
 
 async fn read_connection(
     chunks: &[&[u8]],
-    allow_non_transparent: bool,
+    framing: Option<SyslogFraming>,
 ) -> (error_stack::Result<(), SyslogConnectionError>, Vec<Vec<u8>>) {
     let (tx, mut rx) = mpsc::channel(STREAM_INTAKE_QUEUE_CAPACITY);
     let (_paused, paused_rx) = watch::channel(false);
@@ -516,7 +545,7 @@ async fn read_connection(
         ScriptedStream::new(chunks),
         peer_addr,
         nonzero!(128usize),
-        allow_non_transparent,
+        framing,
         None,
         tx,
         paused_rx,
@@ -534,7 +563,7 @@ async fn read_connection(
 async fn a_connection_delivers_frames_its_reads_split() {
     let (outcome, delivered) = read_connection(
         &[b"1", b"2 octet", b" framed<13>li", b"ne\r", b"\n4 tls!"],
-        true,
+        None,
     )
     .await;
     outcome.expect("every frame was complete when the connection ended");
@@ -543,7 +572,7 @@ async fn a_connection_delivers_frames_its_reads_split() {
 
 #[nervix_primitives::test]
 async fn a_connection_that_ends_inside_a_frame_reports_it_incomplete() {
-    let (outcome, delivered) = read_connection(&[b"5 hello", b"9 trunc"], true).await;
+    let (outcome, delivered) = read_connection(&[b"5 hello", b"9 trunc"], None).await;
     let error = outcome.expect_err("the second frame never completed");
     assert!(matches!(
         error.current_context(),
@@ -554,7 +583,7 @@ async fn a_connection_that_ends_inside_a_frame_reports_it_incomplete() {
 
 #[nervix_primitives::test]
 async fn a_connection_closes_on_the_first_malformed_frame() {
-    let (outcome, delivered) = read_connection(&[b"4 tls!", b"<13>line\n"], false).await;
+    let (outcome, delivered) = read_connection(&[b"4 tls!", b"<13>line\n"], OCTET_COUNTED).await;
     let error = outcome.expect_err("TLS admits octet counting only");
     assert!(matches!(
         error.current_context(),
@@ -579,7 +608,7 @@ async fn a_decoded_frame_waiting_for_intake_survives_suspension() {
         ScriptedStream::new(&[b"6 second"]),
         peer_addr,
         nonzero!(128usize),
-        true,
+        None,
         None,
         tx,
         pause_rx,
@@ -623,8 +652,7 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
         .expect("reserve an available listener port");
     let bind_addr = reservation
         .local_addr()
-        .expect("the reserved port has an address")
-        .to_string();
+        .expect("the reserved port has an address");
     drop(reservation);
     let plan = SyslogListenerIngestorPlan::new(
         vec![
@@ -655,7 +683,7 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
         server,
         peer_addr,
         nonzero!(128usize),
-        true,
+        None,
         None,
         tx,
         paused,
@@ -667,7 +695,7 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
     assert!(failure.contains::<SyslogListenerError>());
     assert!(source.needs_resume());
 
-    let blocker = TcpListener::bind(&source.bind_addr)
+    let blocker = TcpListener::bind(source.bind_addr)
         .await
         .expect("another listener claims the retired socket's port");
     let retry_failure = source
@@ -707,7 +735,7 @@ fn listener_connection_and_frame_failures_name_their_cause_once() {
             "{:#}",
             Report::new(SyslogListenerError::Bind {
                 transport: "UDP",
-                addr: "127.0.0.1:5514".to_string(),
+                addr: SocketAddr::from(([127, 0, 0, 1], 5514)),
                 source: refused(),
             })
         ),
@@ -778,7 +806,7 @@ fn shuttle_a_decoded_frame_racing_suspension_is_handed_off_once() {
                 ScriptedStream::new(&[b"6 second"]),
                 peer_addr,
                 nonzero!(128usize),
-                true,
+                None,
                 None,
                 tx,
                 pause_rx,
@@ -866,7 +894,7 @@ impl IdleConnection {
             server,
             SocketAddr::from(([127, 0, 0, 1], 6514)),
             nonzero!(128usize),
-            true,
+            None,
             Some(idle_deadline()),
             tx,
             paused_rx,
@@ -956,7 +984,7 @@ async fn a_connection_without_an_idle_deadline_waits_for_its_sender() {
         server,
         SocketAddr::from(([127, 0, 0, 1], 6514)),
         nonzero!(128usize),
-        true,
+        None,
         None,
         tx,
         paused_rx,

@@ -18,16 +18,17 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_jaq::StatefulJaqProgram;
 use nervix_models::{
-    Assignment, AssignmentTarget, ClientConfigEntry, ClientDeadline, ClientIngestMode,
-    CodecBatchContainer, CreateClientHttp, CreateCodec, CreateEmitter, CreateIngestor,
-    CreateSchema, CreateSignalingProtocol, DomainName, EmitterEntity, EmitterEntityModel,
-    EndpointName, EnvelopeClauseForm, Expression, FieldName, HttpApplicationHeaders, HttpBodyMode,
-    HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, HttpRequestEmitter,
-    IcebergCatalogProperties, IcebergStorageBackend, IcebergTableEmitter, IngestTimestampSource,
-    IngestorInput, IngestorMetadataType, LiteralHeaderWrite, Model, ModelIndex, ModelKind,
-    ModelName, NodeRef, OtelEmitter, OtelMappings, OtelMetricKind, OtelMetricsEmitter, ParseAsType,
-    ProcessorOutput, RelayName, RouteConstruction, SchemaField, SchemaName, SignalingWireFormat,
-    SqsEmitter, SqsFifoGroup, SqsQueueEmitter, VhostName, parse_duration_text,
+    Assignment, AssignmentTarget, ClientConfigEntry, ClientConfigSide, ClientDeadline,
+    ClientIngestMode, CodecBatchContainer, CreateClientHttp, CreateCodec, CreateEmitter,
+    CreateIngestor, CreateSchema, CreateSignalingProtocol, DomainName, EmitterEntity,
+    EmitterEntityModel, EndpointName, EnvelopeClauseForm, Expression, FieldName,
+    HttpApplicationHeaders, HttpBodyMode, HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod,
+    HttpOrigin, HttpRequestEmitter, IcebergCatalogProperties, IcebergStorageBackend,
+    IcebergTableEmitter, IngestTimestampSource, IngestorEntity, IngestorInput,
+    IngestorMetadataType, LiteralHeaderWrite, Model, ModelIndex, ModelKind, ModelName, NodeRef,
+    OtelEmitter, OtelMappings, OtelMetricKind, OtelMetricsEmitter, ParseAsType, ProcessorOutput,
+    RelayName, RouteConstruction, SchemaField, SchemaName, SignalingWireFormat, SqsEmitter,
+    SqsFifoGroup, SqsQueueEmitter, VhostName, parse_duration_text,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
@@ -259,6 +260,53 @@ fn validate_client_ingest_mode(
         )));
     }
     Ok(())
+}
+
+/// Holds the client an ingestor reads through to the keys its side reads and to what its entity
+/// demands. The client alone cannot know its side, so this runs wherever a graph binds it, which
+/// is every `CREATE` and every alteration.
+pub(in crate::registry) fn validate_ingestor_client(
+    domain: &DomainName,
+    identifier: &ModelName,
+    source: &IngestorEntity,
+    client: &Model,
+) -> Result<(), Report<RegistryError>> {
+    let client = client.configured_client().verified(
+        "the caller resolved this Model as a client, and every client Model is configured",
+    );
+    let context = || RegistryError::IngestorClientConfig {
+        domain: domain.clone(),
+        ingestor: identifier.clone(),
+        kind: source.kind(),
+        client: client.name.clone(),
+    };
+    client
+        .validate_side(ClientConfigSide::Ingestor)
+        .change_context_lazy(context)?;
+    source
+        .validate_client_config(client.config)
+        .change_context_lazy(context)
+}
+
+/// Holds the client an emitter writes through to the keys its side reads, as
+/// [`validate_ingestor_client`] does for an ingestor.
+pub(in crate::registry) fn validate_emitter_client(
+    domain: &DomainName,
+    identifier: &ModelName,
+    emitter: &CreateEmitter,
+    client: &Model,
+) -> Result<(), Report<RegistryError>> {
+    let client = client.configured_client().verified(
+        "the caller resolved this Model as a client, and every client Model is configured",
+    );
+    client
+        .validate_side(ClientConfigSide::Emitter)
+        .change_context_lazy(|| RegistryError::EmitterClientConfig {
+            domain: domain.clone(),
+            emitter: identifier.clone(),
+            kind: emitter.connector.kind(),
+            client: client.name.clone(),
+        })
 }
 
 pub(in crate::registry) fn validate_emitter_publishing_contract(

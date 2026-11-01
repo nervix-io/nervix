@@ -299,6 +299,23 @@ pub(crate) enum RegistryError {
         required: ConnectorKind,
         found: ConnectorKind,
     },
+    /// An ingestor bound to a client its side or its entity cannot read, which the frame beneath
+    /// names.
+    #[error("{kind} ingestor '{ingestor}' in domain '{domain}' cannot use client '{client}'")]
+    IngestorClientConfig {
+        domain: DomainName,
+        ingestor: ModelName,
+        kind: IngestorEntityKind,
+        client: ClientName,
+    },
+    /// An emitter bound to a client its side cannot read, which the frame beneath names.
+    #[error("{kind} emitter '{emitter}' in domain '{domain}' cannot use client '{client}'")]
+    EmitterClientConfig {
+        domain: DomainName,
+        emitter: ModelName,
+        kind: EmitterEntityKind,
+        client: ClientName,
+    },
     #[error(
         "{kind} ingestor '{ingestor}' in domain '{domain}' requires a TYPE {required} endpoint, \
          but endpoint '{endpoint}' is TYPE {found}"

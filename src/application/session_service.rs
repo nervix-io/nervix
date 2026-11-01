@@ -566,6 +566,12 @@ pub(in crate::application) fn create_registry_error_response(
             format!("{err}"),
             find_identifier_span(query, &ModelName::from(endpoint)),
         ),
+        // The refused key is the frame beneath the binding's context.
+        RegistryError::IngestorClientConfig { client, .. }
+        | RegistryError::EmitterClientConfig { client, .. } => failed_at(
+            format!("{err:#}"),
+            find_identifier_span(query, &ModelName::from(client)),
+        ),
         _ => failed_at(format!("{err}"), None),
     }
 }
@@ -2258,6 +2264,35 @@ mod tests {
             infer_kind_from_error_target(&missing_target, &identifier),
             None
         );
+    }
+
+    #[test]
+    fn a_client_a_binding_refuses_names_its_key_and_underlines_the_client() {
+        let domain = DomainName::parse("default").expect("valid domain");
+        let ingestor: ModelName = named("logs");
+        let query = "CREATE SYSLOG LISTENER INGESTOR logs FROM forwarder MODE NO ACK ON QUIESCE \
+                     SUSPEND DECODE USING lines TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE \
+                     ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+        let err =
+            error_stack::Report::new(nervix_models::ClientConfigSchemaError::ReadByOtherSide {
+                key: "timeout_ms",
+                readers: nervix_models::ClientConfigReaders::Emitters,
+            })
+            .change_context(RegistryError::IngestorClientConfig {
+                domain: domain.clone(),
+                ingestor: ingestor.clone(),
+                kind: IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener),
+                client: ClientName::parse("forwarder").expect("valid client name"),
+            });
+        let response = create_registry_error_response(query, &domain, &ingestor, &err);
+        assert!(!response.succeeded());
+        assert_eq!(
+            response.message,
+            "SYSLOG LISTENER ingestor 'logs' in domain 'default' cannot use client 'forwarder': \
+             client config key 'timeout_ms' is read only by emitters"
+        );
+        assert_eq!(response.diagnostics.len(), 1);
+        assert_eq!(response.diagnostics[0].span, Some(42..51));
     }
 
     #[test]

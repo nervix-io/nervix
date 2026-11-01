@@ -13,7 +13,7 @@
 )]
 
 #[cfg(not(feature = "testing"))]
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
 #[cfg(not(feature = "testing"))]
 use nervix_models::{
@@ -120,9 +120,9 @@ impl ConfiguredFaultInjection {
     pub(in crate::runtime) fn syslog_ingestor_bind_addr(
         &self,
         _node_id: &ClusterNodeName,
-        configured: &str,
-    ) -> String {
-        configured.to_string()
+        configured: SocketAddr,
+    ) -> SocketAddr {
+        configured
     }
 
     pub(in crate::runtime) fn state_replica_polling_is_paused(&self) -> bool {

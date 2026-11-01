@@ -16,11 +16,11 @@
 use nervix_models::{
     BufferBound, BufferCapacity, BufferOverflow, ChoiceRequirement, ClientConfigFile,
     ClientConfigKey, ClientConfigNamespace, ClientConfigOwner, ClientConfigPresence,
-    ClientConfigReaders, ClientConfigValue, ClientDeclaration, ClientPooling, ConnectorKind,
-    DeclaredBounds, EmitterBatchLegality, EmitterBodyForm, EmitterEntityCapabilities,
-    EmitterEntityKind, EmitterReferenceKind, HeaderModel, IngestorEntityCapabilities,
-    IngestorEntityKind, IngestorReferenceKind, LocatorDeclaration, LocatorName, OmittedDeadline,
-    OptionDeclaration, OptionForm, OptionPresence, OptionValue, OtelEmitterEntity, OtelValueField,
+    ClientConfigValue, ClientDeclaration, ClientPooling, ConnectorKind, DeclaredBounds,
+    EmitterBatchLegality, EmitterBodyForm, EmitterEntityCapabilities, EmitterEntityKind,
+    EmitterReferenceKind, HeaderModel, IngestorEntityCapabilities, IngestorEntityKind,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OmittedDeadline, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, OtelEmitterEntity, OtelValueField,
     SYSLOG_FRAME_LIMITS, SyslogEmitterEntity, WaitBound,
 };
 use serde_json::{Value, json};
@@ -495,6 +495,12 @@ fn client_key(key: &ClientConfigKey) -> Value {
             option,
             value,
         } => format!("optional; requires `{address}` to set `{option}={value}`"),
+        ClientConfigPresence::OptionalForChoice { selector, choices } => {
+            format!(
+                "optional; requires `{selector}` to be {}",
+                choices.join(" or ")
+            )
+        }
     };
     let owner = match owner {
         ClientConfigOwner::Nervix => "Nervix; strict",
@@ -520,11 +526,7 @@ fn client_key(key: &ClientConfigKey) -> Value {
         ClientConfigValue::Choice(choices) => choices.join(" or "),
         value => value.label().to_owned(),
     };
-    let readers = match readers {
-        ClientConfigReaders::Every => "every",
-        ClientConfigReaders::Ingestors => "ingestors",
-        ClientConfigReaders::Emitters => "emitters",
-    };
+    let readers = readers.to_string();
     let file = match declared_value {
         ClientConfigValue::File(ClientConfigFile::CertificateAuthority) => {
             "TLS trust; follows the connector's documented root policy"

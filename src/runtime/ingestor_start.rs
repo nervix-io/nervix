@@ -21,6 +21,8 @@
     )
 )]
 
+use std::net::SocketAddr;
+
 use error_stack::ResultExt as _;
 
 use super::*;
@@ -142,7 +144,10 @@ impl Runtime {
         retiring
     }
 
-    pub(in crate::runtime) fn syslog_ingestor_bind_addr(&self, configured: &str) -> String {
+    pub(in crate::runtime) fn syslog_ingestor_bind_addr(
+        &self,
+        configured: SocketAddr,
+    ) -> SocketAddr {
         let dispatcher = self.inner.remote_dispatcher.load();
         if let Some(dispatcher) = dispatcher.as_deref() {
             return self
@@ -151,7 +156,7 @@ impl Runtime {
                 .syslog_ingestor_bind_addr(dispatcher.local_node_id(), configured);
         }
 
-        configured.to_string()
+        configured
     }
 
     pub(super) async fn start_missing_domain_ingestors(

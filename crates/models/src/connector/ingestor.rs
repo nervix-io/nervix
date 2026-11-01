@@ -556,6 +556,15 @@ pub trait IngestorEntityBody {
     fn chosen(&self, _option: &str) -> Option<&'static str> {
         None
     }
+
+    /// Refuses a client configuration this entity cannot read, beyond the keys its side reads. A
+    /// value that holds a template is judged when the entity starts.
+    fn validate_client_config(
+        &self,
+        _config: &[crate::ClientConfigEntry],
+    ) -> Result<(), Report<crate::ClientConfigSchemaError>> {
+        Ok(())
+    }
 }
 
 impl ChoiceRequirement {
@@ -707,6 +716,14 @@ impl IngestorEntity {
     /// The connector that serves this source.
     pub fn connector(&self) -> ConnectorKind {
         self.kind().connector()
+    }
+
+    /// Refuses a client this source cannot read through, beyond the keys its side reads.
+    pub fn validate_client_config(
+        &self,
+        config: &[crate::ClientConfigEntry],
+    ) -> Result<(), Report<crate::ClientConfigSchemaError>> {
+        self.body().validate_client_config(config)
     }
 
     pub fn executes_on_every_cluster_node(&self) -> bool {

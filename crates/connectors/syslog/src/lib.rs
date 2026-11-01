@@ -2,8 +2,8 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Syslog client configuration, UDP/TCP/TLS listener and sender transports, RFC
-//!   6587 framing, peer metadata, ingestor lifecycle operations, and record publication.
+//! - **Owns.** Syslog TLS loading, UDP/TCP/TLS listener and sender transports, RFC 6587 framing,
+//!   peer metadata, ingestor lifecycle operations, and record publication.
 //! - **Depends on.** The connector contract, typed client configuration entries,
 //!   execution-sensitive sockets, `memchr`, and rustls.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
@@ -25,10 +25,7 @@ mod config;
 pub mod listener;
 
 pub use collector::{SyslogCollectorEmitter, SyslogCollectorEmitterConfig};
-pub use config::{
-    DEFAULT_MAX_MESSAGE_SIZE, SyslogClientConfig, SyslogConfigError, SyslogDeadlineScope,
-    SyslogDirection, SyslogFraming, SyslogProtocol,
-};
+pub use config::SyslogConfigError;
 #[cfg(feature = "testing")]
 pub use listener::SyslogListenerFault;
 #[cfg(feature = "benchmarks")]

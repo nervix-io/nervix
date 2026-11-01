@@ -5,7 +5,8 @@
 //! - **Owns.** The syslog client Model, the listener source Model with its delivery mode, the
 //!   collector emitter Model, and what each entity declares.
 //!   Client declarations also own public configuration keys, types, confidentiality and the side
-//!   that reads each key, and the frame limits both sides of the wire share.
+//!   that reads each key, what each side reads from them, and the frame limits both sides of the
+//!   wire share.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** How Syslog frames are decoded or encoded, how a listener is bound or how
 //!   a collector is written to.
@@ -15,9 +16,18 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
+use self::client::{
+    STREAM_PROTOCOLS, SYSLOG_FRAMINGS, SYSLOG_PROTOCOLS, TLS_PROTOCOL,
+    validate_listener_client_config,
+};
+pub use self::client::{
+    SyslogCollectorClient, SyslogCollectorTransport, SyslogFraming, SyslogListenerClient,
+    SyslogListenerTls, SyslogListenerTransport, validate_syslog_client_config,
+};
 use super::{
     bounds::{
         BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DeadlineKey,
@@ -27,38 +37,51 @@ use super::{
     entity_union::{connector_emitters, connector_ingestors},
 };
 use crate::{
-    AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
-    EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
-    IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody,
-    IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorMetadataField,
-    IngestorMetadataType, IngestorReference, IngestorReferenceKind, PositionClass,
+    AcknowledgementConfirmation, ClientConfigEntry, ClientConfigSchemaError, ClientName,
+    ConnectorKind, DeclaredDelivery, DeclaredQuiesce, EmitterBatchLegality, EmitterBodyForm,
+    EmitterClientReference, EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities,
+    EmitterReference, EmitterReferenceKind, IngestAcknowledgement, IngestQuiesceMode,
+    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
+    IngestorReferenceKind, PositionClass,
 };
+
+mod client;
 
 configured_client!(Syslog: unpooled, config CLIENT_CONFIG, CreateClientSyslog => SyslogConfigEntry);
 
 /// The current keys this connector reads, shared by validation, completion and inspection.
 ///
 /// A listener binds `addr` and a collector sends to it. Only a listener bounds what it admits with
-/// `max_message_size` and its idle connections with `idle_timeout_ms`; a listener reads each
-/// frame's framing from its first byte, so only a collector writes the `framing` it names and
-/// bounds its writes with `timeout_ms`. Both sides present the TLS identity in `tls_cert_file` and
-/// `tls_key_file`, and verify their peer's certificate against `tls_ca_file`.
+/// `max_message_size` and its idle connections with `idle_timeout_ms`, and verifies client
+/// certificates against `tls_client_ca_file`; only a collector bounds its writes with `timeout_ms`
+/// and trusts a server through `tls_ca_file`. Both sides hold a stream to the `framing` it names and
+/// present the TLS identity in `tls_cert_file` and `tls_key_file`. A key the protocol has no use for
+/// is refused with the client; the `client` module holds what one side demands of the rest.
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
-    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    use crate::{
+        ClientConfigFile as F, ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V,
+    };
     ClientConfigSchema::new(
         &[
-            K::required("addr", V::String),
+            K::required("addr", V::HostPort),
             K::CONNECT_TIMEOUT,
-            K::optional("framing", V::Choice(&["octet-counting", "non-transparent"]))
-                .read_by_emitters(),
-            K::IDLE_TIMEOUT.read_by_ingestors(),
-            K::optional("max_message_size", V::PositiveInteger).read_by_ingestors(),
-            K::required("protocol", V::Choice(&["udp", "tcp", "tls"])),
+            K::optional("framing", V::Choice(SYSLOG_FRAMINGS))
+                .only_for_choice("protocol", STREAM_PROTOCOLS),
+            K::IDLE_TIMEOUT
+                .only_for_choice("protocol", STREAM_PROTOCOLS)
+                .read_by_ingestors(),
+            K::defaulted("max_message_size", V::PositiveInteger, "131072").read_by_ingestors(),
+            K::required("protocol", V::Choice(SYSLOG_PROTOCOLS)),
             K::TIMEOUT.read_by_emitters(),
-            K::TLS_CA,
-            K::TLS_CERT,
-            K::TLS_KEY,
+            K::TLS_CA
+                .only_for_choice("protocol", TLS_PROTOCOL)
+                .read_by_emitters(),
+            K::TLS_CERT.only_for_choice("protocol", TLS_PROTOCOL),
+            K::optional("tls_client_ca_file", V::File(F::CertificateAuthority))
+                .only_for_choice("protocol", TLS_PROTOCOL)
+                .read_by_ingestors(),
+            K::TLS_KEY.only_for_choice("protocol", TLS_PROTOCOL),
         ],
         &[],
         &[],
@@ -291,6 +314,13 @@ impl IngestorEntityBody for SyslogListenerIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn validate_client_config(
+        &self,
+        config: &[ClientConfigEntry],
+    ) -> Result<(), Report<ClientConfigSchemaError>> {
+        validate_listener_client_config(config)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -418,13 +448,14 @@ mod tests {
             vec![
                 ("addr", ClientConfigReaders::Every),
                 ("connect_timeout_ms", ClientConfigReaders::Every),
-                ("framing", ClientConfigReaders::Emitters),
+                ("framing", ClientConfigReaders::Every),
                 ("idle_timeout_ms", ClientConfigReaders::Ingestors),
                 ("max_message_size", ClientConfigReaders::Ingestors),
                 ("protocol", ClientConfigReaders::Every),
                 ("timeout_ms", ClientConfigReaders::Emitters),
-                ("tls_ca_file", ClientConfigReaders::Every),
+                ("tls_ca_file", ClientConfigReaders::Emitters),
                 ("tls_cert_file", ClientConfigReaders::Every),
+                ("tls_client_ca_file", ClientConfigReaders::Ingestors),
                 ("tls_key_file", ClientConfigReaders::Every),
             ]
         );

@@ -34,7 +34,10 @@ use nervix_connector::{
     IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
     IngestorReadCancellation, IngestorResult, IngestorResume, NoIngestHeaders,
 };
-use nervix_models::{ClientConfigEntry, SYSLOG_FRAME_LIMITS};
+use nervix_models::{
+    ClientConfigEntry, SYSLOG_FRAME_LIMITS, SyslogFraming, SyslogListenerClient,
+    SyslogListenerTransport,
+};
 use nervix_primitives::{
     net::{TcpListener, TcpStream, UdpSocket},
     sync::{mpsc, watch},
@@ -46,7 +49,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::debug;
 
-use crate::config::{SyslogClientConfig, SyslogConfigError, SyslogDirection, SyslogProtocol};
+use crate::config::{SyslogConfigError, tls_server_config};
 
 #[cfg(feature = "testing")]
 mod listener_faults;
@@ -65,7 +68,7 @@ struct ConfiguredListenerFaults {
 
 #[cfg(not(feature = "testing"))]
 impl ConfiguredListenerFaults {
-    fn stream_accept(&self, _bind_addr: &str) -> ConfiguredStreamAccept {
+    fn stream_accept(&self, _bind_addr: SocketAddr) -> ConfiguredStreamAccept {
         ConfiguredStreamAccept { _marker: () }
     }
 }
@@ -96,8 +99,8 @@ const STREAM_READ_CHUNK: usize = 8_192;
 
 #[derive(Clone)]
 pub struct SyslogListenerIngestorPlan {
-    config: SyslogClientConfig,
-    bind_addr: String,
+    client: SyslogListenerClient,
+    bind_addr: SocketAddr,
     listener_faults: ConfiguredListenerFaults,
     connections: ConnectionDeadlines,
 }
@@ -105,13 +108,14 @@ pub struct SyslogListenerIngestorPlan {
 impl SyslogListenerIngestorPlan {
     pub fn new(
         entries: Vec<ClientConfigEntry>,
-        bind_addr: impl FnOnce(&str) -> String,
+        bind_addr: impl FnOnce(SocketAddr) -> SocketAddr,
     ) -> error_stack::Result<Self, SyslogConfigError> {
-        let config = SyslogClientConfig::parse(&entries, SyslogDirection::Ingest)?;
+        let client =
+            SyslogListenerClient::read(&entries).change_context(SyslogConfigError::Client)?;
         let connections = ConnectionDeadlines::read(&entries)?;
-        let bind_addr = bind_addr(&config.addr);
+        let bind_addr = bind_addr(client.bind);
         Ok(Self {
-            config,
+            client,
             bind_addr,
             listener_faults: ConfiguredListenerFaults::default(),
             connections,
@@ -237,8 +241,8 @@ struct SyslogStreamListener {
 }
 
 pub struct SyslogListenerIngestor {
-    config: SyslogClientConfig,
-    bind_addr: String,
+    client: SyslogListenerClient,
+    bind_addr: SocketAddr,
     connections: ConnectionDeadlines,
     tls_acceptor: Option<TlsAcceptor>,
     listener: Option<SyslogListener>,
@@ -250,7 +254,7 @@ enum SyslogListenerError {
     #[error("Syslog {transport} bind '{addr}' failed")]
     Bind {
         transport: &'static str,
-        addr: String,
+        addr: SocketAddr,
         #[source]
         source: std::io::Error,
     },
@@ -309,8 +313,8 @@ pub enum SyslogFrameError {
     OversizedNonTransparentFrame { maximum: NonZeroUsize },
     #[error("Syslog stream frame exceeds max_message_size {maximum}")]
     OversizedBufferedFrame { maximum: NonZeroUsize },
-    #[error("Syslog TLS requires octet-counting framing")]
-    NonOctetTlsFrame,
+    #[error("Syslog stream frame is not octet-counted")]
+    NonOctetFrame,
 }
 
 #[async_trait]
@@ -321,18 +325,17 @@ impl IngestorConnector for SyslogListenerIngestor {
     type Plan = SyslogListenerIngestorPlan;
 
     async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
-        let tls_acceptor = if plan.config.protocol == SyslogProtocol::Tls {
-            let config = plan
-                .config
-                .tls_server_config()
-                .change_context(IngestorError::Open { connector: SYSLOG })?;
-            Some(TlsAcceptor::from(config))
-        } else {
-            None
+        let tls_acceptor = match &plan.client.transport {
+            SyslogListenerTransport::Tls(tls) => {
+                let config = tls_server_config(tls)
+                    .change_context(IngestorError::Open { connector: SYSLOG })?;
+                Some(TlsAcceptor::from(config))
+            }
+            SyslogListenerTransport::Udp | SyslogListenerTransport::Tcp { .. } => None,
         };
         Ok(Self {
-            config: plan.config.clone(),
-            bind_addr: plan.bind_addr.clone(),
+            client: plan.client.clone(),
+            bind_addr: plan.bind_addr,
             connections: plan.connections,
             tls_acceptor,
             listener: None,
@@ -359,10 +362,10 @@ impl IngestorConnector for SyslogListenerIngestor {
         if let Some(listener) = self.listener.as_mut() {
             if let SyslogListener::Stream(listener) = listener {
                 if listener.listener.is_none() {
-                    let socket = TcpListener::bind(&self.bind_addr).await.map_err(|source| {
+                    let socket = TcpListener::bind(self.bind_addr).await.map_err(|source| {
                         Report::new(SyslogListenerError::Bind {
                             transport: "stream",
-                            addr: self.bind_addr.clone(),
+                            addr: self.bind_addr,
                             source,
                         })
                         .change_context(IngestorError::Resume { connector: SYSLOG })
@@ -399,7 +402,7 @@ impl BrokerIngestorConnector for SyslogListenerIngestor {
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
         let received = match self.listener.as_mut() {
             Some(SyslogListener::Udp(listener)) => {
-                let receive = listener.receive(self.config.max_message_size);
+                let receive = listener.receive(self.client.max_message_size);
                 cancellation.unless_cancelled(receive).await
             }
             Some(SyslogListener::Stream(listener)) => {
@@ -407,7 +410,8 @@ impl BrokerIngestorConnector for SyslogListenerIngestor {
                     return Ok(IngestorBatch::ResumeRequired);
                 }
                 let receive = listener.receive(
-                    self.config.max_message_size,
+                    self.client.max_message_size,
+                    self.client.transport.stream_framing(),
                     self.tls_acceptor.clone(),
                     self.connections,
                 );
@@ -454,12 +458,12 @@ impl SyslogListenerIngestor {
     }
 
     async fn bind_listener(&self) -> error_stack::Result<SyslogListener, SyslogListenerError> {
-        match self.config.protocol {
-            SyslogProtocol::Udp => {
-                let socket = UdpSocket::bind(&self.bind_addr).await.map_err(|source| {
+        match self.client.transport {
+            SyslogListenerTransport::Udp => {
+                let socket = UdpSocket::bind(self.bind_addr).await.map_err(|source| {
                     Report::new(SyslogListenerError::Bind {
                         transport: "UDP",
-                        addr: self.bind_addr.clone(),
+                        addr: self.bind_addr,
                         source,
                     })
                 })?;
@@ -468,11 +472,11 @@ impl SyslogListenerIngestor {
                     datagram: vec![0_u8; 65_535],
                 }))
             }
-            SyslogProtocol::Tcp | SyslogProtocol::Tls => {
-                let listener = TcpListener::bind(&self.bind_addr).await.map_err(|source| {
+            SyslogListenerTransport::Tcp { .. } | SyslogListenerTransport::Tls(_) => {
+                let listener = TcpListener::bind(self.bind_addr).await.map_err(|source| {
                     Report::new(SyslogListenerError::Bind {
                         transport: "stream",
-                        addr: self.bind_addr.clone(),
+                        addr: self.bind_addr,
                         source,
                     })
                 })?;
@@ -484,7 +488,7 @@ impl SyslogListenerIngestor {
                     frame_rx,
                     connections: JoinSet::new(),
                     paused,
-                    accept: self.listener_faults.stream_accept(&self.bind_addr),
+                    accept: self.listener_faults.stream_accept(self.bind_addr),
                 }))
             }
         }
@@ -530,6 +534,7 @@ impl SyslogStreamListener {
     async fn receive(
         &mut self,
         max_message_size: NonZeroUsize,
+        framing: Option<SyslogFraming>,
         tls_acceptor: Option<TlsAcceptor>,
         deadlines: ConnectionDeadlines,
     ) -> error_stack::Result<SyslogReceived, SyslogListenerError> {
@@ -562,7 +567,7 @@ impl SyslogStreamListener {
                                 stream,
                                 peer_addr,
                                 max_message_size,
-                                false,
+                                framing,
                                 deadlines.idle,
                                 tx,
                                 paused,
@@ -573,7 +578,7 @@ impl SyslogStreamListener {
                                 stream,
                                 peer_addr,
                                 max_message_size,
-                                true,
+                                framing,
                                 deadlines.idle,
                                 tx,
                                 paused,
@@ -634,12 +639,12 @@ async fn read_stream_connection(
     mut stream: impl AsyncRead + Unpin,
     peer_addr: SocketAddr,
     max_message_size: NonZeroUsize,
-    allow_non_transparent: bool,
+    framing: Option<SyslogFraming>,
     idle: Option<ConfiguredDeadline>,
     tx: mpsc::Sender<ReceivedSyslogFrame>,
     mut paused: watch::Receiver<bool>,
 ) -> error_stack::Result<(), SyslogConnectionError> {
-    let mut decoder = StreamFrameDecoder::new(max_message_size, allow_non_transparent);
+    let mut decoder = StreamFrameDecoder::new(max_message_size, framing);
     loop {
         nervix_primitives::task::consume_budget().await;
         if *paused.borrow() {
@@ -747,17 +752,19 @@ struct StreamFrameDecoder {
     cursor: usize,
     progress: FrameProgress,
     max_message_size: NonZeroUsize,
-    allow_non_transparent: bool,
+    /// The framing every frame of the connection keeps to. Without one, each frame's first byte
+    /// states its own: a digit opens an octet count.
+    framing: Option<SyslogFraming>,
 }
 
 impl StreamFrameDecoder {
-    fn new(max_message_size: NonZeroUsize, allow_non_transparent: bool) -> Self {
+    fn new(max_message_size: NonZeroUsize, framing: Option<SyslogFraming>) -> Self {
         Self {
             buffer: Vec::new(),
             cursor: 0,
             progress: FrameProgress::Unread,
             max_message_size,
-            allow_non_transparent,
+            framing,
         }
     }
 
@@ -800,11 +807,14 @@ impl StreamFrameDecoder {
             return Ok(None);
         };
         match self.progress {
-            FrameProgress::Unread if first.is_ascii_digit() => self.read_octet_count(),
-            FrameProgress::Unread if !self.allow_non_transparent => {
-                Err(Report::new(SyslogFrameError::NonOctetTlsFrame))
-            }
-            FrameProgress::Unread => self.next_non_transparent_frame(0),
+            FrameProgress::Unread => match self.framing {
+                Some(SyslogFraming::NonTransparent) => self.next_non_transparent_frame(0),
+                Some(SyslogFraming::OctetCounting) if !first.is_ascii_digit() => {
+                    Err(Report::new(SyslogFrameError::NonOctetFrame))
+                }
+                None if !first.is_ascii_digit() => self.next_non_transparent_frame(0),
+                Some(SyslogFraming::OctetCounting) | None => self.read_octet_count(),
+            },
             FrameProgress::OctetCounted {
                 payload_start,
                 frame_end,
@@ -932,7 +942,7 @@ pub fn frame_stream(
 ) -> error_stack::Result<usize, SyslogFrameError> {
     const IN_MEMORY: &str = "every count is a length of the stream this call holds in memory";
 
-    let mut decoder = StreamFrameDecoder::new(max_message_size, true);
+    let mut decoder = StreamFrameDecoder::new(max_message_size, None);
     let mut position = 0_usize;
     let mut payload_bytes = 0_usize;
     loop {

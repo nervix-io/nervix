@@ -205,8 +205,10 @@ current connection, retry and deadline limits.
   documented in `Common` → `Syslog`; keep the format separate from the `SYSLOG CLIENT` transport,
   use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter,
   configure TLS identity for the client direction that consumes it, and set a key only one side
-  reads, such as `framing` or `idle_timeout_ms`, only on a client that side uses; the SYSLOG
-  client reference in `Connector Capabilities` names those keys.
+  reads, such as `max_message_size`, `idle_timeout_ms`, `tls_client_ca_file`, `timeout_ms` or
+  `tls_ca_file`, only on a client that side uses, because the statement that binds a client refuses
+  the other side's keys. A listener's `addr` is a literal IP address and port; the SYSLOG client
+  reference in `Connector Capabilities` names those keys.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
   owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
   nodes each have one additional fixed dispatch slot.

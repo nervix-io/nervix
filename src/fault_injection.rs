@@ -2708,21 +2708,18 @@ impl FaultInjection {
     pub(crate) fn syslog_ingestor_bind_addr(
         &self,
         node_id: &ClusterNodeName,
-        configured: &str,
-    ) -> String {
+        mut configured: SocketAddr,
+    ) -> SocketAddr {
         let Some(host) = self
             .inner
             .syslog_ingestor_bind_ips
             .get(node_id)
             .map(|host| *host.value())
         else {
-            return configured.to_string();
+            return configured;
         };
-        let Ok(mut addr) = configured.parse::<SocketAddr>() else {
-            return configured.to_string();
-        };
-        addr.set_ip(host);
-        addr.to_string()
+        configured.set_ip(host);
+        configured
     }
 
     pub(crate) fn branch_instance_expiration_scan_interval(&self) -> Option<Duration> {
