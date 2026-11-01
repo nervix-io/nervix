@@ -54,12 +54,14 @@ fn an_envelope_holds_the_bytes_of_its_texts_and_variable_length_property_values(
         reply_to: Some("replies".to_string()),
         message_id: Some("event-1".to_string()),
         deduplication_id: Some("dedup".to_string()),
+        routing_key: Some("orders.eu".to_string()),
         properties,
     };
 
-    // "replies", "event-1" and "dedup", then "application/json" and three signature bytes. Flags,
-    // durations, the timestamp and fixed-size values hold nothing beyond the envelope itself.
-    assert_eq!(envelope.held_bytes(), 7 + 7 + 5 + 16 + 3);
+    // "replies", "event-1", "dedup" and "orders.eu", then "application/json" and three signature
+    // bytes. Flags, durations, the timestamp and fixed-size values hold nothing beyond the envelope
+    // itself.
+    assert_eq!(envelope.held_bytes(), 7 + 7 + 5 + 9 + 16 + 3);
     assert_eq!(RecordEnvelope::default().held_bytes(), 0);
 }
 

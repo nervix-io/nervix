@@ -428,7 +428,7 @@ fn emitter_template(kind: EmitterEntityKind, body: &str) -> String {
         EmitterBodyForm::Native => String::new(),
     };
     body_clause.push_str(&option_template(&payload_options));
-    // Envelope clauses follow the payload, each optional, in the order the statement writes them.
+    // Each envelope clause the entity declares follows the payload, written at most once.
     for clause in declared.envelope {
         body_clause.push_str(&format!("\n    [{}]", clause.example()));
     }

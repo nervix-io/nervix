@@ -2685,3 +2685,68 @@ fn an_envelope_value_is_an_exact_non_null_non_sensitive_value_of_its_clause_type
     unconstructed.envelope.reply_to = Some(expression("message.tenant"));
     check(&unconstructed).expect("message is the source record an emitter publishes as it is");
 }
+
+/// A RabbitMQ exchange emitter's routing key reads what an envelope value reads and computes an
+/// exact, non-null, non-sensitive STRING, which the registry checks with the envelope's values and
+/// names as the statement writes it.
+#[test]
+fn a_routing_key_is_an_exact_non_null_non_sensitive_string() {
+    let domain: DomainName = named("validation");
+    let schema = envelope_schema();
+    let expression =
+        |text: &str| nervix_plexus::parse_expression(text).expect("the case expression parses");
+    let exchange_emitter = |routing_key: &str| {
+        let mut emitter = kafka_emitter();
+        emitter.connector = Box::new(EmitterEntity::RabbitMq(
+            nervix_models::RabbitMqEmitter::Exchange(nervix_models::RabbitMqExchangeEmitter {
+                mode: nervix_models::RabbitMqExchangePublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "1s".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                client: named("rabbit_main"),
+                exchange: nervix_models::RabbitMqExchangeName::parse("events")
+                    .expect("events is an exchange name"),
+                routing_key: expression(routing_key),
+            }),
+        ));
+        emitter
+    };
+    let check = |emitter: &CreateEmitter| {
+        validate_emitter_envelope_expressions(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &ModelIndex::new(),
+            emitter,
+            &schema,
+            &schema,
+        )
+    };
+
+    for accepted in [
+        "input.tenant",
+        "concat('orders.', output.tenant)",
+        "leak_sensitive(input.secret)",
+    ] {
+        check(&exchange_emitter(accepted)).expect("an exact STRING routing key is accepted");
+    }
+    for refused in ["input.at", "input.secret", "input.maybe"] {
+        let refused = check(&exchange_emitter(refused)).expect_err("the routing key is refused");
+        let RegistryError::InvalidConnectorDeclaration { issue, .. } = refused.current_context()
+        else {
+            panic!("a refused routing key is a declaration refusal: {refused:?}");
+        };
+        assert_eq!(
+            issue,
+            &ConnectorDeclarationIssue::EnvelopeValue {
+                site: EnvelopeValueSite::RoutingKey,
+                expected: ParseAsType::String,
+            }
+        );
+        assert_eq!(
+            issue.to_string(),
+            "ROUTING KEY requires an exact, non-null, non-sensitive STRING value"
+        );
+    }
+}

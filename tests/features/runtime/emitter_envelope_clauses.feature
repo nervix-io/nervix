@@ -2,8 +2,9 @@ Feature: Emitters write envelope clauses only where their entity declares them
 
   An emitter's envelope clauses follow its payload and set what its transport carries beside each
   payload. A clause or PROPERTIES key the emitter's entity does not declare is refused where it is
-  written. Only SQS QUEUE declares any yet, DELAY and DEDUPLICATION ID, so a node refuses each
-  other clause form on SQS QUEUE and every clause form on every other emitter entity.
+  written. Only SQS QUEUE, with DELAY and DEDUPLICATION ID, and the RabbitMQ entities, with
+  MANDATORY, declare a clause, so a node refuses each clause form on every entity that does not
+  declare it.
 
   @emitter_envelope
   Scenario Outline: Every emitter entity refuses the envelope clauses it does not declare

@@ -436,7 +436,7 @@ record rather than assumed.
 | Postgres | `ACK`; `DO UPDATE`, `DO NOTHING`, no conflict policy | One `INSERT ... SELECT ... FROM unnest(...)` statement with one array element per member per mapped column | One insert of the members as rows |
 | MySQL | `ACK`; `DO UPDATE`, `DO NOTHING`, no conflict policy | One multi-row `INSERT ... VALUES (...), (...)` statement | One insert of the members as rows |
 | MongoDB | `ACK`; insert, `DO UPDATE`, `DO NOTHING` | One insert or bulk write carrying one document per member | One write of the members as documents |
-| Iceberg | `ACK`; `ON S3`, `ON GCS`, `ON AZURE_BLOB` | One appended Parquet data file whose rows are the members | One data file in the table's next snapshot; the commit appends every data file it wrote |
+| Iceberg | `ACK`; an `S3`, `GCS` or `AZURE_BLOB` storage client | One appended Parquet data file whose rows are the members | One data file in the table's next snapshot; the commit appends every data file it wrote |
 
 For every row emitter the relationship to the array is exact: the native repeated-record container
 carries the same members, in the same order, counted the same way, confirmed by one response. The
@@ -504,8 +504,10 @@ it; a `MAX SIZE` equal to the packet limit does not guarantee that every insert 
 
 Iceberg is the one emitter with two byte bounds, and they measure different things on purpose:
 `BATCH ... MAX SIZE` bounds one written data file, while `COMMIT EACH ... MAX SIZE` bounds the
-Arrow payload bytes staged before a commit becomes due. A declaration that sets the first above the
-second is valid and simply means every commit publishes one data file.
+Arrow payload bytes staged before a commit becomes due. Neither bound limits the other, so a
+declaration that sets the first above the second is valid. A commit appends one data file for each
+staged segment it covers, and a segment never spans two released Arrow carriers, so a commit that
+covers several carriers appends several data files whichever bound is larger.
 For a declared `BATCH`, Iceberg measures the full Parquet file, including its footer, before
 staging each accepted segment. It writes one file per segment and checks the file's physical bytes
 and row count before appending its manifest entry. A single row that cannot fit is a per-row
