@@ -74,6 +74,13 @@ the group's row bound and the vocabulary's frame labels. An estimate that exceed
 is a typed error before allocation; the ingest group adds the opening operation's context and
 retains the cause for its general-error policy.
 
+An SQS received message validates its system-attribute numbers at construction. The receive count
+is an optional `U32`, and send and first-receive times are optional `Timestamp` values converted
+exactly from Unix milliseconds. Absence means the service omitted the attribute. A parse or range
+failure is a typed read error, never an absent value or a default. Borrowed message identifiers
+and FIFO sequence numbers keep their textual representation. The shared metadata visitor,
+retained row and Arrow projection preserve the count as `U32` throughout its in-memory lifetime.
+
 A paced poll message carries a typed metadata variant. HTTP polling supplies its response status
 and scheduled poll instant in that variant, while sources with no integration fields carry the
 headers-only variant. The host copies the variant into a matching quiesce buffer and Arrow builder;

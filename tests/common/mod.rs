@@ -48,6 +48,7 @@ pub(crate) mod server_process;
 pub(crate) mod server_process_cluster;
 pub(crate) mod snapshot_receive_memory;
 pub(crate) mod sqs_answer_hold;
+pub(crate) mod sqs_metadata;
 pub(crate) mod stallable_tcp_proxy;
 pub(crate) mod status_request;
 pub(crate) mod subscription_payloads;

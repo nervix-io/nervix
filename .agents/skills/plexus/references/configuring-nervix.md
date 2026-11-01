@@ -450,6 +450,9 @@ current connection, retry and deadline limits.
   `DELAY <whole seconds from 1s to 900s>` for a standard queue or `DEDUPLICATION ID <string_expression>`
   for a `.fifo` queue. Its `write_header` values may be `STRING`, an integer type or `BYTES`, sent
   as `String`, `Number` and `Binary` attributes; read `Emitters` → `SQS`.
+  For source identity, redelivery routing and event time, read the metadata table in `Ingestors` →
+  `SQS`; use its exact field types and `TIMESTAMP AT metadata.sent_at` where appropriate. User
+  message attributes remain transport headers.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS

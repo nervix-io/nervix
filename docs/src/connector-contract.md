@@ -1331,19 +1331,30 @@ vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the r
 the poll's scheduled instant, `HTTP ENDPOINT` the request's method, path, query, peer address and
 routed host, `WEBSOCKETS CONNECTION` the frame kind, `WEBSOCKETS ENDPOINT` the frame kind, the
 connection's peer address and its path, `KAFKA TOPIC` the topic, partition and offset,
-`SYSLOG LISTENER` the peer address, and every other entity none. The endpoint entities are served by
+`SQS QUEUE` the message identity, send and first-receive times, receive count, group and
+deduplication identifiers, sequence number and sender identifier, `SYSLOG LISTENER` the peer
+address, and every other entity none. The endpoint entities are served by
 the host itself rather than a connector crate, so the server's endpoint intake hands their values
 over the same way a connector's message does. Registry
 validation reads that declaration for the fields an ingestor's route programs and its
 `TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
 connector's message hands the host the value of every declared field in declared order, one typed
 call per field into the host's value sink, so the three cannot disagree. A value is a `STRING`,
-`BYTES`, `BOOL`, `U16`, `I32`, `I64` or `DATETIME`, or absent where the message carries none; a
+`BYTES`, `BOOL`, `U16`, `U32`, `I32`, `I64` or `DATETIME`, or absent where the message carries none; a
 `STRING` such as a socket address may be written into the column in place instead of being
 allocated per message. A message that hands over another number of values than its entity declares,
 or a value of another type than its field's, is a connector defect the host refuses as a typed
 metadata error. A connector adds a field by declaring it and handing its value over: neither the
 contract nor the host names any connector's fields.
+
+The SQS connector requests system attributes with `MessageSystemAttributeNames`, independently
+of user message attributes used as headers. It validates the receive count as `U32` and both
+millisecond timestamps as `Timestamp` once when constructing a received message. Its metadata
+visitor lends strings from the SDK message and hands over those typed scalar values in declared
+order. Missing attributes are absent; invalid numbers or timestamps that cannot fit the internal
+range retain their typed cause beneath `SqsQueueIngestorError::SystemAttribute` and the host's
+read context. They never become absent values. The generic retained row and Arrow builders carry
+`U32` through quiesce and projection without widening it; the FIFO sequence number stays text.
 
 The host projects metadata lazily. When an ingestor binds its programs, the host records which
 declared fields its route programs and its `TIMESTAMP AT metadata.<field>` read, and every ingest

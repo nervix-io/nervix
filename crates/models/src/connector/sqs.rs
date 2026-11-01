@@ -34,10 +34,10 @@ use crate::{
     EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
     EmitterReferenceKind, EnvelopeClauseKind, Expression, HeaderLayout, HeaderModel,
     HeaderValueType, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
-    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass, PropertyType,
-    RetryPolicy,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration,
+    IngestorMetadataField, IngestorMetadataType, IngestorReference, IngestorReferenceKind,
+    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
+    OptionValue, PayloadSizeLimit, PositionClass, PropertyType, RetryPolicy,
 };
 
 configured_client!(Sqs: unpooled, config CLIENT_CONFIG, CreateClientSqs => SqsConfigEntry);
@@ -155,7 +155,16 @@ impl IngestorDeclaration for SqsQueueIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // An SQS message's attributes: one value per name, in no order.
         headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
-        metadata: IngestorMetadataDeclaration::NONE,
+        metadata: IngestorMetadataDeclaration::new(&[
+            IngestorMetadataField::new("message_id", IngestorMetadataType::String),
+            IngestorMetadataField::new("sent_at", IngestorMetadataType::Datetime),
+            IngestorMetadataField::new("receive_count", IngestorMetadataType::U32),
+            IngestorMetadataField::new("first_received_at", IngestorMetadataType::Datetime),
+            IngestorMetadataField::new("group_id", IngestorMetadataType::String),
+            IngestorMetadataField::new("deduplication_id", IngestorMetadataType::String),
+            IngestorMetadataField::new("sequence_number", IngestorMetadataType::String),
+            IngestorMetadataField::new("sender_id", IngestorMetadataType::String),
+        ]),
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Sqs),
         position_class: PositionClass::BrokerRedelivered,
