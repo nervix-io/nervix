@@ -2,7 +2,8 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Reading `timeout_ms`, `connect_timeout_ms` and `idle_timeout_ms` from a client's
+//! - **Owns.** Reading `timeout_ms`, `connect_timeout_ms`, `idle_timeout_ms` and
+//!   `pool_acquire_timeout_ms` from a client's
 //!   entries, each held to the vocabulary's one deadline rule, the default a connection takes
 //!   without its key, and the typed failure of a wait that ran out of its deadline.
 //! - **Depends on.** The vocabulary's deadline keys, rule and default, and a client's
@@ -59,6 +60,14 @@ impl ConfiguredDeadline {
     /// while its connector waits to read from it, after which the connector closes it.
     pub fn idle(entries: &[nervix_models::ClientConfigEntry]) -> ClientConfigResult<Option<Self>> {
         Self::read(entries, DeadlineKey::IdleTimeout)
+    }
+
+    /// The client's `pool_acquire_timeout_ms`, where it sets one: one checkout from a connection
+    /// pool, the wait for the pool and opening or testing the connection it hands over included.
+    pub fn pool_acquire(
+        entries: &[nervix_models::ClientConfigEntry],
+    ) -> ClientConfigResult<Option<Self>> {
+        Self::read(entries, DeadlineKey::PoolAcquireTimeout)
     }
 
     fn read(
@@ -144,6 +153,7 @@ mod tests {
             ("timeout_ms", "1500"),
             ("connect_timeout_ms", "250"),
             ("idle_timeout_ms", "60000"),
+            ("pool_acquire_timeout_ms", "750"),
         ]);
         let timeout = ConfiguredDeadline::timeout(&settings)
             .assured("1500 ms is a valid deadline")
@@ -158,6 +168,11 @@ mod tests {
             .assured("the client sets idle_timeout_ms");
         assert_eq!(idle.key(), DeadlineKey::IdleTimeout);
         assert_eq!(idle.bound(), Duration::from_secs(60));
+        let checkout = ConfiguredDeadline::pool_acquire(&settings)
+            .assured("750 ms is a valid deadline")
+            .assured("the client sets pool_acquire_timeout_ms");
+        assert_eq!(checkout.key(), DeadlineKey::PoolAcquireTimeout);
+        assert_eq!(checkout.bound(), Duration::from_millis(750));
     }
 
     #[test]

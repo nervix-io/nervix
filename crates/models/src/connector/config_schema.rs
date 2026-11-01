@@ -208,6 +208,8 @@ pub enum ClientConfigValue {
     UnsignedInteger,
     PositiveInteger,
     Milliseconds,
+    NonnegativeMilliseconds,
+    WholeSecondsMilliseconds,
     TcpKeepaliveMilliseconds,
     Url(&'static [&'static str]),
     /// A URL with one of these schemes that names a host and a nonzero port and nothing else: no
@@ -231,6 +233,10 @@ impl ClientConfigValue {
             Self::UnsignedInteger => "unsigned integer",
             Self::PositiveInteger => "positive integer",
             Self::Milliseconds => "positive, schedulable whole milliseconds",
+            Self::NonnegativeMilliseconds => "nonnegative, schedulable whole milliseconds",
+            Self::WholeSecondsMilliseconds => {
+                "positive, schedulable whole seconds written in milliseconds"
+            }
             Self::TcpKeepaliveMilliseconds => {
                 "whole seconds from 1000 through 32767000 milliseconds"
             }
@@ -298,8 +304,18 @@ impl ClientConfigValue {
                     return Err(Report::new(invalid()));
                 }
             }
-            Self::Milliseconds => {
+            Self::NonnegativeMilliseconds
+                if !value.is_empty() && value.bytes().all(|byte| byte == b'0') => {}
+            Self::Milliseconds | Self::NonnegativeMilliseconds => {
                 ClientDeadline::parse(value).change_context(invalid())?;
+            }
+            Self::WholeSecondsMilliseconds => {
+                let interval = ClientDeadline::parse(value)
+                    .change_context(invalid())?
+                    .duration();
+                if interval.subsec_nanos() != 0 {
+                    return Err(Report::new(invalid()));
+                }
             }
             Self::TcpKeepaliveMilliseconds => {
                 let interval = ClientDeadline::parse(value)
@@ -355,6 +371,8 @@ impl ClientConfigValue {
             | Self::UnsignedInteger
             | Self::PositiveInteger
             | Self::Milliseconds
+            | Self::NonnegativeMilliseconds
+            | Self::WholeSecondsMilliseconds
             | Self::TcpKeepaliveMilliseconds
             | Self::DriverUrl(_)
             | Self::DriverAddress

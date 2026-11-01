@@ -70,7 +70,7 @@ pub enum SyslogFraming {
 }
 
 /// The Syslog clients whose waits one deadline key bounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, strum::EnumIter)]
 pub enum SyslogDeadlineScope {
     /// `connect_timeout_ms`: the connection an emitter opens, and the handshake a TLS listener
     /// completes with each connection it accepts.
@@ -85,12 +85,12 @@ pub enum SyslogDeadlineScope {
 }
 
 impl SyslogDeadlineScope {
-    /// The clients whose waits `key` bounds.
-    fn of(key: DeadlineKey) -> Self {
-        match key {
-            DeadlineKey::Timeout => Self::EmitterWrites,
-            DeadlineKey::ConnectTimeout => Self::ConnectionOrTlsHandshake,
-            DeadlineKey::IdleTimeout => Self::ListenerConnections,
+    /// The shared key that bounds this Syslog wait.
+    fn key(self) -> DeadlineKey {
+        match self {
+            Self::EmitterWrites => DeadlineKey::Timeout,
+            Self::ConnectionOrTlsHandshake => DeadlineKey::ConnectTimeout,
+            Self::ListenerConnections => DeadlineKey::IdleTimeout,
         }
     }
 
@@ -342,14 +342,14 @@ impl SyslogClientConfig {
         protocol: SyslogProtocol,
     ) -> error_stack::Result<(), SyslogConfigError> {
         let schema = CreateClientSyslog::<u64>::DECLARATION.config;
-        for key in DeadlineKey::iter() {
+        for scope in SyslogDeadlineScope::iter() {
+            let key = scope.key();
             if Self::optional_value(entries, key.key()).is_none() {
                 continue;
             }
             let declared = schema
                 .key(key.key())
                 .verified("validate_keys refused every entry the client does not declare");
-            let scope = SyslogDeadlineScope::of(key);
             if !direction.reads(declared) || !scope.waits_over(direction, protocol) {
                 return Err(Report::new(SyslogConfigError::InapplicableDeadlineKey {
                     key: key.key(),

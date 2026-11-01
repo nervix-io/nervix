@@ -713,10 +713,14 @@ errors keep those reports as typed fields while preserving their startup message
 A MySQL pool is kept at its `POOL SIZE MIN` by a task no caller waits on, so that task is the only
 witness of a pass that ends below the minimum. It reports `PoolMinimumError::NotRestored`, naming
 the minimum, above the failed checkout's `PoolMinimumError::CheckOut` and the driver's error, at
-`debug`, returns the connections the pass held, and passes again a second later. An emitter that
+`debug`, returns the connections the pass held, and passes again after the declared maintenance interval. An emitter that
 needs a connection meanwhile reports its own failed checkout. The shared MySQL pool retains
-`ConfiguredDeadline` for `timeout_ms`, when present, and every checkout, validation and insert
-keeps a typed `DeadlineElapsed` on expiry. Driver checkout and validation errors retain their
+the effective `ConfiguredDeadline` for `pool_acquire_timeout_ms` and optional `timeout_ms`.
+Checkout uses the shorter applicable bound, and every expired checkout, validation or insert
+keeps a typed `DeadlineElapsed` naming the key that ended it. An unusable lifetime or maintenance
+value keeps its vocabulary `ClientConfigSchemaError` beneath the connector's
+`MySqlPoolPolicyError::InvalidKey` and the initialization context; public CREATE validation uses
+that same declared value rule. Driver checkout and validation errors retain their
 typed causes through the open/write contexts. The emitter's pool-borrow context adds no rendered
 copy of the report. Its deadline report also attaches the safe operation, key and duration for
 the host's public emitter diagnostic. MySQL initialization changes context on the shared-client

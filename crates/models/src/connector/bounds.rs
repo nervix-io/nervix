@@ -187,6 +187,10 @@ pub enum DeadlineKey {
     /// activity and whether cancellation or handoff backpressure retains the activity deadline.
     #[strum(serialize = "idle_timeout_ms")]
     IdleTimeout,
+    /// `pool_acquire_timeout_ms`: one checkout from a connection pool, including the wait for
+    /// capacity and opening or testing the connection it hands over.
+    #[strum(serialize = "pool_acquire_timeout_ms")]
+    PoolAcquireTimeout,
 }
 
 impl DeadlineKey {
@@ -302,6 +306,10 @@ mod tests {
         assert_eq!(DeadlineKey::Timeout.key(), "timeout_ms");
         assert_eq!(DeadlineKey::ConnectTimeout.key(), "connect_timeout_ms");
         assert_eq!(DeadlineKey::IdleTimeout.key(), "idle_timeout_ms");
+        assert_eq!(
+            DeadlineKey::PoolAcquireTimeout.key(),
+            "pool_acquire_timeout_ms"
+        );
         let checks: Vec<String> = RuntimeCapability::of_bounds(KEYED)
             .iter()
             .map(ToString::to_string)

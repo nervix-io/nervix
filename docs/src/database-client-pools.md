@@ -97,13 +97,14 @@ An acquisition timeout, an inability to connect, or the loss of a connection is 
 failure instead, and follows the emitter's existing retry policy and general-error reporting.
 
 Postgres has a 30-second acquisition deadline covering pool wait, connection establishment,
-authentication and validation, independent of how long an accepted query then runs. A MySQL client
-that sets `timeout_ms` bounds each checkout, including connection establishment and authentication,
-by that value, and bounds initial validation and each insert separately. Its minimum keeper uses
-the same checkout bound. An exhausted pool reports `checking out a MySQL connection did not finish
-within timeout_ms` with the configured duration, then the emitter retries on its policy. Omitting
-`timeout_ms` leaves these MySQL waits unbounded. Each isolated row's insert receives its own
-operation bound, so the key is not a deadline for the entire flush or its retries. See the
+authentication and validation, independent of how long an accepted query then runs. MySQL uses
+`pool_acquire_timeout_ms`, 30 seconds by default, for each checkout, including connection
+establishment and authentication. Its optional `timeout_ms` also bounds each checkout, initial
+validation and each insert as separate operations. When both checkout bounds apply, the shorter
+one wins and the diagnostic names its key and duration. The minimum keeper uses that same checkout
+bound. Omitting `timeout_ms` leaves validation after checkout and inserts without an operation
+deadline; checkout remains bounded. Each isolated row's insert receives its own operation bound,
+so neither key is a deadline for the entire flush or its retries. See the
 [MySQL emitter contract](emitters.md#mysql) for insert sizing, TLS identity and exact value bindings.
 A Redis publish checks its connection out within the client's
 `connect_timeout_ms`, 30 seconds by default, the same deadline that bounds opening each new command
@@ -153,11 +154,11 @@ reached then, each attempt waits up to `connect_timeout_ms` and the next follows
 while a publisher that finds no connection idle still opens one for itself.
 
 For MySQL, opening the pool validates one connection, even with `MIN 0`. The maintenance task
-starts its first pass one second after initialization and waits one second after each completed
-pass before starting another. Establishment can take longer; when configured, `timeout_ms` bounds
-each checkout rather than the complete pass. A checkout that fails ends its pass, which returns
-the connections it held, and the next pass tries again a second later, while an emitter that finds
-no connection idle still opens one for itself. With `MIN 0` the keeper requests no connections.
+waits `pool_maintenance_interval_ms` before its first pass and after each completed pass; the
+default is one second. Establishment can take longer: each checkout keeps its own acquire budget,
+rather than one deadline for the complete pass. A failed checkout ends its pass, which returns the
+connections it held; the next pass tries again after the configured interval. An emitter that
+finds no idle connection still opens one for itself. With `MIN 0` the keeper requests no connections.
 
 ## Connection lifetimes
 
@@ -208,6 +209,41 @@ A client that omits a key reports its default, marked `(default)`, such as
 `pool_max_lifetime_ms: 1800000 (default)`. `SHOW CREATE CLIENT` reports only the keys the client
 was declared with.
 
+A `MYSQL` client declares its pool policy with these Nervix-owned keys:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `pool_acquire_timeout_ms` | `30000`, 30 seconds | One checkout, including waiting for capacity and opening/authentication |
+| `pool_idle_timeout_ms` | `0` | Idle lifetime above `MIN`; zero immediately retires returned connections above `MIN` |
+| `pool_max_lifetime_ms` | Omitted: no maximum age | Maximum connection age, a positive whole number of seconds written in milliseconds |
+| `pool_maintenance_interval_ms` | `1000`, one second | Delay before and between the minimum keeper's passes |
+
+Acquire and maintenance intervals are positive schedulable milliseconds. Idle lifetime accepts
+zero or positive schedulable milliseconds. Maximum age must be a positive multiple of 1000:
+`1000` requests one second, while `1001` is refused at `CREATE`, rather than truncated by the driver.
+The same schedulable-duration ceiling applies to all four keys.
+
+A maximum-age connection is retired when the driver checks it for reuse, when it is returned, or
+at an idle scan. An active insert is allowed to finish. The driver's idle scan retains its
+30-second interval, independently of the minimum keeper's interval, so an idle connection can
+remain until that scan observes its expiry. Absolute age can retire a connection kept for `MIN`;
+the keeper restores the missing connections on its next pass. Idle lifetime alone preserves the
+minimum. These defaults preserve the driver's immediate retirement above `MIN` and disabled
+maximum age, while giving every checkout an explicit default deadline.
+
+`DESCRIBE CLIENT` shows effective values and marks omitted defaulted keys `(default)`;
+`SHOW CREATE CLIENT` retains only authored keys. For example:
+
+```plexus
+CREATE MYSQL CLIENT mysql_edge POOL SIZE MIN 1 MAX 4 CONFIG {
+  'addr' = 'mysql://USER:PASSWORD@HOST:3306/DATABASE',
+  'pool_acquire_timeout_ms' = '1500',
+  'pool_idle_timeout_ms' = '60000',
+  'pool_max_lifetime_ms' = '900000',
+  'pool_maintenance_interval_ms' = '1000'
+};
+```
+
 ## Accepted values
 
 Both values are unquoted decimal integers written directly in the statement.
@@ -238,15 +274,14 @@ connector options for connection establishment, idle lifetime, and operation tim
 
 For MySQL, `CREATE MYSQL CLIENT` refuses reserved sizing keys in standalone `CONFIG` and in the
 decoded `addr` query, without regard to ASCII case: `maxpoolsize`, `max_pool_size`, `minpoolsize`,
-`min_pool_size`, `pool_max`, `pool_min` and `pool_size`. Its declared standalone keys are `addr`,
-`timeout_ms`, `tls_ca_file`, `tls_cert_file` and `tls_key_file`. Driver URL options pass the
-driver's offline parser. Nervix installs the declared bounds on default driver pool options,
-replacing URL values for `inactive_connection_ttl`, `ttl_check_interval`, `abs_conn_ttl` and
-`abs_conn_ttl_jitter`. The driver's separate `conn_ttl` URL option is retained: it sets an expiry
-threshold, in seconds, for time since a connection's last I/O (`0` disables this check).
-When omitted, that check uses the server's `wait_timeout`. No standalone MySQL pool-lifetime
-`CONFIG` key is currently declared. Read the [MYSQL client key reference](connector-capabilities.md#mysql-client)
-before choosing connection settings.
+`min_pool_size`, `pool_max`, `pool_min` and `pool_size`. The standalone keys are listed in the
+[MYSQL client key reference](connector-capabilities.md#mysql-client), including the pool-policy
+keys above, `addr`, `timeout_ms` and TLS identity files. Driver URL options pass the driver's
+offline parser. Nervix builds the driver's pool options from the declared bounds and policy,
+so URL pool options are replaced, including `inactive_connection_ttl`, `ttl_check_interval`,
+`abs_conn_ttl` and `abs_conn_ttl_jitter`. The driver's separate `conn_ttl` URL option is retained: it sets an
+expiry threshold, in seconds, for time since a connection's last I/O (`0` disables this check).
+When omitted, that check uses the server's `wait_timeout`.
 
 Both counts are strongly persisted with the rest of the client definition, and
 `SHOW CREATE CLIENT <name>;` reports them in the declared order:

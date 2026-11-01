@@ -87,6 +87,46 @@ fn tcp_keepalive_values_fit_the_socket_option_without_truncation() {
 }
 
 #[test]
+fn millisecond_lifetimes_keep_zero_and_whole_second_rules_distinct() {
+    let idle = ClientConfigKey::optional(
+        "pool_idle_timeout_ms",
+        ClientConfigValue::NonnegativeMilliseconds,
+    );
+    for value in ["0", "00", "1", "1250"] {
+        idle.validate(value)
+            .expect("zero and positive schedulable millisecond lifetimes are valid");
+    }
+    let maximum = ClientConfigKey::optional(
+        "pool_max_lifetime_ms",
+        ClientConfigValue::WholeSecondsMilliseconds,
+    );
+    for value in ["1000", "30000", "60000"] {
+        maximum
+            .validate(value)
+            .expect("positive whole seconds are exactly representable");
+    }
+    for value in ["+0", "-0", "1.5", "18446744073709551615"] {
+        assert!(
+            idle.validate(value).is_err(),
+            "invalid idle lifetime {value}"
+        );
+    }
+    for value in [
+        "0",
+        "999",
+        "1001",
+        "-1000",
+        "1000.0",
+        "18446744073709551615",
+    ] {
+        assert!(
+            maximum.validate(value).is_err(),
+            "invalid maximum lifetime {value}"
+        );
+    }
+}
+
+#[test]
 fn a_level_template_admits_exactly_its_levels() {
     let key = ClientConfigKey::optional("namespace", ClientConfigValue::Levels("tenant/namespace"));
     assert_eq!(key.value.label(), "tenant/namespace");
@@ -920,6 +960,14 @@ fn bolero_schema_checked_client_entries_round_trip() {
                         .to_string(),
                     ClientConfigValue::Milliseconds => {
                         arbitrary.entropy().boundary_biased(1..=60_000).to_string()
+                    }
+                    ClientConfigValue::NonnegativeMilliseconds => {
+                        arbitrary.entropy().boundary_biased(0..=60_000).to_string()
+                    }
+                    ClientConfigValue::WholeSecondsMilliseconds => {
+                        Duration::from_secs(arbitrary.entropy().boundary_biased(1..=60))
+                            .as_millis()
+                            .to_string()
                     }
                     ClientConfigValue::TcpKeepaliveMilliseconds => {
                         Duration::from_secs(arbitrary.entropy().boundary_biased(1..=32_767))
