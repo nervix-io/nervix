@@ -1,9 +1,10 @@
-//! What a record envelope holds and how a record carries it.
+//! What a record's envelope and typed headers hold and how a record carries them.
 //!
 //! Layer: test harness.
-//! - **Owns.** Evidence that an envelope counts exactly the bytes of its variable-length values,
-//!   and that a record carries the envelope the host gives it.
-//! - **Depends on.** The emitter contract's record and envelope types.
+//! - **Owns.** Evidence that an envelope and a typed header count exactly the bytes of their
+//!   variable-length values, that a property value states its exact type, and that a record
+//!   carries the envelope and the typed header writes the host gives it.
+//! - **Depends on.** The emitter contract's record, envelope and typed header types.
 //! - **Must not know.** Any connector, the host's evaluation of an envelope, or its retention.
 
 #![cfg_attr(
@@ -88,4 +89,81 @@ fn a_record_carries_the_envelope_the_host_evaluated_for_it() {
 
     assert_eq!(record.envelope, envelope);
     assert_eq!(record.payload, b"payload");
+}
+
+#[test]
+fn a_record_carries_typed_header_writes_in_place_of_text_ones() {
+    let record = EmitterRecord::new(
+        EmitterRecordId::new(0),
+        None,
+        b"payload".to_vec(),
+        Vec::new(),
+        Timestamp::from_unix_nanos(1),
+    );
+    assert!(
+        record.typed_headers.is_empty(),
+        "a record of an emitter with text header values carries no typed writes"
+    );
+
+    let writes = vec![
+        TypedRecordHeader {
+            name: "tenant".to_string(),
+            value: PropertyValue::String("acme".to_string()),
+        },
+        TypedRecordHeader {
+            name: "user".to_string(),
+            value: PropertyValue::I64(7),
+        },
+    ];
+    let record = record.with_typed_headers(writes.clone());
+
+    assert_eq!(record.typed_headers, writes);
+    assert!(record.headers.is_empty());
+}
+
+#[test]
+fn a_typed_header_holds_the_bytes_of_its_name_and_variable_length_value() {
+    let header = |name: &str, value: PropertyValue| TypedRecordHeader {
+        name: name.to_string(),
+        value,
+    };
+
+    // "tenant" and "acme"; "user" and an I64, which holds nothing beyond its fixed size; "digest"
+    // and three bytes.
+    assert_eq!(
+        header("tenant", PropertyValue::String("acme".to_string())).held_bytes(),
+        6 + 4
+    );
+    assert_eq!(header("user", PropertyValue::I64(7)).held_bytes(), 4);
+    assert_eq!(
+        header("digest", PropertyValue::Bytes(vec![0, 255, 16])).held_bytes(),
+        6 + 3
+    );
+}
+
+#[test]
+fn a_property_value_states_its_exact_type() {
+    let cases = [
+        (PropertyValue::U8(1), PropertyType::U8),
+        (PropertyValue::I8(-1), PropertyType::I8),
+        (PropertyValue::U16(2), PropertyType::U16),
+        (PropertyValue::I16(-2), PropertyType::I16),
+        (PropertyValue::U32(3), PropertyType::U32),
+        (PropertyValue::I32(-3), PropertyType::I32),
+        (PropertyValue::U64(4), PropertyType::U64),
+        (PropertyValue::I64(-4), PropertyType::I64),
+        (PropertyValue::Bool(true), PropertyType::Bool),
+        (
+            PropertyValue::String("text".to_string()),
+            PropertyType::String,
+        ),
+        (
+            PropertyValue::Datetime(Timestamp::from_unix_nanos(5)),
+            PropertyType::Datetime,
+        ),
+        (PropertyValue::Bytes(vec![1]), PropertyType::Bytes),
+    ];
+    for (value, ty) in cases {
+        assert_eq!(value.ty(), ty, "{value:?}");
+    }
 }

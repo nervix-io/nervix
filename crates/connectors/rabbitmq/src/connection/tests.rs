@@ -367,21 +367,43 @@ async fn an_amqp_handshake_the_broker_never_answers_ends_within_the_budget_and_c
     );
 
     let broker = fixture.broker(&format!("amqp://guest:guest@{BROKER}:{port}/%2f"));
+    // Resolve and dial before starting the handshake's budget: parallel test load may consume
+    // that entire short budget before Lapin receives a transport.
+    let setup_timeout = connect_deadline(GENEROUS_BUDGET);
+    let setup = OperationBudget::start(GENEROUS_BUDGET, LookupShare::Whole);
+    let runtime = lapin::runtime::default_runtime().assured("a test runs inside Tokio");
+    let addresses = broker
+        .resolve(&setup)
+        .await
+        .assured("the fixture authority answers the broker's name");
+    let DialledBroker { stream, socket } = broker
+        .dial(&runtime, &addresses, &setup, setup_timeout)
+        .await
+        .assured("the loopback listener accepts a connection");
+    let stream = broker
+        .secure(stream, &setup, setup_timeout)
+        .await
+        .assured("the fixture uses plain AMQP");
     let budget = Duration::from_millis(500);
-    let attempt = timeout(
-        GENEROUS_BUDGET,
-        broker.connect_within(connect_deadline(budget)),
-    )
-    .await
-    .assured("a handshake the broker never answers ends within its budget");
+    let opening = OpeningBudget {
+        deadline: OperationBudget::start(budget, LookupShare::Whole),
+        connect_timeout: connect_deadline(budget),
+    };
+    let attempt = timeout(GENEROUS_BUDGET, broker.handshake(runtime, stream, &opening))
+        .await
+        .assured("a handshake the broker never answers ends within its budget");
+    drop(socket);
     let Err(report) = attempt else {
         panic!("a broker that never answers cannot complete the handshake");
     };
 
-    assert!(matches!(
-        report.current_context(),
-        RabbitMqConnectError::AmqpHandshake { host } if host == BROKER
-    ));
+    assert!(
+        matches!(
+            report.current_context(),
+            RabbitMqConnectError::AmqpHandshake { host } if host == BROKER
+        ),
+        "the unanswered AMQP handshake owns the expiry: {report:?}"
+    );
     let elapsed = report.downcast_ref::<DeadlineElapsed>().copied();
     assert_eq!(
         elapsed.map(|elapsed| (elapsed.key, elapsed.bound)),

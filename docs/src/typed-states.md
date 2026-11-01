@@ -236,10 +236,11 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX OWNED SUB` archive signature identifies the current Model layout, including
-the required owned Pulsar subscription position, branch partition count, Sentry platform, and an ingestor's
-`TIMESTAMP AT metadata.<field>` source. Consensus's `raft_pulsar_start_` keyspaces and current
-state metadata encoding identify its stored shapes. An unrecognized signature, namespace or
+The registry's `NERVIX MODEL SET` archive signature identifies the current Model layout, including
+an owned Pulsar subscription's required start position, the required branch partition count,
+Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source and an SQS QUEUE emitter's
+`SEND` request shape. Consensus's `raft_declared_models_` keyspaces and current state metadata
+encoding identify its stored shapes. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States

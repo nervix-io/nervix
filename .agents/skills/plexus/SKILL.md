@@ -509,7 +509,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   [HTTP inspection](../../../docs/src/emitters.md#http-inspection-and-metrics).
 - Write a supported emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
   emitter clause and route construction, before `FLUSH`; it is required for CLIENT, ClickHouse,
-  Postgres, MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
+  Postgres, MySQL, and MongoDB emitters and limited to `1MiB` for SQS. A batching Sentry emitter needs a
   codec with `ON EMITTING BATCH`, and a batching protobuf codec needs `BATCH MESSAGE`. Compatible
   rows from successive Arrow carriers in one flush may share a payload, but rows from different
   source relays or concrete branches cannot. For the database emitters, the clause bounds each insert
