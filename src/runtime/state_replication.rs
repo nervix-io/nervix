@@ -1060,6 +1060,7 @@ impl Runtime {
             .is_some_and(|state| state.is_frozen())
     }
 
+    #[cfg(test)]
     pub(crate) fn ownership_handoff_entity_is_frozen_by(
         &self,
         entity: &DomainNodeRef,
@@ -1327,10 +1328,11 @@ impl Runtime {
         } = request;
         let domain = &domain;
         let entity = &entity;
-        if !self.entity_gate_operation_owns_entity(
+        if !self.entity_gate_operation_owns_unit(
             &coordination,
             domain,
             entity,
+            unit,
             EntityGatePurpose::OwnershipHandoff,
         ) {
             return Err(OwnershipHandoffError::participant(format!(
@@ -1462,10 +1464,11 @@ impl Runtime {
                     return Ok(());
                 }
 
-                let existing_gate_is_held = self.entity_gate_operation_owns_entity(
+                let existing_gate_is_held = self.entity_gate_operation_owns_unit(
                     &existing.coordination,
                     domain,
                     entity,
+                    existing.unit,
                     EntityGatePurpose::OwnershipHandoff,
                 );
                 if existing_gate_is_held {
@@ -1901,10 +1904,11 @@ impl Runtime {
         &self,
         transition: OwnershipHandoffTransitionRef<'_>,
     ) -> OwnershipHandoffResult<()> {
-        if !self.entity_gate_operation_owns_entity(
+        if !self.entity_gate_operation_owns_unit(
             transition.coordination,
             transition.domain,
             transition.entity,
+            transition.unit,
             EntityGatePurpose::OwnershipHandoff,
         ) {
             return Err(OwnershipHandoffError::participant(format!(

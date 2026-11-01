@@ -241,10 +241,11 @@ impl Runtime {
                             && participants_match
                             && prepared.base_schedule_fingerprint == schedule_fingerprint
                             && source_still_owns_entity
-                            && self.entity_gate_operation_owns_entity(
+                            && self.entity_gate_operation_owns_unit(
                                 &prepared.coordination,
                                 &entity.entity.domain,
                                 &entity.entity.node,
+                                entity.unit,
                                 EntityGatePurpose::OwnershipHandoff,
                             )
                     }
