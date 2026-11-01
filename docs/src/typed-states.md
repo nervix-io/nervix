@@ -229,10 +229,11 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX REDIS PAT` archive signature identifies the current Model layout, including
+The registry's `NERVIX RPAT QOS2` archive signature identifies the current Model layout, including
 the required branch partition count, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>`
-source, an SQS QUEUE emitter's `SEND` request shape and a `REDIS PUBSUB` ingestor's subscription,
-which is either a `CHANNEL` or a `PATTERN`. Consensus's `raft_redis_pattern_` keyspaces and current
+source, an SQS QUEUE emitter's `SEND` request shape, the session and quality of service an MQTT
+TOPIC ingestor writes beside its delivery mode, and a `REDIS PUBSUB` ingestor's subscription, which
+is either a `CHANNEL` or a `PATTERN`. Consensus's `raft_redis_qos_` keyspaces and current
 state metadata encoding identify its stored shapes. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.
 

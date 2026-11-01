@@ -227,24 +227,6 @@ impl EntityPresentation {
             .insert(declaration.keywords, PresentedOption::Payload(value));
     }
 
-    /// MQTT's current body writes SESSION and QOS together when either differs from its default.
-    fn write_choices_together(&mut self, keywords: &[&str]) {
-        // Both bounds come from one MQTT declaration: two named choices among three options.
-        let written = keywords.iter().any(|keyword| {
-            matches!(
-                self.options.get(*keyword),
-                Some(PresentedOption::Written(_))
-            )
-        });
-        if written {
-            for keyword in keywords {
-                if let Some(option @ PresentedOption::Default(_)) = self.options.get_mut(*keyword) {
-                    *option = PresentedOption::Written(option.value());
-                }
-            }
-        }
-    }
-
     /// The connector and entity phrase, from the vocabulary's kind.
     pub fn phrase(&self) -> &'static str {
         self.boundary.phrase()
@@ -494,9 +476,8 @@ impl IngestorPresentationModel for MqttTopicIngestor {
         let mut presentation = EntityPresentation::ingestor(self);
         presentation.external_locator(self.topic.as_str());
         presentation.defaulted_option("INSTANCES", self.instances.to_string());
-        presentation.defaulted_option("SESSION", self.mode.session().keyword().to_owned());
-        presentation.defaulted_option("QOS", self.mode.qos().spelling().to_owned());
-        presentation.write_choices_together(&["SESSION", "QOS"]);
+        presentation.written_option("SESSION", self.session.keyword().to_owned());
+        presentation.written_option("QOS", self.qos.spelling().to_owned());
         presentation
     }
 }

@@ -119,11 +119,10 @@ fn requirements(requirements: &[ChoiceRequirement]) -> String {
     if requirements.is_empty() {
         return String::new();
     }
-    let choices: Vec<_> = requirements
-        .iter()
-        .map(|requirement| format!("{} {}", requirement.option, requirement.choice))
-        .collect();
-    format!(" (requires {})", choices.join(" and "))
+    format!(
+        " (requires {})",
+        ChoiceRequirement::conjunction(requirements)
+    )
 }
 
 fn ingestor(kind: IngestorEntityKind) -> Value {
