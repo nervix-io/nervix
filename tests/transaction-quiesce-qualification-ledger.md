@@ -1,9 +1,9 @@
 # Transaction quiesce qualification ledger
 
 This is the acceptance record for [Tx Quiesce 11: Qualify inspection, recovery, and large reports
-across the full stack](https://app.clickup.com/t/90141361959/86bc16euj). The audit starts from
-`origin/main` at `f7fd2911` and follows the one typed impact report from planning through replicated
-storage, execution outcomes, the Rust client, CLI rendering, and the browser inspector.
+across the full stack](https://app.clickup.com/t/90141361959/86bc16euj). The map follows the one typed
+impact report from planning through replicated storage, execution outcomes, the Rust client,
+CLI rendering and browser inspector.
 
 Run the public qualification matrix with:
 
@@ -44,17 +44,4 @@ server response. The server reconstructs content-addressed topology before dispa
 a partial success. Size changes transfer and rendering cost, not semantics: the response contains
 all operations, all execution steps, both topology sides, and all recorded actual outcomes.
 
-## Validation record
-
-The public qualification selection passed with retries disabled: 4 features, 93 scenarios, and
-every step succeeded. The large-report feature also passed by itself under LLVM coverage with 1
-scenario and 34 steps. The isolated browser selection matched the two inspector scenarios whose
-names contain `Inspecting` and `basis`; both passed under LLVM coverage with 79 steps.
-
-Library coverage ran 116 client-wire, 105 consensus, and 12 execution tests. Combining those LCOV
-records with the successful large-report and browser profiles covered 335 of 370 executable changed
-Rust lines, or **90.54% patch coverage** against the task base. Direct package runs also passed the
-client-wire transport integration tests, for 125 client-wire tests in total.
-
-The repository gates passed: `just validate`, `just ratchet`, `just plexus-completion-walk`,
-`just validate-skill`, `just book`, `just cargo-fmt-check`, and `just gherkin-fmt-check`.
+Historical run results and audit findings are retained on [Tx Quiesce 11](https://app.clickup.com/t/86bc16euj).
