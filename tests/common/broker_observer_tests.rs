@@ -17,7 +17,7 @@ use nervix_primitives::{
 use rstest::rstest;
 
 use crate::{
-    broker_observer::{BrokerMessage, BrokerObserver, TypedBrokerHeader},
+    broker_observer::{BrokerMessage, BrokerObserver, PulsarMessageTimes, TypedBrokerHeader},
     nats_observer::NatsObserver,
     nats_observer_tests::StandInNatsServer,
 };
@@ -174,10 +174,17 @@ async fn forwarded_reads_preserve_the_complete_message_and_observer() {
         data_type: "Number".to_string(),
         value: "7".to_string(),
     }];
+    let pulsar_times = PulsarMessageTimes {
+        event_time: Some(981_173_106_789),
+        deliver_at: Some(981_173_111_789),
+        published_at: 981_173_106_800,
+        received_at: 981_173_111_802,
+    };
     let message = BrokerMessage::from_bytes(b"\xff", headers())
         .with_key(Some("key".to_string()))
         .with_group(Some("group".to_string()))
-        .with_typed_headers(typed_headers.clone());
+        .with_typed_headers(typed_headers.clone())
+        .with_pulsar_times(pulsar_times);
     messages.send(message).await.assured("the channel has room");
     messages
         .send(BrokerMessage::from_bytes(b"next", Vec::new()))
@@ -198,6 +205,7 @@ async fn forwarded_reads_preserve_the_complete_message_and_observer() {
     assert_eq!(first.key.as_deref(), Some("key"));
     assert_eq!(first.group.as_deref(), Some("group"));
     assert_eq!(first.typed_headers, typed_headers);
+    assert_eq!(first.pulsar_times, Some(pulsar_times));
     assert_eq!(
         observer
             .try_next_payload(Duration::ZERO)
