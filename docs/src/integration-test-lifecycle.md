@@ -597,11 +597,10 @@ scenario waits for is the one thread that polls all of their steps, described un
 that thread ran on a CPU for 86 percent of the run, every scenario took about 1.45 times its
 median across the factor `3` runs, and the run needed 279,439 slot-seconds where 48 slots had
 needed at most 215,000. More slots added no throughput, so the job keeps factor `3`. Memory was no
-limit on those runs' runner, which used at most 28 GiB of its 62. The archive build and its
-unit-test and scenario readers run on `boat-xlarge`, keeping the compiled checkout path identical
-across archive publication and restoration. Its 32 GB and 4 GB of swap stay above that peak with
-less to spare, and each scenario shard keeps 16 CPUs, 48 slots and every product and harness
-deadline. A Boat runner can lose a fifth of its CPU to its host: in Check 41157008321 two of three
+limit on those runs' runner, which used at most 28 GiB of its 62. The archive build runs on
+`blacksmith-16vcpu-ubuntu-2404`, and its unit-test and scenario readers on `boat-xlarge`, whose
+32 GB and 4 GB of swap stay above that peak with less to spare. Each scenario shard keeps 16 CPUs,
+48 slots and every product and harness deadline. A Boat runner can lose a fifth of its CPU to its host: in Check 41157008321 two of three
 shards averaged 18% and 20% CPU steal with 54 and 64 retries, and the third averaged 0.9% with one.
 The runner load record shows how close a run comes on memory and how much CPU it lost.
 
@@ -3005,8 +3004,9 @@ for one build at a time, so the recipe builds each helper beside the suite in a 
 below `target/llvm-cov-tools`, and then installs it into the target directory of `cargo llvm-cov`. `scripts/scenario_shards.py`
 names what the archive holds: every executable `cargo llvm-cov report` reads as an object, the
 Playwright driver whose path the scenario executable holds, the ONNX fixtures and runtime, and the
-WASM guests. Each `scenarios (I of N)` job checks out the same revision at the same path, which the
-executables' absolute paths require, and restores the archive with
+WASM guests. Each `scenarios (I of N)` job checks out the same revision and bind-mounts it at the
+path the build publishes, which the executables' absolute paths require, because the build and the
+shards run on different providers. It then restores the archive from there with
 `just test-scenarios-coverage-unpack`. The restore refuses an archive of another revision or
 checkout path, a file restored at another size, and an executable whose shared libraries the runner
 lacks, before any scenario starts. Before it, the shard remounts the ext4 volumes holding `/tmp`,

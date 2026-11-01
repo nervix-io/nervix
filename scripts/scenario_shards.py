@@ -26,7 +26,8 @@ The archive holds these files, under their paths below the checkout:
   and every file with its size.
 
 Executables hold absolute paths below the checkout they were built in, such as the tools a
-scenario starts and the Playwright driver, so a shard must run in a checkout at the same path.
+scenario starts and the Playwright driver, so a shard must run in a checkout at the same path. A
+shard on another provider bind-mounts its checkout at the path the build publishes.
 `unpack` refuses an archive of another revision or of another checkout path, checks that every file
 the manifest names was restored at its size, and refuses an executable or library whose shared
 libraries this runner lacks, before any scenario starts.

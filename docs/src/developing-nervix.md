@@ -383,7 +383,7 @@ minute, hour and day. A job's size follows the memory and disk its builds use ra
 since a Boat machine has only 2 GB of memory per CPU, with 4 GB of swap beside it:
 
 - `boat-xlarge`, with 16 CPUs, 32 GB and 251 GB of disk, runs validation, the diagnostic evidence,
-  the unit tests, the scenario build and its shards, the extra checks, Shuttle, Loom, the Deloxide
+  the unit tests, the scenario shards, the extra checks, Shuttle, Loom, the Deloxide
   lane, the Bolero randomized properties, the image builds and the benchmarks. In October 2026 the
   extra checks used about 95 GiB of disk and the amd64 image build lost its runner on a 16 GB
   machine.
@@ -402,17 +402,17 @@ Boat jobs that run the selection's tests install the current git from the git-co
 runner image does.
 
 [Blacksmith](https://www.blacksmith.sh)'s `blacksmith-16vcpu-ubuntu-2404`, with 16 CPUs, 64 GB and
-GitHub's runner image, runs the Bolero sanitizer shards, the Loom qualification shards and client
-conformance. The sanitizer shards' address-sanitized server build
+GitHub's runner image, runs the scenario build, the Bolero sanitizer shards, the Loom qualification
+shards and client conformance. The sanitizer shards' address-sanitized server build
 needs more than Boat's 32 GB, even with eight compilers. The other two are compile-bound builds that kache serves slowly on Boat: in
 Check run 40991534806 kache's downloads spent most of their time waiting for the lock of its local
 store, 1.8 to 4.6 seconds each against 0.4 seconds on Blacksmith, the Loom qualification shards
 reached their two-hour limit after about 107 minutes of compiling, and the client conformance build
 took 49 of its job's 60 minutes. `.github/actionlint.yaml` declares the Blacksmith labels as well.
 
-The scenario build, the unit tests and the shards must share one provider, because the archive
-restores only at the checkout path it was built in, and it checks that path before it restores any
-file.
+An archive restores only at the checkout path it was built in, and it checks that path before it
+restores any file. The scenario build runs on Blacksmith and publishes its path, so the `tests` job
+and the shards on Boat bind-mount their checkout there, and restore and run from that path.
 
 A kache-backed job uses the cache bucket in its runner's region: the EU bucket on Boat's European
 machines, and the US bucket on GitHub's hosted runners and on Blacksmith's US runners.
