@@ -38,7 +38,7 @@ use crate::{
     EmitterBatchLegality, EmitterPublishing, EmitterPublishingModeKind, Expression,
     HttpRequestEmitterMode, IcebergTableEmitterMode, KafkaTopicEmitterMode,
     MongoDbCollectionEmitterMode, MqttTopicEmitterMode, MySqlTableEmitterMode, NatsEmitterMode,
-    OtelEmitterMode, PostgresTableEmitterMode, PulsarTopicEmitterMode, RabbitMqQueueEmitterMode,
+    OtelEmitterMode, PostgresTableEmitterMode, PulsarTopicEmitterMode, RabbitMqEmitterMode,
     RedisPubSubEmitterMode, SchemaName, SentryEventEmitterMode, SqsQueueEmitterMode,
     SyslogCollectorEmitterMode, ZeroMqPushEmitterMode,
 };
