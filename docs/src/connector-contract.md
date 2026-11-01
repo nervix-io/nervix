@@ -1345,10 +1345,10 @@ vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the r
 the poll's scheduled instant, `HTTP ENDPOINT` the request's method, path, query, peer address and
 routed host, `WEBSOCKETS CONNECTION` the frame kind, `WEBSOCKETS ENDPOINT` the frame kind, the
 connection's peer address and its path, `KAFKA TOPIC` the topic, partition, offset, binary key,
-timestamp, timestamp kind and tombstone flag, `SYSLOG LISTENER` the peer address, and every other
-entity none. The endpoint entities are served by the host itself rather than a connector crate,
-so the server's endpoint intake hands their values over the same way a connector's message does.
-Registry
+timestamp, timestamp kind and tombstone flag, `SYSLOG LISTENER` the peer address, `REDIS PUBSUB`
+the delivering channel and the pattern it matched, and every other entity none. The endpoint
+entities are served by the host itself rather than a connector crate, so the server's endpoint
+intake hands their values over the same way a connector's message does. Registry
 validation reads that declaration for the fields an ingestor's route programs and its
 `TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
 connector's message hands the host the value of every declared field in declared order, one typed
