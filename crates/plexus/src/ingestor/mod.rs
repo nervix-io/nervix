@@ -327,12 +327,23 @@ where
     Vec<AlterTransportIngestorOperation<S>>: Into<IngestorAlteration>,
     P: Parser<'src, &'src [Token], S, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
-    let operation = choice((
+    alteration::<S, _, _>(transport_operation(body))
+}
+
+/// The shared operations of a transport ingestor; an entity may compose typed options with them.
+fn transport_operation<'src, S, P>(
+    body: P,
+) -> impl Parser<'src, &'src [Token], AlterTransportIngestorOperation<S>, extra::Err<ParseError<'src>>>
++ Clone
+where
+    S: IngestorEntityModel + Clone + 'src,
+    P: Parser<'src, &'src [Token], S, extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    choice((
         set_source(body).map(AlterTransportIngestorOperation::from),
         set_decode(),
         shared_operation().map(AlterTransportIngestorOperation::from),
-    ));
-    alteration::<S, _, _>(operation)
+    ))
 }
 
 /// The alteration of a client ingestor, which decodes nothing and so has no codec to set.
@@ -349,7 +360,7 @@ pub fn alter_ingestor_parser<'src>()
             transport_alteration(http::request_body()),
             transport_alteration(http::endpoint_body()),
             transport_alteration(kafka::topic_body()),
-            transport_alteration(pulsar::topic_body()),
+            pulsar::alteration(),
             transport_alteration(mqtt::topic_body()),
             transport_alteration(nats::subject_body()),
             transport_alteration(nats::stream_body()),
@@ -493,8 +504,8 @@ mod tests {
         let sources = [
             "KAFKA TOPIC INGESTOR i FROM c TOPIC 't' OFFSET BY DOMAIN MODE NO ACK ON QUIESCE \
              SUSPEND",
-            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' OWNED BY INGESTOR MODE NO \
-             ACK ON QUIESCE SUSPEND",
+            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' OWNED BY INGESTOR START AT \
+             EARLIEST MODE NO ACK ON QUIESCE SUSPEND",
             "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' PROVISIONED MODE NO ACK ON \
              QUIESCE SUSPEND",
             "RABBITMQ QUEUE INGESTOR i FROM c QUEUE 'q' MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY \
@@ -1094,7 +1105,7 @@ mod tests {
     fn parses_create_ingestor_pulsar_ack_sequential() {
         let input = r#"
             CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-              FROM pulsar_main TOPIC 'notifications' SUBSCRIPTION 'nervix_subscription' OWNED BY INGESTOR MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
+              FROM pulsar_main TOPIC 'notifications' SUBSCRIPTION 'nervix_subscription' OWNED BY INGESTOR START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
               ON QUIESCE SUSPEND DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1114,7 +1125,9 @@ mod tests {
                 subscription: PulsarSubscription {
                     name: nervix_models::PulsarSubscriptionName::try_from("nervix_subscription")
                         .expect("valid subscription identifier"),
-                    ownership: PulsarSubscriptionOwnership::Ingestor,
+                    ownership: PulsarSubscriptionOwnership::Ingestor {
+                        start_at: nervix_models::PulsarStartPosition::Earliest
+                    },
                 },
                 instances: nonzero!(1u64),
                 mode: PulsarIngestMode::AckSequential {
@@ -1280,7 +1293,7 @@ mod tests {
     #[test]
     fn pulsar_mode_context_does_not_offer_kafka_offset_keywords() {
         let input = "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' OWNED \
-                     BY INGESTOR MODE ";
+                     BY INGESTOR START AT EARLIEST MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO ACK".to_string()));
@@ -1300,8 +1313,18 @@ mod tests {
     #[test]
     fn parses_who_owns_a_pulsar_subscription_in_any_case() {
         for (ownership, expected) in [
-            ("OWNED BY INGESTOR", PulsarSubscriptionOwnership::Ingestor),
-            ("owned by Ingestor", PulsarSubscriptionOwnership::Ingestor),
+            (
+                "OWNED BY INGESTOR START AT EARLIEST",
+                PulsarSubscriptionOwnership::Ingestor {
+                    start_at: nervix_models::PulsarStartPosition::Earliest,
+                },
+            ),
+            (
+                "owned by Ingestor start at earliest",
+                PulsarSubscriptionOwnership::Ingestor {
+                    start_at: nervix_models::PulsarStartPosition::Earliest,
+                },
+            ),
             ("PROVISIONED", PulsarSubscriptionOwnership::Provisioned),
             ("Provisioned", PulsarSubscriptionOwnership::Provisioned),
         ] {
@@ -1333,8 +1356,8 @@ mod tests {
             "OWNED BY",
             "OWNED BY DOMAIN",
             "BY INGESTOR",
-            "PROVISIONED OWNED BY INGESTOR",
-            "OWNED BY INGESTOR PROVISIONED",
+            "PROVISIONED OWNED BY INGESTOR START AT EARLIEST",
+            "OWNED BY INGESTOR START AT EARLIEST PROVISIONED",
         ] {
             let source = format!(
                 "PULSAR TOPIC INGESTOR i FROM c TOPIC 'orders' SUBSCRIPTION 'readers' {ownership} \
@@ -1366,7 +1389,7 @@ mod tests {
 
     #[test]
     fn pulsar_ownership_is_followed_by_the_instances_and_the_mode() {
-        for ownership in ["OWNED BY INGESTOR", "PROVISIONED"] {
+        for ownership in ["OWNED BY INGESTOR START AT EARLIEST", "PROVISIONED"] {
             let input = format!(
                 "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' {ownership} "
             );

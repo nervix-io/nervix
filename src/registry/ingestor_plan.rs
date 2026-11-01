@@ -32,13 +32,12 @@ use nervix_models::{
     IngestorEntity, IngestorEntityKind, IngestorInput, IngestorName, KafkaIngestMode,
     KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, MessageErrorOperation, Model, ModelName,
     MqttIngestMode, MqttIngestor, MqttTopicIngestor, NatsIngestor, NatsStreamIngestor,
-    NatsSubjectIngestor, PrometheusIngestor, PulsarIngestMode, PulsarIngestor,
-    PulsarSubscriptionOwnership, PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestor,
-    RabbitMqQueueIngestor, RedisIngestor, RedisPubSubIngestor, ResolvedBranching, ScheduledNode,
-    SchemaField, SchemaName, SignalingProtocolName, SqsIngestMode, SqsIngestor, SqsQueueIngestor,
-    SyslogIngestor, SyslogListenerIngestor, WebsocketsConnectionIngestor,
-    WebsocketsEndpointIngestor, WebsocketsIngestor, ZeroMqIngestor, ZeroMqPullIngestor,
-    parse_duration_text,
+    NatsSubjectIngestor, PrometheusIngestor, PulsarIngestMode, PulsarIngestor, PulsarTopicIngestor,
+    RabbitMqIngestMode, RabbitMqIngestor, RabbitMqQueueIngestor, RedisIngestor,
+    RedisPubSubIngestor, ResolvedBranching, ScheduledNode, SchemaField, SchemaName,
+    SignalingProtocolName, SqsIngestMode, SqsIngestor, SqsQueueIngestor, SyslogIngestor,
+    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestor, ZeroMqIngestor, ZeroMqPullIngestor, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 
@@ -507,7 +506,7 @@ impl IngestorStartPlan {
                 true
             }
             IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(source)) => {
-                let owned = source.subscription.ownership == PulsarSubscriptionOwnership::Ingestor;
+                let owned = source.subscription.ownership.is_owned();
                 if !owned {
                     return false;
                 }
@@ -1191,6 +1190,7 @@ mod tests {
         CreateClientSqs, CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq,
         CreateEndpoint, EndpointType, FlushPolicy, GeneralErrorPolicy, IngestorName, MqttQos,
         MqttSession, NodeRef, OutputBranch, ProcessorOutputs, PrometheusQueryIngestor,
+        PulsarSubscriptionOwnership,
     };
     use nonzero_ext::nonzero;
     use rstest::rstest;
@@ -1281,7 +1281,9 @@ mod tests {
     fn pulsar_subscription() -> nervix_models::PulsarSubscription {
         nervix_models::PulsarSubscription {
             name: named("nervix"),
-            ownership: PulsarSubscriptionOwnership::Ingestor,
+            ownership: PulsarSubscriptionOwnership::Ingestor {
+                start_at: nervix_models::PulsarStartPosition::Earliest,
+            },
         }
     }
 
@@ -1873,6 +1875,20 @@ mod tests {
         input.codec = named("alternate_json");
         replacement.input = IngestorInputPlan::Transport(input);
         assert!(!owned.requires_entity_retirement(Some(&replacement)));
+
+        let mut input = transport_plan(owned).clone();
+        let IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(source)) =
+            &mut input.source
+        else {
+            panic!("the Pulsar fixture produces a typed Pulsar source");
+        };
+        source.subscription.ownership = PulsarSubscriptionOwnership::Ingestor {
+            start_at: nervix_models::PulsarStartPosition::Latest,
+        };
+        let mut latest = owned.clone();
+        latest.input = IngestorInputPlan::Transport(input);
+        assert!(latest.requires_entity_retirement(None));
+        assert!(!latest.requires_entity_retirement(Some(&latest)));
 
         // Changed sources require the composition root to compare their resolved subscriptions.
         let mut input = transport_plan(owned).clone();

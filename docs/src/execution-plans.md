@@ -236,6 +236,13 @@ protocols. [Domain Clock](./domain-clock.md) owns the execution-time capability 
 installation. [Client Session Protocol](./client-session-protocol.md) owns how a client observes
 an installed domain and recovers a command outcome.
 
+An application bounded by its caller's deadline checks elapsed time before polling each wait,
+including every later poll of a pending wait. An elapsed deadline therefore takes precedence over
+an available installation slot even before the timer driver's next tick. It does not interrupt an
+installation or activation already begun; reconciliation continues applying the newest committed
+revision. [Backup And Restore Architecture](./backup-and-restore-architecture.md#the-quiesced-cut)
+owns a cut's refusal and resumption after its pause commits beyond that deadline.
+
 ## Incremental Changes And Rebuilds
 
 The decision layer compares the previous and desired schedules while both Model-bearing
@@ -303,7 +310,9 @@ publication and relocation.
 ## Sources, Emitters, And Error Routes
 
 An ingestor start uses the scheduled source class, client configuration, codec, ACK boundary,
-and bound ordered routes from its entrypoint plan. A reingestor binds its source predicates and
+and bound ordered routes from its entrypoint plan. A Pulsar plan retains the owned subscription's
+required creation position alongside its ownership; composition passes that typed choice to the
+connector without inventing a position for a provisioned cursor. A reingestor binds its source predicates and
 incoming-branch materialized dependencies before attaching relay inputs. Initial build, entity
 swap, reassignment, memory-pressure resume, and Kafka domain-offset placement all use those
 typed contracts. Route plans decide whether output is unbranched, preserves an incoming key, or
