@@ -17,6 +17,66 @@
 # the compiler's catalog: a new owner of tracked locks needs a record, and a record whose file no
 # longer acquires one is removed.
 
+[[workload]]
+coverage = "Kafka records through the real broker and the source host's tracked ingestion and ACK state, with every new metadata field read in NO ACK, ACK SEQUENTIAL and ACK PARALLEL on one and three nodes. Driver polling and borrowed metadata visits are untracked."
+examples = 6
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "scenario.kafka-record-metadata"
+invariant = "Every admitted record retains its own binary key, exact broker timestamp, timestamp kind and tombstone flag across ingestion and acknowledgement."
+invocation = "scenarios"
+scenario = "A Kafka <mode_name> ingestor projects each record's key, timestamp and type"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Kafka null and empty values decoded through TOML and JAQ, then projected beside tracked ingestion and acknowledgement state on one and three nodes. Driver data and metadata conversion are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "scenario.kafka-record-tombstones"
+invariant = "A null Kafka value has tombstone=true and an empty non-null value has tombstone=false for every row its codec produces."
+invocation = "scenarios"
+scenario = "A Kafka ingestor distinguishes a tombstone from an empty value"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Kafka metadata timestamps drive two branch-local historical windows through tracked source and processor lifecycle state on one and three nodes. Logical timer waits and borrowed metadata conversion are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "scenario.kafka-record-event-time"
+invariant = "TIMESTAMP AT metadata.timestamp uses the broker instant for each branch's duration window and preserves the row's fields."
+invocation = "scenarios"
+scenario = "Kafka broker event time makes historical windows due independently in two branches"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: real-broker Kafka ingestion and ACK state in all three modes with every record metadata field read. Driver polling and borrowed metadata visits remain untracked."
+examples = 6
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "stress.kafka-record-metadata"
+invariant = "Every admitted record retains its own binary key, exact broker timestamp, timestamp kind and tombstone flag across ingestion and acknowledgement."
+invocation = "stress-scenarios"
+scenario = "A Kafka <mode_name> ingestor projects each record's key, timestamp and type"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: real Kafka null and empty values decoded through TOML and JAQ beside tracked ingestion and acknowledgement state. Driver data and metadata conversion remain untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "stress.kafka-record-tombstones"
+invariant = "A null Kafka value has tombstone=true and an empty non-null value has tombstone=false for every row its codec produces."
+invocation = "stress-scenarios"
+scenario = "A Kafka ingestor distinguishes a tombstone from an empty value"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: metadata timestamps drive two historical branch windows beside tracked source and processor lifecycle state. Logical timer waits and borrowed metadata conversion remain untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "stress.kafka-record-event-time"
+invariant = "TIMESTAMP AT metadata.timestamp uses the broker instant for each branch's duration window and preserves the row's fields."
+invocation = "stress-scenarios"
+scenario = "Kafka broker event time makes historical windows due independently in two branches"
+selections = ["deloxide-stress"]
+
 [lane]
 # All diagnostic test and driver executables build before any workload starts, under their own
 # real-time budget. The measured cold stressed scenario build took 1988s on a loaded host; 80
@@ -109,6 +169,7 @@ kind = "cucumber"
 package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@kafka_record_metadata",
   "@restore_client_inspection",
   "@runtime_installation_retry",
   "@execution_class_drain",

@@ -105,10 +105,15 @@ writes proceed beside response reads. Both forwarding forms use two-second idle 
 ten-second peer-silence limit. The [Interconnect](./interconnect.md#client-consumer-streams) owns
 setup budgets, peer identity, quotas and link-ending semantics.
 
-HTTP and WebSocket endpoint ingestors also project these shared submission outcome labels. Their
-`MODE ACK MAX <n> ACK TIMEOUT <duration>` window and request transport are separate from native
-client producer credit and session recovery. See [endpoint ingestion](ingestors.md#http-endpoint-and-websockets-endpoint)
-for HTTP statuses, signaling frames, sender retry and intake-ending behavior.
+`HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT` ingestors receive codec payloads on every live node,
+through an endpoint of the matching `TYPE` under a VHOST. They expose request or frame metadata and
+the request's headers. `MODE NO ACK` confirms HTTP admission with 202; `MODE ACK MAX <n> ACK TIMEOUT
+<duration>` waits for graph completion and projects the shared submission outcome labels into an
+HTTP JSON response or a WebSocket signaling frame. Its per-node response window, absolute physical
+deadline and reject-only quiesce policy are separate from native producer credit, progress timeouts
+and session recovery. Endpoint senders own retry and may duplicate admitted effects. See
+[endpoint ingestion](ingestors.md#http-endpoint-and-websockets-endpoint) for the complete status
+mapping, metadata fields, header contract, buffering and intake-ending behavior.
 
 ## Configure A Native Graph
 
