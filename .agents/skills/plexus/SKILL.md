@@ -65,7 +65,8 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Payload: sample input, wire format, exact internal field types, optional fields, and sensitive
   fields.
 - Source and emitter: connector kinds, externally provisioned entity names, whether an operator
-  provisions a Pulsar subscription or its ingestor owns it, endpoints, delivery/ACK expectations,
+  provisions a Pulsar subscription or its ingestor owns it, the owned subscription's EARLIEST or
+  LATEST creation position, endpoints, delivery/ACK expectations,
   emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
   ordering, and offsets.
 - Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit. A branch
@@ -81,9 +82,11 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 
 Read [references/configuring-nervix.md](references/configuring-nervix.md), then use its routing
 guidance to select the relevant Markdown entries from the public index.
-For Plexus endpoint ACK declarations, require the explicit response window and reject-only quiesce
-policy; WebSocket replies use the endpoint's declared signaling format. The configuring reference
-and the Ingestors endpoint section define status, outcome, timeout and retry behavior.
+For endpoint declarations, read `Ingestors` → `HTTP ENDPOINT And WEBSOCKETS ENDPOINT` for both
+delivery modes, their quiesce sets, request/frame metadata and upgrade-header reads. Require an
+explicit response window and reject-only quiesce with `MODE ACK`; its absolute response deadline
+does not restart on progress. The configuring reference routes the status, signaling and retry
+contracts.
 For Kafka domain offsets, retain the documented native checkpoint quorum budget and at-least-once
 retry boundary when explaining source recovery.
 
@@ -535,10 +538,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   node, so size it for the node's whole workload rather than per emitter, and expect one pool per
   node the client is placed on. Read the dedicated `Common` → `Database Client Connection Pools`
   documentation entry before choosing values.
-- A `REDIS` client's command pool takes `pool_idle_timeout_ms` and `pool_max_lifetime_ms`, 10 and
-  30 minutes by default, and never applies them to a Pub/Sub ingestor's subscription connection.
-  Read `Connection lifetimes` in that same pools entry before choosing values; `DESCRIBE CLIENT
-  <name>` shows both, marking an omitted one `(default)`.
+- A `REDIS` client's command pool and a `POSTGRES` client's pool take `pool_idle_timeout_ms` and
+  `pool_max_lifetime_ms`, 10 and 30 minutes by default; Redis never applies them to a Pub/Sub
+  ingestor's subscription connection. A `POSTGRES` client also takes `pool_acquire_timeout_ms`, 30
+  seconds by default, and `pool_test_before_acquire`, `true` by default. Read `Connection lifetimes`
+  in that same pools entry before choosing values; `DESCRIBE CLIENT <name>` shows them, marking an
+  omitted one `(default)`.
 - Give a `POSTGRES` client an absolute `postgres://` or `postgresql://` `addr` URL that sets
   `sslmode` once, to either `disable` or `verify-full`; no other mode is accepted and there is no
   opportunistic fallback. Mounted `tls_ca_file`, `tls_cert_file`, and `tls_key_file` are the
@@ -573,8 +578,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `FLUSH` values as latency and boundary-cost controls, not as a throughput lever: `MAX BATCH SIZE`
   only clamps a batch, and the flush tuning guidance in the docs records which emitters benefit from
   larger batches.
-- Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; an ingestor's `NO ACK` and an emitter's
-  `NO ACK` have no in-flight ACK window and never accept `MAX`.
+- Use delivery-mode `MAX <n>` with `ACK PARALLEL` or an endpoint's `ACK`; an ingestor's `NO ACK`
+  and an emitter's `NO ACK` have no in-flight ACK window and never accept `MAX`.
 - Do not promise that an emitter's `NO ACK` survives a stop on every emitter. A `STOP`, a replacement
   or a node shutdown sends what a Kafka producer still queues, awaits the receipts of what a Pulsar
   producer accepted and waits for an MQTT QoS 0 client to send what it holds, all within its

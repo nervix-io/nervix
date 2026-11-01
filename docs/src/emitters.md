@@ -2771,9 +2771,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | a pool acquire: name resolution, connection, TLS and authentication: fixed 30s<br>an insert and its metadata query: unbounded |
+| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>an insert and its metadata query: unbounded |
 | Driver limits | None declared. |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |
+| Stalled-peer checks | `STALLED PEER pool_acquire_timeout_ms` |
 
 See the [POSTGRES TABLE capability and mirror reference](connector-capabilities.md#postgres-table-emit).
 <!-- connector-matrix:emit-postgres-table:end -->
@@ -2806,6 +2806,13 @@ CREATE POSTGRES CLIENT pg
 ```
 
 For TLS connections, use `sslmode=verify-full`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path. `'tls_cert_file'` and `'tls_key_file'` supply a client identity and must be given together. TLS files require `sslmode=verify-full`.
+
+Four more Nervix-owned keys set how the client's pool treats a connection.
+`pool_acquire_timeout_ms`, 30 seconds by default, bounds each checkout, independent of how long an
+accepted query then runs. `pool_idle_timeout_ms` and `pool_max_lifetime_ms`, 10 and 30 minutes by
+default, retire a connection, and `pool_test_before_acquire`, `true` by default, has each checkout
+test an idle connection before handing it over. `DESCRIBE CLIENT` reports all four, and
+[Connection lifetimes](database-client-pools.md#connection-lifetimes) states what each one does.
 
 ### MySQL
 

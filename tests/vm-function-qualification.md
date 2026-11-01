@@ -48,21 +48,4 @@ tests shapes that cannot be sent by the scalar binding API, including nested arr
 scenario passes function-produced string, bytes, integer, datetime and sensitive values through the
 same subscription protocol as the other runtime scenarios.
 
-## Verification
-
-The new `A schema mutation installs a newly compiled function plan before ingestion resumes` and
-`Replacing a route installs its newly prepared regular expression` outlines passed on both one-
-and three-node clusters (4 scenarios, 38 steps). The updated `Case conversion agrees across
-literal, column and repeated expressions` outline also passed on both topologies.
-
-The `Narrow integer arithmetic fails only the messages whose exact results leave their width`
-outline, which reaches the explicit SIMD lanes of every integer width below 64 bits, passed on both
-one- and three-node clusters together with the other checked numeric and numeric function outlines
-(20 scenarios, 90 steps).
-
-The full `just test` run passed 1,986 scenarios and 21,628 steps, including the client conformance
-suite. The standalone client conformance run passed 19 scenarios; client wire tests, the Plexus
-completion walk, `just ratchet`, and `just validate` passed.
-The focused `just test-coverage-feature` run passed the new qualification, expression semantics,
-and client conformance features and produced `lcov.info`. This patch changes Cucumber specifications
-and Markdown only; it has no modified Rust source lines for patch coverage to measure.
+Historical run results and audit findings are retained on [VM Functions 19](https://app.clickup.com/t/86bc202m0).
