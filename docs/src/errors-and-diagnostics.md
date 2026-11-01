@@ -218,6 +218,7 @@ provides.
 | Shared C binding | `ClientError` as the current context, and the `BackupDownloadError` beneath a failed download | The `NX_ERROR_*` kind of the failure |
 | Session edge | `ConsensusError::LeadershipLost` as the current context of a proposal report | A leader redirect in place of a failed command |
 | Transaction application | `RuntimeError`'s revision preparation and readiness timeouts as the current context | Apply the cluster state again and retry, in place of failing the transaction |
+| Quiesced backup cut | `RuntimeError::ApplicationDeadline` as the current context of its pause's application, then `DomainAlterError`'s pause application and drain timeouts as the current context | The cut's timeout with its active phase, in place of a failure to stop ingestion or a capture failure |
 | Session transaction binding | `SessionTransactionBindingError` as the current context | The `TransactionTakenOver` or `TransactionDetached` disposition |
 | Postgres, MySQL and ClickHouse emitters | The driver's SQLSTATE, code or named rejection in the current context | Whether the destination refused rows for good or the attempt failed as infrastructure |
 | Connectors that resolve through a driver's DNS hook | `DnsLookupError::find_in` over the causes the driver wraps around the lookup | Keep the typed lookup failure beneath the connection failure |
@@ -1366,7 +1367,14 @@ session receives render the whole chain, such as `failed to start domain 'edge':
 runtime revision 7: failed to build domain execution for 'edge': failed to load lookup 'zips': ...`,
 and a domain whose build failed records the same chain as its instantiation error. Revision
 preparation and readiness timeouts keep variants of their own, which a transaction recognizes in
-the report's top context to retry its application rather than fail it.
+the report's top context to retry its application rather than fail it. A caller that bounds the
+application by a deadline of its own, as a quiesced backup cut applying its pause, receives
+`RuntimeError::ApplicationDeadline` when that deadline ends one of the application's waits, naming
+the wait: an installation slot, or every live node preparing or readying a revision. The pause path
+reports it beneath `DomainAlterError::BackupPauseTimeout`, and the cut attributes that to its drain
+phase as its timeout, such as `timed out waiting to capture domain 'edge': phase=drain, ...: timed
+out applying the backup pause of domain 'edge': the caller's deadline ended the runtime application
+while it waited for every live node to ready runtime revision 9`.
 
 ### Ingestors, Emitters And Generators
 

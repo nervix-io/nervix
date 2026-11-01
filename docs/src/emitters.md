@@ -349,7 +349,8 @@ parsed against the client origin. It cannot include a fragment, backslash, inval
 whitespace or control character; normalization must keep it on that origin and must not produce a
 leading `//`. The normalized target is limited to 8 KiB. `write_header` accepts valid HTTP field
 names and UTF-8 values without control characters or leading/trailing whitespace in a nonempty
-value. Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
+value. The request carries those values as their exact UTF-8 bytes, including non-ASCII characters.
+Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
 application headers and 32 KiB of name/value bytes are allowed.
 
 `ENCODE USING` permits the ordinary transforming construction clauses. `WITHOUT BODY` selects an
@@ -1165,7 +1166,7 @@ Transport-specific expectations:
 - `KAFKA`: pass-through to librdkafka, except `allow.auto.create.topics`, which `CREATE KAFKA CLIENT` refuses. The emitter's producer keeps librdkafka's producer default, so a broker that allows auto-creation creates a missing topic on the first publish; provision topics explicitly. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and optional `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `RABBITMQ`: use `amqps://...` in `addr`; Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](./ingestors.md#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`.
+- `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
 - `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`,
@@ -1579,6 +1580,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-emit).
 <!-- connector-matrix:emit-mqtt-topic:end -->
+
+`TOPIC` names one literal topic, published to exactly as written, letter case included. It follows
+the [ingestion topic filter rule](ingestors.md#external-names) without the `+` and `#` wildcards,
+so `TOPIC 'devices/+'` is refused when the emitter is created. The client's `addr` names the broker
+by its scheme, host and port alone, as [MQTT ingestion](ingestors.md#mqtt) describes.
 
 CREATE refuses an unsupported QoS number with its value and accepted levels, such as
 `MQTT emitter QOS must be 0, 1, or 2, found 3`, underlining the supplied number.

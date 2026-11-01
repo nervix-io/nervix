@@ -86,7 +86,7 @@ use crate::{
     cluster,
     registry::{Registry, RegistryError},
     resource::ResourceStore,
-    runtime::Runtime,
+    runtime::{ApplicationWait, Runtime},
 };
 
 /// How many events a session can fall behind before the bus drops the oldest.
@@ -242,10 +242,41 @@ pub(in crate::application) struct RuntimeStateApplication<'a> {
     pub(in crate::application) shutdown: &'a CancellationToken,
 }
 
+/// What ends the waits of one application of the committed runtime state, beside the budget the
+/// cluster gives each revision the application installs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::application) enum ApplicationBound {
+    /// The cluster's budget alone: peer-failure detection followed by readiness propagation.
+    ClusterBudget,
+    /// The cluster's budget, or `deadline` when it comes first: a caller that must not wait for
+    /// the cluster past its own deadline, as a quiesced backup cut applying its pause. The
+    /// deadline ends only the application's waits. A local installation or activation that began
+    /// before it finishes, so this node never holds part of a revision, and every node keeps
+    /// applying the newest committed state through its own reconciliation.
+    Deadline(nervix_primitives::time::Instant),
+}
+
+impl ApplicationBound {
+    /// Resolves once the bound ends the application's current `wait`, with the report of the wait
+    /// it ended. It never resolves for the cluster's budget alone, which each of the application's
+    /// cluster-wide waits applies itself.
+    async fn ends(self, wait: ApplicationWait) -> Report<crate::runtime::RuntimeError> {
+        match self {
+            Self::ClusterBudget => std::future::pending().await,
+            Self::Deadline(deadline) => {
+                nervix_primitives::time::sleep_until(deadline).await;
+                Report::new(crate::runtime::RuntimeError::ApplicationDeadline { wait })
+            }
+        }
+    }
+}
+
 /// Apply the newest admitted runtime state with a heap-backed future so command execution keeps a
 /// bounded stack regardless of the preparation and readiness paths active inside this operation.
+/// `bound` ends the application's waits; see [`ApplicationBound`].
 pub(in crate::application) fn apply_current_cluster_runtime_state(
     application: RuntimeStateApplication<'_>,
+    bound: ApplicationBound,
 ) -> BoxFuture<'_, error_stack::Result<(), crate::runtime::RuntimeError>> {
     let RuntimeStateApplication {
         runtime,
@@ -261,7 +292,14 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
         let local_node_id = consensus.local_node_id();
         loop {
             nervix_primitives::task::consume_budget().await;
-            let Some(installation) = admission.begin_installation(shutdown).await else {
+            let installation = admission.begin_installation(shutdown);
+            tokio::pin!(installation);
+            let installation = nervix_primitives::select! {
+                biased;
+                ended = bound.ends(ApplicationWait::Installation) => return Err(ended),
+                installation = &mut installation => installation,
+            };
+            let Some(installation) = installation else {
                 return Ok(());
             };
             #[cfg(feature = "testing")]
@@ -358,6 +396,9 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             let preparation_result = nervix_primitives::select! {
                 biased;
                 _ = shutdown.cancelled() => return Ok(()),
+                ended = bound.ends(ApplicationWait::Preparation {
+                    revision: state.revision,
+                }) => return Err(ended),
                 newer_revision = &mut supersession => {
                     let Some(newer_revision) = newer_revision else {
                         return Ok(());
@@ -396,7 +437,16 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 "cluster runtime revision prepared"
             );
 
-            let Some(activation) = admission.begin_installation(shutdown).await else {
+            let activation = admission.begin_installation(shutdown);
+            tokio::pin!(activation);
+            let activation = nervix_primitives::select! {
+                biased;
+                ended = bound.ends(ApplicationWait::Activation {
+                    revision: state.revision,
+                }) => return Err(ended),
+                activation = &mut activation => activation,
+            };
+            let Some(activation) = activation else {
                 return Ok(());
             };
             let current_revision = consensus.current_runtime_revision().await;
@@ -424,21 +474,33 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 .set_local_runtime_revision_ready(state.revision)
                 .await;
             drop(activation);
-            let readiness = wait_for_application_revision(
-                cluster,
-                consensus,
-                interconnect,
-                state.revision,
-                ApplicationRevisionPhase::RuntimeReady,
-                ApplicationRevisionParticipants::EveryLiveNode,
-                deadline,
-            );
+            let readiness = async {
+                // A test build can hold this wait while the revision pauses a domain, as a cluster
+                // slow to apply a backup cut's pause would; the revision that resumes it passes.
+                #[cfg(feature = "testing")]
+                runtime
+                    .pause_backup_cut_application_if_armed(&state.domains)
+                    .await;
+                wait_for_application_revision(
+                    cluster,
+                    consensus,
+                    interconnect,
+                    state.revision,
+                    ApplicationRevisionPhase::RuntimeReady,
+                    ApplicationRevisionParticipants::EveryLiveNode,
+                    deadline,
+                )
+                .await
+            };
             tokio::pin!(readiness);
             let supersession = consensus.wait_for_runtime_revision_after(state.revision);
             tokio::pin!(supersession);
             let readiness_result = nervix_primitives::select! {
                 biased;
                 _ = shutdown.cancelled() => return Ok(()),
+                ended = bound.ends(ApplicationWait::Readiness {
+                    revision: state.revision,
+                }) => return Err(ended),
                 newer_revision = &mut supersession => {
                     let Some(newer_revision) = newer_revision else {
                         return Ok(());
@@ -1326,7 +1388,17 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn apply_current_cluster_state(
         &self,
     ) -> error_stack::Result<(), crate::runtime::RuntimeError> {
-        apply_current_cluster_runtime_state(RuntimeStateApplication {
+        self.apply_current_cluster_state_within(ApplicationBound::ClusterBudget)
+            .await
+    }
+
+    /// Applies the newest committed runtime state across the cluster, ending its waits as `bound`
+    /// declares.
+    pub(in crate::application) async fn apply_current_cluster_state_within(
+        &self,
+        bound: ApplicationBound,
+    ) -> error_stack::Result<(), crate::runtime::RuntimeError> {
+        let application = RuntimeStateApplication {
             runtime: &self.inner.runtime,
             https_certificates: &self.inner.https_certificates,
             cluster: &self.inner.cluster,
@@ -1335,8 +1407,8 @@ impl SessionServiceImpl {
             consensus: &self.inner.consensus,
             admission: &self.inner.runtime_admission,
             shutdown: &self.inner.drain_support_shutdown,
-        })
-        .await
+        };
+        apply_current_cluster_runtime_state(application, bound).await
     }
 
     /// Report a control-plane failure this node recovered from to the sessions attached to it.
