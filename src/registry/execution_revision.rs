@@ -24,9 +24,11 @@ use nervix_models::{
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
 
+#[cfg(test)]
+use super::ActiveGraph;
 use super::{
-    ActiveGraph, DomainActivationPlan, EntrypointPlans, MessageErrorRouteSpecs,
-    ResourceExecutionPlans, ScheduleDelta, entity_pause_relays_for_schedule,
+    DomainActivationPlan, EntrypointPlans, MessageErrorRouteSpecs, ResourceExecutionPlans,
+    ScheduleDelta, entity_pause_relays_for_schedule,
     processor_plan::{BranchedNodeSpecs, branched_node_specs_from_scheduled_nodes},
 };
 use crate::emitter_execution_plan::EmitterExecutionPlans;
@@ -215,6 +217,7 @@ pub(crate) struct ExecutionRevision {
 }
 
 impl ExecutionRevision {
+    #[cfg(test)]
     pub(crate) fn from_graph(
         domain: &DomainName,
         graph: &ActiveGraph,

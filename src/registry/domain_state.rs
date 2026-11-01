@@ -283,13 +283,6 @@ impl DomainState {
                             reason: "UDF arity must be between 1 and 8".to_string(),
                         }));
                     }
-                    if udf.code.len() > 64 * 1024 {
-                        return Err(Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason: "UDF code exceeds the 64 KiB limit".to_string(),
-                        }));
-                    }
                 }
                 Model::ClientPrometheus(client) => {
                     if !client.config.iter().any(|entry| entry.value.contains("{{")) {

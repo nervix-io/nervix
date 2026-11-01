@@ -338,6 +338,8 @@ run_cluster_restart() {
     local source_after output_after
     source_after="$(topic_end_offset chaos_input)"
     output_after="$(topic_end_offset chaos_output)"
+    capture_cluster_parameters "${case_dir}/cluster-parameters" "${node_names[@]}" \
+        || recovery_fail product 'the restarted nodes did not install the committed cluster policy'
     jq -n \
         --arg fault_since "${fault_since}" \
         --argjson nodes "${node_count}" \
@@ -359,12 +361,14 @@ run_cluster_restart() {
         --argjson output_after "${output_after}" \
         --slurpfile ownership "${case_dir}/ownership.json" \
         --slurpfile starts "${case_dir}/node-starts.json" \
+        --slurpfile parameters "${case_dir}/cluster-parameters.json" \
         --argjson configured "$(configured_settings "${case_dir}/selected-${node_hosts[0]}.json")" \
         '{evidence_class: "process crash: every node SIGKILLed and started again on the same host, image and volume",
           not_established: ["host power loss", "storage or filesystem corruption"],
           topology_nodes: $nodes, fault_since: $fault_since,
           configured_bounds: {
             deployment: $configured,
+            parameters: $parameters[0],
             voter_observation_grace_ms: $grace_ms,
             minimum_outage_seconds: $outage_seconds,
             listener_recovery_bound_seconds: $listener_bound,

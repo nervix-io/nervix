@@ -56,6 +56,8 @@ mod relay;
 
 #[path = "materialized.rs"]
 mod materialized;
+#[path = "parameters.rs"]
+mod parameters;
 
 const CLUSTER: &str = "simulated";
 const PORT: u16 = 7443;

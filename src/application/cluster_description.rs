@@ -43,7 +43,9 @@ pub(in crate::application) async fn describe_cluster(
         leader_record,
         nodes,
     };
-    description.lines().join("\n")
+    let mut lines = description.lines();
+    lines.extend(super::cluster_parameters::describe_parameters(cluster, consensus).await);
+    lines.join("\n")
 }
 
 /// One view of the cluster, as the lines of `DESCRIBE CLUSTER` render it.
@@ -169,6 +171,7 @@ mod tests {
 
     fn node(node: &str, incarnation: u64, record: Option<NodePrerequisites>) -> GossipNode {
         GossipNode {
+            parameters: None,
             node_id: name(node),
             incarnation: ClusterNodeIncarnation::new(incarnation),
             terminating: false,

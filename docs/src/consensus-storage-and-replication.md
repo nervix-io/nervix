@@ -460,12 +460,13 @@ The dedicated database owns exactly four current keyspaces: `raft_redis_subscrip
 `raft_redis_subscription_meta`, `raft_redis_subscription_state`, and
 `raft_redis_subscription_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. This namespace identifies the current Model shape, including an owned Pulsar
-subscription's required start position, the serialized Sentry platform field, an ingestor's
+subscription's required start position, the required serialized Sentry platform field, an ingestor's
 `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the session and
 quality of service an MQTT TOPIC ingestor writes beside its delivery mode, and a `REDIS PUBSUB`
 ingestor's `CHANNEL` or `PATTERN` subscription. Its state metadata requires the current
-`RestoredLifecycle` encoding, including the durable restore installation gate and the unit-keyed
-committed schedule. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
+`ClusterState` encoding, including committed cluster parameters, the durable restore installation
+gate and the unit-keyed committed schedule. Native counts in commands, queued transactions,
+progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
 and snapshot installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).
@@ -620,3 +621,15 @@ cross that boundary. The current state encoding requires these records and rejec
 whose encoding does not match, requiring recreation under the alpha persistence contract. The current encoding also requires a restore's explicit lifecycle policy and its
 installed-state effect's clock. RESUME changes the domain to running and removes its complete-set
 installation gate in that single applied effect; it preserves the archived generation and mapping.
+
+## Cluster Parameter Publication
+
+Current state metadata includes the optional committed cluster parameter record; absence is only
+the unseeded bootstrap state. The first bootstrap submits the complete seed through Raft. Later
+parameter commands atomically compare their policy/model/resource snapshot, replace the record
+and record durable command progress. Their apply advances the coherent runtime revision and its
+existing schedule notification. Model planning inputs include the parameter record.
+
+The metadata encoding has one current identity. Data from a different stored shape fails decoding
+with a typed error asking for node-state recreation. Parameter durations and numeric bounds are
+validated on archive recovery as well as construction. No migration or second decoder is present.

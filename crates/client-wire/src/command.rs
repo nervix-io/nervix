@@ -23,7 +23,7 @@ use crate::{
     wire,
 };
 
-/// Why an admitted command's outcome is not known yet.
+/// Why a command's authoritative outcome is not known yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnknownOutcomeCause {
     /// After the command was durably admitted, or while its admission was being decided,
@@ -31,7 +31,8 @@ pub enum UnknownOutcomeCause {
     LeadershipLost,
     /// The command is durably admitted and still applying.
     StillApplying,
-    /// The command finished, but its outcome is not yet authoritative on every live node.
+    /// The node is establishing live policy or waiting for a finished command's outcome to
+    /// become authoritative on every live node.
     NotYetAuthoritative,
 }
 

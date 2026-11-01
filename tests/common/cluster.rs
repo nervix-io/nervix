@@ -85,9 +85,7 @@ use nervix_server::{
     },
     cluster::{MembershipSettings, MembershipValues},
     memory_pressure::{MemoryPressureConfig, MemoryPressureSettings},
-    runtime::{
-        DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, RuntimeSettings, branch_task_stop_timeout,
-    },
+    runtime::{DEFAULT_TEMP_DIR, RuntimeSettings, branch_task_stop_timeout},
 };
 use pulsar::{
     ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
@@ -170,7 +168,7 @@ pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
 /// conflict while an ingestor's check holds a non-durable cursor of the same name.
 const PULSAR_PROVISION_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT: Duration =
-    branch_task_stop_timeout(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
+    branch_task_stop_timeout(nervix_models::DomainDrainTimeout::DEFAULT);
 const DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR: Duration =
     match DEFAULT_TEST_DRAIN_TIMEOUT.checked_add(DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT) {
         Some(timeout) => timeout,
@@ -181,7 +179,8 @@ const DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR: Duration =
 /// policy, not an upper bound on valid shutdown. Configured bounded phases may raise its floor.
 const NODE_SHUTDOWN_LIVENESS_WATCHDOG: Duration = Duration::from_secs(5 * 60);
 const _: () = assert!(
-    DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT.as_nanos() > DEFAULT_DOMAIN_DRAIN_TIMEOUT.as_nanos(),
+    DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT.as_nanos()
+        > nervix_models::DomainDrainTimeout::DEFAULT.as_nanos(),
     "the runtime branch stop budget must include its post-drain grace"
 );
 const _: () = assert!(
@@ -1188,6 +1187,51 @@ impl Cluster {
         .map_err(io::Error::other)
     }
 
+    /// Starts a node only as far as its public status service, even when no peer is running.
+    /// Initialization and route installation remain the scenario's explicit observations.
+    pub(crate) async fn start_node_until_observable(&mut self, node_id: &str) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get_mut(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let node = node_name(&handle.spec.node_id);
+        NodeStartup::start(
+            &node,
+            &mut ObservableNode(handle),
+            PhaseDeadline::after(ATTEMPT_READINESS_BUDGET),
+            StartupRetryPolicy::BindBeforeRuntime,
+        )
+        .await
+        .map_err(io::Error::other)
+    }
+
+    /// Starts one owned node with live-policy discovery held. Readiness must remain false,
+    /// so this fixture waits for the explicit startup boundary instead of the ready probe.
+    pub(crate) async fn start_node_waiting_for_parameters(
+        &mut self,
+        node_id: &str,
+    ) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get_mut(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let node = node_name(&handle.spec.node_id);
+        let fault = handle.fault_injection.clone();
+        fault.pause_initial_cluster_parameters_on(node.clone());
+        let deadline = PhaseDeadline::after(NODE_STARTUP_BUDGET);
+        handle.start()?;
+        match deadline
+            .bound(fault.wait_for_initial_cluster_parameters_pause(&node))
+            .await
+        {
+            BeforeDeadline::Finished(()) => Ok(()),
+            BeforeDeadline::Passed => Err(io::Error::other(format!(
+                "node '{node_id}' did not reach initial live-policy discovery within {:?}",
+                deadline.elapsed()
+            ))),
+        }
+    }
+
     /// Names a setting `node_id` starts with from its next launch on, over the cluster's own. A
     /// node that is not a member yet starts with it when it is registered.
     pub(crate) fn override_node_setting(&mut self, node_id: &str, setting: SettingOverride) {
@@ -1998,17 +2042,19 @@ impl Cluster {
             }
         }
         if arrangement.relayed_voter().is_some() {
-            // The relayed voter's scenario observes scheduling while the bootstrap node leads, so
-            // that node starts first. The held heartbeat can keep replication from catching the
-            // voter up, so the others start without waiting for catch-up: the scenario reaches and
-            // releases the observation barrier before it waits for that.
-            self.start_node_within(&bootstrap, construction).await?;
-            for node_id in node_ids.iter().filter(|node_id| **node_id != bootstrap) {
-                self.start_node_without_waiting_for_raft_catch_up_within(node_id, construction)
-                    .await?;
+            // Returning nodes discover live policy from another process before reporting ready,
+            // so every voter starts together. The held heartbeat can prevent catch-up; the
+            // scenario releases it after observing scheduling with the bootstrap node leading.
+            self.start_restarted_nodes_together(construction, None)
+                .await?;
+            let leader = self.wait_for_leader_among_running().await?;
+            if leader != bootstrap {
+                self.transfer_leadership(&leader, &bootstrap);
             }
-            self.wait_for_any_leader(&bootstrap).await?;
-            return self.wait_for_leader(&bootstrap, Some(&bootstrap)).await;
+            self.wait_for_leader(&bootstrap, Some(&bootstrap)).await?;
+            self.fault_injection
+                .begin_startup_voter_observation(&node_name(&bootstrap));
+            return Ok(());
         }
         self.start_restarted_nodes_together(
             construction,
@@ -4037,7 +4083,7 @@ impl NodeHandle {
         let domain_drain_timeout = self
             .fault_injection
             .domain_drain_timeout()
-            .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
+            .unwrap_or(nervix_models::DomainDrainTimeout::DEFAULT);
         let configured_phase_floor = application_drain_timeout
             .checked_add(branch_task_stop_timeout(domain_drain_timeout))
             .ok_or_else(|| {
@@ -4202,6 +4248,39 @@ impl NodeHandle {
                 self.spec.node_id
             ))),
         }
+    }
+}
+
+/// A startup whose completion boundary is public observation, before runtime initialization.
+/// It shares the ordinary node's launch, failed-attempt cleanup and listener reallocation.
+struct ObservableNode<'node>(&'node mut NodeHandle);
+
+impl StartableNode for ObservableNode<'_> {
+    fn launch(&mut self) -> io::Result<()> {
+        self.0.launch()
+    }
+
+    async fn readiness(
+        &mut self,
+        attempt: u32,
+        readiness: PhaseDeadline,
+    ) -> error_stack::Result<(), NodeStartupError> {
+        let endpoint = self.0.status_endpoint();
+        let node = node_name(&self.0.spec.node_id);
+        self.0
+            .task
+            .wait_until_ready(&node, attempt, readiness, POLL_INTERVAL, |phase| {
+                ReadinessProbeOutcome::probe_observation(&endpoint, phase)
+            })
+            .await
+    }
+
+    async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
+        self.0.clean_up(cleanup).await
+    }
+
+    fn move_to_fresh_ports(&mut self, ports: StartupPorts) -> io::Result<()> {
+        self.0.move_to_fresh_ports(ports)
     }
 }
 

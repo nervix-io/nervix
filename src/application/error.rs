@@ -11,11 +11,16 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use nervix_models::DomainName;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
+    #[error("invalid cluster parameters")]
+    InvalidClusterParameters,
+    #[error("{parameter} is a first-bootstrap seed; use ALTER CLUSTER SET")]
+    ClusterParameterSeedOnExistingCluster {
+        parameter: nervix_models::ClusterParameterKey,
+    },
     #[error("failed to build the Tokio runtime")]
     BuildRuntime,
     #[error("failed to parse server address")]
@@ -79,12 +84,6 @@ pub enum AppError {
          dedicated consensus database layout"
     )]
     ConsensusStorageLayout,
-    #[error("failed to read startup runtime changes from the registry")]
-    ReadStartupRuntimeChanges,
-    #[error("failed to plan startup runtime changes for domain '{domain}'")]
-    PlanStartupRuntime { domain: DomainName },
-    #[error("failed to apply startup runtime changes for domain '{domain}'")]
-    ApplyStartupRuntime { domain: DomainName },
     #[error("failed to open runtime state store")]
     OpenRuntimeState,
     #[error("failed to load interconnect tls configuration")]

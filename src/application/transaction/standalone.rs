@@ -17,7 +17,7 @@
 )]
 
 use error_stack::Report;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, ReplicatedTransaction, TransactionMutationError,
     TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits, TransactionQueueRequest,
@@ -175,8 +175,11 @@ impl SessionServiceImpl {
             domain: &domain,
             request: &request,
             limits: TransactionQueueLimits {
-                max_statements: self.inner.transaction_max_statements,
-                max_source_bytes: self.inner.transaction_max_source_bytes,
+                max_statements: usize::try_from(
+                    self.cluster_parameters().transaction_max_statements(),
+                )
+                .assured("the committed count fits a supported target"),
+                max_source_bytes: self.cluster_parameters().transaction_max_source_bytes(),
             },
         };
         let observed = self
@@ -322,7 +325,11 @@ impl SessionServiceImpl {
         if let Err(error) = self
             .inner
             .consensus
-            .open_transaction(candidate, self.inner.transaction_max_open)
+            .open_transaction(
+                candidate,
+                usize::try_from(self.cluster_parameters().transaction_max_open())
+                    .assured("the committed count fits a supported target"),
+            )
             .await
             && self
                 .inner

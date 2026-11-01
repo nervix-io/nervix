@@ -188,6 +188,7 @@ mod tests {
         let runtime = Runtime::new();
         let local = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
         let current = ConsensusRuntimeState {
+            parameters: None,
             revision: 2,
             schedule: ClusterSchedule::default(),
             domains: BTreeMap::new(),
@@ -199,6 +200,7 @@ mod tests {
             .assured("the empty current revision applies");
 
         let stale = ConsensusRuntimeState {
+            parameters: None,
             revision: 1,
             schedule: ClusterSchedule::from_iter([DomainSchedule::new(
                 nervix_models::DomainName::parse("testing")

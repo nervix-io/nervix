@@ -58,6 +58,8 @@ pub(in crate::application) async fn render_cluster_status(
         &health_unavailable,
     ));
 
+    lines.push("[cluster parameters]".to_string());
+    lines.extend(super::cluster_parameters::describe_parameters(cluster, consensus).await);
     lines.join("\n")
 }
 
@@ -180,6 +182,7 @@ mod tests {
 
     fn peer() -> GossipNode {
         GossipNode {
+            parameters: None,
             node_id: ClusterNodeName::parse("node-3").expect("valid peer name"),
             incarnation: ClusterNodeIncarnation::new(7),
             terminating: false,

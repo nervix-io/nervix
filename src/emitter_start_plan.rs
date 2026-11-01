@@ -44,18 +44,18 @@ use nervix_connector_otel::{
 };
 use nervix_connector_postgres::PostgresConflictAction;
 use nervix_models::{
-    AckWindow, Assignment, AssignmentTarget, CLIENT_CONSUMER_SESSION_BYTES, ClickHouseEmitter,
-    ClickHouseTableEmitter, ClickHouseValueMapping, ClientConfigEntry, ClientConsumerEmitter,
-    ClientEmitter, ClientName, ClientPoolBounds, ClientResourceMount, CreateEmitter,
-    EmitterBatchPolicy, EmitterEntity, Expression, FieldName, HttpEmitter, HttpOrigin,
-    HttpRequestEmitter, IcebergCatalog, IcebergEmitter, IcebergStorageBackend, IcebergTableEmitter,
-    KafkaEmitter, KafkaTopicEmitter, Literal, Model, MongoDbCollectionEmitter, MongoDbEmitter,
-    MqttEmitter, MqttTopicEmitter, MySqlEmitter, MySqlTableEmitter, NatsEmitter,
-    NatsSubjectEmitter, OtelEmitter, OtelMappings, OtelMetricsEmitter, PostgresEmitter,
-    PostgresTableEmitter, PulsarEmitter, PulsarTopicEmitter, RabbitMqEmitter,
-    RabbitMqExchangeEmitter, RabbitMqQueueEmitter, RedisEmitter, RedisPubSubEmitter, RetryPolicy,
-    RouteConstruction, SchemaName, SentryEmitter, SqsEmitter, SqsQueueEmitter,
-    SyslogCollectorEmitter, SyslogEmitter, ZeroMqEmitter, ZeroMqPushEmitter, parse_duration_text,
+    AckWindow, Assignment, AssignmentTarget, ClickHouseEmitter, ClickHouseTableEmitter,
+    ClickHouseValueMapping, ClientConfigEntry, ClientConsumerEmitter, ClientEmitter, ClientName,
+    ClientPoolBounds, ClientResourceMount, CreateEmitter, EmitterBatchPolicy, EmitterEntity,
+    Expression, FieldName, HttpEmitter, HttpOrigin, HttpRequestEmitter, IcebergCatalog,
+    IcebergEmitter, IcebergStorageBackend, IcebergTableEmitter, KafkaEmitter, KafkaTopicEmitter,
+    Literal, Model, MongoDbCollectionEmitter, MongoDbEmitter, MqttEmitter, MqttTopicEmitter,
+    MySqlEmitter, MySqlTableEmitter, NatsEmitter, NatsSubjectEmitter, OtelEmitter, OtelMappings,
+    OtelMetricsEmitter, PostgresEmitter, PostgresTableEmitter, PulsarEmitter, PulsarTopicEmitter,
+    RabbitMqEmitter, RabbitMqExchangeEmitter, RabbitMqQueueEmitter, RedisEmitter,
+    RedisPubSubEmitter, RetryPolicy, RouteConstruction, SchemaName, SentryEmitter, SqsEmitter,
+    SqsQueueEmitter, SyslogCollectorEmitter, SyslogEmitter, ZeroMqEmitter, ZeroMqPushEmitter,
+    parse_duration_text,
 };
 use nervix_vm::{
     SemanticScopePolicy, lower_route_construction,
@@ -128,8 +128,6 @@ pub(super) enum EmitterStartPlanError {
     RetryMaxBackoffBelowBackoff,
     #[error("ack timeout must be greater than zero")]
     ZeroAckTimeout,
-    #[error("{} emitter batch maximum {bytes} bytes exceeds the 32 MiB consumer window", <ClientConsumerEmitter as nervix_models::EmitterEntityModel>::KIND)]
-    ClientBatchTooLarge { bytes: u64 },
     #[error("{} emitter client '{client}' declares no http or https origin endpoint", <HttpRequestEmitter as nervix_models::EmitterEntityModel>::KIND)]
     InvalidHttpEndpoint { client: ClientName },
     #[error("{connector} emitter '{emitter}' requires at least one VALUES mapping")]
@@ -872,11 +870,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
             let batch = emitter
                 .batch
                 .verified("the registry checked this entity's required BATCH declaration");
-            if batch.max_size.bytes().get() > CLIENT_CONSUMER_SESSION_BYTES {
-                return Err(Report::new(EmitterStartPlanError::ClientBatchTooLarge {
-                    bytes: batch.max_size.bytes().get(),
-                }));
-            }
+
             return Ok(Self {
                 label: <ClientConsumerEmitter as nervix_models::EmitterEntityModel>::KIND
                     .connector()

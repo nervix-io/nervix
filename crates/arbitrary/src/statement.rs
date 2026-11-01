@@ -158,6 +158,7 @@ pub enum StatementVariant {
     ShowTransactions,
     DescribeTransaction,
     DescribeCluster,
+    AlterCluster,
 }
 
 impl StatementVariant {
@@ -165,6 +166,7 @@ impl StatementVariant {
     /// compile until the generator is taught to build it.
     pub fn of(statement: &Statement) -> Self {
         match statement {
+            Statement::AlterCluster(_) => Self::AlterCluster,
             Statement::CreateDomain(_) => Self::CreateDomain,
             Statement::AlterDomain(_) => Self::AlterDomain,
             Statement::CreateUser(_) => Self::CreateUser,
@@ -250,6 +252,70 @@ enum EmitterOperationForm {
 }
 
 impl Arbitrary<'_> {
+    /// A bounded cluster transition naming each parameter once, with independently drawn values.
+    fn alter_cluster(&mut self) -> nervix_models::AlterCluster {
+        let assignments = vec![
+            nervix_models::ClusterParameterChange::NodeUnavailabilityTimeout(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::DomainDrainTimeout(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::EntityGateDeadline(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::TransactionIdleTimeout(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::TransactionTombstoneRetention(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::CommandRetryValidity(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::StateSnapshotInterval(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::TransactionMaxStatements(
+                self.entropy.between(1..=256),
+            ),
+            nervix_models::ClusterParameterChange::TransactionMaxSourceBytes(
+                self.entropy.between(1..=256),
+            ),
+            nervix_models::ClusterParameterChange::TransactionMaxOpen(
+                self.entropy.between(1..=256),
+            ),
+            nervix_models::ClusterParameterChange::CommandExecutionCapacity(
+                self.entropy.between(1..=256),
+            ),
+            nervix_models::ClusterParameterChange::ReplicaCount(self.entropy.between(1..=256)),
+            nervix_models::ClusterParameterChange::ResourceMaxArchiveBytes(
+                self.entropy.between(1..=256),
+            ),
+            nervix_models::ClusterParameterChange::ResourceMaxExtractedBytes(
+                self.entropy.between(1..=256),
+            ),
+            nervix_models::ClusterParameterChange::ResourceMaxFileCount(
+                self.entropy.between(1..=256),
+            ),
+            nervix_models::ClusterParameterChange::MaxBatchMessages(self.entropy.between(1..=256)),
+            nervix_models::ClusterParameterChange::ClientProducerSessionBytes(
+                self.entropy.between(1..=256),
+            ),
+            nervix_models::ClusterParameterChange::ClientConsumerSessionBytes(
+                self.entropy.between(1..=256),
+            ),
+            nervix_models::ClusterParameterChange::UdfCodeBytes(self.entropy.between(1..=256)),
+            nervix_models::ClusterParameterChange::HttpHeaderBytes(self.entropy.between(1..=256)),
+            nervix_models::ClusterParameterChange::HttpHeaderFields(self.entropy.between(1..=256)),
+            nervix_models::ClusterParameterChange::ClientBatchRows(self.entropy.between(1..=256)),
+        ];
+        nervix_models::AlterCluster {
+            parameters: nervix_models::ClusterParameterUpdates::try_from(assignments)
+                .assured("the generated nonempty list names each declared parameter once"),
+        }
+    }
+
     /// A statement of any form, each form as likely as any other.
     pub fn statement(&mut self) -> Statement {
         let variants = StatementVariant::iter().collect::<Vec<_>>();
@@ -261,6 +327,7 @@ impl Arbitrary<'_> {
     /// A statement of the requested form, with every clause it declares generated.
     pub fn statement_of(&mut self, variant: StatementVariant) -> Statement {
         match variant {
+            StatementVariant::AlterCluster => Statement::AlterCluster(self.alter_cluster()),
             StatementVariant::CreateDomain => {
                 let if_not_exists = self.entropy.flag();
                 let pace = if self.entropy.flag() {

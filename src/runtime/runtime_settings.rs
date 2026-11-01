@@ -22,32 +22,11 @@ use fjall::Database;
 use meticulous::ResultExt as _;
 use nervix_dns::DnsResolver;
 use nervix_execution::Executor;
-use nervix_models::{ClusterParameters, NodeCapabilities, Setting, SettingDefinition};
+use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
 use ubyte::ByteUnit;
 
-use super::{DEFAULT_RESTORE_STAGING_MAX_BYTES, DEFAULT_STATE_SNAPSHOT_INTERVAL};
+use super::DEFAULT_RESTORE_STAGING_MAX_BYTES;
 use crate::ConfiguredFaultInjection;
-
-/// How often the owner of a piece of runtime state publishes a snapshot of it to its replicas.
-pub struct StateSnapshotInterval;
-
-impl SettingDefinition for StateSnapshotInterval {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = Infallible;
-
-    const NAME: &'static str = "state-snapshot-interval";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> Duration {
-        DEFAULT_STATE_SNAPSHOT_INTERVAL
-    }
-
-    fn validate(_: &Duration, _: &()) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
-}
 
 /// The most unpublished restore checkpoint key and value bytes this node stages. Without a value
 /// the node derives it from the volume that holds its database.
@@ -84,10 +63,11 @@ impl RuntimeSettings {
     pub fn resolve(
         state_snapshot_interval: Option<Duration>,
         restore_staging_max_bytes: Option<ByteUnit>,
-    ) -> Result<Self, Report<Infallible>> {
+    ) -> Result<Self, Report<nervix_models::ClusterParameterError>> {
         Ok(Self {
             state_snapshot_interval: Setting::resolve(state_snapshot_interval, &())?,
-            restore_staging_max_bytes: Setting::new(restore_staging_max_bytes, &())?,
+            restore_staging_max_bytes: Setting::new(restore_staging_max_bytes, &())
+                .assured("the local restore capability accepts every optional byte bound"),
         })
     }
 
@@ -116,7 +96,7 @@ impl RuntimeSettings {
 
 impl Default for RuntimeSettings {
     fn default() -> Self {
-        Self::resolve(None, None).assured("the runtime defaults declare no validation")
+        Self::resolve(None, None).assured("the runtime defaults have valid bounds")
     }
 }
 
@@ -151,3 +131,6 @@ impl RuntimeEnvironment {
         }
     }
 }
+
+// Cluster policy definitions have one vocabulary owner. These facades hold bootstrap inputs.
+pub use nervix_models::StateSnapshotInterval;

@@ -198,6 +198,8 @@ current connection, retry and deadline limits.
   TLS trust roots, handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close,
   read `Ingestors` → `WEBSOCKETS CONNECTION` in the selected documentation index.
   A successful upgrade does not establish data delivery or reset repeated-failure backoff.
+  Committed `http-header-fields` and `http-header-bytes` caps govern literal upgrade headers,
+  including the canonical subprotocol offer, at admission and during parameter changes.
   Check the effective idle bound together with the ping cadence and the peer's inbound activity.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
   optionality match exactly. Declared wire formats are separate entity kinds even when their names

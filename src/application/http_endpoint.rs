@@ -55,7 +55,10 @@ use tokio_tungstenite::{
 };
 use tracing::warn;
 
-use super::{AppError, service_tasks::ServiceTasks, tls::HttpsListenerCertificates};
+use super::{
+    AppError, node_initialization::NodeInitialization, service_tasks::ServiceTasks,
+    tls::HttpsListenerCertificates,
+};
 use crate::runtime::{
     EndpointDispatchOutcome, EndpointRequestOutcome, EndpointResolution,
     HttpEndpointRequestMetadata, ResolvedEndpointRoute, Runtime, WebsocketsEndpointFrameMetadata,
@@ -378,14 +381,25 @@ impl IngestMessageHeaders for HyperRequestHeaders<'_> {
 
 async fn handle_http_request(
     runtime: Runtime,
+    initialization: Arc<NodeInitialization>,
+    request_tasks: ServiceTasks,
+    shutdown: CancellationToken,
+    remote_addr: SocketAddr,
+    request: HyperRequest<HyperIncoming>,
+) -> Result<HyperResponse<EndpointResponseBody>, Infallible> {
+    if shutdown.is_cancelled() || !initialization.is_ready() {
+        return Ok(endpoint_rejection_response(None).map(Either::Left));
+    }
+    dispatch_http_request(runtime, request_tasks, shutdown, remote_addr, request).await
+}
+
+async fn dispatch_http_request(
+    runtime: Runtime,
     request_tasks: ServiceTasks,
     shutdown: CancellationToken,
     remote_addr: SocketAddr,
     mut request: HyperRequest<HyperIncoming>,
 ) -> Result<HyperResponse<EndpointResponseBody>, Infallible> {
-    if shutdown.is_cancelled() {
-        return Ok(endpoint_rejection_response(None).map(Either::Left));
-    }
     let mut host = String::new();
     if let Some(value) = request.headers().get(HOST)
         && let Ok(value) = value.to_str()
@@ -499,6 +513,7 @@ async fn serve_endpoint_connection<S>(
     stream: S,
     remote_addr: SocketAddr,
     runtime: Runtime,
+    initialization: Arc<NodeInitialization>,
     request_tasks: ServiceTasks,
     shutdown: CancellationToken,
 ) -> Result<(), hyper::Error>
@@ -512,6 +527,7 @@ where
             service_fn(move |request| {
                 handle_http_request(
                     runtime.clone(),
+                    initialization.clone(),
                     request_tasks.clone(),
                     request_shutdown.clone(),
                     remote_addr,
@@ -532,6 +548,7 @@ where
 
 pub(in crate::application) async fn serve_http(
     runtime: Runtime,
+    initialization: Arc<NodeInitialization>,
     request_tasks: ServiceTasks,
     listener: TcpListener,
     shutdown: CancellationToken,
@@ -552,6 +569,7 @@ pub(in crate::application) async fn serve_http(
             .set_nodelay(true)
             .change_context(AppError::ServeHttp)?;
         let runtime = runtime.clone();
+        let initialization = initialization.clone();
         let request_tasks = request_tasks.clone();
         let request_shutdown = shutdown.clone();
         connection_tasks.spawn(async move {
@@ -559,6 +577,7 @@ pub(in crate::application) async fn serve_http(
                 stream,
                 remote_addr,
                 runtime,
+                initialization,
                 request_tasks,
                 request_shutdown,
             )
@@ -574,6 +593,7 @@ pub(in crate::application) async fn serve_http(
 
 pub(in crate::application) async fn serve_https(
     runtime: Runtime,
+    initialization: Arc<NodeInitialization>,
     request_tasks: ServiceTasks,
     certificates: HttpsListenerCertificates,
     listener: TcpListener,
@@ -595,6 +615,7 @@ pub(in crate::application) async fn serve_https(
             .set_nodelay(true)
             .change_context(AppError::ServeHttps)?;
         let runtime = runtime.clone();
+        let initialization = initialization.clone();
         let request_tasks = request_tasks.clone();
         let request_shutdown = shutdown.clone();
         let certificates = certificates.clone();
@@ -614,6 +635,7 @@ pub(in crate::application) async fn serve_https(
                         tls_stream,
                         remote_addr,
                         runtime,
+                        initialization,
                         request_tasks,
                         request_shutdown,
                     )

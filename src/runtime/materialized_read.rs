@@ -1303,8 +1303,9 @@ mod tests {
         let db = fjall::Database::builder(root.path())
             .open()
             .expect("database opens");
-        let runtime = Runtime::with_persistence(Some(db), DEFAULT_STATE_SNAPSHOT_INTERVAL)
-            .expect("persistent runtime opens");
+        let runtime =
+            Runtime::with_persistence(Some(db), nervix_models::StateSnapshotInterval::DEFAULT)
+                .expect("persistent runtime opens");
         let rows = (0..80)
             .map(|index| MaterializedGenerationRecord {
                 branch: string_branch_key("tenant", &format!("tenant-{index:02}")),

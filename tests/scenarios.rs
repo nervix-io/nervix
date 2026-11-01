@@ -7858,6 +7858,16 @@ async fn when_node_is_started_without_catching_up(world: &mut ScenarioWorld, nod
         .expect("failed to start node");
 }
 
+#[when(expr = "node {string} is started until public observation is available")]
+async fn when_node_is_started_until_observable(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .start_node_until_observable(&node_id)
+        .await
+        .expect("failed to start observable node");
+}
+
 #[then(expr = "within {string} node {string} has interrupted a raft snapshot installation")]
 async fn then_node_interrupted_a_snapshot_installation(
     world: &mut ScenarioWorld,
@@ -12384,6 +12394,27 @@ async fn when_node_is_started(world: &mut ScenarioWorld, node_id: String) {
         .expect("failed to start node");
 }
 
+#[when(expr = "node {string} is started with live parameter discovery paused")]
+async fn when_node_is_started_with_parameter_discovery_paused(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .start_node_waiting_for_parameters(&node_id)
+        .await
+        .expect("failed to start node at live parameter discovery");
+}
+
+#[when(expr = "live parameter discovery on node {string} is released")]
+async fn when_parameter_discovery_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_initial_cluster_parameters_pause(&crate::common::cluster::node_name(&node_id));
+}
+
 /// Starts a node whose start the scenario expects may be refused, and records how it ended for a
 /// later step to assert instead of failing this one.
 #[when(expr = "node {string} attempts to start")]
@@ -15849,6 +15880,48 @@ async fn when_referenced_command_request_is_executed_on_leader(
 ) {
     let execution_reference = command_execution_reference(world, &execution_reference);
     execute_command_request_with_reference_on_leader(world, &execution_reference, step).await;
+}
+
+#[when(
+    expr = "this Plexus command request with execution reference {string} is sent once to node \
+            {string}"
+)]
+async fn when_referenced_command_is_sent_once_to_node(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    node_id: String,
+    #[step] step: &Step,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let execution_reference = command_execution_reference(world, &execution_reference);
+    let query = expand_placeholders(world, docstring(step));
+    let mut session = world
+        .cluster()
+        .open_session(&node_id, &world.domain)
+        .await
+        .expect("failed to open the single-attempt command session");
+    let result = session
+        .run_command_result_with_reference(&query, &execution_reference)
+        .await
+        .expect("the single-attempt command transport failed");
+    world.last_command_disposition = Some(result.disposition.clone());
+    if result.succeeded() {
+        world.last_command_error = None;
+        world.last_command_output = Some(result.message);
+    } else {
+        world.last_command_output = None;
+        world.last_command_error = Some(result.message);
+    }
+}
+
+#[then("the last command request reports that its outcome is not yet authoritative")]
+fn then_last_command_outcome_is_not_yet_authoritative(world: &mut ScenarioWorld) {
+    assert_eq!(
+        world.last_command_disposition,
+        Some(nervix_client_wire::CommandDisposition::OutcomeUnknown(
+            nervix_client_wire::UnknownOutcomeCause::NotYetAuthoritative
+        ))
+    );
 }
 
 #[when(

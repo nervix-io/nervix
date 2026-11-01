@@ -198,8 +198,8 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_client_wire::{
         ClientFrame, ClientMessage, CommandDisposition, CommandOutcome, Diagnostic, EncodedFrame,
-        LeaderRedirect, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, ServerFrame,
-        ServerNotice, SessionLimits, VerifiedFrame,
+        NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, ServerFrame, ServerNotice,
+        SessionLimits, VerifiedFrame,
         grpc::{EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec},
     };
     use nervix_models::{ClusterNodeName, CommandExecutionReference};
@@ -1312,7 +1312,8 @@ mod tests {
     /// The budget a convergence regression lets pass on purpose. Its stand-in members answer at
     /// once, so the wait asks them many times within it.
     const CONVERGENCE_EXPIRY_BUDGET: Duration = Duration::from_secs(1);
-    const HEALTHY_STATUS: &str = "raft.state: Leader\nraft.current_leader: node-1";
+    const HEALTHY_STATUS: &str =
+        "raft.state: Leader\nraft.current_leader: node-1\nnode.initialization=ready";
     /// How often a startup regression probes its stand-in. The startup regressions run on a
     /// paused clock, so this only decides how many probes one attempt performs.
     const STARTUP_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -1877,10 +1878,6 @@ mod tests {
         }
     }
 
-    fn not_leader() -> CommandDisposition {
-        CommandDisposition::NotLeader(LeaderRedirect { leader: None })
-    }
-
     /// A loopback address that refuses connections for as long as it is held.
     ///
     /// Its socket stays bound, so no other test or process can take the port while a probe
@@ -2131,9 +2128,9 @@ mod tests {
             HEALTHY_STATUS,
         )))
         .await;
-        let not_leader = StandInNode::serve(StandInBehavior::Answer(command_result(
-            not_leader(),
-            "not the leader",
+        let initializing = StandInNode::serve(StandInBehavior::Answer(command_result(
+            completed(),
+            "node.initialization=initializing",
         )))
         .await;
         let mut unavailable_result =
@@ -2157,9 +2154,24 @@ mod tests {
             }
         ));
         assert!(matches!(
-            ReadinessProbeOutcome::probe(&not_leader.endpoint(), phase).await,
+            ReadinessProbeOutcome::probe(&initializing.endpoint(), phase).await,
+            ReadinessProbeOutcome::UnsuccessfulResponse {
+                response_kind: ResponseKind::Completed,
+                ref message,
+                ..
+            } if message == "node.initialization=initializing"
+        ));
+        assert!(matches!(
+            ReadinessProbeOutcome::probe_observation(&initializing.endpoint(), phase).await,
             ReadinessProbeOutcome::Ready {
-                response_kind: ResponseKind::NotLeader
+                response_kind: ResponseKind::Completed
+            }
+        ));
+        assert!(matches!(
+            ReadinessProbeOutcome::probe_observation(&unavailable.endpoint(), phase).await,
+            ReadinessProbeOutcome::UnsuccessfulResponse {
+                response_kind: ResponseKind::Failed,
+                ..
             }
         ));
         let unsuccessful = ReadinessProbeOutcome::probe(&unavailable.endpoint(), phase).await;

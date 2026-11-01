@@ -246,7 +246,7 @@ connector `CLIENT` object, codec, header operations, or direct `VALUES` form. Th
 uses its ordinary `FROM` predicates, optional collection, materialized dependencies, ordered
 `INHERIT` and `SET`, route `WHERE`, error policies, placement, and `ATTACHED` or `DETACHED`
 boundary. A client emitter requires `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>`, an explicit
-`ACK TIMEOUT` and `RETRY POLICY`, `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>`, and its
+`ACK TIMEOUT` and `RETRY POLICY`, `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, and its
 ordinary required `FLUSH` policy. `SHOW CREATE EMITTER` preserves this full contract.
 
 The declared output schema is exact. Construction starts empty; only explicitly inherited or set
@@ -351,8 +351,8 @@ whitespace or control character; normalization must keep it on that origin and m
 leading `//`. The normalized target is limited to 8 KiB. `write_header` accepts valid HTTP field
 names and UTF-8 values without control characters or leading/trailing whitespace in a nonempty
 value. The request carries those values as their exact UTF-8 bytes, including non-ASCII characters.
-Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
-application headers and 32 KiB of name/value bytes are allowed.
+Transport-owned headers cannot be written. After case-insensitive replacement, application headers
+use the committed field-count and byte caps, 128 fields and 32 KiB by default.
 
 `ENCODE USING` permits the ordinary transforming construction clauses. `WITHOUT BODY` selects an
 absent request body and permits `WHERE` and `INVOKE` but no `INHERIT`, `SET` or `VALUES`. HTTP
@@ -426,7 +426,7 @@ an empty string is sent as an empty value. Two writes whose names are string lit
 same field, such as `write_header('X-Tenant', …)` and `write_header('x-tenant', …)`, are refused when
 the statement is validated, because the earlier one could never be sent; a name an expression
 computes is replaced at run time. An invalid or reserved write rejects its record even when a later
-write would replace it, and the 128-header and 32 KiB bounds apply after every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
+write would replace it, and the publication's captured committed field-count and byte caps apply after every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
 newline, form encoding or compression added; Nervix adds no `Content-Type`, and a declared
 `Content-Encoding` does not transform the bytes. `WITHOUT BODY` sends zero content bytes.
 
@@ -647,7 +647,8 @@ clause and its route construction, and before the flush policy:
 BATCH MAX MESSAGES <n> MAX SIZE <bytes>
 ```
 
-`MAX MESSAGES` is the most source records one batch carries, from 1 to 65,536. `MAX SIZE` is the
+`MAX MESSAGES` is the most source records one batch carries, from 1 through the committed
+`MAX_BATCH_MESSAGES` cap (65,536 by default), within the unsigned 32-bit representation. `MAX SIZE` is the
 most bytes its encoded payload may occupy: a positive whole number followed by `B`, `KB`, `KiB`,
 `MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`. Neither limit has a default, neither may be omitted, and
 neither is derived from the other or from `FLUSH ... MAX BATCH SIZE`, which measures Arrow memory
@@ -674,7 +675,7 @@ CREATE KAFKA TOPIC EMITTER kafka_notifications
 
 A statement is rejected, naming the offending value, when:
 
-- `MAX MESSAGES` is zero or above 65,536;
+- `MAX MESSAGES` is zero, exceeds its representation, or exceeds the committed batch-count cap;
 - `MAX SIZE` is zero, fractional, written without a unit, or past the 64-bit byte range;
 - `MAX SIZE` is above 1 MiB on an SQS emitter, the largest SQS message Nervix sends;
 - the clause is absent on a ClickHouse, Postgres, MySQL or MongoDB emitter;

@@ -31,10 +31,9 @@ pub struct MembershipArgs {
     #[arg(
         long = NodeUnavailabilityTimeout::NAME,
         env = "NERVIX_NODE_UNAVAILABILITY_TIMEOUT",
-        default_value_t = HumanDuration(NodeUnavailabilityTimeout::default_value(&())),
-        help = "How long a member may go unobserved before the cluster treats it as unavailable"
+        help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::NodeUnavailabilityTimeout, "How long a member may go unobserved before the cluster treats it as unavailable")
     )]
-    pub node_unavailability_timeout: HumanDuration,
+    pub node_unavailability_timeout: Option<HumanDuration>,
     #[arg(
         long = GossipInterval::NAME,
         env = "NERVIX_GOSSIP_INTERVAL",
@@ -56,7 +55,7 @@ pub struct MembershipArgs {
 impl MembershipArgs {
     pub(super) fn settings(&self) -> Result<MembershipSettings, Report<MembershipSettingsError>> {
         MembershipSettings::resolve(MembershipValues {
-            node_unavailability_timeout: Some(self.node_unavailability_timeout.0),
+            node_unavailability_timeout: self.node_unavailability_timeout.map(|value| value.0),
             gossip_interval: Some(self.gossip_interval.0),
             clock_skew_tolerance: Some(self.clock_skew_tolerance.0),
         })
@@ -64,14 +63,16 @@ impl MembershipArgs {
 
     pub(super) fn from_settings(settings: &MembershipSettings) -> Self {
         Self {
-            node_unavailability_timeout: HumanDuration(settings.node_unavailability_timeout()),
+            node_unavailability_timeout: Some(HumanDuration(
+                settings.node_unavailability_timeout(),
+            )),
             gossip_interval: HumanDuration(settings.gossip_interval()),
             clock_skew_tolerance: HumanDuration(settings.clock_skew_tolerance()),
         }
     }
 
     pub(super) fn render(&self, command_line: &mut CommandLine) {
-        command_line.option(
+        command_line.optional(
             NodeUnavailabilityTimeout::NAME,
             self.node_unavailability_timeout,
         );

@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{ConsensusError, DomainMutationLease, DomainPlanningInputs};
 use nervix_models::{
     ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, NodeRef, PlacementPolicy,
@@ -435,7 +435,8 @@ impl SessionServiceImpl {
                 &desired,
                 &relocation.destination,
                 &moved,
-                self.inner.replica_count,
+                usize::try_from(self.cluster_parameters().replica_count())
+                    .assured("the committed count fits a supported target"),
                 &schedulable_nodes,
                 &live_nodes,
             )
@@ -553,14 +554,21 @@ impl SessionServiceImpl {
             graph.schedule_for_domain_with_mode(
                 domain,
                 &cluster_nodes,
-                self.inner.replica_count,
+                usize::try_from(self.cluster_parameters().replica_count())
+                    .assured("the committed count fits a supported target"),
                 placement,
                 self.inner.runtime.scheduler_mode(),
             )
         }
         #[cfg(not(feature = "testing"))]
         {
-            graph.schedule_for_domain(domain, &cluster_nodes, self.inner.replica_count, placement)
+            graph.schedule_for_domain(
+                domain,
+                &cluster_nodes,
+                usize::try_from(self.cluster_parameters().replica_count())
+                    .assured("the committed count fits a supported target"),
+                placement,
+            )
         }
     }
 }

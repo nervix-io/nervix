@@ -202,6 +202,7 @@ class InventoryTests(unittest.TestCase):
             "backup-section-mapping",
             "stopping-node-drain-wire",
             "cluster-peer-clock-probes",
+            "cluster-parameters",
             "restore-installation-storage",
             "restore-staging-kept-measurement",
             "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax", "typed-hidden-tunables",

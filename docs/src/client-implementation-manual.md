@@ -536,7 +536,8 @@ payload, infinity, and nullable and sensitive branch key fields.
 
 - **P-1.** A client MUST open a producer with `OpenIngestorRequest`, naming the domain, the
   ingestor, the exact fields it expects, including each field's optionality and sensitivity, and
-  positive credit no larger than 1,024 batches and 32 MiB. It MUST handle both dispositions:
+  positive credit no larger than 1,024 batches and the committed producer session-byte cap
+  (32 MiB by default). It MUST handle both dispositions:
   `Opened` with the producer's description, and `Refused` with a `ClientProducerRefusal`. It MUST
   NOT open a producer while its session holds a transaction.
 - **P-2.** The producer's identity is the request identity of its open. A client MUST start
@@ -1057,3 +1058,17 @@ so opening before START does not prevent later filtering. Clients continue
 to handle domain-time-unavailable skipped-row notices and generation termination using the existing
 subscription protocol. Internal clock and metric handle retention introduces no additional client
 request, capability negotiation or recovery step.
+
+## Cluster Policy and Attachment Grants
+
+Treat producer and consumer byte defaults as request preferences. Validate an opened producer's
+grant against the corresponding request, including its batch and byte limits, and use the row
+limit returned in that grant. Do not reject a grant solely because it exceeds a compiled default.
+A parameter change governs new admission; an existing attachment retains its grant until it ends.
+`ALTER CLUSTER SET` uses the same durable command recovery and completion contract as other
+administrative commands. Its informational notice is not a replacement for a command outcome.
+
+During node initialization, cluster status and description are available before policy-dependent
+work. A durable command sent then can return `OutcomeUnknown(NotYetAuthoritative)`, including an
+exact retry of an execution that completed before restart. Keep the same execution reference and
+continue recovery; this response establishes neither success nor failure of that execution.

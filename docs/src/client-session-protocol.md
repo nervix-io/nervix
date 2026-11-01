@@ -558,7 +558,7 @@ because a client recovers from both the same way.
 | `LeaderRedirect` | Before admission | The serving node is not the leader, and nothing was admitted there. The leader's endpoints are absent while no leader is known or discovery cannot reach it. | Reconnect to the leader, or wait for one, and repeat the command under the same reference. |
 | `TransactionDetached` | Before admission | The leader holds no binding for the session's transaction, typically after a reconnect or leader change. | Attach the transaction again and repeat the command under the same reference. |
 | `TransactionTakenOver` | Before admission | Another session attached this session's transaction, and nothing was admitted for this request. | Report it. Attaching the transaction again would take it back, which is the user's decision rather than a retry. |
-| `OutcomeUnknown` | Admission, execution, or finalization | The command may have been admitted and its outcome is not known yet: leadership moved, or the leader could not confirm it still leads, while the command was admitted or applied (`LeadershipLost`), it is still applying (`StillApplying`), or it finished but its outcome is not yet authoritative on every live node (`NotYetAuthoritative`). | Repeat the command under the same reference until the outcome is known. Never report success or failure from this disposition. |
+| `OutcomeUnknown` | Admission, execution, or finalization | The command may have been admitted and its outcome is not known yet: leadership moved, or the leader could not confirm it still leads, while the command was admitted or applied (`LeadershipLost`), it is still applying (`StillApplying`), or the node is still establishing live policy or waiting for a finished outcome to become authoritative on every live node (`NotYetAuthoritative`). | Repeat the command under the same reference until the outcome is known. Never report success or failure from this disposition. |
 | `ExecutionReferenceConflict` | Before admission | The reference already identifies a different command, which differs in its owner, domain, transaction position, or content. Nothing was admitted for this request. | Treat it as a defect in the client's use of references. |
 | `ExecutionReferenceExpired` | Before admission | The reference aged out of execution history. Its outcome can no longer be recovered, and the command was not executed again. | Report that the outcome is unknown; issuing the work again is a new command. |
 | `PreviewStale` | Commit admission | The commit named a preview that no longer describes the transaction. Nothing was applied, and the transaction stays open. The reply names both the expected and the current preview. | Inspect the transaction again and decide whether to commit against the current preview. |
@@ -1396,7 +1396,8 @@ owns the public contract of a producer; this section places producers in the pro
 the credit it asks for: how many batches and how many bytes it may have outstanding. The open runs
 on the ordered lane. The serving node checks the session's transaction binding, the requested
 limits, the committed domain state and schedule, and the ingestor's kind, reserves room in the
-session's budget of 32 producers and 32 MiB and in its own node budget of 128 MiB, and attaches the
+session's budget of 32 producers and its committed byte cap (32 MiB by default), and in
+its own node budget of 128 MiB, and attaches the
 producer through the node that executes the ingestor, which checks the expected fields against the
 execution it runs. The reply is `ProducerOpened` or a typed `ClientProducerRefusal` with a message;
 a refused open leaves nothing attached and reserves nothing. `ProducerOpened` carries the domain,
@@ -1530,7 +1531,8 @@ temporary-unavailability behavior and the client's restoration backoff continue 
 
 `OpenEmitterRequest` names the domain and `TO CLIENT` emitter, an exact field list, and requested
 outstanding batch and byte limits. The serving node validates the committed schedule and schema,
-reserves the requested bytes against the session's 32 MiB and node's separate 128 MiB consumer
+reserves the requested bytes against the session's committed cap (32 MiB by default) and the
+node's separate 128 MiB consumer
 budgets, and attaches to the executing node before sending `OpenEmitterOutcome.Opened`. It
 refuses an open that cannot hold the emitter's maximum IPC batch. At most 32 consumer handles
 belong to one session. The request identity of the open is its `ConsumerId`. The protocol and its
@@ -2140,3 +2142,25 @@ It also retains the node's executor and passes it to predicate evaluation for bo
 Its dropped-row counter is resolved with the generation. A native ingestor endpoint resolves every
 public batch-outcome metric child at startup and retains its execution's acknowledgement trackers.
 These internal ownership rules change neither session framing nor client recovery behavior.
+
+## Committed Cluster Policy
+
+`ALTER CLUSTER SET` is an administrative command on the ordinary command and execution-reference
+path. Existing informational notices announce a committed parameter revision after local
+installation; notices retain their ordinary best-effort delivery contract. No frame or correlation
+shape changes. Cluster inspection reports committed and per-node installed values.
+
+The public session listener starts while live cluster policy may still be unavailable. Authenticated
+`SHOW CLUSTER STATUS` and `DESCRIBE CLUSTER` work during that wait; status names the node's
+`initializing` or `ready` initialization state. Other command batches are refused before durable
+admission until live policy is caught up and initialization completes. A durable command may be
+resuming an earlier execution, so this wait answers `OutcomeUnknown(NotYetAuthoritative)` under
+the same reference, preserving the client's recovery obligation. Read-only refusals are definitive
+for that request. Producer and consumer
+requests use their existing `EndpointUnavailable` outcome. Resource upload, restore upload and
+backup download report the unavailable installation, staging or read through their existing typed
+failure outcomes. No transfer starts before this admission check and no wire shape changes.
+
+Producer and consumer session-byte admission uses the committed cluster limits. A producer's
+existing grant carries its exact row bound, which the admission worker enforces for that
+attachment. The compiled defaults are request preferences, not server admission ceilings.

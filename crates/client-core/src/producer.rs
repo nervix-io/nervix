@@ -39,10 +39,9 @@ use nervix_client_wire::{
     SubmissionOutcome as WireSubmissionOutcome, SubmitBatchRequest,
 };
 use nervix_models::{
-    CLIENT_PRODUCER_SESSION_BYTES, ClientOutcomeUncertainty, ClientProcessingFailure,
-    ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
-    ClientProducerLimits, ClientSubmissionOutcome, ClientSubmissionRefusal, DomainName,
-    IngestorName, SchemaField,
+    ClientOutcomeUncertainty, ClientProcessingFailure, ClientProducerAdmission,
+    ClientProducerDescription, ClientProducerEndReason, ClientProducerLimits,
+    ClientSubmissionOutcome, ClientSubmissionRefusal, DomainName, IngestorName, SchemaField,
 };
 use nervix_primitives::sync::{Arc, StdArc, StdWeak, blocking::Mutex as SyncMutex, oneshot, watch};
 use nervix_recovery::Discarded as _;
@@ -1060,7 +1059,6 @@ impl ProducerAttachment {
         // before returning the protocol error, including when this was a cancelled initial open.
         if opened.domain != request.domain
             || opened.ingestor != request.ingestor
-            || attachment.description.grant.bytes.get() > CLIENT_PRODUCER_SESSION_BYTES
             || attachment.description.grant.batches > request.limits.batches
             || attachment.description.grant.bytes > request.limits.bytes
         {

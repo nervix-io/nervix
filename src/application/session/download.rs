@@ -182,6 +182,9 @@ impl SessionServiceImpl {
         user: &UserName,
         reference: &CommandExecutionReference,
     ) -> DownloadAnswer {
+        if let Err(error) = self.available_cluster_parameters() {
+            return refused(BackupDownloadFailure::ReadFailed, format!("{error:#}"));
+        }
         let now = current_timestamp();
         if self.backup_reference_expired(reference, now) {
             return expired(reference);
@@ -221,7 +224,7 @@ impl SessionServiceImpl {
         let Ok(issued_at) = reference.retry_issued_at() else {
             return false;
         };
-        let validity = self.inner.command_execution_policy.retry_validity();
+        let validity = self.command_execution_policy().retry_validity();
         match issued_at.checked_add(validity) {
             Ok(retained_until) => now >= retained_until,
             // A window ending past the last representable instant has not ended.

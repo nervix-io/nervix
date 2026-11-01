@@ -1632,7 +1632,7 @@ scenario = "A node whose memory limit cannot hold its memory budgets refuses to 
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Whole-cluster teardown, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. Watch channels and the test fault map are untracked."
+coverage = "Whole-cluster teardown, concurrent live-policy discovery, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. The fixture's reconciliation gate, watch channels and test fault map are untracked."
 examples = 1
 feature = "tests/features/cluster/restarted_voter_observation.feature"
 id = "scenario.restarted-voter-observation"
@@ -1922,7 +1922,7 @@ scenario = "A node whose memory limit cannot hold its memory budgets refuses to 
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Under scheduling stress: whole-cluster teardown, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. Watch channels and the test fault map are untracked."
+coverage = "Under scheduling stress: whole-cluster teardown, concurrent live-policy discovery, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. The fixture's reconciliation gate, watch channels and test fault map are untracked."
 examples = 1
 feature = "tests/features/cluster/restarted_voter_observation.feature"
 id = "stress.restarted-voter-observation"
@@ -3402,6 +3402,10 @@ workloads = [
 [[owner]]
 path = "src/registry/storage.rs"
 workloads = [
+  "parameters.request-header-cap",
+  "parameters.live",
+  "parameters.restart",
+  "parameters.return",
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
   "stress.diagnostic-nodes",
@@ -4032,6 +4036,203 @@ invocation = "stress-scenarios"
 scenario = "RabbitMQ ACK PARALLEL settles successful deliveries while another delivery is rejected"
 selections = ["deloxide-stress"]
 
+# Parameter publication shares the existing runtime admission and storage owners in every mode.
+[[workload]]
+coverage = "The committed header-count range is checked against the request transport's representable distinct-field capacity before publication."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.header-count-range"
+invariant = "A cluster parameter cannot promise a header count its HTTP representation cannot hold."
+invocation = "cluster-parameters"
+scenario = "A parameter change reserves transport capacity in the HTTP header count on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Committed header caps validate literal HTTP polling headers at both parameter transition and model admission. The request transport is not opened by this configuration-only scenario."
+examples = 4
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.request-header-cap"
+invariant = "A cluster header cap protects existing and newly admitted HTTP polling ingestors."
+invocation = "cluster-parameters"
+scenario = "A lower HTTP request header <parameter> cap protects stored and new ingestors on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Committed header caps validate literal WebSocket upgrade headers at parameter transition and model admission. This configuration-only scenario opens no transport."
+examples = 4
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.websocket-header-cap"
+invariant = "A cluster header cap protects existing and newly admitted WebSocket connection ingestors."
+invocation = "cluster-parameters"
+scenario = "A lower WebSocket upgrade header <parameter> cap protects stored and new ingestors on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[invocation]]
+bound_seconds = 900
+concurrency = 1
+evidence = true
+id = "cluster-parameters"
+inputs = ["tests/features/cluster/cluster_parameters.feature"]
+kind = "cucumber"
+package = "nervix-scenarios"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+tags = ["@cluster_parameters"]
+target = "test:scenarios"
+
+[[workload]]
+coverage = "Each live node installs the committed policy before command completion."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.live"
+invariant = "Each live node installs the committed policy before command completion."
+invocation = "cluster-parameters"
+scenario = "A committed parameter change applies on every node without restarting on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "First-bootstrap values become one cluster authority."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.seed"
+invariant = "First-bootstrap values become one cluster authority."
+invocation = "cluster-parameters"
+scenario = "First bootstrap seeds the parameter record for every node on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Explicit seed flags are refused after the first bootstrap."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.refuse-seed"
+invariant = "Explicit seed flags are refused after the first bootstrap."
+invocation = "cluster-parameters"
+scenario = "An existing cluster refuses parameter seed options at a later node start on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Committed policy survives a process restart."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.restart"
+invariant = "Committed policy survives a process restart."
+invocation = "cluster-parameters"
+scenario = "A committed parameter survives a node restart on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "A returning node answers public status and liveness, remains unready and returns a nonterminal outcome for an exact durable retry while initial discovery is held, then adopts live policy and recovers that execution."
+examples = 1
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.return"
+invariant = "A returning node adopts live policy before its stale log catches up."
+invocation = "cluster-parameters"
+scenario = "A node down during a parameter change adopts the committed record when it returns"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "An atomic cap refusal identifies the existing model."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.model-cap"
+invariant = "An atomic cap refusal identifies the existing model."
+invocation = "cluster-parameters"
+scenario = "Lowering a cap refuses the existing model that exceeds it on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Repeated-work durations have a typed positive bound."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.positive-duration"
+invariant = "Repeated-work durations have a typed positive bound."
+invocation = "cluster-parameters"
+scenario = "A parameter change refuses a nonpositive snapshot interval on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Public native producer opens observe a raised and lowered policy while admitted credit remains attached."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.client-credit"
+invariant = "New grants use committed byte limits; an admitted grant survives a later lower cap."
+invocation = "cluster-parameters"
+scenario = "A live producer byte cap changes new grants and retains admitted credit on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Lowered header cardinality and byte limits are validated against known HTTP header names even when their values are dynamic."
+examples = 4
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.header-cap"
+invariant = "A parameter transition cannot invalidate a model's known HTTP header names or their byte requirement."
+invocation = "cluster-parameters"
+scenario = "A lower HTTP header <parameter> cap refuses known names with dynamic values on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 [[workload]]
 coverage = "Tracked transaction state and impact recording during branch reset application and recovery. Async gates, consensus/network waits and the test-owned fault maps are untracked."
 examples = 2

@@ -1283,6 +1283,9 @@ TLS keys on `ws`, and unpaired identity files are typed refusals naming their ke
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a ingestor cannot produce its validated header collection. Rendered client values are
 validated again by the connector before opening transport.
+Canonical upgrade fields that exceed committed HTTP caps produce the registry's typed
+`ClusterParameterLimit` at model admission or parameter transition, naming the parameter and
+ingestor. The subprotocol offer contributes its canonical field bytes to that check.
 An Iceberg emitter's location refusal names its domain, emitter and `LOCATION`, with the
 vocabulary's typed location failure beneath that context. A malformed URL retains its URL-parser
 cause; a storage-scheme mismatch names the found scheme and the schemes its declared client
@@ -1616,8 +1619,10 @@ A node that is refused as it joins stops with `AppError::JoinRefused` above a `J
 `Prerequisite` holds the `JoinRefusal` that names the peer and the `PrerequisiteMismatch` from this
 node's side, and `ClockSkew` names the peer whose clock was judged, the skew one probe proved and
 this node's tolerance. The refusal is logged at `error` as
-`this node was refused at join and stops` when the node requests its own stop, and returned once
-its shutdown phases have run, so the exit renders the whole chain.
+`this node was refused at join and stops` when the node requests its own stop. Before live policy
+discovery completes, startup cleans up the subsystems it started and returns that typed refusal.
+After startup, it returns the refusal once the shutdown phases have run. The exit renders the
+whole chain in either case.
 
 Memory-pressure watermarks are validated the same way. A watermark set without its pair, a low
 watermark that is not below the high one, or a zero check interval while the watermarks are set is
@@ -3203,3 +3208,27 @@ Connector terminology follows entity ownership: `IngestorError` and `EmitterOpen
 record. Renaming and grouping entity owners changes neither retry classification nor what is
 rendered at the boundary. The ingestor planner's input identity/kind errors cover client, endpoint
 and native schema references before composition.
+
+## Cluster Parameter Refusals
+
+Parameter definitions own positive duration and numeric range errors, and structured assignments
+own empty or duplicate-key refusals. The registry names the exact parameter, domain/model or
+resource, actual requirement and candidate maximum when a lowered cap cannot hold committed
+state. Consensus compares captured inputs and reports a typed stale-input conflict before any
+publication. Bootstrap seed refusal names the parameter and `ALTER CLUSTER SET`. A failed seed
+append is logged with its complete consensus report, including the typed causes beneath it.
+HTTP polling's literal header requirements use the same model-limit refusal as emitter headers;
+the header-count definition also refuses values beyond the native request map's capacity.
+
+A live publication that disagrees with an equal applied revision is a typed installation failure,
+not a default or retry interpretation. Invalid current consensus metadata preserves its decoder
+cause beneath a typed node-state recreation error.
+
+`ClusterParameterAdmissionError` distinguishes awaiting a live publication, awaiting local catch-up,
+and completing initialization. These are ordinary request refusals before policy-dependent work
+begins. A durable command projects this temporary absence into
+`OutcomeUnknown(NotYetAuthoritative)` because its reference may already name a committed execution;
+a read-only request can be refused definitively. An inconsistent equal-revision publication
+preserves its typed publication error. Public
+cluster inspection remains available while these refusals apply; transfer boundaries project the
+refusal into their existing installation, staging or read failure with its full message.

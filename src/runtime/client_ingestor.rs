@@ -50,7 +50,7 @@ use nervix_models::{
     ClientOutcomeUncertainty, ClientProcessingFailure, ClientProducerAdmission,
     ClientProducerDescription, ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits,
     ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
-    MAX_CLIENT_BATCH_ROWS, SchemaField,
+    SchemaField,
 };
 use nervix_primitives::sync::atomic::AtomicU64;
 
@@ -408,6 +408,7 @@ enum EndpointCommand {
 }
 
 struct AttachCommand {
+    max_batch_rows: NonZeroU32,
     expected_fields: Vec<SchemaField>,
     limits: ClientProducerLimits,
     max_batch_bytes: NonZeroU64,
@@ -436,6 +437,7 @@ struct AttachedProducer {
 
 /// One batch the endpoint hands its admission worker.
 struct AdmissionJob {
+    max_batch_rows: NonZeroU32,
     attachment: ClientAttachmentId,
     submission: ClientSubmissionId,
     body: Bytes,
@@ -534,6 +536,7 @@ impl Attachment {
             submission: batch.submission,
             body: batch.body,
             max_batch_bytes: self.grant.max_batch_bytes,
+            max_batch_rows: self.grant.max_batch_rows,
         }
     }
 
@@ -664,7 +667,10 @@ impl Runtime {
             max_batch_bytes,
             retention,
         } = request;
-        if !limits.is_within_bounds() {
+        let parameters = self.cluster_parameters();
+        if !limits.is_within_bounds()
+            || limits.bytes.get() > parameters.client_producer_session_bytes()
+        {
             return Err(ClientProducerRefusal::InvalidLimits);
         }
         let key = DomainNodeRef::node_in(domain, ModelKind::Ingestor, ingestor);
@@ -687,6 +693,11 @@ impl Runtime {
         };
         let (reply, attached) = oneshot::channel();
         let command = EndpointCommand::Attach(AttachCommand {
+            max_batch_rows: NonZeroU32::new(
+                u32::try_from(parameters.client_batch_rows())
+                    .assured("the committed row count fits its wire representation"),
+            )
+            .assured("the committed row count is positive"),
             expected_fields,
             limits,
             max_batch_bytes,
@@ -1041,13 +1052,20 @@ impl Endpoint {
 
     fn attach(&mut self, attach: AttachCommand) {
         let AttachCommand {
+            max_batch_rows,
             expected_fields,
             limits,
             max_batch_bytes,
             serving,
             reply,
         } = attach;
-        let attached = self.attached_producer(expected_fields, limits, max_batch_bytes, serving);
+        let attached = self.attached_producer(
+            expected_fields,
+            limits,
+            max_batch_bytes,
+            max_batch_rows,
+            serving,
+        );
         if reply.send(attached).is_err() {
             // The open was cancelled before its answer arrived; the new attachment has no
             // producer and is released.
@@ -1064,6 +1082,7 @@ impl Endpoint {
         expected_fields: Vec<SchemaField>,
         limits: ClientProducerLimits,
         max_batch_bytes: NonZeroU64,
+        max_batch_rows: NonZeroU32,
         serving: ProducerServing,
     ) -> Result<AttachedProducer, ClientProducerRefusal> {
         let Some(execution) = self.execution.clone() else {
@@ -1077,8 +1096,7 @@ impl Endpoint {
             batches: limits.batches,
             bytes: limits.bytes,
             max_batch_bytes,
-            max_batch_rows: NonZeroU32::new(MAX_CLIENT_BATCH_ROWS)
-                .assured("the row limit is a non-zero constant"),
+            max_batch_rows,
         };
         let admission_state = self.intake.admission();
         let (events, outcomes) = mpsc::unbounded_channel();
@@ -1840,8 +1858,8 @@ impl ClientIntake {
     async fn admit(&self, job: AdmissionJob) -> AdmissionResult {
         let limits = ClientBatchLimits {
             max_bytes: job.max_batch_bytes,
-            max_rows: NonZeroUsize::new(MAX_CLIENT_BATCH_ROWS.arch_into())
-                .assured("the row limit is a non-zero constant"),
+            max_rows: NonZeroUsize::new(job.max_batch_rows.get().arch_into())
+                .assured("an attachment grants a positive row limit"),
         };
         let decoded = self
             .schema

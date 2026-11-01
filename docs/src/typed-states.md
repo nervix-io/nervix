@@ -1096,3 +1096,18 @@ OTEL field rules carry their exact type with the constraint that requires it: a 
 cannot be declared with a floating-point descriptor. Required, optional and required-for-DELTA
 presence are distinct vocabulary states. Opening an OTEL client validates its required positive
 deadline before constructing settings; the installed settings hold a duration with no absent state.
+
+## Parameter Authority and Installation
+
+`ClusterParameterValues` holds validated class-typed settings with a single definition for each
+default and bound. `ClusterParameterRecord` pairs them with a positive revision. The state machine
+has no record until first bootstrap; it never fills missing persisted fields from defaults.
+A node's gossip publication keeps committed and optional running records together and validates
+their revision/value relationship. A live construction record distinguishes pending catch-up from
+ready installation and rejects equal revisions with unequal values.
+
+The application shares one `NodeInitialization` publication between session admission, configured
+HTTP intake and readiness. Its private `OnceLock<()>` distinguishes initialization pending from
+completed and can publish completion once. This state is separate from the live construction
+record and quorum-confirmed runtime admission: policy can be caught up while initialization is
+still registering owners, and observation is available throughout.

@@ -1103,7 +1103,7 @@ impl SessionServiceImpl {
             .retry_issued_at()
             .change_context(BackupError::RetryWindow)?;
         issued_at
-            .checked_add(self.inner.command_execution_policy.retry_validity())
+            .checked_add(self.command_execution_policy().retry_validity())
             .change_context(BackupError::RetryWindow)
     }
 
