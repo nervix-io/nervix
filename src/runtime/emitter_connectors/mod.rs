@@ -42,7 +42,9 @@ use nervix_connector_kafka::{KafkaTopicEmitter, KafkaTopicEmitterConfig};
 use nervix_connector_mongodb::{MongoDbCollectionEmitter, MongoDbCollectionEmitterConfig};
 use nervix_connector_mqtt::{MqttTopicEmitter, MqttTopicEmitterConfig};
 use nervix_connector_mysql::{MySqlTableEmitter, MySqlTableEmitterConfig};
-use nervix_connector_nats::{NatsSubjectEmitter, NatsSubjectEmitterConfig};
+use nervix_connector_nats::{
+    NatsStreamEmitter, NatsStreamEmitterConfig, NatsSubjectEmitter, NatsSubjectEmitterConfig,
+};
 use nervix_connector_otel::{
     OtelExportConfig, OtelLogsEmitter, OtelLogsEmitterConfig, OtelMetricsEmitter,
     OtelMetricsEmitterConfig, OtelTracesEmitter, OtelTracesEmitterConfig,
@@ -95,6 +97,7 @@ impl EmitterConnectorStarter {
             | EmitterConnectorPlan::Redis(RedisEmitterPlan::PubSub(_))
             | EmitterConnectorPlan::Mqtt(MqttEmitterPlan::Topic(_))
             | EmitterConnectorPlan::Nats(NatsEmitterPlan::Subject(_))
+            | EmitterConnectorPlan::Nats(NatsEmitterPlan::Stream(_))
             | EmitterConnectorPlan::ZeroMq(ZeroMqEmitterPlan::Push(_))
             | EmitterConnectorPlan::Sqs(SqsEmitterPlan::Queue(_))
             | EmitterConnectorPlan::Sentry(SentryEmitterPlan::Event(_))
@@ -144,6 +147,9 @@ impl EmitterConnectorStarter {
             }
             EmitterConnectorPlan::Nats(NatsEmitterPlan::Subject(connector)) => {
                 Self::nats(connector, context, codec, label, batch, plan).await?
+            }
+            EmitterConnectorPlan::Nats(NatsEmitterPlan::Stream(connector)) => {
+                Self::nats_stream(connector, context, codec, label, batch, plan).await?
             }
             EmitterConnectorPlan::ZeroMq(ZeroMqEmitterPlan::Push(connector)) => {
                 Self::zeromq(connector, context, codec, label, batch).await?

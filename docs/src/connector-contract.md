@@ -1058,7 +1058,7 @@ as a whole token and `>` only last; a publication subject admits neither, since 
 published to one literal subject. The ingestor declares `NO ACK` with a required `QUEUE GROUP` and
 `INSTANCES`, and `BUFFER`/`DROP` for intake, because Core NATS keeps no backlog, position or
 acknowledgement for a subscriber. Both directions carry headers by name, and the ingestor projects
-no typed metadata field. The emitter declares Core `NO ACK` and `JETSTREAM ACK` publication, codec
+no typed metadata field. The subject emitter declares Core `NO ACK` publication, codec
 payloads, no envelope clause, and optional batching without a protocol maximum: each server
 announces its `max_payload`, and the client refuses a message above it before writing it. The
 unpooled client's Nervix-owned keys are the address, `timeout_ms` and the TLS files, while the
@@ -1086,6 +1086,15 @@ was lost, is delivered again once that `AckWait` passes. The
 stream's unit tests drive these paths through a scripted server, and one-/three-node public
 scenarios through a JetStream server qualify delivery, redelivery, suspension, missing entities
 and failover.
+
+A `NATS STREAM` emitter names an operator-provisioned stream and one literal publication subject.
+Opening looks up the stream and reports the missing external entity if it is absent. Every record
+carries the expected-stream header; a subject the stream does not capture is rejected per record.
+`MESSAGE ID` writes `Nats-Msg-Id` from the host's once-evaluated envelope, so an uncertain retry
+keeps the same ID and JetStream can deduplicate it. The emitter bounds in-flight publishes by the
+ACK window and each PubAck by `ACK TIMEOUT`, settling confirmed records through the shared
+confirmation window before retrying unresolved records. It never creates a stream or persists
+hot-path records.
 
 `MQTT TOPIC` keeps a subscription's topic filter and a publication's topic exactly as written,
 letter case included, within MQTT's 65,535-byte string. A filter may write `+` for one level and
@@ -1274,7 +1283,7 @@ the `write_header` calls of one record become on the published message.
 | `last_wins`, exact names | `SQS QUEUE` | `PULSAR TOPIC` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | None | `SQS QUEUE` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
 | `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC` | `KAFKA TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
-| `repeats_by_name`, exact names | `NATS SUBJECT`, `NATS STREAM` | `NATS SUBJECT` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| `repeats_by_name`, exact names | `NATS SUBJECT`, `NATS STREAM` | `NATS SUBJECT`, `NATS STREAM` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, lowercase names | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT` | None | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `sorted_by_name`, exact names | `RABBITMQ QUEUE` | `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE` | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `sorted_by_name`, lowercase names | None | `HTTP REQUEST` | one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
@@ -2066,7 +2075,8 @@ the emitter's transient error that `DESCRIBE EMITTER` shows and as an error even
 | Kafka | `NO ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered, but a record a failed publish stopped waiting for stays until librdkafka gives it up | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts the records whose delivery report has not been served when the deadline passes |
 | Pulsar | `NO ACK`: accepted messages whose broker receipts have not arrived. `ACK`: nothing a completed publish reported delivered | Retains the receipts and waits for them until the finish deadline; reports a driver failure or the count still unanswered at that deadline |
 | MQTT | `QOS 0`: publishes the client took and its event loop has not yet written and flushed to the broker connection, which a client cut off from its broker holds until it connects again. `QOS 1` and `QOS 2`: nothing | Waits until the event loop has flushed every publish the client took or the deadline passes; reports a failed flush or the count still unflushed at that deadline |
-| NATS | Core `NO ACK`: nothing after a write whose connection flushed; after a failed or timed-out write, its pending count and connection expectation until the client's buffer is settled. JetStream: nothing, because JetStream answers each record | Drains and flushes the Core NATS client by the deadline, then verifies the pending write's connection. A connection change fails finish with the uncertain record count; a driver failure retains its typed cause; an expired deadline reports the pending count. Only a flush on the expected connection answers Flushed |
+| NATS SUBJECT | Nothing after a write whose connection flushed; after a failed or timed-out write, its pending count and connection expectation until the client's buffer is settled | Drains and flushes the Core NATS client by the deadline, then verifies the pending write's connection. A connection change fails finish with the uncertain record count; a driver failure retains its typed cause; an expired deadline reports the pending count. Only a flush on the expected connection answers Flushed |
+| NATS STREAM | Nothing a completed publish reported delivered: JetStream answers each record | Nothing to send |
 | ZeroMQ | Nothing a publish reported delivered: a completed send has flushed its frame to a peer's socket, and a send that ran out of `timeout_ms` failed its record | Nothing to send |
 | RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
 | Iceberg | Rows it staged and has not committed, which only a commit publishes | Nothing to send: a stop commits the staged rows before it finishes, and teardown leaves them uncommitted, as [Shutdown And Recovery](./shutdown.md#emitters) describes |
@@ -2177,8 +2187,8 @@ about a second of `ACK TIMEOUT`. An `ACK TIMEOUT` longer than the 2147483647 mil
 holds refuses the emitter when it starts. In `MODE NO ACK` the producer taking a record into its queue
 delivers it, and the client's own delivery bound applies.
 
-The NATS JetStream emitter awaits its `PubAck`s through the window: a `PubAck` confirms a record, a
-message above the server's `max_payload` is refused for good, and any other ending of the wait
+The NATS STREAM emitter awaits its `PubAck`s through the window: a `PubAck` confirms a record, a
+message above the server's `max_payload` or outside the named stream is refused for good, and any other ending of the wait
 leaves the record unresolved with the driver's typed cause. A client that does not take a record
 within `ACK TIMEOUT`, because its connection stopped draining what it queued, ends the publish
 through the window, so the retry resends none of the records JetStream confirmed before it.

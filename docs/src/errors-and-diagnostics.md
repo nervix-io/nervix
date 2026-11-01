@@ -1105,7 +1105,11 @@ holding the server's status and the description it gave, if any, beneath `Ingest
 An acknowledgement or a negative acknowledgement the server does not answer keeps the client's
 `RequestError` beneath `Acknowledge` or `NegativelyAcknowledge`, and one without a connection to
 send it on is `Disconnected`. A
-NATS JetStream publish keeps the driver's `PublishError` beneath `EmitterWriteError::Publish` when the
+NATS STREAM opening reports `EmitterOpenError::MissingExternalEntity` with the stream name if its
+lookup finds no stream; its public emitter status uses that typed error's value-free display text
+to name the missing stream. Other lookup failures keep the driver's typed cause beneath `Initialize`.
+A stream publish whose subject the named stream does not capture is a per-record external rejection.
+Other NATS JetStream publish failures keep the driver's `PublishError` beneath `EmitterWriteError::Publish` when the
 client does not take a record within `ACK TIMEOUT` and when a record's `PubAck` fails, each with the
 connector's description of the failure for the emitter's transient error. A message above the
 server's `max_payload` becomes a record rejection with code `external` and operation `publish`, and a

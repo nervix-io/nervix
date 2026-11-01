@@ -248,6 +248,7 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
     // Both RabbitMQ entities publish through the same channel, so either can ask the broker to
     // return a message no queue takes.
     let mandatory = &[EnvelopeClauseKind::Mandatory];
+    let message_id = &[EnvelopeClauseKind::MessageId];
     match kind {
         EmitterEntityKind::Client(ClientEmitterEntity::Consumer) => EmitterSurface {
             reference: EmitterReferenceKind::Schema,
@@ -286,6 +287,15 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
         EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => {
             located(ConnectorKind::Nats, "SUBJECT", "nats_publish_subject", &[])
         }
+        EmitterEntityKind::Nats(NatsEmitterEntity::Stream) => EmitterSurface {
+            envelope: message_id,
+            ..located(
+                ConnectorKind::Nats,
+                "STREAM",
+                "nats_stream",
+                &[("SUBJECT", true)],
+            )
+        },
         EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => EmitterSurface {
             envelope: &[
                 EnvelopeClauseKind::Delay,

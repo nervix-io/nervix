@@ -1,7 +1,47 @@
-Feature: NATS SUBJECT declarations
+Feature: NATS declarations
   The Core NATS subject contract keeps subjects and queue groups exactly as written in both
-  directions, with wildcards only where a queue subscription reads. Its delivery, quiesce and
-  client rules apply at CREATE without connecting to NATS.
+  directions, with wildcards only where a queue subscription reads. The stream emitter names a
+  stream and a literal subject and can write a message ID. Declaration rules apply at CREATE
+  without connecting to NATS.
+
+  @nats_stream_declaration
+  Scenario Outline: NATS STREAM emitter preserves its destination, acknowledgement mode, and message ID
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (value STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE NATS CLIENT nats_main CONFIG { 'addr' = 'nats://127.0.0.1:1' };
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE NATS STREAM EMITTER publishing FROM events
+        TO nats_main STREAM 'orders' SUBJECT 'orders.created'
+        MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s
+        ENCODE USING event_codec MESSAGE ID input.value
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      SHOW CREATE EMITTER publishing;
+      """
+    Then the last command output contains
+      """
+      STREAM 'orders' SUBJECT 'orders.created'
+      """
+    And the last command output contains
+      """
+      MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s
+      """
+    And the last command output contains
+      """
+      MESSAGE ID input.value
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario Outline: NATS SUBJECT declarations preserve subject literals in both directions
     Given a <cluster_size> node nervix cluster is started
@@ -50,11 +90,11 @@ Feature: NATS SUBJECT declarations
       """
 
     Examples:
-      | cluster_size | subscription | quiesce                                      | mode                                                                           | batch                               |
-      | 1            | Orders.*.EU  | DROP                                         | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                                      |                                     |
-      | 3            | Orders.*.EU  | DROP                                         | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                                      |                                     |
-      | 1            | orders.>     | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | JETSTREAM ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s | BATCH MAX MESSAGES 8 MAX SIZE 64KiB |
-      | 3            | orders.>     | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | JETSTREAM ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s | BATCH MAX MESSAGES 8 MAX SIZE 64KiB |
+      | cluster_size | subscription | quiesce                                      | mode                                      | batch                               |
+      | 1            | Orders.*.EU  | DROP                                         | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s |                                     |
+      | 3            | Orders.*.EU  | DROP                                         | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s |                                     |
+      | 1            | orders.>     | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s | BATCH MAX MESSAGES 8 MAX SIZE 64KiB |
+      | 3            | orders.>     | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s | BATCH MAX MESSAGES 8 MAX SIZE 64KiB |
 
   Scenario Outline: NATS SUBJECT ingestors refuse delivery and quiesce modes Core NATS cannot honor
     Given a <cluster_size> node nervix cluster is started
@@ -205,7 +245,7 @@ Feature: NATS SUBJECT declarations
       """
     Then the last command error contains
       """
-      expected NO ACK | JETSTREAM ACK, found ACK
+      expected NO ACK, found ACK
       """
 
     Examples:

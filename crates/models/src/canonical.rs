@@ -3023,11 +3023,12 @@ impl EmitterPublishing<'_> {
                 ack_timeout,
                 retry_policy,
             } => confirmed("QOS 2 ACK", window, ack_timeout, retry_policy),
-            EmitterPublishing::NatsJetStream {
-                window,
-                ack_timeout,
-                retry_policy,
-            } => confirmed("JETSTREAM ACK", window, ack_timeout, retry_policy),
+            EmitterPublishing::SqsSingle { retry_policy } => {
+                format!("SINGLE {}", retry(retry_policy))
+            }
+            EmitterPublishing::SqsBatch { retry_policy } => {
+                format!("BATCH {}", retry(retry_policy))
+            }
             EmitterPublishing::RequestAck { retry_policy } => {
                 format!("ACK {}", retry(retry_policy))
             }

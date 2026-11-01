@@ -473,13 +473,6 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE JETSTREAM ACK"
-entity = "NATS SUBJECT EMITTER"
-scenarios = [
-  { feature = "tests/features/runtime/nats_emission.feature", scenario = "NATS JetStream emitter retries a missing stream until it is provisioned" },
-]
-
-[[capability]]
 capability = "MODE NO ACK"
 entity = "NATS SUBJECT EMITTER"
 scenarios = [
@@ -491,6 +484,35 @@ capability = "STALLED PEER timeout_ms"
 entity = "NATS SUBJECT EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A NATS emitter whose server goes down is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "NATS STREAM EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "NATS STREAM EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/nats_emission.feature", scenario = "A NATS STREAM emitter confirms publication and the stream deduplicates a repeated message ID" },
+]
+
+[[capability]]
+capability = "SUBJECT"
+entity = "NATS STREAM EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/nats_emission.feature", scenario = "A NATS STREAM emitter rejects a subject its named stream does not capture" },
+]
+
+[[capability]]
+capability = "MESSAGE ID"
+entity = "NATS STREAM EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/nats_emission.feature", scenario = "A NATS STREAM emitter confirms publication and the stream deduplicates a repeated message ID" },
+  { feature = "tests/features/runtime/nats_emission.feature", scenario = "A NATS STREAM emitter retries a lost PubAck with the same message ID" },
 ]
 
 [[capability]]

@@ -246,7 +246,7 @@ current connection, retry and deadline limits.
   record reported delivered; write `MANDATORY` after the payload, on either entity, to reject such a
   record through `ON MESSAGE ERROR` instead. See
   [Emitters → RabbitMQ](../../../../docs/src/emitters.md#rabbitmq).
-- For Core NATS completion, reconnect retries and finish outcomes, read
+- For Core NATS completion, JetStream PubAck, reconnect retries and finish outcomes, read
   [Emitters → NATS](../../../../docs/src/emitters.md#nats) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
@@ -444,13 +444,19 @@ current connection, retry and deadline limits.
   as `String`, `Number` and `Binary` attributes; read `Emitters` → `SQS`.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
-  tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
-  sections of `Ingestors` and `Emitters`.
+  tokens with `>` last; a `NATS SUBJECT` emitter uses `MODE NO ACK` and one literal subject.
+  Check both against the NATS sections of `Ingestors` and `Emitters`.
 - A `NATS STREAM` ingestor reads a durable pull consumer an operator provisioned:
   `STREAM '<stream>' CONSUMER '<consumer>'` with `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL`, and
   `SUSPEND`, `BUFFER` or `DROP` quiesce. Nervix creates neither the stream nor the consumer, and it
   refuses a push consumer and one whose acknowledgement policy is not explicit. Read `Ingestors` →
   `NATS` for redelivery, `MaxRequestBatch`, `MaxRequestExpires` and `AckWait`.
+- A `NATS STREAM` emitter publishes to an operator-provisioned `STREAM '<stream>'` and a literal
+  `SUBJECT '<subject>'` that stream captures. Use `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX
+  <n>` with an `ACK TIMEOUT` and retry policy. The stream is checked when the emitter opens;
+  a subject the named stream does not capture is rejected per record. `MESSAGE ID <expression>`
+  writes `Nats-Msg-Id` so a retry after a lost PubAck can be deduplicated by JetStream. Read
+  `Emitters` → `NATS` for the full declaration and guarantee boundary.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
   `OWNED BY INGESTOR` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
