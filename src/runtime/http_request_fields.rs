@@ -22,8 +22,8 @@
 
 use error_stack::ResultExt as _;
 use nervix_models::{
-    HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
-    HttpRequestFieldError, HttpTarget,
+    HeaderValues, HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue,
+    HttpMethod, HttpOrigin, HttpRequestFieldError, HttpTarget,
 };
 use nervix_vm::SideError as VmSideError;
 
@@ -487,7 +487,7 @@ impl CompiledHttpRequestFields {
                 context.compile_options(VmCompileOptions {
                     output_mode: VmOutputMode::ExplicitOnly,
                     allow_sensitive_output: false,
-                    allow_header_writes: true,
+                    header_writes: Some(HeaderValues::Text),
                     ..VmCompileOptions::default()
                 }),
             );

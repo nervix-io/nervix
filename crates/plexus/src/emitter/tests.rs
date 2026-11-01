@@ -76,7 +76,7 @@ fn fields_named_like_the_request_clauses_stay_in_the_http_request() {
 fn fields_named_like_keywords_stay_in_a_fifo_group_and_values() {
     let parsed = parse_create_emitter(&complete_codec_emitter(
         "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP \
-         concat(input.mode, mode) MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s",
+         concat(input.mode, mode) SEND SINGLE MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
     ))
     .expect("a bare mode completes the group before MODE");
     let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
@@ -612,10 +612,12 @@ fn every_publishing_mode_body_parses_and_canonical_round_trips() {
          BACKOFF 250ms MAX 30s",
         "ZEROMQ PUSH EMITTER emit FROM p99 TO broker MODE NO ACK RETRY POLICY BACKOFF 250ms MAX \
          30s",
-        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events' MODE SINGLE RETRY POLICY \
-         BACKOFF 250ms MAX 30s",
-        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events' MODE BATCH RETRY POLICY BACKOFF \
-         250ms MAX 30s",
+        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events' SEND SINGLE MODE ACK RETRY \
+         POLICY BACKOFF 250ms MAX 30s",
+        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events' SEND BATCH MODE ACK RETRY \
+         POLICY BACKOFF 250ms MAX 30s",
+        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP FROM BRANCH \
+         SEND BATCH MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
         "SENTRY EVENT EMITTER emit FROM p99 TO broker MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
     ] {
         assert_canonical_emitter_roundtrip(&complete_codec_emitter(connector), connector);
@@ -731,7 +733,11 @@ fn sqs_quoted_fifo_queue_completes_its_group_and_policy() {
         suggestions.contains(&"FIFO GROUP".to_string()),
         "{suggestions:?}"
     );
-    assert!(suggestions.contains(&"MODE".to_string()), "{suggestions:?}");
+    assert!(suggestions.contains(&"SEND".to_string()), "{suggestions:?}");
+    assert!(
+        !suggestions.contains(&"MODE".to_string()),
+        "{suggestions:?}"
+    );
 }
 
 #[test]
@@ -754,7 +760,7 @@ fn direct_emitter_completion_only_offers_where_construction() {
 fn parses_sqs_fifo_group_forms() {
     let from_branch = parse_create_emitter(&complete_codec_emitter(
         "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP FROM BRANCH \
-         MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s",
+         SEND SINGLE MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
     ))
     .expect("SQS FIFO FROM BRANCH mode should parse");
     assert!(matches!(
@@ -774,7 +780,8 @@ fn parses_sqs_fifo_group_forms() {
 
     let expression = parse_create_emitter(&complete_codec_emitter(
         "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP \
-         concat(input.tenant, '-', input.region) MODE BATCH RETRY POLICY BACKOFF 250ms MAX 30s",
+         concat(input.tenant, '-', input.region) SEND BATCH MODE ACK RETRY POLICY BACKOFF 250ms \
+         MAX 30s",
     ))
     .expect("SQS FIFO expression mode should parse");
     assert!(matches!(
@@ -2416,7 +2423,7 @@ fn parses_create_emitter_sqs() {
     let input = r#"
         CREATE ATTACHED SQS QUEUE EMITTER emit
             FROM p99
-            TO sqs_main QUEUE 'queue1' MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s
+            TO sqs_main QUEUE 'queue1' SEND SINGLE MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
@@ -2432,6 +2439,7 @@ fn parses_create_emitter_sqs() {
     );
     assert_eq!(destination.queue.as_str(), "queue1");
     assert_eq!(destination.fifo_group, None);
+    assert_eq!(destination.send, nervix_models::SqsSend::Single);
 }
 
 #[test]
@@ -2541,8 +2549,8 @@ fn every_emitter_family_accepts_an_optional_batch_clause_and_round_trips_it() {
          30s",
         "SYSLOG COLLECTOR EMITTER emit FROM p99 TO broker MODE NO ACK RETRY POLICY BACKOFF 250ms \
          MAX 30s",
-        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events' MODE BATCH RETRY POLICY BACKOFF \
-         250ms MAX 30s",
+        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events' SEND BATCH MODE ACK RETRY \
+         POLICY BACKOFF 250ms MAX 30s",
         "SENTRY EVENT EMITTER emit FROM p99 TO broker MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
     ];
     for connector in codec_emitters {

@@ -43,7 +43,6 @@ use nervix_connector_otel::{
     OtelScope,
 };
 use nervix_connector_postgres::PostgresConflictAction;
-use nervix_connector_sqs::SqsPublishingMode;
 use nervix_models::{
     AckWindow, Assignment, AssignmentTarget, ClickHouseEmitter, ClickHouseTableEmitter,
     ClickHouseValueMapping, ClientConfigEntry, ClientConsumerEmitter, ClientEmitter, ClientName,
@@ -1085,7 +1084,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
                     client: expected,
                     queue,
-                    mode,
+                    send,
                     ..
                 })),
                 Model::ClientSqs(client),
@@ -1098,7 +1097,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     &client.config,
                 )?,
                 queue: queue.clone(),
-                mode: decide_sqs_publishing_mode(mode),
+                send: *send,
             })),
             (EmitterEntity::Sentry(SentryEmitter::Event(event)), Model::ClientSentry(client)) => {
                 EmitterConnectorPlan::Sentry(SentryEmitterPlan::Event(SentryEventEmitterPlan {
@@ -1552,14 +1551,6 @@ fn decide_nats_publishing_mode(
     }
 }
 
-/// The request shape `mode` declares for an SQS `emitter`.
-fn decide_sqs_publishing_mode(mode: &nervix_models::SqsQueuePublishingMode) -> SqsPublishingMode {
-    match mode {
-        nervix_models::SqsQueuePublishingMode::Single { .. } => SqsPublishingMode::Single,
-        nervix_models::SqsQueuePublishingMode::Batch { .. } => SqsPublishingMode::Batch,
-    }
-}
-
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
@@ -1949,7 +1940,7 @@ mod tests {
                 },
                 Self::Sqs => EmitterCase {
                     connector: EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-                        mode: nervix_models::SqsQueuePublishingMode::Batch {
+                        mode: nervix_models::SqsQueuePublishingMode::Ack {
                             retry_policy: nervix_models::RetryPolicy {
                                 backoff: "100ms".to_string(),
                                 max_backoff: "1s".to_string(),
@@ -1958,6 +1949,7 @@ mod tests {
                         client: client(),
                         queue: nervix_models::SqsQueueName::parse("orders").expect("valid queue"),
                         fifo_group: None,
+                        send: nervix_models::SqsSend::Batch,
                     })),
                     client: Model::ClientSqs(CreateClientSqs {
                         name: client(),
@@ -2601,12 +2593,12 @@ mod tests {
         let EmitterConnectorPlan::Sqs(SqsEmitterPlan::Queue(sqs)) = EmitterKind::Sqs
             .case()
             .decide()
-            .expect("an SQS emitter accepts BATCH")
+            .expect("an SQS emitter accepts SEND BATCH")
             .connector
         else {
             panic!("an SQS emitter must be planned as SQS");
         };
-        assert_eq!(sqs.mode, SqsPublishingMode::Batch);
+        assert_eq!(sqs.send, nervix_models::SqsSend::Batch);
     }
 
     #[rstest]

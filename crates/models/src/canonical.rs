@@ -3029,12 +3029,6 @@ impl EmitterPublishing<'_> {
                 ack_timeout,
                 retry_policy,
             } => confirmed("JETSTREAM ACK", window, ack_timeout, retry_policy),
-            EmitterPublishing::SqsSingle { retry_policy } => {
-                format!("SINGLE {}", retry(retry_policy))
-            }
-            EmitterPublishing::SqsBatch { retry_policy } => {
-                format!("BATCH {}", retry(retry_policy))
-            }
             EmitterPublishing::RequestAck { retry_policy } => {
                 format!("ACK {}", retry(retry_policy))
             }
@@ -4461,7 +4455,7 @@ mod tests {
             ),
             (
                 EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-                    mode: crate::SqsQueuePublishingMode::Single {
+                    mode: crate::SqsQueuePublishingMode::Ack {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
                             max_backoff: "30s".to_string(),
@@ -4470,8 +4464,9 @@ mod tests {
                     client: named("sqs_main"),
                     queue: crate::SqsQueueName::parse("orders_queue").expect("valid queue"),
                     fifo_group: None,
+                    send: crate::SqsSend::Single,
                 })),
-                "sqs_main QUEUE 'orders_queue'",
+                "sqs_main QUEUE 'orders_queue' SEND SINGLE",
             ),
             (
                 EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
@@ -4570,7 +4565,7 @@ mod tests {
 
         let sqs = |fifo_group| {
             EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-                mode: crate::SqsQueuePublishingMode::Single {
+                mode: crate::SqsQueuePublishingMode::Ack {
                     retry_policy: crate::RetryPolicy {
                         backoff: "250ms".to_string(),
                         max_backoff: "30s".to_string(),
@@ -4579,6 +4574,7 @@ mod tests {
                 client: named("sqs_main"),
                 queue: crate::SqsQueueName::parse("orders_queue").expect("valid queue"),
                 fifo_group,
+                send: crate::SqsSend::Batch,
             }))
         };
         assert_eq!(
@@ -4586,7 +4582,7 @@ mod tests {
                 .entity_presentation()
                 .assured("the branch group has no fallible expression")
                 .reference_to_plexus(),
-            "sqs_main QUEUE 'orders_queue' FIFO GROUP FROM BRANCH"
+            "sqs_main QUEUE 'orders_queue' FIFO GROUP FROM BRANCH SEND BATCH"
         );
         assert_eq!(
             sqs(Some(crate::SqsFifoGroup::Expression(scoped_field(
@@ -4596,7 +4592,7 @@ mod tests {
             .entity_presentation()
             .assured("the scoped field has a canonical representation")
             .reference_to_plexus(),
-            "sqs_main QUEUE 'orders_queue' FIFO GROUP input.tenant"
+            "sqs_main QUEUE 'orders_queue' FIFO GROUP input.tenant SEND BATCH"
         );
 
         let otel = EmitterEntity::from(crate::OtelMetricsEmitter {
