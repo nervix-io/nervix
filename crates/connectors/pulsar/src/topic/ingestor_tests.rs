@@ -492,7 +492,14 @@ async fn open_with(
     broker: &LoopbackBroker,
     ack_receipts: PulsarAckReceipts,
 ) -> PulsarTopicIngestor {
-    let plan = plan(broker, ack_receipts, PulsarSubscriptionOwnership::Ingestor).await;
+    let plan = plan(
+        broker,
+        ack_receipts,
+        PulsarSubscriptionOwnership::Ingestor {
+            start_at: nervix_models::PulsarStartPosition::Earliest,
+        },
+    )
+    .await;
     PulsarTopicIngestor::open(&plan, 0)
         .await
         .expect("the loopback broker serves the subscription")
@@ -544,7 +551,9 @@ fn removal_settings<'a>(
     PulsarTopicIngestorSettings {
         config,
         topic,
-        subscription: subscription(PulsarSubscriptionOwnership::Ingestor),
+        subscription: subscription(PulsarSubscriptionOwnership::Ingestor {
+            start_at: nervix_models::PulsarStartPosition::Earliest,
+        }),
         consumer_name: "orders".to_string(),
         ack_receipts: PulsarAckReceipts::Awaited,
     }
@@ -936,7 +945,9 @@ async fn an_instance_joins_its_owned_subscription_at_open_under_its_indexed_cons
     let plan = plan(
         &broker,
         PulsarAckReceipts::Awaited,
-        PulsarSubscriptionOwnership::Ingestor,
+        PulsarSubscriptionOwnership::Ingestor {
+            start_at: nervix_models::PulsarStartPosition::Earliest,
+        },
     )
     .await;
 
