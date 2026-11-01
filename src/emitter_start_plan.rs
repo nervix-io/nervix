@@ -1572,14 +1572,6 @@ fn decide_mqtt_publishing_mode(
     }
 }
 
-/// The request shape `mode` declares for an SQS `emitter`.
-fn decide_sqs_publishing_mode(mode: &nervix_models::SqsQueuePublishingMode) -> SqsPublishingMode {
-    match mode {
-        nervix_models::SqsQueuePublishingMode::Single { .. } => SqsPublishingMode::Single,
-        nervix_models::SqsQueuePublishingMode::Batch { .. } => SqsPublishingMode::Batch,
-    }
-}
-
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
