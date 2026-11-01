@@ -14,7 +14,7 @@
 use std::collections::BTreeSet;
 
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -153,11 +153,9 @@ impl WebsocketsUpgradeHeaders {
             tokens.push(protocol);
         }
         let canonical = tokens.join(",");
-        HttpHeaderValue::parse(&canonical).change_context_lazy(|| {
-            WebsocketsUpgradeHeadersError::InvalidValue {
-                name: SUBPROTOCOL_FIELD.to_string(),
-            }
-        })
+        let value = HttpHeaderValue::parse(&canonical)
+            .assured("nonempty tokens joined by commas are visible ASCII without edge whitespace");
+        Ok(value)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&HttpHeaderName, &HttpHeaderValue)> {
