@@ -1324,8 +1324,12 @@ attach to. It declares no header model or metadata field and supports only `SUSP
 
 Each source entity declares its typed metadata fields beside its other capabilities in the
 vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the response status and
-the poll's scheduled instant, `WEBSOCKETS CONNECTION` the frame kind, `KAFKA TOPIC` the topic,
-partition and offset, `SYSLOG LISTENER` the peer address, and every other entity none. Registry
+the poll's scheduled instant, `HTTP ENDPOINT` the request's method, path, query, peer address and
+routed host, `WEBSOCKETS CONNECTION` the frame kind, `WEBSOCKETS ENDPOINT` the frame kind, the
+connection's peer address and its path, `KAFKA TOPIC` the topic, partition and offset,
+`SYSLOG LISTENER` the peer address, and every other entity none. The endpoint entities are served by
+the host itself rather than a connector crate, so the server's endpoint intake hands their values
+over the same way a connector's message does. Registry
 validation reads that declaration for the fields an ingestor's route programs and its
 `TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
 connector's message hands the host the value of every declared field in declared order, one typed
@@ -1362,8 +1366,11 @@ An HTTP poll retains every response-header value whose bytes are valid UTF-8, in
 characters, as the same UTF-8 bytes and in each field's repeat order. It drops an invalid UTF-8
 value alone while retaining the response body and other headers, and hands the drop count to the
 host for
-`nervix_ingestor_header_values_dropped_total`. An HTTP request emitter sends every admitted
-`write_header` value as its exact UTF-8 bytes.
+`nervix_ingestor_header_values_dropped_total`. An `HTTP ENDPOINT` request and a
+`WEBSOCKETS ENDPOINT` upgrade hand over their request-header values the same way: a value whose
+bytes are valid UTF-8 is read as those bytes, and the server's endpoint intake drops an invalid
+value alone and counts it once for each ingestor the request or upgrade was routed to. An HTTP
+request emitter sends every admitted `write_header` value as its exact UTF-8 bytes.
 `read_header` and `read_headers` are validated against that declaration, and header values do not
 travel through relays unless an ingestor writes them into schema-backed fields. See
 [Header Context](./ingestors.md#header-context) for the exact expression behavior. The session

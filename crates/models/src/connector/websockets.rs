@@ -268,12 +268,21 @@ pub struct WebsocketsEndpointIngestor {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// The text or binary kind of one data frame, the address of the peer that opened its connection and
+/// the path the connection's upgrade request named.
+const WEBSOCKETS_ENDPOINT_METADATA: IngestorMetadataDeclaration =
+    IngestorMetadataDeclaration::new(&[
+        IngestorMetadataField::new("frame_type", IngestorMetadataType::String),
+        IngestorMetadataField::new("remote_addr", IngestorMetadataType::String),
+        IngestorMetadataField::new("path", IngestorMetadataType::String),
+    ]);
+
 impl IngestorDeclaration for WebsocketsEndpointIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // The opening HTTP upgrade request's fields, as the server's header map keeps them: names in
         // lowercase, every value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-        metadata: IngestorMetadataDeclaration::NONE,
+        metadata: WEBSOCKETS_ENDPOINT_METADATA,
         executes_on_every_cluster_node: true,
         reference: IngestorReferenceKind::Endpoint(EndpointType::Websockets),
         position_class: PositionClass::None,
