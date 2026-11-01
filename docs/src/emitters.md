@@ -57,7 +57,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] <CONNECTOR> <ENTITY> EMITTER <name>
 ```
 
 The declared pairs are `CLIENT CONSUMER`, `HTTP REQUEST`, `KAFKA TOPIC`, `PULSAR TOPIC`,
-`RABBITMQ QUEUE`, `REDIS PUBSUB`, `MQTT TOPIC`, `NATS SUBJECT`, `ZEROMQ PUSH`, `SQS QUEUE`,
+`RABBITMQ QUEUE`, `RABBITMQ EXCHANGE`, `REDIS PUBSUB`, `MQTT TOPIC`, `NATS SUBJECT`, `ZEROMQ PUSH`, `SQS QUEUE`,
 `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`,
 `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION` and `ICEBERG TABLE`.
 A client consumer uses `TO SCHEMA <schema> MODE ACK ...`, with native output in place of a codec.
@@ -68,7 +68,8 @@ Nervix resolves S3, GCS or Azure Blob from that client's kind. Its `NAMESPACE`, 
 Database conflict clauses follow `VALUES`.
 
 External locators are string literals and retain their exact spelling, including case. Each
-entity validates its own name: Kafka and Pulsar topics, RabbitMQ and SQS queues, Redis channels,
+entity validates its own name: Kafka and Pulsar topics, RabbitMQ and SQS queues, RabbitMQ
+exchanges, Redis channels,
 MQTT publication topics and NATS publication subjects. Publication names contain no MQTT or NATS
 subscription wildcards. Table names contain 1–128 ASCII letters, digits, `_`, `-`,
 `~` or `.`, with uppercase letters preserved. MongoDB collection names follow their own
@@ -1050,6 +1051,7 @@ Each emitter that writes transport headers declares a
 | `KAFKA TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `PULSAR TOPIC` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| `RABBITMQ EXCHANGE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `SQS QUEUE` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 
@@ -1110,8 +1112,9 @@ the entity's closed property set, each at most once and in any order. A clause o
 does not declare is refused where it is written, with the entity and the clause or key named, and
 the registry refuses it again in a Model that reaches it another way. The
 [capability matrix](connector-capabilities.md) lists the clauses and properties each entity
-declares, and each entity's section below says what its transport does with them. No entity
-declares one yet, so every emitter refuses every clause today.
+declares, and each entity's section below says what its transport does with them. Today only the
+two [RabbitMQ](#rabbitmq) entities declare a clause, `MANDATORY`, and every other emitter refuses
+every clause.
 
 | Clause | Written with | Value every record carries |
 | --- | --- | --- |
@@ -1189,6 +1192,13 @@ Transport-specific expectations:
 - `SYSLOG`: select `'protocol' = 'tls'`. Optional `tls_ca_file` adds a server trust root;
   optional `tls_cert_file` and `tls_key_file` configure client authentication and must appear
   together.
+- `S3`, `GCS`, `AZURE_BLOB` and `ICEBERG_REST`: the object-store and catalog clients of an Iceberg
+  emitter use TLS for every HTTPS request: the default AWS and Google endpoints, an `https://`
+  `endpoint`, `service_path` or `uri`, and a `wasbs://` or `abfss://` location. Each verifies the
+  server against the bundled WebPKI roots, the platform's native roots and its own `tls_ca_file`,
+  and `tls_cert_file` with `tls_key_file` presents a client certificate. The catalog client's files
+  apply to catalog requests and the object-store client's to data files and credential calls; see
+  [Iceberg](#iceberg).
 
 Example Kafka TLS emitter client:
 
@@ -1407,6 +1417,7 @@ CREATE RABBITMQ QUEUE EMITTER <name>
   TO <client> QUEUE 'orders'
     MODE <mode>
     ENCODE USING <codec>
+    [MANDATORY]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1427,9 +1438,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
+| Envelope | MANDATORY |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
-| Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>unroutable messages the broker returns under NO ACK: unbounded |
+| Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |
 | Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the queue check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |
 | Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |
@@ -1437,13 +1448,90 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-emit).
 <!-- connector-matrix:emit-rabbitmq-queue:end -->
 
-`QUEUE` names an existing queue through the broker's default exchange. The same case-preserving
-queue-name type is used for ingestion and emission: 1 to 255 UTF-8 bytes, including every byte of
-a multibyte character. `SHOW CREATE EMITTER` retains the external name and the complete publishing
-and optional batching policy.
+<!-- connector-matrix:emit-rabbitmq-exchange:start -->
+```plexus,ignore
+CREATE RABBITMQ EXCHANGE EMITTER <name>
+  FROM <relay>
+  TO <client> EXCHANGE 'events'
+  (ROUTING KEY input.category)
+    MODE <mode>
+    ENCODE USING <codec>
+    [MANDATORY]
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
 
-`ACK` enables publisher confirms and waits for the confirm of each message. A broker nack is an
-infrastructure failure and is retried with backpressure. In `NO ACK` the broker confirms nothing,
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | RABBITMQ client |
+| Locator and validation rule | EXCHANGE 'events' (rabbitmq_exchange) |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `ROUTING KEY input.category` (expression); required |
+| Headers | `write_header`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| Body | ENCODE USING &lt;codec&gt; |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | MANDATORY |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |
+| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the exchange check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |
+| Driver limits | A frame above the negotiated frame_max ends the connection.<br>A routing key longer than the 255 bytes an AMQP short string carries is not sent; its record is rejected. |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |
+
+See the [RABBITMQ EXCHANGE capability and mirror reference](connector-capabilities.md#rabbitmq-exchange-emit).
+<!-- connector-matrix:emit-rabbitmq-exchange:end -->
+
+`RABBITMQ QUEUE` is the default-exchange shorthand: `QUEUE` names an existing queue, and the
+emitter publishes each message to the broker's default exchange with the queue's name as its
+routing key, which routes it to that queue. The same case-preserving queue-name type is used for
+ingestion and emission: 1 to 255 UTF-8 bytes, including every byte of a multibyte character.
+`SHOW CREATE EMITTER` retains the external name and the complete publishing and optional batching
+policy.
+
+`RABBITMQ EXCHANGE` publishes to an exchange the operator declared. `EXCHANGE` names it, 1 to 255
+UTF-8 bytes kept as written, and `ROUTING KEY` computes the key the exchange routes each record by.
+The expression reads what an [envelope expression](#envelope-clauses) reads and must compute an
+exact, non-null, non-sensitive `STRING`, as `CREATE` and `ALTER` check with the message
+`ROUTING KEY requires an exact, non-null, non-sensitive STRING value`; `leak_sensitive` admits a
+sensitive key. Nervix evaluates it once for every batch it admits, together with the envelope,
+after the route kept and finalized its rows. A record whose routing key fails or produces no value
+is not sent: it follows `ON MESSAGE ERROR` as an `evaluation` error of the `publish` operation whose
+message begins `ROUTING KEY`, such as `ROUTING KEY expression produced NULL`. A key longer than the
+255 bytes an AMQP short string carries is not sent either: its record is rejected as an `external`
+error of the `publish` operation that names the key's length. The exchange's type decides where the
+key leads: a direct exchange routes to the queues bound under exactly that key, a topic exchange to
+the queues whose binding pattern matches it, and a fanout exchange to every bound queue, whatever
+the key. Records whose keys differ never share a [batch payload](#batch-payloads), so a batch
+message carries the one key its members share. `SHOW CREATE EMITTER` retains the exchange's name
+and the routing key's expression.
+
+Nervix never declares an exchange or a binding. When an exchange emitter opens, it checks that its
+exchange exists with a passive declaration; while it is missing, the emitter stays unavailable with
+`RabbitMQ exchange '<name>' does not exist` as its transient error, confirms nothing, so its input
+stays unacknowledged, and opens on its `RETRY POLICY` backoff once the exchange is declared.
+
+A message no binding routes, such as one whose key no binding of a direct exchange names or one for
+a queue deleted under a `RABBITMQ QUEUE` emitter, is the broker's to drop unless the emitter writes
+`MANDATORY`. Without it the broker drops the message and answers it as taken, so the emitter reports
+its record delivered and the record is lost. With `MANDATORY`, on either entity, the broker returns
+the message, and the emitter rejects its record through `ON MESSAGE ERROR` as an `external` error of
+the `publish` operation naming the broker's reply, such as `rabbitmq returned the message unrouted
+with reply code 312: NO_ROUTE`, in every mode, and keeps publishing the write's other records.
+Under `ACK` the broker returns the message ahead of its confirmation. Under `NO ACK` it returns the
+message ahead of its answer to the round trip that ends the write, so the emitter reads every return
+of the write once that answer arrives, and holds none of them beyond the write that published it.
+A return names the message's exchange, routing key, headers and body but not which record it was,
+so the emitter attributes it to the first message of the write, in written order, that carries all
+four; of messages identical in all four, the earlier one is rejected.
+
+Both entities publish the same way. `ACK` enables publisher confirms and waits for the confirm of
+each message. A broker nack is an infrastructure failure and is retried with backpressure. In `NO ACK` the broker confirms nothing,
 so once a write's messages are on the channel, the emitter asks the channel for one round trip,
 which the broker answers only after it has taken every message written before it, and that answer
 acknowledges them. A `NO ACK` write therefore waits for one round trip to the broker however many
@@ -1464,7 +1552,7 @@ when it opens and whenever it reopens after a failed publish, so a changed DNS a
 on the next connection, and tries the addresses it receives in order. A literal IPv4 address, or
 an IPv6 address in brackets, is connected to as written. Resolution, the TCP connection, for
 `amqps` the TLS handshake, the AMQP handshake, opening the channel, selecting publisher confirms
-under `ACK` and checking the queue share the client's `connect_timeout_ms`, 30 seconds when it is
+under `ACK` and checking the queue or the exchange share the client's `connect_timeout_ms`, 30 seconds when it is
 left out; the broker certificate must name the host `addr` names. A connection that fails or runs
 out of that deadline, including a name that does not resolve, leaves the emitter unavailable with
 the failure as its transient error; it confirms nothing, so its input stays unacknowledged, and it
@@ -3105,7 +3193,7 @@ CREATE ICEBERG TABLE EMITTER iceberg_notifications
   ON GENERAL ERROR LOG;
 ```
 
-Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The referenced storage client selects the S3, GCS or Azure Blob implementation and supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `ICEBERG_REST CLIENT` that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, catalog namespace, mapped output columns, table location, catalog client reference, and flush policy.
+Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The referenced storage client selects the S3, GCS or Azure Blob implementation and supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `ICEBERG_REST CLIENT` that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, catalog namespace, mapped output columns, table location, catalog client reference, and flush policy. It appends Parquet data files to an unpartitioned table and changes nothing else about it; [Iceberg data files](#iceberg-data-files) describes the files it writes and what it leaves to other tools.
 
 `NAMESPACE '<namespace>'` is required immediately after the table name. Its dot-separated levels
 preserve case: `NAMESPACE 'Analytics.Events'` selects the two catalog levels `Analytics` and
@@ -3115,8 +3203,15 @@ the declared namespace.
 
 `LOCATION` must be an absolute object-store URL whose scheme matches the storage client: `s3`
 for `S3`, `gs` for `GCS`, and `wasb`, `wasbs`, `abfs` or `abfss` for `AZURE_BLOB`. Nervix refuses
-a mismatched scheme at `CREATE` or `ALTER`, naming `LOCATION`, before opening either client.
-`COMMIT EACH ... MAX SIZE` uses the same positive whole-byte size syntax as `BATCH MAX SIZE`.
+a mismatched scheme or a URL without a bucket or container authority at `CREATE` or `ALTER`,
+naming `LOCATION`, before opening either client. An Azure location also names its container
+before `@` and its account's storage service in its host:
+`wasb://<container>@<account>.blob.<suffix>/...` and `wasbs://...` name the Blob service, while
+`abfs://<container>@<account>.dfs.<suffix>/...` and `abfss://...` name the Data Lake service. The
+emitter checks the container and the service when it opens; a location that lacks either fails the
+open as a configuration failure, which `DESCRIBE EMITTER` shows as the emitter's transient error
+while the emitter retries the open on its declared retry policy. `COMMIT EACH ... MAX SIZE` uses the
+same positive whole-byte size syntax as `BATCH MAX SIZE`.
 
 The four Iceberg client schemas distinguish Nervix-owned options from driver properties.
 Nervix validates declared addresses, booleans and deadlines at `CREATE CLIENT`; for example,
@@ -3129,10 +3224,11 @@ S3 delegates `s3.*` and `client.*`, GCS delegates `gcs.*`, and Azure delegates `
 The REST catalog delegates `header.*` and those storage-property namespaces. Delegated names
 and values keep the driver's interpretation; a declaration is not a connectivity or credential
 check, and a property the offline check cannot inspect is checked when its driver opens.
-The offline storage reader refuses an unsupported encryption selection and Azure connection
-strings without opening an operator. The Azure table's `LOCATION` selects its endpoint; its client
-supplies account and authentication options. GCS inline credentials use the driver's
-Base64-encoded JSON form in `credentials_json`.
+`CREATE CLIENT` also runs the object store's own property reader without opening a connection, so
+it refuses an `s3.sse.type` other than `none`, `s3`, `kms` or `custom`, and any
+`adls.connection-string`, whether the storage client or the catalog client sets it. The Azure
+table's `LOCATION` selects its endpoint; its client supplies account and authentication options.
+GCS inline credentials use the driver's Base64-encoded JSON form in `credentials_json`.
 
 Both Iceberg clients verify an HTTPS server's certificate against the bundled WebPKI roots, the
 platform's native roots and the client's own `tls_ca_file`. A client that also names `tls_cert_file`
@@ -3141,9 +3237,10 @@ uses only its own files: the `ICEBERG_REST` client's for catalog requests, and t
 `AZURE_BLOB` client's for data-file reads and writes and for the HTTP calls of its credential
 provider. Mount the resource that holds the files on each client that names them, as
 [Resources](./resources.md) describes. Nervix reads the files when the emitter opens. A file it
-cannot read or parse stops the emitter as a configuration failure that names whether the catalog
-or the object-store client's TLS failed. A client whose address is plain HTTP never uses its TLS
-files, though Nervix still reads them when the emitter opens.
+cannot read or parse fails the open as a configuration failure that names whether the catalog or
+the object-store client's TLS failed; `DESCRIBE EMITTER` shows it as the emitter's transient error,
+and the emitter retries the open on its declared retry policy. A client whose address is plain
+HTTP never uses its TLS files, though Nervix still reads them when the emitter opens.
 
 The table's file I/O receives the storage client's properties and the catalog client's
 storage-namespace properties. Each Nervix-owned storage option supplies one Iceberg property:
@@ -3153,12 +3250,18 @@ TLS-file options configure the clients' own HTTP transport and supply no propert
 must not set the same property. Nervix refuses `CREATE` or `ALTER` of an emitter whose catalog client
 sets a property that its storage client supplies, and the refusal names the property, the
 storage option that supplies it and both clients. Within a storage client, the last entry for a
-property is its value.
+property is its value. The REST catalog can supply file I/O properties as well: the configuration
+it answers with when the emitter first reaches it, and the configuration it returns with the table,
+such as storage credentials it vends, apply wherever neither client sets the same property. For
+the catalog's own requests, its configuration answer follows the Iceberg REST protocol: its
+`defaults` fill catalog properties the client leaves unset, and its `overrides`, `uri` included,
+replace the client's values.
 
 The catalog and object-store HTTP clients resolve endpoint names through the node's configured
-DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
-resolver for object operations and credential HTTP calls. DNS failures enter the existing emitter
-initialization or commit retry path; they do not advance the commit or ACK boundary.
+DNS resolver. Name resolution changes no URL: catalog requests keep their host names and
+authentication, while OpenDAL uses the resolver for object operations and credential HTTP calls.
+DNS failures enter the existing emitter initialization or commit retry path; they do not advance
+the commit or ACK boundary.
 
 GCS uses the same emitter shape with a `GCS CLIENT` and `gs://` locations:
 
@@ -3188,7 +3291,9 @@ CREATE ICEBERG TABLE EMITTER iceberg_notifications
   ON GENERAL ERROR LOG;
 ```
 
-Azure Blob uses `AZURE_BLOB CLIENT` and `wasbs://` locations. `wasb://` is also accepted for plain-HTTP local endpoints:
+Azure uses an `AZURE_BLOB CLIENT` with a `wasbs://` or `abfss://` location, or `wasb://` or
+`abfs://` for plain HTTP; [Iceberg object storage](#iceberg-object-storage) describes the endpoint
+Nervix reaches for each:
 
 ```plexus
 CREATE AZURE_BLOB CLIENT azure_main
@@ -3256,6 +3361,8 @@ name, so `VALUES` may list them in any order:
   declared `OPTIONAL`, `nullif(...)` and `TRY_CAST(...)` can produce one, so they are refused for a
   required column even when no row carries a null; `coalesce(...)` with an argument that is never
   null maps a nullable value into a required column.
+- A table column whose nested values are required, such as a list whose elements are required, must
+  be mapped from an expression whose nested values cannot be null either.
 
 A table that breaks one of these rules fails the open before any row is staged. `DESCRIBE EMITTER`
 shows the failure as the emitter's transient error, naming the column, and the emitter retries the
@@ -3267,6 +3374,7 @@ open on its declared retry policy:
 | A mapped column of another type | `mapped column 'user_id' has Iceberg type string, but the table requires long` |
 | A required column `VALUES` leaves out | `table column 'user_id' is required, but VALUES does not map it` |
 | A required column mapped from an expression that can produce a null | `table column 'user_id' is required, but the VALUES expression mapped into it can produce a null` |
+| A column with required nested values mapped from an expression whose nested values can be null | `table column 'tags' requires every value nested in it, but the VALUES expression mapped into it can produce a null one` |
 
 The comparison uses the types the emitter writes. An Iceberg `timestamptz` column stores
 microseconds, so Nervix narrows every UTC `DATETIME` from nanoseconds to the microsecond that
@@ -3278,12 +3386,13 @@ column and `U32` writes a `long` column, while a `U64` has no Iceberg type and i
 An `ARRAY` value writes an Iceberg list of its elements, and `BYTES` writes a `binary` column.
 
 Every commit matches the mapped columns against the table's schema as that commit finds it, by the
-same rules, and writes each mapped column into the table column of its name. A column added to the
-table after open is written as null. A change after open that leaves a mapped column without a
-column it can be written into, such as dropping the column, renaming it or changing its type, fails
-the commit with the transient error that names the column, as it would fail an open. That commit
-enters the retry path that [Iceberg retries](#iceberg-retries) describes and keeps its staged rows
-and their acknowledgements until the table can take them again or the emitter is altered.
+same rules, and writes each mapped column into the table column of its name. An optional column
+added to the table after open is written as null. A change after open that breaks one of the rules,
+such as dropping, renaming or retyping a mapped column or adding a required column `VALUES` does not
+map, fails the commit with the transient error that names the column, as it would fail an open.
+That commit enters the retry path that [Iceberg retries](#iceberg-retries) describes and keeps its
+staged rows and their acknowledgements until the table can take them again or the emitter is
+altered.
 
 #### Iceberg staging and commits
 
@@ -3333,6 +3442,85 @@ Such a file is read alone once the whole class is free, charged with the whole c
 byte of it the class can account for, and it leaves no room for other bulk work beside the read.
 Until then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole bulk memory class of
 <capacity> bytes for a staged file of <bytes> bytes`, and the emitter retries the commit as before.
+
+#### Iceberg data files
+
+Every commit writes Parquet data files, whatever the table's `write.format.default` property says,
+with the Parquet library's default writer properties: uncompressed pages, dictionary encoding,
+page-level statistics and row groups of at most 1,048,576 rows. The table's `write.parquet.*`
+properties do not apply. Without `BATCH`, a commit writes each group of staged files it reads back
+together into data files of their own, rolling to a new file once the current one reaches 512 MiB
+whatever the table's `write.target-file-size-bytes` property says. With `BATCH`, each staged
+segment becomes one data file, as [Iceberg staging and commits](#iceberg-staging-and-commits)
+describes.
+
+Data files go to the table's `write.data.path` property, to its `write.folder-storage.path`
+property when that is unset, and to `<table location>/data` when neither is set. Each is named
+`<emitter>-<table>-<opened>-<random>-<writer>-<count>.parquet`: the emitter's and the table's
+names, the Unix time in nanoseconds at which the emitter opened, a random 64-bit number drawn at
+that open, the sequence number of the data-file writer that produced the file, which grows from 1
+with every writer the emitter starts, and the five-digit count of the files that writer rolled,
+from `00000`. Each opening of the emitter therefore names its files apart from every other's. A
+commit appends its data files in one fast-append snapshot whose summary carries
+`nervix.emitter.append-id`, the identity a retry looks for, as
+[Iceberg retries](#iceberg-retries) describes.
+
+The emitter writes nothing else:
+
+- **Partitions.** Data files carry no partition values and name the table's first partition spec,
+  so the emitter appends only to a table whose current spec is that first spec, without a field.
+  A table whose current spec has a field opens and stages rows, but every commit fails with
+  `failed to commit Iceberg staged batches: DataInvalid => Partition value is not compatible with
+  partition type` and is retried on the declared retry policy, keeping its staged rows and their
+  acknowledgements. A table whose spec was later changed back to an unpartitioned one fails every
+  commit too.
+- **Schema changes.** The emitter never changes the table's schema; provision every column it
+  maps, as [Iceberg table schema](#iceberg-table-schema) describes.
+- **Deletes and upserts.** A commit only appends data files. The emitter writes no equality or
+  position deletes, replaces no rows and overwrites no files.
+- **Other catalogs.** The emitter commits through an Iceberg REST catalog, its `ICEBERG_REST`
+  client, and through no other catalog implementation.
+
+A commit writes its data files to object storage before it appends them, and a retry reuses the
+files an earlier attempt finished writing for a whole group of staged files. Files no snapshot comes
+to reference stay in object storage until an orphan-file cleanup of the table removes them: those
+of a group whose writing failed partway, which the retry writes again, and those of a commit that
+never succeeds because the emitter ends before a retry does.
+
+#### Iceberg object storage
+
+The storage client's object store reads and writes the table's files in the bucket or container
+that `LOCATION` names. Nervix builds it when a commit first writes a data file and keeps it for as
+long as the emitter stays open, so a setting only the object store judges, such as a missing S3
+region or an Azure account the location does not name, fails each commit rather than the open.
+
+- **S3.** Requests address the bucket as a virtual host, a host name under the `endpoint`, unless
+  `path_style_access` is `true`, which puts the bucket in the request path instead; an
+  S3-compatible store that serves buckets only as paths needs it, as the example above shows, and
+  so does a bucket whose name contains a dot, which no virtual host can name. Without `endpoint`,
+  requests go to the AWS endpoint of the region. `client_region` takes precedence over `region`
+  when both are set; without either, the node's `AWS_REGION` or `AWS_DEFAULT_REGION` environment
+  variable supplies the region, and a commit fails without one. Without `access_key_id` and
+  `secret_access_key`, the driver's default credential chain applies: `disable_config_load` stops
+  it reading the environment and AWS configuration files, `disable_ec2_metadata` stops it asking
+  the EC2 instance metadata service, and `allow_anonymous` set to `true` sends unsigned requests.
+  Of the delegated properties, the object store reads `client.assume-role.arn`,
+  `client.assume-role.external-id` and `client.assume-role.session-name`, which assume that role
+  for its requests, and `s3.sse.type`: `s3` selects SSE-S3, `kms` selects SSE-KMS with
+  `s3.sse.key` as its key, and `custom` selects SSE-C with `s3.sse.key` and `s3.sse.md5`.
+- **GCS.** `credentials_json` or `token` authenticates the requests; without either, the driver's
+  default credentials apply, which `disable_config_load` and `disable_vm_metadata` narrow.
+  `no_auth` set to `true` sends unsigned requests and loads no credentials, and `allow_anonymous`
+  set to `true` sends unsigned requests. `service_path` replaces the default endpoint.
+- **Azure.** Every Azure location is reached through its account's Data Lake endpoint, with its
+  container as the file system: `https://<account>.dfs.<suffix>` for `wasbs` and `abfss`, and
+  `http://<account>.dfs.<suffix>` for `wasb` and `abfs`. When the client sets `account_name`, the
+  location must name that account. `account_key`, `sas_token`, or `tenant_id` with `client_id` and
+  `client_secret` authenticate the requests, and `authority_host` replaces the default sign-in
+  authority.
+
+Any other delegated property reaches the REST catalog's property map as written, and the object
+store ignores it.
 
 #### Iceberg retries
 
@@ -3446,7 +3634,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | Kafka | `ACK` retry after an ambiguous delivery report or timeout; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after local producer-queue admission; broker durability follows Kafka client and topic configuration | None; Kafka producer idempotence is pass-through client configuration |
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
 | NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a timed-out write or a connection change, including records the server may already have received; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` confirms a local drain and flush on the write's connection, without durable stream acknowledgement; a connection failure after that completion can lose what the server has not read | None |
-| RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after the broker's channel has taken it; queue durability and message persistence remain broker policy | None |
+| RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; queue durability and message persistence remain broker policy | None |
 | SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
 | Redis Pub/Sub | Retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |

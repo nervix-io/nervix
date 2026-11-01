@@ -26,8 +26,8 @@ use futures_util::{SinkExt, future::join_all};
 use lapin::{
     BasicProperties, Connection, ConnectionProperties,
     options::{
-        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions,
-        QueueDeleteOptions,
+        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions,
+        QueueBindOptions, QueueDeclareOptions, QueueDeleteOptions,
     },
     types::FieldTable,
 };
@@ -5337,6 +5337,65 @@ pub(crate) async fn ensure_rabbitmq_queue(
         .await
         .map_err(io::Error::other)?;
     declare_rabbitmq_queue(&channel, queue).await
+}
+
+/// Declares `exchange` as an exchange of `kind`, as an operator provisions it before an emitter
+/// publishes to it.
+pub(crate) async fn ensure_rabbitmq_exchange(
+    dependencies: &DependencyEndpoints,
+    exchange: &str,
+    kind: lapin::ExchangeKind,
+) -> io::Result<()> {
+    let connection = Connection::connect(
+        dependencies.get(RABBITMQ_ADDR)?,
+        ConnectionProperties::default(),
+    )
+    .await
+    .map_err(io::Error::other)?;
+    let channel = connection
+        .create_channel()
+        .await
+        .map_err(io::Error::other)?;
+    channel
+        .exchange_declare(
+            exchange.into(),
+            kind,
+            ExchangeDeclareOptions::default(),
+            FieldTable::default(),
+        )
+        .await
+        .map_err(io::Error::other)
+}
+
+/// Declares `queue` and binds it to `exchange` under `routing_key`, so the exchange routes to it
+/// every message its binding matches.
+pub(crate) async fn bind_rabbitmq_queue(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+    exchange: &str,
+    routing_key: &str,
+) -> io::Result<()> {
+    let connection = Connection::connect(
+        dependencies.get(RABBITMQ_ADDR)?,
+        ConnectionProperties::default(),
+    )
+    .await
+    .map_err(io::Error::other)?;
+    let channel = connection
+        .create_channel()
+        .await
+        .map_err(io::Error::other)?;
+    declare_rabbitmq_queue(&channel, queue).await?;
+    channel
+        .queue_bind(
+            queue.into(),
+            exchange.into(),
+            routing_key.into(),
+            QueueBindOptions::default(),
+            FieldTable::default(),
+        )
+        .await
+        .map_err(io::Error::other)
 }
 
 /// Deletes `queue` from the scenario's broker with whatever it holds, as an operator would, so a

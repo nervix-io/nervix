@@ -49,9 +49,12 @@ metadata = "The current stream declaration exposes message headers but no typed 
 mirror = "A durable pull consumer an operator provisioned acknowledges or negatively acknowledges each delivery on its own subject. The declared emitter set has no NATS STREAM publisher; a NATS SUBJECT emitter in MODE JETSTREAM publishes into a stream through its subject."
 
 [entity."RABBITMQ QUEUE"]
-envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
 metadata = "The current queue declaration exposes transport headers but no typed AMQP delivery metadata namespace."
 mirror = "A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."RABBITMQ EXCHANGE"]
+mirror = "No ingestor consumes an exchange: the exchange routes each message by the key its record computes to the queues bound to it, and a RABBITMQ QUEUE ingestor consumes one of those queues. Publishing waits for a channel answer or publisher confirmation, as it does for a queue."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."REDIS PUBSUB"]

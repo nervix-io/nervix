@@ -174,6 +174,7 @@ tags = [
   "@redis_subscription_backpressure",
   "@redis_idle_subscription",
   "@rabbitmq_consumer_modes",
+  "@rabbitmq_exchange_lifecycle",
   "@node_prerequisite_refusal",
   "@backup_holder_download",
   "@snapshot_receive_admission",
@@ -3822,6 +3823,26 @@ id = "stress.command-transaction-retention-recovery"
 invariant = "Recovery of an ordinary command or transaction batch beyond tombstone age returns its recorded outcome without applying the effect again."
 invocation = "stress-transaction-retention"
 scenario = "Leadership recovery uses a finished transaction beyond its age retention"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "RabbitMQ exchange emitter composition, the passive exchange check that fails while its exchange is missing, the reopen on its retry policy once the exchange is declared, and publishing through the reopened channel on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_exchange_emission.feature"
+id = "scenario.rabbitmq-exchange-provisioned"
+invariant = "An exchange emitter whose exchange is missing stays unopened with that exchange as its transient error, then opens and publishes once the exchange is declared, without losing a record admitted meanwhile."
+invocation = "scenarios"
+scenario = "A RabbitMQ exchange emitter opens once its missing exchange is declared"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: RabbitMQ exchange emitter composition, the passive exchange check that fails while its exchange is missing, the reopen on its retry policy once the exchange is declared, and publishing through the reopened channel on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_exchange_emission.feature"
+id = "stress.rabbitmq-exchange-provisioned"
+invariant = "An exchange emitter whose exchange is missing stays unopened with that exchange as its transient error, then opens and publishes once the exchange is declared, without losing a record admitted meanwhile."
+invocation = "stress-scenarios"
+scenario = "A RabbitMQ exchange emitter opens once its missing exchange is declared"
 selections = ["deloxide-stress"]
 
 [[workload]]
