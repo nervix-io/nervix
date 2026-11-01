@@ -2924,6 +2924,40 @@ impl Cluster {
         publish_http_with_headers(&handle.spec, host, path, payload, headers).await
     }
 
+    /// Posts `payload` to `node_id` with one header whose value is exactly `value`, including bytes
+    /// a text header value cannot hold, such as a sequence that is not UTF-8.
+    pub(crate) async fn publish_http_with_header_bytes(
+        &self,
+        node_id: &str,
+        host: &str,
+        path: &str,
+        payload: &str,
+        name: &str,
+        value: &[u8],
+    ) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let value = reqwest::header::HeaderValue::from_bytes(value).map_err(io::Error::other)?;
+        let response = reqwest::Client::new()
+            .post(handle.spec.http_uri(path))
+            .header("Host", host)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(name, value)
+            .body(payload.to_owned())
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        if response.status() != reqwest::StatusCode::ACCEPTED {
+            return Err(io::Error::other(format!(
+                "unexpected http status {}",
+                response.status()
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn publish_http_bytes(
         &self,
         node_id: &str,

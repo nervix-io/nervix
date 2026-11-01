@@ -288,12 +288,22 @@ pub struct HttpEndpointIngestor {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// The method, path and query an admitted HTTP request named, the address of the peer that sent it
+/// and the host its endpoint routed it by.
+const HTTP_ENDPOINT_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("method", IngestorMetadataType::String),
+    IngestorMetadataField::new("path", IngestorMetadataType::String),
+    IngestorMetadataField::new("query", IngestorMetadataType::String),
+    IngestorMetadataField::new("remote_addr", IngestorMetadataType::String),
+    IngestorMetadataField::new("host", IngestorMetadataType::String),
+]);
+
 impl IngestorDeclaration for HttpEndpointIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // An HTTP request's fields, as the server's header map keeps them: names in lowercase, every
         // value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-        metadata: IngestorMetadataDeclaration::NONE,
+        metadata: HTTP_ENDPOINT_METADATA,
         executes_on_every_cluster_node: true,
         reference: IngestorReferenceKind::Endpoint(EndpointType::Http),
         position_class: PositionClass::None,

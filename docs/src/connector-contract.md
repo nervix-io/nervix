@@ -1345,8 +1345,12 @@ attach to. It declares no header model or metadata field and supports only `SUSP
 
 Each source entity declares its typed metadata fields beside its other capabilities in the
 vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the response status and
-the poll's scheduled instant, `WEBSOCKETS CONNECTION` the frame kind, `KAFKA TOPIC` the topic,
-partition and offset, `SYSLOG LISTENER` the peer address, and every other entity none. Registry
+the poll's scheduled instant, `HTTP ENDPOINT` the request's method, path, query, peer address and
+routed host, `WEBSOCKETS CONNECTION` the frame kind, `WEBSOCKETS ENDPOINT` the frame kind, the
+connection's peer address and its path, `KAFKA TOPIC` the topic, partition and offset,
+`SYSLOG LISTENER` the peer address, and every other entity none. The endpoint entities are served by
+the host itself rather than a connector crate, so the server's endpoint intake hands their values
+over the same way a connector's message does. Registry
 validation reads that declaration for the fields an ingestor's route programs and its
 `TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
 connector's message hands the host the value of every declared field in declared order, one typed
@@ -1383,8 +1387,11 @@ An HTTP poll retains every response-header value whose bytes are valid UTF-8, in
 characters, as the same UTF-8 bytes and in each field's repeat order. It drops an invalid UTF-8
 value alone while retaining the response body and other headers, and hands the drop count to the
 host for
-`nervix_ingestor_header_values_dropped_total`. An HTTP request emitter sends every admitted
-`write_header` value as its exact UTF-8 bytes.
+`nervix_ingestor_header_values_dropped_total`. An `HTTP ENDPOINT` request and a
+`WEBSOCKETS ENDPOINT` upgrade hand over their request-header values the same way: a value whose
+bytes are valid UTF-8 is read as those bytes, and the server's endpoint intake drops an invalid
+value alone and counts it once for each ingestor the request or upgrade was routed to. An HTTP
+request emitter sends every admitted `write_header` value as its exact UTF-8 bytes.
 `read_header` and `read_headers` are validated against that declaration, and header values do not
 travel through relays unless an ingestor writes them into schema-backed fields. See
 [Header Context](./ingestors.md#header-context) for the exact expression behavior. The session
@@ -2803,7 +2810,11 @@ sequenceDiagram
   deadline. Registry creation and source construction after template rendering both validate
   it. The omitted connection
   timeout is thirty seconds; omitted ping cadence means only answering peer pings. `open` prepares local transport and TLS
-  state without resolving a name or connecting; `resume` resolves and connects, completes any
+  state without resolving a name or connecting. For a `wss` endpoint it takes the rustls
+  configuration that the shared `RustlsClientConfigProvider` builds from the client's entries: the
+  bundled WebPKI roots and the platform's native roots with the client's `tls_ca_file` added, and
+  the identity of its `tls_cert_file` and `tls_key_file`. A file it cannot parse therefore fails
+  `open`, and with it the ingestor's start. `resume` resolves and connects, completes any
   signaling handshake, and only then reports readiness. Accepted data from a successful
   handshake stays in one bounded `HandshakeFrames` handoff for polling before new socket frames.
   Its capacity is `handshake_buffer_capacity` (default 16 messages), with each message bounded by
@@ -2825,7 +2836,10 @@ sequenceDiagram
   fails an upgrade whose answer contradicts the request. `resume` turns that refusal into a typed
   connection failure, keeps the transport's refusal attached, and tries no further address,
   because the endpoint, not an address, refused the offer. Neither that failure nor a refusal of
-  a malformed offer prints a subprotocol, since an offer can carry a credential. Client pings begin after
+  a malformed offer prints a subprotocol, since an offer can carry a credential. Every other failed
+  connection, TLS handshake or upgrade, an answer other than `101` and an opening response beyond
+  the transport's fixed header-count and head-size limits included, gives way to the next resolved
+  address within the same budget; the declaration states those limits as driver limits. Client pings begin after
   signaling at the configured cadence, with the close handshake's existing one-second budget
   declared once in the vocabulary and shared by both transport operations, and continue alongside
   data reads. Protocol control frames remain transport concerns.
