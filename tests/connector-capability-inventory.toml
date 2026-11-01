@@ -222,6 +222,22 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "TIMESTAMP"
+entity = "PULSAR TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_emission.feature", scenario = "A Pulsar emitter writes each message's TIMESTAMP as its event time" },
+  { feature = "tests/features/runtime/pulsar_emission.feature", scenario = "A Pulsar message keeps its event time and delivery time when the emitter sends it again" },
+]
+
+[[capability]]
+capability = "DELIVER AFTER"
+entity = "PULSAR TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_emission.feature", scenario = "A Pulsar emitter delivers each message DELIVER AFTER its batch's execution time" },
+  { feature = "tests/features/runtime/pulsar_emission.feature", scenario = "A Pulsar message keeps its event time and delivery time when the emitter sends it again" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "KAFKA TOPIC EMITTER"
 scenarios = [

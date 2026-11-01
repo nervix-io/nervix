@@ -83,6 +83,12 @@ impl Timestamp {
         )
     }
 
+    /// The Unix millisecond that contains this instant, the floor of its nanoseconds. A protocol
+    /// that counts whole milliseconds carries this instant as that millisecond.
+    pub fn unix_millis(self) -> i64 {
+        self.0.timestamp_millis()
+    }
+
     pub fn checked_add(self, duration: Duration) -> Result<Self, Report<TimestampError>> {
         let available = i128::from(i64::MAX)
             .checked_sub(i128::from(self.unix_nanos()))
@@ -292,8 +298,27 @@ mod tests {
 
     use chrono::{DateTime, TimeZone, Utc};
     use rkyv::{from_bytes, rancor::Error, to_bytes};
+    use rstest::rstest;
 
     use super::{Timestamp, TimestampError};
+
+    /// A timestamp's millisecond is the floor of its nanoseconds, on both sides of the Unix epoch.
+    #[rstest]
+    #[case(0, 0)]
+    #[case(999_999, 0)]
+    #[case(1_000_000, 1)]
+    #[case(1_999_999, 1)]
+    #[case(-1, -1)]
+    #[case(-1_000_000, -1)]
+    #[case(-1_000_001, -2)]
+    #[case(i64::MAX, 9_223_372_036_854)]
+    #[case(i64::MIN, -9_223_372_036_855)]
+    fn unix_millis_is_the_millisecond_that_contains_the_instant(
+        #[case] unix_nanos: i64,
+        #[case] unix_millis: i64,
+    ) {
+        assert_eq!(Timestamp::from_unix_nanos(unix_nanos).unix_millis(), unix_millis);
+    }
 
     #[test]
     fn serde_roundtrips_as_unix_nanoseconds() {

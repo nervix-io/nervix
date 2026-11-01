@@ -1024,10 +1024,13 @@ classification; diagnostics do not quote the row payload.
 
 A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar emitter: a message
 larger than the maximum message size the broker announced, which carries the measured size of its
-metadata and payload and the limit as typed fields, or a message the broker answered with
-`NotAllowedError`, which carries the broker's reason. Either becomes a record rejection with code
-`external` and operation `publish`. Every other failure of the client, its connection or the broker
-stays an infrastructure failure of the attempt, which the emitter retries.
+metadata and payload and the limit as typed fields, a message the broker answered with
+`NotAllowedError`, which carries the broker's reason, or a record whose envelope sets a time its
+message cannot carry, which carries the `PulsarMessageTimeError` naming that time: a `TIMESTAMP`
+before the Unix epoch's first millisecond, or a `DELIVER AFTER` past the last timestamp, with the
+batch's execution time and the delay. Each becomes a record rejection with code `external` and
+operation `publish`. Every other failure of the client, its connection or the broker stays an
+infrastructure failure of the attempt, which the emitter retries.
 
 The Pulsar emitter preserves the driver's `pulsar::Error` beneath `EmitterWriteError::Publish` for
 enqueue failures and failed receipts, with its description in a printable attachment. Its shared

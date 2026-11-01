@@ -834,7 +834,7 @@ remain in their owning work records until that delivery.
 | Side | What the entity declares |
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
-| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
+| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which `PULSAR TOPIC` declares `TIMESTAMP` and `DELIVER AFTER` and no entity declares any other yet. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
@@ -981,8 +981,9 @@ written; at most 1,024 bytes without whitespace, control characters or an empty 
 ingestor names a subscription of 1 to 255 bytes with its declared owner, declares `NO ACK`,
 `ACK SEQUENTIAL` and `ACK PARALLEL` in Pulsar's own delivery-mode type, and quiesces only by
 `SUSPEND`, since the durable subscription keeps its backlog. The emitter declares `NO ACK` and
-`ACK` publishing and optional batching under the `maxMessageSize` the broker announces. Message
-properties are headers in both directions, `ordered_repeats` on ingestion and `last_wins` on
+`ACK` publishing, optional batching under the `maxMessageSize` the broker announces, the `TIMESTAMP`
+and `DELIVER AFTER` envelope clauses it writes as each message's `event_time` and `deliver_at_time`,
+and no other envelope clause or properties. Message properties are headers in both directions, `ordered_repeats` on ingestion and `last_wins` on
 emission. A Pulsar client declares only the keys both directions read. `namespace` holds exactly a
 tenant and a namespace, with the default `public/default` written once in the declaration, and topic
 qualification reads that effective value, so a namespace that cannot qualify a topic is refused at
@@ -1807,7 +1808,14 @@ properties in written order, each a `RecordProperty` under the name its entity d
 envelopes always compare equal. A connector receives only what its entity declares, and an entity
 that declares nothing always receives the empty envelope. Only an entity whose body is a codec,
 whose records a record emitter publishes, declares envelope clauses or properties, so no envelope
-is evaluated for a row, row request, HTTP request or native client emitter.
+is evaluated for a row, row request, HTTP request or native client emitter. The Pulsar emitter
+writes a record's timestamp as its message's `event_time`, in the millisecond that contains it, and
+the record's `occurred_at` plus its `deliver_after` as its `deliver_at_time`. `occurred_at` is the
+execution time of the batch the record's first source row came from, which the host retains with
+the record, so a retry writes the times of the first attempt and the connector reads no clock. It
+rejects a record before its producer takes it where the timestamp's millisecond is not after the
+Unix epoch, because Pulsar reads a zero event time as none, or where the delivery time leaves the
+range of a timestamp.
 
 Each connector classifies definite delivery and rejection per record, and may report one
 infrastructure failure for the attempt. A record emitter answers for a record under the identity the

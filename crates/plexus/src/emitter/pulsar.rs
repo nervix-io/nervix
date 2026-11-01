@@ -43,12 +43,16 @@ pub(super) fn topic_body<'src>(
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_models::{
-        AckWindow, EmitterEntity, Model, PulsarEmitter, PulsarTopicPublishingMode,
+        AckWindow, EmitterEntity, EmitterEnvelope, Model, PulsarEmitter, PulsarTopicPublishingMode,
     };
     use rstest::rstest;
 
-    use crate::conformance_support::{assert_offers_exactly, created_model, refused};
+    use crate::{
+        conformance_support::{assert_offers_exactly, created_model, refused},
+        statement::suggest_statement,
+    };
 
     /// A `PULSAR TOPIC` emitter statement producing to `topic` in the publishing mode `mode`.
     fn statement(topic: &str, mode: &str) -> String {
@@ -71,6 +75,116 @@ mod tests {
     }
 
     const NO_ACK: &str = "NO ACK RETRY POLICY BACKOFF 250ms MAX 30s";
+
+    /// A `PULSAR TOPIC` emitter statement that writes `envelope` after its codec.
+    fn enveloped_statement(envelope: &str) -> String {
+        format!(
+            "CREATE PULSAR TOPIC EMITTER publishing FROM events TO pulsar_main TOPIC 'orders' \
+             MODE {NO_ACK} ENCODE USING event_codec {envelope} INHERIT ALL FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+        )
+    }
+
+    /// The envelope `envelope` writes on a `PULSAR TOPIC` emitter.
+    fn created_envelope(envelope: &str) -> EmitterEnvelope {
+        let statement = enveloped_statement(envelope);
+        let Some(Model::Emitter(emitter)) = created_model(&statement) else {
+            panic!("the composed grammar accepts the statement: {statement}");
+        };
+        *emitter.envelope
+    }
+
+    #[test]
+    fn the_declared_clauses_reach_the_emitter_model() {
+        let envelope = created_envelope("TIMESTAMP input.occurred_at DELIVER AFTER 5s");
+
+        assert_eq!(envelope.deliver_after.as_deref(), Some("5s"));
+        assert_eq!(
+            envelope.to_canonical_plexus().assured("the clauses render"),
+            "TIMESTAMP input.occurred_at DELIVER AFTER 5s"
+        );
+        assert!(created_envelope("").is_empty());
+    }
+
+    #[test]
+    fn the_clauses_keep_their_declared_order_and_each_is_written_once() {
+        for envelope in [
+            "DELIVER AFTER 5s TIMESTAMP input.occurred_at",
+            "TIMESTAMP input.occurred_at TIMESTAMP input.occurred_at",
+            "DELIVER AFTER 5s DELIVER AFTER 5s",
+        ] {
+            assert!(
+                refused(&enveloped_statement(envelope)),
+                "`{envelope}` breaks the declared clause order"
+            );
+        }
+    }
+
+    #[rstest]
+    #[case("PERSISTENT")]
+    #[case("MANDATORY")]
+    #[case("RETAIN")]
+    #[case("DELAY 5s")]
+    #[case("REPLY TO input.reply_queue")]
+    #[case("MESSAGE ID input.id")]
+    #[case("DEDUPLICATION ID input.id")]
+    #[case("PROPERTIES {'priority' = 1}")]
+    fn clauses_a_pulsar_message_does_not_carry_are_refused(#[case] clause: &str) {
+        assert!(
+            refused(&enveloped_statement(clause)),
+            "PULSAR TOPIC declares no `{clause}`"
+        );
+    }
+
+    #[test]
+    fn deliver_after_takes_a_duration_literal() {
+        for delay in ["5", "soon", "'5s'", ""] {
+            assert!(
+                refused(&enveloped_statement(&format!("DELIVER AFTER {delay}"))),
+                "`{delay}` is no duration literal"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_offers_each_clause_until_the_statement_has_passed_it() {
+        let opening = "CREATE PULSAR TOPIC EMITTER publishing FROM events TO pulsar_main TOPIC \
+                       'orders' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING \
+                       event_codec ";
+        let after_the_codec = suggest_statement(opening, opening.len());
+        let offered = |suggestions: &[String], clause: &str| {
+            suggestions
+                .iter()
+                .any(|suggestion| clause.starts_with(suggestion.as_str()))
+        };
+        assert!(
+            offered(&after_the_codec, "TIMESTAMP"),
+            "{after_the_codec:?}"
+        );
+        assert!(
+            offered(&after_the_codec, "DELIVER AFTER"),
+            "{after_the_codec:?}"
+        );
+
+        let timestamped = format!("{opening}TIMESTAMP input.occurred_at ");
+        let after_the_timestamp = suggest_statement(&timestamped, timestamped.len());
+        assert!(
+            !offered(&after_the_timestamp, "TIMESTAMP"),
+            "{after_the_timestamp:?}"
+        );
+        assert!(
+            offered(&after_the_timestamp, "DELIVER AFTER"),
+            "{after_the_timestamp:?}"
+        );
+
+        let delayed = format!("{opening}DELIVER AFTER 5s ");
+        let after_the_delay = suggest_statement(&delayed, delayed.len());
+        assert!(!offered(&after_the_delay, "TIMESTAMP"), "{after_the_delay:?}");
+        assert!(
+            !offered(&after_the_delay, "DELIVER AFTER"),
+            "{after_the_delay:?}"
+        );
+    }
 
     #[rstest]
     #[case("Orders-EU_1")]

@@ -20,6 +20,19 @@ use super::nats_observer::NatsObserver;
 
 pub(crate) const BROKER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The times one Pulsar message carried and when its observer read it, in Unix milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PulsarMessageTimes {
+    /// The `event_time` the producer wrote, absent where it wrote none.
+    pub(crate) event_time: Option<u64>,
+    /// The `deliver_at_time` the producer wrote, absent where it wrote none.
+    pub(crate) deliver_at: Option<i64>,
+    /// The `publish_time` the producer's client stamped on this copy when it sent it.
+    pub(crate) published_at: u64,
+    /// When the observing client took the message, by this host's clock.
+    pub(crate) received_at: u64,
+}
+
 #[derive(Debug)]
 pub(crate) struct BrokerMessage {
     /// The payload as text, with any byte that is not valid UTF-8 replaced.
@@ -34,6 +47,8 @@ pub(crate) struct BrokerMessage {
     pub(crate) key: Option<String>,
     /// The ordering group the broker delivered the payload in: an SQS FIFO message group.
     pub(crate) group: Option<String>,
+    /// The times of a message a Pulsar broker delivered.
+    pub(crate) pulsar_times: Option<PulsarMessageTimes>,
 }
 
 impl BrokerMessage {
@@ -44,11 +59,17 @@ impl BrokerMessage {
             headers,
             key: None,
             group: None,
+            pulsar_times: None,
         }
     }
 
     pub(crate) fn with_key(mut self, key: Option<String>) -> Self {
         self.key = key;
+        self
+    }
+
+    pub(crate) fn with_pulsar_times(mut self, times: PulsarMessageTimes) -> Self {
+        self.pulsar_times = Some(times);
         self
     }
 

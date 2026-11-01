@@ -2,7 +2,8 @@ Feature: Emitters write envelope clauses only where their entity declares them
 
   An emitter's envelope clauses follow its payload and set what its transport carries beside each
   payload. A clause or PROPERTIES key the emitter's entity does not declare is refused where it is
-  written. No entity declares one yet, so a node refuses each clause form on every emitter entity.
+  written. PULSAR TOPIC declares TIMESTAMP and DELIVER AFTER, and no entity declares another clause
+  or a property, so a node refuses every other clause form on every emitter entity.
 
   @emitter_envelope
   Scenario Outline: Every emitter entity refuses the envelope clauses it does not declare
@@ -34,11 +35,18 @@ Feature: Emitters write envelope clauses only where their entity declares them
         RETAIN
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    And these Plexus commands fail with "found TIMESTAMP"
+    And these Plexus commands fail with "found PERSISTENT"
       """
       CREATE PULSAR TOPIC EMITTER generated FROM events TO destination_client TOPIC 'orders'
         MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING events_codec
-        TIMESTAMP occurred_at
+        PERSISTENT
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    And these Plexus commands fail with "found DELAY"
+      """
+      CREATE PULSAR TOPIC EMITTER generated FROM events TO destination_client TOPIC 'orders'
+        MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING events_codec
+        DELAY 5s
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And these Plexus commands fail with "found DELIVER"
@@ -163,6 +171,42 @@ Feature: Emitters write envelope clauses only where their entity declares them
     Then the last command error contains
       """
       found PROPERTIES
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @emitter_envelope
+  Scenario Outline: A declared DELIVER AFTER refuses a delay that is not a duration greater than zero
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE PULSAR CLIENT broker CONFIG { 'addr' = 'pulsar://127.0.0.1:6650' };
+      """
+    When these Plexus commands fail with "DELIVER AFTER must be greater than zero"
+      """
+      CREATE PULSAR TOPIC EMITTER immediate FROM events TO broker TOPIC 'orders'
+        MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING event_codec
+        DELIVER AFTER 0s
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    And these Plexus commands fail with "expected duration"
+      """
+      CREATE PULSAR TOPIC EMITTER unitless FROM events TO broker TOPIC 'orders'
+        MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING event_codec
+        DELIVER AFTER 5
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    Then the last command error contains
+      """
+      expected duration
       """
 
     Examples:
