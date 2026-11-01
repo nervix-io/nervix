@@ -253,6 +253,14 @@ impl Arbitrary<'_> {
                     subject: self.nats_publication_subject_name(),
                 }))
             }
+            EmitterEntityKind::Nats(NatsEmitterEntity::Stream) => {
+                EmitterEntity::Nats(NatsEmitter::Stream(NatsStreamEmitter {
+                    mode: self.nats_stream_publication(),
+                    client: self.name(),
+                    stream: self.nats_stream_name(),
+                    subject: self.nats_publication_subject_name(),
+                }))
+            }
             EmitterEntityKind::ZeroMq(ZeroMqEmitterEntity::Push) => {
                 EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
                     mode: self.zeromq_push_publication(),
@@ -594,7 +602,8 @@ publication_generators! {
     rabbitmq_exchange_publication(arbitrary) -> RabbitMqExchangePublishingMode = [RabbitMqExchangePublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, RabbitMqExchangePublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
     redis_pubsub_publication(arbitrary) -> RedisPubSubPublishingMode = [RedisPubSubPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }];
     mqtt_topic_publication(arbitrary) -> MqttTopicPublishingMode = [MqttTopicPublishingMode::Qos0 { retry_policy: arbitrary.retry_policy() }, MqttTopicPublishingMode::Qos1 { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }, MqttTopicPublishingMode::Qos2 { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
-    nats_subject_publication(arbitrary) -> NatsSubjectPublishingMode = [NatsSubjectPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, NatsSubjectPublishingMode::JetStream { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
+    nats_subject_publication(arbitrary) -> NatsSubjectPublishingMode = [NatsSubjectPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }];
+    nats_stream_publication(arbitrary) -> NatsStreamPublishingMode = [NatsStreamPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
     zeromq_push_publication(arbitrary) -> ZeroMqPushPublishingMode = [ZeroMqPushPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }];
     sqs_queue_publication(arbitrary) -> SqsQueuePublishingMode = [SqsQueuePublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
     sentry_event_publication(arbitrary) -> SentryEventPublishingMode = [SentryEventPublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];

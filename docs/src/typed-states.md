@@ -244,14 +244,14 @@ written string, including an empty string or `other`. Its serialized field is re
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
 
-A NATS ingestor Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`, so a stored ingestor
-holds the archived union of both. The registry's `NERVIX MODEL NJS` archive signature identifies the
-current Model layout, including that union, an owned Pulsar subscription's required start position,
-the required branch partition count, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>`
-source, an SQS QUEUE emitter's `SEND` request shape, the session and quality of service an MQTT
-TOPIC ingestor writes beside its delivery mode, and a `REDIS PUBSUB` ingestor's subscription, which
-is either a `CHANNEL` or a `PATTERN`. Consensus's `raft_jetstream_` keyspaces and current state
-metadata encoding identify its stored shapes. An unrecognized signature, namespace or encoding
+A NATS ingestor or emitter Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`, so a stored
+declaration holds the archived union of both. The registry's `NERVIX MODEL NSE` archive signature
+identifies the current Model layout, including those unions, an owned Pulsar subscription's required
+start position, the required branch partition count, Sentry platform, an ingestor's
+`TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the session
+and quality of service an MQTT TOPIC ingestor writes beside its delivery mode, and a `REDIS PUBSUB`
+ingestor's `CHANNEL` or `PATTERN` subscription. Consensus's `raft_stream_emit_` keyspaces and current
+state metadata encoding identify its stored shapes. An unrecognized signature, namespace or encoding
 fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
