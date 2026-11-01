@@ -861,7 +861,9 @@ Applying a model step under an accepted transaction or restore instead waits for
 capacities with `QueueAdmission::WaitForPlace`; lack of room has not judged the configuration.
 The service task's existing shutdown cancellation ends the wait. A charge larger than the whole
 class or a closed executor still fails inspection, and no uncharged config copy is made while waiting.
-Rendered values also pass the existing WebSockets configuration and Prometheus API-root owners;
+Rendered values also pass the WebSockets configuration owner, which holds a schema-valid
+WebSockets client to an endpoint without a fragment, counts within their ranges and a derivable
+idle deadline, and the Prometheus API-root owner;
 an optional Redis subscription capacity passes the same range parser its ingestor plan uses.
 Ingestor-only presence requirements stay with that plan.
 MQTT's representative first instance uses the same instance-template renderer as execution.
@@ -2593,10 +2595,14 @@ sequenceDiagram
   `WEBSOCKETS CONNECTION` source through `IngestorConnector` and `BrokerIngestorConnector`. It has
   no emitter or listening endpoint. Its plan carries resolved client configuration, the node
   resolver, validated literal upgrade headers and an optional compiled signaling protocol. The
-  vocabulary owns its strict CONFIG schema: endpoint, positive connection/ping/idle durations,
-  positive handoff/message/frame limits and TLS
-  file keys restricted to secure endpoints with paired client identity files. Registry creation
-  and source construction after template rendering both validate it. The omitted connection
+  client's declared key schema is its one key validator: the endpoint, positive
+  connection/ping/idle durations, positive handoff/message/frame limits with their declared
+  defaults, and TLS file keys restricted to secure endpoints with paired client identity files.
+  The vocabulary's typed WebSockets configuration converts schema-valid entries once and adds
+  only what the schema cannot state: an endpoint without a fragment, each count within its
+  range, and three ping intervals within the schedulable bound when they derive the idle
+  deadline. Registry creation and source construction after template rendering both validate
+  it. The omitted connection
   timeout is thirty seconds; omitted ping cadence means only answering peer pings. `open` prepares local transport and TLS
   state without resolving a name or connecting; `resume` resolves and connects, completes any
   signaling handshake, and only then reports readiness. Accepted data from a successful
@@ -2613,7 +2619,14 @@ sequenceDiagram
   share that immutable snapshot, so suspension, reconnection and quiesce replay preserve the
   correct headers. The host builds the typed `frame_type` STRING column and supplies header
   reads from that snapshot. Request headers use the validated vocabulary collection; protocol
-  fields and repeated names cannot override the generated upgrade. Client pings begin after
+  fields and repeated names cannot override the generated upgrade. The one protocol field the
+  collection accepts is a `sec-websocket-protocol` offer of unique subprotocol tokens, written as
+  the tokens joined by commas: the transport compares the peer's selection with each
+  comma-separated element exactly, so whitespace would become part of a token. The transport
+  fails an upgrade whose answer contradicts the request. `resume` turns that refusal into a typed
+  connection failure, keeps the transport's refusal attached, and tries no further address,
+  because the endpoint, not an address, refused the offer. Neither that failure nor a refusal of
+  a malformed offer prints a subprotocol, since an offer can carry a credential. Client pings begin after
   signaling at the configured cadence, with the close handshake's existing one-second budget
   declared once in the vocabulary and shared by both transport operations, and continue alongside
   data reads. Protocol control frames remain transport concerns.

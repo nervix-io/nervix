@@ -18,7 +18,9 @@ the reasons ingest and emit differ. Read headers the way the source's model reco
 lowercase HTTP field names, and on an emitter that keeps one value per header name write each literal
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
-headers, response-header reads, frame metadata and the closed client CONFIG key set.
+headers, subprotocol offers, response-header reads, frame metadata and the closed client CONFIG key
+set. Offer subprotocols only through `HEADERS { 'sec-websocket-protocol' = '...' }`, and expect
+the peer to select one of them: any other answer fails the connection.
 For ClickHouse HTTP connection tuning, read the ClickHouse Emitters section and the generated
 client key reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured values;
 `SHOW CREATE CLIENT <name>` preserves authored configuration. Both redact secrets.
