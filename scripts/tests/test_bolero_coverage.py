@@ -306,6 +306,19 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(completion["corpus"], coverage.corpus_identity(target.corpus))
         self.assertGreater(completion["corpus"]["inputs"], 0)
 
+    def test_a_shard_rerun_in_a_later_attempt_combines_with_the_shards_of_its_run(self) -> None:
+        plan = tuple((target,) for target in self.inventory.targets)
+        evidence = self.shard_campaigns(plan)
+        records = sorted(path for path in evidence.rglob("*.json") if "selection" in json.loads(path.read_text()))
+        self.assertEqual(len(records), 2)
+        for attempt, path in enumerate(records, start=1):
+            content = json.loads(path.read_text())
+            content["run"] = {"provider": "github", "run": "1", "attempt": str(attempt), "job": "bolero-fuzz"}
+            path.write_text(json.dumps(content))
+        record = self.record(self.combine(evidence, plan))
+        self.assertEqual(record["verdict"], "complete")
+        self.assertEqual(record["run"], {"provider": "github", "run": "1", "attempt": "2"})
+
     def test_missing_failed_foreign_or_mismatched_shards_do_not_combine(self) -> None:
         plan = tuple((target,) for target in self.inventory.targets)
         evidence = self.shard_campaigns(plan)
