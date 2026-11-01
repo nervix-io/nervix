@@ -40,7 +40,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
-| MySQL table path parts, exact value bindings, duplicate-key actions, operation deadlines and TLS identity file formats | `Emitters` → `MySQL`, and `Database Client Connection Pools` |
+| MySQL table path parts, exact value bindings, duplicate-key actions, placeholder and packet limits, operation deadlines, TLS verification and identity file formats, URL lifetime settings and maintained pool minimums | `Emitters` → `MySQL`, `Database Client Connection Pools`, then `Connector Capabilities` → `MYSQL client` |
 | Sentry platform options, event defaults and limit, batch transformations, strict DSN/timeout configuration, the inherited HTTP transport, rejected versus retried statuses and retry hints | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
@@ -193,7 +193,7 @@ current connection, retry and deadline limits.
   membership because their listeners execute on every cluster node. Every other ingestor, a
   `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
   schedule recomputation.
-- For `WEBSOCKETS CONNECTION` literal upgrade headers, frame metadata, strict client CONFIG,
+- For `WEBSOCKETS CONNECTION` literal upgrade headers, subprotocol offers, frame metadata, strict client CONFIG,
   handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close, read `Ingestors` →
   `WEBSOCKETS CONNECTION` in the selected documentation index.
   A successful upgrade does not establish data delivery or reset repeated-failure backoff.

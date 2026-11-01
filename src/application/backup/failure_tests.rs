@@ -2,10 +2,10 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Authority-loss recovery and definitive cut/storage refusal assertions.
-//! - **Depends on.** The production backup response boundary and application fixtures.
+//! - **Depends on.** The production cut/release join, response boundary and application fixtures.
 //! - **Must not know.** Client retry scheduling or archive representations.
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::LeadershipObservation;
 use nervix_recovery::Discarded as _;
 
@@ -165,4 +165,218 @@ async fn a_storage_refusal_keeps_its_terminal_failure_and_complete_cause() {
     drop(service);
     drop(registry);
     std::fs::remove_dir_all(path).discarded("the throwaway database may already be gone");
+}
+
+#[nervix_primitives::test]
+async fn a_cut_budget_expiry_remains_terminal_when_lease_release_loses_authority() {
+    let TestService {
+        service,
+        registry,
+        path,
+    } = build_test_service(false).await;
+    let reference = test_execution_reference();
+    let captured = Err(Report::new(BackupError::CaptureTimeout {
+        domain: DomainName::parse("capture").assured("the test domain is valid"),
+        phase: CutPhase::Capture,
+        elapsed: Duration::from_secs(30),
+        phase_elapsed: Duration::from_secs(12),
+        completed: CompletedPhases::default(),
+    }));
+    let expected = format!("{:#}", captured.as_ref().err().assured("the cut timed out"));
+    let report = finish_backup_cut::<()>(
+        &reference,
+        captured,
+        Err(authority_loss("mutation lease release failed")),
+    )
+    .err()
+    .assured("the failed cut cannot complete");
+    let response = service.backup_error_response(&reference, report).await;
+    assert_eq!(response.disposition, CommandDisposition::Failed);
+    assert!(response.message.contains(&expected));
+    assert_eq!(response.diagnostics[0].message, response.message);
+    drop(service);
+    drop(registry);
+    std::fs::remove_dir_all(path).discarded("the throwaway database may already be gone");
+}
+
+#[nervix_primitives::test]
+async fn a_cut_storage_failure_remains_terminal_when_lease_release_loses_authority() {
+    let TestService {
+        service,
+        registry,
+        path,
+    } = build_test_service(false).await;
+    let reference = test_execution_reference();
+    let captured = Err(
+        Report::new(std::io::Error::from(std::io::ErrorKind::StorageFull)).change_context(
+            BackupError::CaptureDomain {
+                domain: DomainName::parse("capture").assured("the test domain is valid"),
+                reason: "owner capture failed".to_string(),
+            },
+        ),
+    );
+    let expected = format!(
+        "{:#}",
+        captured.as_ref().err().assured("the cut storage failed")
+    );
+    let report = finish_backup_cut::<()>(
+        &reference,
+        captured,
+        Err(authority_loss("mutation lease release failed")),
+    )
+    .err()
+    .assured("the failed cut cannot complete");
+    let response = service.backup_error_response(&reference, report).await;
+    assert_eq!(response.disposition, CommandDisposition::Failed);
+    assert!(response.message.contains(&expected));
+    assert_eq!(response.diagnostics[0].message, response.message);
+    drop(service);
+    drop(registry);
+    std::fs::remove_dir_all(path).discarded("the throwaway database may already be gone");
+}
+
+#[nervix_primitives::test]
+async fn a_release_storage_failure_remains_terminal_when_the_cut_loses_authority() {
+    let TestService {
+        service,
+        registry,
+        path,
+    } = build_test_service(false).await;
+    let reference = test_execution_reference();
+    let released = Err(
+        Report::new(std::io::Error::from(std::io::ErrorKind::StorageFull))
+            .change_context(ConsensusError::Storage)
+            .change_context(BackupError::CaptureDomain {
+                domain: DomainName::parse("capture").assured("the test domain is valid"),
+                reason: "mutation lease release failed".to_string(),
+            }),
+    );
+    let expected = format!(
+        "{:#}",
+        released
+            .as_ref()
+            .err()
+            .assured("the release storage failed")
+    );
+    let report = finish_backup_cut::<()>(
+        &reference,
+        Err(authority_loss("domain pause or drain failed")),
+        released,
+    )
+    .err()
+    .assured("the failed release cannot complete");
+    let response = service.backup_error_response(&reference, report).await;
+    assert_eq!(response.disposition, CommandDisposition::Failed);
+    assert!(response.message.contains(&expected));
+    assert_eq!(response.diagnostics[0].message, response.message);
+    drop(service);
+    drop(registry);
+    std::fs::remove_dir_all(path).discarded("the throwaway database may already be gone");
+}
+
+fn authority_loss(reason: &str) -> Report<BackupError> {
+    Report::new(ConsensusError::LeadershipLost {
+        observed: LeadershipObservation::UnconfirmedLease { term: 7 },
+    })
+    .change_context(BackupError::CaptureDomain {
+        domain: DomainName::parse("capture").assured("the test domain is valid"),
+        reason: reason.to_string(),
+    })
+}
+
+#[nervix_primitives::test]
+async fn a_pause_or_drain_expiry_remains_terminal_when_the_abandoned_pause_cannot_resume() {
+    let TestService {
+        service,
+        registry,
+        path,
+    } = build_test_service(false).await;
+    let reference = test_execution_reference();
+    let domain = DomainName::parse("capture").assured("the test domain is valid");
+    let failures = [
+        Report::new(DomainAlterError::BackupPauseTimeout {
+            domain: domain.clone(),
+        }),
+        Report::new(DomainAlterError::BackupQuiesceTimeout {
+            domain: domain.clone(),
+            details: "pending owner".to_string(),
+        }),
+    ];
+    for failure in failures {
+        nervix_primitives::task::consume_budget().await;
+        let compound = abandoned_pause(failure, &domain);
+        let cause_chain = format!("{compound:#}");
+        let progress = CutProgress::at(
+            domain.clone(),
+            CaptureContext::Coordinator {
+                execution: reference.clone(),
+            },
+            CutPhase::Drain,
+            nervix_primitives::time::Instant::now(),
+        );
+        let report =
+            finish_backup_cut::<()>(&reference, Err(progress.drain_failure(compound)), Ok(()))
+                .err()
+                .assured("the expired cut cannot complete");
+        let response = service.backup_error_response(&reference, report).await;
+        assert_eq!(response.disposition, CommandDisposition::Failed);
+        assert!(response.message.contains("phase=drain"));
+        assert!(response.message.contains(&cause_chain));
+        assert_eq!(response.diagnostics[0].message, response.message);
+    }
+    drop(service);
+    drop(registry);
+    std::fs::remove_dir_all(path).discarded("the throwaway database may already be gone");
+}
+
+#[nervix_primitives::test]
+async fn an_application_failure_remains_terminal_when_the_abandoned_pause_cannot_resume() {
+    let TestService {
+        service,
+        registry,
+        path,
+    } = build_test_service(false).await;
+    let reference = test_execution_reference();
+    let domain = DomainName::parse("capture").assured("the test domain is valid");
+    let failure = Report::new(std::io::Error::from(std::io::ErrorKind::StorageFull))
+        .change_context(DomainAlterError::StopIngestion {
+            domain: domain.clone(),
+        });
+    let compound = abandoned_pause(failure, &domain);
+    let cause_chain = format!("{compound:#}");
+    let progress = CutProgress::at(
+        domain,
+        CaptureContext::Coordinator {
+            execution: reference.clone(),
+        },
+        CutPhase::Drain,
+        nervix_primitives::time::Instant::now(),
+    );
+    let report = finish_backup_cut::<()>(&reference, Err(progress.drain_failure(compound)), Ok(()))
+        .err()
+        .assured("the failed application cannot complete");
+    let response = service.backup_error_response(&reference, report).await;
+    assert_eq!(response.disposition, CommandDisposition::Failed);
+    assert!(response.message.contains(&cause_chain));
+    assert_eq!(response.diagnostics[0].message, response.message);
+    drop(service);
+    drop(registry);
+    std::fs::remove_dir_all(path).discarded("the throwaway database may already be gone");
+}
+
+fn abandoned_pause(
+    mut failure: Report<DomainAlterError>,
+    domain: &DomainName,
+) -> Report<DomainAlterError> {
+    failure.extend_one(
+        Report::new(ConsensusError::LeadershipLost {
+            observed: LeadershipObservation::UnconfirmedLease { term: 7 },
+        })
+        .change_context(DomainAlterError::ResumeDomain {
+            domain: domain.clone(),
+        }),
+    );
+    failure.change_context(DomainAlterError::ResumeAfterAbandonedAlter {
+        domain: domain.clone(),
+    })
 }

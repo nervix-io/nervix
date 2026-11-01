@@ -241,6 +241,17 @@ still holds and takes its cuts again. Every cut uses the declared per-domain bud
 cut budget remains a definitive refusal, including expiry while lease admission was being refused
 by an unconfirmed leader lease.
 
+When a cut and its resume or lease release both fail, a definitive cut failure takes precedence
+over the cleanup failure. Conversely, an uncertain cut cannot hide a definitive cleanup failure.
+Both typed reports are logged with the execution reference before the selected failure reaches
+command finalization. Losing authority during cleanup cannot turn an expired cut budget or a
+storage failure into a recoverable attempt.
+
+A pause already confirmed by consensus can fail while it is being applied or drained. If resuming
+that abandoned pause also fails, the combined report remains definitive. A pause-application or
+drain expiry still projects to `CaptureTimeout`, with the active phase and completed measurements,
+even beneath the combined lifecycle context. The resume's authority loss does not replace it.
+
 A pause the cluster has not applied by the deadline fails the backup with the wait the deadline
 ended and resumes the domain. A drain that does not finish by the deadline fails the backup with the
 counts each node still held and resumes the domain; an unavailable emitter keeps its publish and
