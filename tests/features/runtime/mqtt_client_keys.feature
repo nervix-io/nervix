@@ -87,7 +87,7 @@ Feature: MQTT client credentials, identity, keep-alive and admitted publish size
         'addr' = '{{mqtt_auth_addr}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_in
-      FROM anonymous TOPIC 'anonymous_in_{{test_id}}' MODE NO ACK
+      FROM anonymous TOPIC 'anonymous_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -237,7 +237,7 @@ Feature: MQTT client credentials, identity, keep-alive and admitted publish size
         'addr' = '{{mqtt_addr}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_in
-      FROM mqtt_main TOPIC 'default_identity_in_{{test_id}}' INSTANCES 2 MODE NO ACK
+      FROM mqtt_main TOPIC 'default_identity_in_{{test_id}}' INSTANCES 2 SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -286,7 +286,7 @@ Feature: MQTT client credentials, identity, keep-alive and admitted publish size
         'client_id' = 'nervix-keep-alive-out-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_in
-      FROM mqtt_in TOPIC 'keep_alive_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_in TOPIC 'keep_alive_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL

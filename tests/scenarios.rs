@@ -6029,6 +6029,7 @@ impl IngestorLogicTransportFixture {
             Self::Mqtt => {
                 r#"FROM logic_mqtt
         TOPIC 'logic_notifications_{{test_id}}'
+        SESSION CLEAN QOS 0
         MODE NO ACK"#
             }
             Self::Nats => {
@@ -19418,7 +19419,8 @@ impl UnacknowledgedSourceFixture {
         ON QUIESCE SUSPEND"
             }
             Self::Mqtt => {
-                "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}' MODE NO ACK
+                "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}' SESSION CLEAN QOS 0
+          MODE NO ACK
         ON QUIESCE DROP"
             }
             Self::Nats => {
@@ -26607,20 +26609,27 @@ async fn when_these_mqtt_messages_are_rapidly_published(
     }
 }
 
-#[when(expr = "MQTT QoS 1 message is published to topic {string}")]
-async fn when_mqtt_qos1_message_is_published(
+/// Publishes the docstring at QoS 1 or 2 and returns once the broker answered it: its PUBACK at
+/// QoS 1, its PUBREC and then PUBCOMP at QoS 2.
+#[when(expr = "MQTT QoS {int} message is published to topic {string}")]
+async fn when_mqtt_message_is_published_at_qos(
     world: &mut ScenarioWorld,
+    qos: u8,
     topic: String,
     #[step] step: &Step,
 ) {
     let topic = expand_placeholders(world, &topic);
     let payload = expand_placeholders(world, docstring(step));
     wait_for_mqtt_ingestors_ready(world).await;
-    world
-        .cluster()
-        .publish_mqtt_qos1(&topic, &payload)
-        .await
-        .expect("failed to publish mqtt QoS 1 message");
+    let published = match qos {
+        1 => world.cluster().publish_mqtt_qos1(&topic, &payload).await,
+        2 => world.cluster().publish_mqtt_qos2(&topic, &payload).await,
+        other => {
+            panic!("the scenario publishes an answered MQTT message at QoS 1 or 2, not {other}")
+        }
+    };
+    published
+        .unwrap_or_else(|error| panic!("failed to publish the MQTT QoS {qos} message: {error}"));
 }
 
 /// Publishes `count` QoS 1 messages whose payloads are exactly `bytes` long: JSON objects whose
@@ -26822,7 +26831,7 @@ async fn when_json_messages_with_user_id_are_rapidly_published_to_input(
     let count = count
         .try_into()
         .expect("rapid publish count must fit into usize");
-    if entity_kind == "MQTT" || entity_kind == "MQTT_QOS1" {
+    if entity_kind == "MQTT" || entity_kind == "MQTT_QOS1" || entity_kind == "MQTT_QOS2" {
         wait_for_mqtt_ingestors_ready(world).await;
     }
     match entity_kind.as_str() {
@@ -26841,6 +26850,11 @@ async fn when_json_messages_with_user_id_are_rapidly_published_to_input(
             .publish_mqtt_qos1_burst(&input, &payload, count)
             .await
             .expect("failed to publish mqtt QoS 1 message burst"),
+        "MQTT_QOS2" => world
+            .cluster()
+            .publish_mqtt_qos2_burst(&input, &payload, count)
+            .await
+            .expect("failed to publish mqtt QoS 2 message burst"),
         "REDIS" => world
             .cluster()
             .publish_redis_burst(&input, &payload, count)
@@ -28595,6 +28609,44 @@ async fn when_http_payload_is_posted_to_node_with_header(
         )
         .await
         .expect("failed to post http payload with header");
+}
+
+#[when(
+    expr = "http payload is posted to node {string} with host {string} path {string} and header \
+            {string} with base64 bytes {string}"
+)]
+async fn when_http_payload_is_posted_to_node_with_header_bytes(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    header_name: String,
+    header_bytes: String,
+    #[step] step: &Step,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let header_bytes = BASE64_STANDARD
+        .decode(header_bytes.trim())
+        .unwrap_or_else(|error| panic!("invalid base64 header value '{header_bytes}': {error}"));
+    append_cucumber_log_line(&format!(
+        "http publish: node={node_id} host={host} path={path} header={header_name} \
+         header_bytes={header_bytes:02x?} payload={payload}"
+    ));
+    world.last_publish_at = Some(Instant::now());
+    world
+        .cluster()
+        .publish_http_with_header_bytes(
+            &node_id,
+            &host,
+            &path,
+            &payload,
+            &header_name,
+            &header_bytes,
+        )
+        .await
+        .expect("failed to post http payload with a header of raw bytes");
 }
 
 #[when(expr = "http payload is posted to node {string} with host {string} path {string} and fails")]

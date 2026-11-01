@@ -319,9 +319,20 @@ fn default_admission_bytes() -> usize {
     usize::try_from(admission.get()).assured("the declared admission bound fits the address space")
 }
 
-/// One ACK-mode ingestor instance subscribing to `events` through `addr` and `dns`, whose publishes
-/// wait on their acknowledgements `window` at a time.
+/// One ACK-mode ingestor instance subscribing to `events` at QoS 1 through `addr` and `dns`, whose
+/// publishes wait on their acknowledgements `window` at a time.
 fn acknowledged_plan(addr: &str, dns: DnsResolver, window: NonZeroU64) -> MqttTopicIngestorPlan {
+    acknowledged_plan_at(addr, dns, window, MqttQos::Qos1)
+}
+
+/// One ACK-mode ingestor instance subscribing to `events` at `qos` through `addr` and `dns`, whose
+/// publishes wait on their acknowledgements `window` at a time.
+fn acknowledged_plan_at(
+    addr: &str,
+    dns: DnsResolver,
+    window: NonZeroU64,
+    qos: MqttQos,
+) -> MqttTopicIngestorPlan {
     MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
         instances: vec![vec![ClientConfigEntry {
             key: "addr".to_string(),
@@ -331,25 +342,35 @@ fn acknowledged_plan(addr: &str, dns: DnsResolver, window: NonZeroU64) -> MqttTo
         share_group: "default~ingestor".to_string(),
         topic: "events".to_string(),
         session: MqttSession::Persistent,
-        qos: MqttQos::AtLeastOnce,
+        qos,
         acknowledgement_window: Some(window),
         dns,
         read_ahead_dropped: IngestorMetricsFixture::new().counter(),
     })
 }
 
-/// An ingestor of `plan` that `broker` granted its subscription, and the broker's end of the ingestor's
-/// connection.
+/// An ingestor of `plan` that `broker` granted its subscription at QoS 1, and the broker's end of
+/// the ingestor's connection.
 async fn subscribed(
     plan: &MqttTopicIngestorPlan,
     broker: &ScriptedBroker,
+) -> (MqttTopicIngestor, ScriptedConnection) {
+    subscribed_at(plan, broker, 1).await
+}
+
+/// An ingestor of `plan` that `broker` granted its subscription at the QoS `granted`, and the
+/// broker's end of the ingestor's connection.
+async fn subscribed_at(
+    plan: &MqttTopicIngestorPlan,
+    broker: &ScriptedBroker,
+    granted: u8,
 ) -> (MqttTopicIngestor, ScriptedConnection) {
     let mut source = MqttTopicIngestor::open(plan, 0)
         .await
         .assured("an MQTT source opens without connecting");
     let grant = async {
         let mut connection = broker.accept().await;
-        connection.grant_subscription().await;
+        connection.grant_subscription_at(granted).await;
         connection
     };
     let (resumed, connection) = tokio::join!(source.resume(), grant);
@@ -654,6 +675,113 @@ async fn an_acknowledged_batch_has_written_every_puback_it_asks_for() {
         [1, 2, 3],
         "the broker received every PUBACK the batch asks for, in order"
     );
+}
+
+/// Reads the `count` PUBRECs the client sends next, and returns the packet identifiers they record,
+/// in the order the client wrote them.
+async fn read_pubrecs(connection: &mut ScriptedConnection, count: usize) -> Vec<u16> {
+    let mut recorded = Vec::with_capacity(count);
+    for _ in 0..count {
+        nervix_primitives::task::consume_budget().await;
+        let Ok(packet_id) = timeout(OBSERVATION_BUDGET, connection.read_pubrec()).await else {
+            panic!("the client wrote {count} PUBRECs within {OBSERVATION_BUDGET:?}");
+        };
+        recorded.push(packet_id);
+    }
+    recorded
+}
+
+/// Releases each of `packet_ids` with a PUBREL and returns the packet identifiers the client's
+/// PUBCOMPs complete, in the order the client wrote them.
+async fn release(connection: &mut ScriptedConnection, packet_ids: &[u16]) -> Vec<u16> {
+    for packet_id in packet_ids {
+        connection.pubrel(*packet_id).await;
+    }
+    let mut completed = Vec::with_capacity(packet_ids.len());
+    for _ in packet_ids {
+        nervix_primitives::task::consume_budget().await;
+        let Ok(packet_id) = timeout(OBSERVATION_BUDGET, connection.read_pubcomp()).await else {
+            panic!(
+                "the client wrote {} PUBCOMPs within {OBSERVATION_BUDGET:?}",
+                packet_ids.len()
+            );
+        };
+        completed.push(packet_id);
+    }
+    completed
+}
+
+#[nervix_primitives::test]
+async fn an_acknowledged_exactly_once_batch_has_written_every_pubrec_and_completes_each_release() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let window = NonZeroU64::new(3).assured("three is non-zero");
+    let plan = acknowledged_plan_at(&broker.addr(), fixture.dns.clone(), window, MqttQos::Qos2);
+    let (mut source, mut connection) = subscribed_at(&plan, &broker, 2).await;
+    for packet_id in 1..=3_u16 {
+        connection.write_publish_exactly_once(packet_id, b"x").await;
+    }
+    let read = read_whole_batch(&mut source, 3).await;
+    for message in &read {
+        assert_eq!(message.position().publish().qos, QoS::ExactlyOnce);
+    }
+
+    let positions = positions(&read);
+    let acknowledging = source.acknowledge(&positions);
+    let Ok(acknowledged) = timeout(OBSERVATION_BUDGET, acknowledging).await else {
+        panic!("an acknowledgement through a polled connection returned within its budget");
+    };
+    acknowledged.assured("the connection wrote every PUBREC the batch asks for");
+
+    assert_eq!(
+        read_pubrecs(&mut connection, 3).await,
+        [1, 2, 3],
+        "the broker received every PUBREC the batch asks for, in order"
+    );
+    assert_eq!(
+        release(&mut connection, &[1, 2, 3]).await,
+        [1, 2, 3],
+        "the connection completed every release the broker sent"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_rejected_exactly_once_publish_is_read_again_and_recorded_once_it_is_acknowledged() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let plan = acknowledged_plan_at(
+        &broker.addr(),
+        fixture.dns.clone(),
+        NonZeroU64::MIN,
+        MqttQos::Qos2,
+    );
+    let (mut source, mut connection) = subscribed_at(&plan, &broker, 2).await;
+    connection.write_publish_exactly_once(7, b"retried").await;
+    let first = read_whole_batch(&mut source, 1).await;
+    let first_positions = positions(&first);
+    let rejecting = source.reject(&first_positions);
+    let Ok(rejected) = timeout(OBSERVATION_BUDGET, rejecting).await else {
+        panic!("a rejection on a live connection returned within its budget");
+    };
+    rejected.assured("a live connection replays what the host rejected");
+
+    let again = read_whole_batch(&mut source, 1).await;
+    assert_eq!(
+        again[0].payload(),
+        b"retried",
+        "the rejected publish is read again ahead of anything the broker sends next"
+    );
+    let again_positions = positions(&again);
+    let acknowledging = source.acknowledge(&again_positions);
+    let Ok(acknowledged) = timeout(OBSERVATION_BUDGET, acknowledging).await else {
+        panic!("an acknowledgement through a polled connection returned within its budget");
+    };
+    acknowledged.assured("the connection wrote the PUBREC the publish asks for");
+
+    // The client wrote nothing for the rejection, so the first packet the broker reads records the
+    // acknowledged publish, and the one after it completes its release.
+    assert_eq!(read_pubrecs(&mut connection, 1).await, [7]);
+    assert_eq!(release(&mut connection, &[7]).await, [7]);
 }
 
 #[nervix_primitives::test]

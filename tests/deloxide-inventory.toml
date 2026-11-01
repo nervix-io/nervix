@@ -163,6 +163,7 @@ tags = [
   "@forced_recovery_schedule",
   "@websocket_source_lifecycle",
   "@websocket_declaration_lifecycle",
+  "@endpoint_metadata_buffer",
   "@mqtt_source_retirement",
   "@mqtt_client_credentials_refused",
   "@pulsar_source_retirement",
@@ -3432,6 +3433,8 @@ workloads = [
   "stress.endpoint-ack-ending",
   "scenario.endpoint-ack-fanout",
   "stress.endpoint-ack-fanout",
+  "scenario.endpoint-metadata-buffer",
+  "stress.endpoint-metadata-buffer",
   "scenario.mqtt-parallel-gather-at-quiesce",
   "stress.mqtt-parallel-gather-at-quiesce",
   "scenario.sqs-receive-at-quiesce",
@@ -3783,6 +3786,26 @@ id = "stress.websocket-declaration-buffer"
 invariant = "Both text and binary frames retain their exact upgrade response headers through BUFFER and a codec change on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "A buffered WebSockets connection preserves upgrade headers and frame types through a codec change"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "An HTTP endpoint request buffered under an entity hold keeps its declared metadata through the quiesce buffer's tracked ownership, the entity engagement and a codec change, and its replay reads the values it arrived with. The request's socket, its HTTP parsing and the endpoint's asynchronous dispatch remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/endpoint_metadata.feature"
+id = "scenario.endpoint-metadata-buffer"
+invariant = "A buffered HTTP endpoint request replays with its exact method, path, query, routed host and peer address after an entity-pause alteration on one and three nodes."
+invocation = "scenarios"
+scenario = "An HTTP endpoint replays a buffered request with the metadata it arrived with"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: An HTTP endpoint request buffered under an entity hold keeps its declared metadata through the quiesce buffer's tracked ownership, the entity engagement and a codec change, and its replay reads the values it arrived with. The request's socket, its HTTP parsing and the endpoint's asynchronous dispatch remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/endpoint_metadata.feature"
+id = "stress.endpoint-metadata-buffer"
+invariant = "A buffered HTTP endpoint request replays with its exact method, path, query, routed host and peer address after an entity-pause alteration on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "An HTTP endpoint replays a buffered request with the metadata it arrived with"
 selections = ["deloxide-stress"]
 
 [[workload]]
