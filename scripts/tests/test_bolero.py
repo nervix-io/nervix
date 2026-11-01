@@ -417,6 +417,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-mqtt",
             "nervix-connector-postgres",
             "nervix-connector-mysql",
+            "nervix-connector-prometheus",
             "nervix-connector-mongodb",
             "nervix-connector-websockets",
             "nervix-connector-otel",
