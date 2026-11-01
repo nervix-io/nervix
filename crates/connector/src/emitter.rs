@@ -110,6 +110,10 @@ pub struct RecordEnvelope {
     pub message_id: Option<String>,
     /// `DEDUPLICATION ID <expression>`.
     pub deduplication_id: Option<String>,
+    /// `ROUTING KEY <expression>` of a `RABBITMQ EXCHANGE` emitter's destination: the key the
+    /// exchange routes the record by, which the host evaluates with the envelope because it reads
+    /// the same record at the same point.
+    pub routing_key: Option<String>,
     /// The properties the statement sets, in the order it writes them.
     pub properties: Vec<RecordProperty>,
 }
@@ -119,7 +123,12 @@ impl RecordEnvelope {
     /// record that carries them.
     pub fn held_bytes(&self) -> u64 {
         let mut bytes = 0_u64;
-        let texts = [&self.reply_to, &self.message_id, &self.deduplication_id];
+        let texts = [
+            &self.reply_to,
+            &self.message_id,
+            &self.deduplication_id,
+            &self.routing_key,
+        ];
         for text in texts.into_iter().flatten() {
             let length: u64 = text.len().arch_into();
             bytes = bytes.checked_add(length).assured(HELD_IN_MEMORY);

@@ -464,6 +464,12 @@ macro_rules! connector_emitters {
                     $(Self::$Variant(connector) => $crate::EmitterEntityBody::commit_policy(connector),)+
                 }
             }
+
+            fn routing_key(&self) -> Option<&$crate::Expression> {
+                match self {
+                    $(Self::$Variant(connector) => $crate::EmitterEntityBody::routing_key(connector),)+
+                }
+            }
         }
 
         $(

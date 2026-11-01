@@ -240,6 +240,15 @@ current connection, retry and deadline limits.
   outcome; a rejection requeues that delivery. `NO ACK` disables broker prefetch and cannot
   recover a delivery already consumed before downstream completion. See
   [Ingestors → RabbitMQ](../../../../docs/src/ingestors.md#rabbitmq).
+- A RabbitMQ emitter publishes to a queue through the default exchange with
+  `RABBITMQ QUEUE EMITTER … TO <client> QUEUE '<queue>'`, or to a declared exchange with
+  `RABBITMQ EXCHANGE EMITTER … TO <client> EXCHANGE '<exchange>' ROUTING KEY <expression>`, whose
+  expression computes every record's key as an exact, non-null, non-sensitive `STRING`. Nervix never
+  declares the exchange or its bindings, and an emitter whose exchange is missing stays unavailable
+  until it exists. Without `MANDATORY` a message no binding routes is dropped by the broker and its
+  record reported delivered; write `MANDATORY` after the payload, on either entity, to reject such a
+  record through `ON MESSAGE ERROR` instead. See
+  [Emitters → RabbitMQ](../../../../docs/src/emitters.md#rabbitmq).
 - For Core NATS completion, reconnect retries and finish outcomes, read
   [Emitters → NATS](../../../../docs/src/emitters.md#nats) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
@@ -338,9 +347,18 @@ current connection, retry and deadline limits.
   column into the table column of its name, in any `VALUES` order, and a null into each optional
   column `VALUES` leaves out. Opening the emitter refuses, before staging records, a mapped column
   the table lacks or types differently, a required table column `VALUES` leaves out, and a required
-  column mapped from an expression that can produce a null, such as an `OPTIONAL` field; wrap it in
-  `coalesce(...)` with a never-null argument. A commit refuses a table changed after open in the same
-  way, naming the column, and retries until the table can take the mapped columns again.
+  column, or a column whose nested values are required, mapped from an expression that can produce
+  a null, such as an `OPTIONAL` field; wrap it in `coalesce(...)` with a never-null argument. A
+  commit refuses a table changed after open in the same way, naming the column, and retries until
+  the table can take the mapped columns again.
+- Point an Iceberg emitter at an unpartitioned table. Its data files carry no partition values, so
+  a table whose current partition spec has a field opens but fails every commit, and the emitter
+  retries it without end. The emitter only appends Parquet data files with the Parquet library's
+  default writer properties: it writes no deletes or upserts, never changes the table's schema and
+  commits only through an `ICEBERG_REST` catalog client. Set `'path_style_access' = true` on an
+  `S3` client whose S3-compatible store serves buckets as paths, or whose bucket name contains a
+  dot; requests otherwise address the bucket as a virtual host. Read `Emitters` → `Iceberg data
+  files` and `Iceberg object storage`.
 - Set each Iceberg file I/O property on one client only. An Iceberg emitter whose catalog client
   sets a storage property its storage client already supplies, such as `s3.endpoint` beside the S3
   client's `endpoint`, is refused at `CREATE` or `ALTER`. Put each client's `tls_*` files on that
