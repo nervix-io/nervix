@@ -1223,13 +1223,16 @@ An envelope clause or `PROPERTIES` key the entity does not declare is
 `EnvelopeDeclarationError` that names the entity and the clause or key; an envelope duration
 reuses the duration issues under `DELIVER AFTER` or `DELAY`, and an envelope expression that is
 not an exact, non-null, non-sensitive value of its type is `EnvelopeValue`, naming the clause or
-key and the expected type with the VM's compile failure beneath it. These are command refusals
-before publication, including during `ALTER`, rather than retried source or sink initialization
-failures. They never include a record's values. An ingestor whose delivery mode lacks the option
-choices its entity declares for it, such as an MQTT `ACK` mode outside a persistent session at QoS 1
-or 2, is `ConnectorDeclarationIssue::Delivery`, carrying the vocabulary's typed
-`UnmetDeliveryRequirement` that names the entity, the mode, every required choice and the choice
-the statement writes for each option. The grammar refuses the same statement with the same text,
+key and the expected type with the VM's compile failure beneath it. An `SQS QUEUE` emitter that
+writes `DELAY` for a FIFO queue, a `DELAY` other than whole seconds up to 900s, or a
+`DEDUPLICATION ID` for a standard queue is refused with `SqsFifoQueueDelay`, `SqsDelay` or
+`SqsStandardQueueDeduplication`, naming the queue or the duration as written. These are command
+refusals before publication, including during `ALTER`, rather than retried source or sink
+initialization failures. They never include a record's values. An ingestor whose delivery mode lacks
+the option choices its entity declares for it, such as an MQTT `ACK` mode outside a persistent
+session at QoS 1 or 2, is `ConnectorDeclarationIssue::Delivery`, carrying the vocabulary's typed
+`UnmetDeliveryRequirement` that names the entity, the mode, every required choice and the choice the
+statement writes for each option. The grammar refuses the same statement with the same text,
 underlining the mode.
 
 MySQL table-name construction refuses empty path parts and more than two parts with typed

@@ -399,7 +399,7 @@ Feature: Plexus file formatting
   Scenario: SQS queue names retain their case and quoting
     Given a Plexus file "pipeline.plexus" containing
       """
-      create SQS QUEUE EMITTER order_events from orders to sqs_main queue 'Orders.fifo' FIFO GROUP 'orders' mode single retry policy backoff 1s max 5s encode using order_codec flush immediate on message error log on general error log;
+      create SQS QUEUE EMITTER order_events from orders to sqs_main queue 'Orders.fifo' FIFO GROUP 'orders' send single mode ack retry policy backoff 1s max 5s encode using order_codec flush immediate on message error log on general error log;
       """
     When nervix-plexus-format formats the Plexus file "pipeline.plexus"
     Then the formatter exits with code 0

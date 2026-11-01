@@ -1,9 +1,10 @@
 Feature: Header models
   Every entity whose messages carry transport headers declares a header model for each side: what
-  a repeated name keeps, the order names travel in, and how names compare. DESCRIBE shows each
-  side's model. Where a emitter keeps one value per header name, an emitter that writes one literal
-  name twice is refused when its statement is validated, because the later write would replace the
-  earlier one on every record. No broker is involved: nothing here starts the domain.
+  a repeated name keeps, the order names travel in, how names compare, and the exact types a value
+  may have. DESCRIBE shows each side's model. Where a emitter keeps one value per header name, an
+  emitter that writes one literal name twice is refused when its statement is validated, because the
+  later write would replace the earlier one on every record, and a written value of a type the model
+  does not declare is refused the same way. No broker is involved: nothing here starts the domain.
 
   @header_models
   Scenario Outline: A repeated literal header name is refused where the emitter keeps one value per name
@@ -162,6 +163,59 @@ Feature: Header models
     Then the last command output contains
       """
       headers: none
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @header_models
+  Scenario Outline: A header value has a type its emitter's header model declares
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA event (event_id STRING, attempt I64);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (event_id string, attempt integer);
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY outgoing SCHEMA event UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE SQS CLIENT sqs_main CONFIG {
+        'endpoint' = 'http://127.0.0.1:1',
+        'region' = 'eu-west-1',
+        'access_key_id' = 'declaration-key',
+        'secret_access_key' = 'declaration-secret'
+      };
+      """
+    When these Plexus statements fail with "write_header value must be STRING, found Int64"
+      """
+      CREATE KAFKA TOPIC EMITTER attempts FROM outgoing
+        TO kafka_main TOPIC 'events_out'
+          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
+          ENCODE USING event_codec
+        INHERIT ALL
+        INVOKE write_header('attempt', input.attempt)
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SQS QUEUE EMITTER attempts FROM outgoing
+        TO sqs_main QUEUE 'events_out'
+          SEND SINGLE MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+          ENCODE USING event_codec
+        INHERIT ALL
+        INVOKE write_header('attempt', input.attempt)
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      DESCRIBE EMITTER attempts;
+      """
+    Then the last command output contains
+      """
+      headers: last_wins, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary
       """
 
     Examples:
