@@ -79,21 +79,18 @@ use thiserror::Error;
 const KAFKA: &str = "kafka";
 
 /// The librdkafka property that bounds how long the producer keeps trying to deliver a record it
-/// took, its own retries included.
-const MESSAGE_TIMEOUT_PROPERTY: &str = "message.timeout.ms";
-
-/// The other name librdkafka reads `message.timeout.ms` from.
+/// took, its own retries included, under the one name a Kafka client accepts for it.
 const DELIVERY_TIMEOUT_PROPERTY: &str = "delivery.timeout.ms";
 
 /// The librdkafka property that, set to `true`, withholds the delivery report of every record the
 /// broker took.
 const ONLY_ERROR_REPORTS_PROPERTY: &str = "delivery.report.only.error";
 
-/// The longest `message.timeout.ms` librdkafka accepts, which it holds as a C `int` of
+/// The longest `delivery.timeout.ms` librdkafka accepts, which it holds as a C `int` of
 /// milliseconds.
 const LONGEST_MESSAGE_TIMEOUT_MILLIS: u32 = i32::MAX.unsigned_abs();
 
-/// Nanoseconds in one millisecond, the unit `message.timeout.ms` counts in.
+/// Nanoseconds in one millisecond, the unit `delivery.timeout.ms` counts in.
 const NANOS_PER_MILLI: u32 = 1_000_000;
 
 /// The longest single wait inside librdkafka's flush. A finish waits in such steps until its
@@ -165,7 +162,7 @@ enum KafkaQueueWaitError {
 }
 
 /// How long librdkafka keeps trying to deliver a record a confirmed publish handed it, in the
-/// whole milliseconds `message.timeout.ms` counts.
+/// whole milliseconds `delivery.timeout.ms` counts.
 ///
 /// A confirmed publish stops waiting for a record's answer `ACK TIMEOUT` after it handed the
 /// record over, and the host's retry then sends the record again. A producer that went on trying
@@ -187,14 +184,14 @@ struct KafkaMessageTimeout {
     )
 )]
 enum KafkaMessageTimeoutError {
-    /// A zero `ACK TIMEOUT` would set `message.timeout.ms` to `0`, which librdkafka reads as no
+    /// A zero `ACK TIMEOUT` would set `delivery.timeout.ms` to `0`, which librdkafka reads as no
     /// bound at all.
     #[error("ACK TIMEOUT 0s cannot bound librdkafka's delivery of a record")]
     Zero,
-    /// librdkafka cannot hold a `message.timeout.ms` this long.
+    /// librdkafka cannot hold a `delivery.timeout.ms` this long.
     #[error(
         "ACK TIMEOUT {} is longer than the {LONGEST_MESSAGE_TIMEOUT_MILLIS}ms librdkafka's \
-         message.timeout.ms can hold",
+         delivery.timeout.ms can hold",
         humantime::format_duration(*.timeout)
     )]
     TooLong { timeout: Duration },
@@ -308,9 +305,9 @@ impl KafkaTopicEmitter {
     /// The entries pass through as written, except that the producer always asks for the delivery
     /// report of every record: a record stays retained until its report is served, so a record the
     /// broker took without a report would count as unsent forever. A confirmed publish then sets
-    /// `message.timeout.ms` to its `ACK TIMEOUT` and drops the other name librdkafka reads that
-    /// bound from, so no entry can keep the producer trying to deliver a record after the publish
-    /// stopped waiting for it.
+    /// `delivery.timeout.ms` to its `ACK TIMEOUT`, replacing the client's own entry. A Kafka client
+    /// accepts that bound under this one name, so no entry can keep the producer trying to deliver
+    /// a record after the publish stopped waiting for it.
     fn producer_config(
         entries: &[ClientConfigEntry],
         mode: BrokerPublishingMode,
@@ -332,8 +329,10 @@ impl KafkaTopicEmitter {
                     .attach_printable(description));
             }
         };
-        config.remove(DELIVERY_TIMEOUT_PROPERTY);
-        config.set(MESSAGE_TIMEOUT_PROPERTY, message_timeout.millis.to_string());
+        config.set(
+            DELIVERY_TIMEOUT_PROPERTY,
+            message_timeout.millis.to_string(),
+        );
         Ok(config)
     }
 
@@ -866,17 +865,24 @@ mod tests {
     fn a_confirmed_producer_gives_up_on_a_record_after_ack_timeout() {
         let entries = [
             entry("bootstrap.servers", "127.0.0.1:9092"),
-            entry("message.timeout.ms", "300000"),
             entry("delivery.timeout.ms", "300000"),
         ];
 
         let config =
             KafkaTopicEmitter::producer_config(&entries, confirmed(Duration::from_millis(2_500)))
-                .expect("an ACK TIMEOUT of seconds fits librdkafka's message timeout");
+                .expect("an ACK TIMEOUT of seconds fits librdkafka's delivery timeout");
 
-        assert_eq!(config.get("message.timeout.ms"), Some("2500"));
-        assert_eq!(config.get("delivery.timeout.ms"), None);
+        assert_eq!(config.get("delivery.timeout.ms"), Some("2500"));
         assert_eq!(config.get("bootstrap.servers"), Some("127.0.0.1:9092"));
+        let native = config
+            .create_native_config()
+            .expect("librdkafka accepts the confirmed producer's configuration");
+        assert_eq!(
+            native
+                .get("delivery.timeout.ms")
+                .expect("librdkafka reads its delivery timeout"),
+            "2500"
+        );
     }
 
     #[test]
@@ -890,7 +896,6 @@ mod tests {
             .expect("the client entries pass through");
 
         assert_eq!(config.get("delivery.timeout.ms"), Some("300000"));
-        assert_eq!(config.get("message.timeout.ms"), None);
     }
 
     #[test]
