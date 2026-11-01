@@ -173,6 +173,7 @@ fn the_emitter_kinds_name_every_pair_once_with_its_phrase() {
             "KAFKA TOPIC",
             "PULSAR TOPIC",
             "RABBITMQ QUEUE",
+            "RABBITMQ EXCHANGE",
             "REDIS PUBSUB",
             "MQTT TOPIC",
             "NATS SUBJECT",
@@ -651,7 +652,9 @@ fn emitter_declaration(kind: EmitterEntityKind) -> EmitterDeclaration {
             Some(HeaderModel::exact(HeaderLayout::LastWins)),
             &["NoAck", "BrokerAck"],
         ),
-        EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Queue) => codec(
+        EmitterEntityKind::RabbitMq(
+            RabbitMqEmitterEntity::Queue | RabbitMqEmitterEntity::Exchange,
+        ) => codec(
             Some(HeaderModel::exact(HeaderLayout::SortedByName)),
             &["NoAck", "BrokerAck"],
         ),
