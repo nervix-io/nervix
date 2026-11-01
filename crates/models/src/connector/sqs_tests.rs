@@ -18,7 +18,8 @@ use super::*;
 use crate::{
     ClientConfigEntry, ClientConfigFile, ClientConfigOwner, ClientConfigPresence,
     ClientConfigSchemaError, ClientConfigValue, ClientPooling, CreateClientSqs, EmitterEntityKind,
-    EmitterPublishingModeKind, IngestDeliveryKind, IngestQuiesceKind, IngestorEntityKind,
+    EmitterPublishingModeKind, HeaderNames, IngestDeliveryKind, IngestQuiesceKind,
+    IngestorEntityKind,
 };
 
 #[test]
@@ -53,12 +54,11 @@ fn queue_declarations_match_the_acknowledged_transport() {
     ] {
         assert_eq!(ingest.declared_quiesce(undeclared), None);
     }
+    // Every request is answered, so the emitter publishes in the shared request/response mode,
+    // and its request shape is the SEND option.
     assert_eq!(
         emit.publishing_modes,
-        &[
-            EmitterPublishingModeKind::SqsSingle,
-            EmitterPublishingModeKind::SqsBatch
-        ]
+        &[EmitterPublishingModeKind::RequestAck]
     );
     assert_eq!(emit.body, EmitterBodyForm::Codec);
     assert!(!emit.requires_batch_transformation);
@@ -91,25 +91,52 @@ fn both_queue_directions_share_the_queue_rule_and_the_client() {
 }
 
 #[test]
-fn queue_declares_message_attributes_as_headers_and_no_envelope() {
+fn queue_declares_message_attributes_as_headers_with_a_delay_and_a_deduplication_id() {
     let ingest = IngestorEntityKind::Sqs(SqsIngestorEntity::Queue).capabilities();
     let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
-    let attributes = Some(HeaderModel::exact(HeaderLayout::LastWins));
 
-    assert_eq!(ingest.headers, attributes);
-    assert_eq!(emit.headers, attributes);
+    assert_eq!(
+        ingest.headers,
+        Some(HeaderModel::exact(HeaderLayout::LastWins))
+    );
     assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
     assert!(ingest.metadata.fields().is_empty());
     assert_eq!(ingest.options, &[OptionDeclaration::INSTANCES]);
-    assert!(emit.envelope.is_empty());
+    assert_eq!(
+        emit.envelope,
+        &[
+            EnvelopeClauseKind::Delay,
+            EnvelopeClauseKind::DeduplicationId
+        ]
+    );
     assert!(emit.properties.is_empty());
+}
+
+#[test]
+fn emitted_attributes_carry_strings_integers_and_bytes_as_their_sqs_data_types() {
+    let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
+    let Some(attributes) = emit.headers else {
+        panic!("an SQS queue emitter writes message attributes");
+    };
+
+    assert_eq!(attributes.layout, HeaderLayout::LastWins);
+    assert_eq!(attributes.names, HeaderNames::Exact);
+    assert_eq!(
+        attributes.values.carried().as_deref(),
+        Some("STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary")
+    );
+    // A boolean and a datetime have no SQS data type that carries them exactly.
+    let declared = attributes.values.types();
+    for refused in [PropertyType::Bool, PropertyType::Datetime] {
+        assert!(!declared.contains(&refused), "{refused}");
+    }
 }
 
 #[test]
 fn fifo_group_is_an_optional_expression_or_the_branch() {
     let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
-    let [fifo_group] = emit.options else {
-        panic!("an SQS queue emitter declares exactly one option, its FIFO GROUP");
+    let [fifo_group, _] = emit.options else {
+        panic!("an SQS queue emitter declares its FIFO GROUP, then its SEND");
     };
 
     assert_eq!(fifo_group.keywords, "FIFO GROUP");
@@ -126,6 +153,29 @@ fn fifo_group_is_an_optional_expression_or_the_branch() {
 }
 
 #[test]
+fn send_is_a_required_choice_between_one_request_per_message_and_batch_requests() {
+    let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
+    let [_, send] = emit.options else {
+        panic!("an SQS queue emitter declares its FIFO GROUP, then its SEND");
+    };
+
+    assert_eq!(send.keywords, "SEND");
+    assert!(send.is_required());
+    let OptionForm::Choice([single, batch]) = send.form else {
+        panic!("SEND is a choice between SINGLE and BATCH");
+    };
+    assert_eq!((single.name, single.value), ("SINGLE", None));
+    assert_eq!((batch.name, batch.value), ("BATCH", None));
+    assert_eq!(SqsSend::Single.keyword(), single.name);
+    assert_eq!(SqsSend::Batch.keyword(), batch.name);
+}
+
+#[test]
+fn a_delay_is_at_most_the_fifteen_minutes_sqs_gives_a_message() {
+    assert_eq!(SQS_DELAY_MAXIMUM.as_secs(), 15 * 60);
+}
+
+#[test]
 fn batching_is_optional_up_to_the_largest_message_sqs_accepts() {
     let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
     let EmitterBatchLegality::Optional {
@@ -135,7 +185,8 @@ fn batching_is_optional_up_to_the_largest_message_sqs_accepts() {
         panic!("an SQS queue emitter batches optionally within the SQS message limit");
     };
 
-    assert_eq!(maximum.bytes().get(), 256 * 1024);
+    assert_eq!(maximum, SQS_MESSAGE_SIZE_MAXIMUM);
+    assert_eq!(maximum.bytes().get(), 1024 * 1024);
 }
 
 #[test]

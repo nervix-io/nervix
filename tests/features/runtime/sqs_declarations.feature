@@ -1,7 +1,7 @@
 Feature: SQS queue declarations
   SQS QUEUE uses one literal, case-preserving queue rule in both directions. Its delivery, quiesce
-  and publishing modes, and the configuration an SQS client honours, apply at CREATE without
-  contacting the service.
+  and publishing modes, its request shape, the envelope clauses and header values it carries, and
+  the configuration an SQS client honours, apply at CREATE without contacting the service.
 
   Scenario Outline: SQS queue declarations preserve queue literals in both directions
     Given a <cluster_size> node nervix cluster is started
@@ -39,32 +39,43 @@ Feature: SQS queue declarations
       """
       CREATE SQS QUEUE EMITTER publishing FROM events
         TO sqs_main QUEUE '<queue>' <fifo_group>
-        MODE <mode> RETRY POLICY BACKOFF 250ms MAX 30s
-        ENCODE USING event_codec INHERIT ALL
-        INVOKE write_header('tenant', input.tenant)
+        SEND <send> MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        ENCODE USING event_codec <envelope> INHERIT ALL
+        INVOKE write_header('tenant', input.tenant), write_header('size', length(input.value))
         <batch>
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       SHOW CREATE EMITTER publishing;
       """
     Then the last command output contains
       """
-      QUEUE '<queue>'
-      """
-    And the last command output contains
-      """
-      MODE <mode> RETRY POLICY BACKOFF 250ms MAX 30s
+      QUEUE '<queue>' <options>
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+          ENCODE USING event_codec
+          <envelope>
+        INHERIT ALL
       """
     And the last command output contains
       """
       <shown>
       """
+    When these Plexus commands are executed on the leader node
+      """
+      DESCRIBE EMITTER publishing;
+      """
+    Then the last command output contains
+      """
+      options: <options>
+      mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      quiesce: none
+      envelope: <envelope>
+      """
 
     Examples:
-      | cluster_size | queue            | fifo_group              | mode   | batch                                 | shown                   |
-      | 1            | Orders-EU_1      |                         | SINGLE |                                       | write_header            |
-      | 3            | Orders-EU_1      |                         | SINGLE |                                       | write_header            |
-      | 1            | Orders-EU_1.fifo | FIFO GROUP input.tenant | BATCH  | BATCH MAX MESSAGES 10 MAX SIZE 256KiB | FIFO GROUP input.tenant |
-      | 3            | Orders-EU_1.fifo | FIFO GROUP input.tenant | BATCH  | BATCH MAX MESSAGES 10 MAX SIZE 256KiB | BATCH MAX MESSAGES 10   |
+      | cluster_size | queue            | fifo_group              | send   | envelope                     | batch                               | shown                                     | options                            |
+      | 1            | Orders-EU_1      |                         | SINGLE | DELAY 5s                     |                                     | write_header('size', length(input.value)) | SEND SINGLE                        |
+      | 3            | Orders-EU_1      |                         | SINGLE | DELAY 900s                   |                                     | write_header('tenant', input.tenant)      | SEND SINGLE                        |
+      | 1            | Orders-EU_1.fifo | FIFO GROUP input.tenant | BATCH  | DEDUPLICATION ID input.value | BATCH MAX MESSAGES 10 MAX SIZE 1MiB | FIFO GROUP input.tenant                   | FIFO GROUP input.tenant SEND BATCH |
+      | 3            | Orders-EU_1.fifo | FIFO GROUP input.tenant | BATCH  | DEDUPLICATION ID input.value | BATCH MAX MESSAGES 10 MAX SIZE 1MiB | BATCH MAX MESSAGES 10 MAX SIZE 1MiB       | FIFO GROUP input.tenant SEND BATCH |
 
   Scenario Outline: SQS queue ingestors refuse delivery and quiesce modes the queue does not declare
     Given a <cluster_size> node nervix cluster is started
@@ -144,7 +155,7 @@ Feature: SQS queue declarations
       | 1            | ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
       | 3            | ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 
-  Scenario Outline: SQS queue emitters refuse publishing modes the queue does not declare
+  Scenario Outline: SQS queue emitters require a request shape and refuse shapes and publishing modes the queue does not declare
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -163,20 +174,65 @@ Feature: SQS queue declarations
     When these Plexus commands fail
       """
       CREATE SQS QUEUE EMITTER refused FROM events TO sqs_main QUEUE 'orders'
-        MODE <mode> ENCODE USING event_codec INHERIT ALL
+        <publishing> ENCODE USING event_codec INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     Then the last command error contains
       """
-      expected SINGLE | BATCH, found
+      <expected>
       """
 
     Examples:
-      | cluster_size | mode                                                          |
-      | 1            | NO ACK RETRY POLICY BACKOFF 1s MAX 30s                        |
-      | 3            | NO ACK RETRY POLICY BACKOFF 1s MAX 30s                        |
-      | 1            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-      | 3            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+      | cluster_size | publishing                                                                    | expected                                 |
+      | 1            | MODE ACK RETRY POLICY BACKOFF 1s MAX 30s                                      | expected FIFO GROUP \| SEND, found MODE  |
+      | 3            | MODE ACK RETRY POLICY BACKOFF 1s MAX 30s                                      | expected FIFO GROUP \| SEND, found MODE  |
+      | 1            | SEND PARALLEL MODE ACK RETRY POLICY BACKOFF 1s MAX 30s                        | expected SINGLE \| BATCH, found PARALLEL |
+      | 3            | SEND PARALLEL MODE ACK RETRY POLICY BACKOFF 1s MAX 30s                        | expected SINGLE \| BATCH, found PARALLEL |
+      | 1            | SEND SINGLE MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s                       | expected ACK, found NO                   |
+      | 3            | SEND SINGLE MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s                       | expected ACK, found NO                   |
+      | 1            | SEND BATCH MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | expected RETRY POLICY, found SEQUENTIAL  |
+      | 3            | SEND BATCH MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | expected RETRY POLICY, found SEQUENTIAL  |
+
+  Scenario Outline: SQS queue emitters refuse envelope clauses and header values SQS cannot carry
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (tenant STRING, value STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE SQS CLIENT sqs_main CONFIG {
+        'endpoint' = 'http://127.0.0.1:1',
+        'region' = 'eu-west-1',
+        'access_key_id' = 'declaration-key',
+        'secret_access_key' = 'declaration-secret'
+      };
+      """
+    When these Plexus commands fail
+      """
+      CREATE SQS QUEUE EMITTER refused FROM events TO sqs_main QUEUE '<queue>' <fifo_group>
+        SEND SINGLE MODE ACK RETRY POLICY BACKOFF 1s MAX 30s
+        ENCODE USING event_codec <envelope> INHERIT ALL <invoke>
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    Then the last command error contains
+      """
+      <expected>
+      """
+
+    Examples:
+      | cluster_size | queue       | fifo_group              | envelope                     | invoke                                             | expected                                                                                        |
+      | 1            | orders.fifo | FIFO GROUP input.tenant | DELAY 5s                     |                                                    | SQS FIFO queue 'orders.fifo' takes no per-message DELAY                                         |
+      | 3            | orders.fifo | FIFO GROUP input.tenant | DELAY 5s                     |                                                    | SQS FIFO queue 'orders.fifo' takes no per-message DELAY                                         |
+      | 1            | orders      |                         | DEDUPLICATION ID input.value |                                                    | SQS DEDUPLICATION ID requires a queue name ending in .fifo, found 'orders'                      |
+      | 3            | orders      |                         | DEDUPLICATION ID input.value |                                                    | SQS DEDUPLICATION ID requires a queue name ending in .fifo, found 'orders'                      |
+      | 1            | orders      |                         | DELAY 1500ms                 |                                                    | SQS DELAY must be whole seconds from 1s to 900s, found '1500ms'                                 |
+      | 3            | orders      |                         | DELAY 16m                    |                                                    | SQS DELAY must be whole seconds from 1s to 900s, found '16m'                                    |
+      | 1            | orders      |                         | DELAY 0s                     |                                                    | DELAY must be greater than zero                                                                 |
+      | 3            | orders      |                         | DELAY 0s                     |                                                    | DELAY must be greater than zero                                                                 |
+      | 1            | orders      |                         |                              | INVOKE write_header('flag', input.tenant = 'acme') | write_header value must be STRING, U8, I8, U16, I16, U32, I32, U64, I64 or BYTES, found Boolean |
+      | 3            | orders      |                         |                              | INVOKE write_header('ratio', 0.5)                  | write_header value must be STRING, U8, I8, U16, I16, U32, I32, U64, I64 or BYTES, found Float64 |
 
   Scenario Outline: SQS queue names outside the SQS rule are refused in both directions
     Given a <cluster_size> node nervix cluster is started
@@ -211,7 +267,7 @@ Feature: SQS queue declarations
       """
       CREATE SQS QUEUE EMITTER refused_publishing FROM events
         TO sqs_main QUEUE '<queue>'
-        MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s
+        SEND SINGLE MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING event_codec INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """

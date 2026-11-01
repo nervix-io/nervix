@@ -373,7 +373,7 @@ fn batch_violation(emitter: &CreateEmitter) -> Option<EmitterBatchContractError>
 fn batch_size_is_bounded_by_the_largest_sqs_message() {
     let sqs = || {
         EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-            mode: crate::SqsQueuePublishingMode::Single {
+            mode: crate::SqsQueuePublishingMode::Ack {
                 retry_policy: crate::RetryPolicy {
                     backoff: "250ms".to_string(),
                     max_backoff: "30s".to_string(),
@@ -382,19 +382,20 @@ fn batch_size_is_bounded_by_the_largest_sqs_message() {
             client: named("queue_client"),
             queue: crate::SqsQueueName::parse("events").expect("valid queue"),
             fifo_group: None,
+            send: crate::SqsSend::Single,
         }))
     };
 
     assert_eq!(
-        batch_violation(&batching_emitter(sqs(), Some(batch_policy(10, "256KiB")))),
+        batch_violation(&batching_emitter(sqs(), Some(batch_policy(10, "1MiB")))),
         None
     );
     assert_eq!(
-        batch_violation(&batching_emitter(sqs(), Some(batch_policy(10, "262145B")))),
+        batch_violation(&batching_emitter(sqs(), Some(batch_policy(10, "1048577B")))),
         Some(EmitterBatchContractError::SizeAboveEmitterMaximum {
             connector: "SQS QUEUE",
-            declared: "262145B".parse().assured("a whole number of bytes"),
-            maximum: "256KiB".parse().assured("a whole number of bytes"),
+            declared: "1048577B".parse().assured("a whole number of bytes"),
+            maximum: "1MiB".parse().assured("a whole number of bytes"),
         })
     );
     let kafka = EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {

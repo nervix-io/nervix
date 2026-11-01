@@ -343,7 +343,7 @@ Feature: SQS ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE SQS QUEUE EMITTER sqs_forward FROM notifications TO sqs_out QUEUE 'parallel_out_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
+        CREATE SQS QUEUE EMITTER sqs_forward FROM notifications TO sqs_out QUEUE 'parallel_out_{{test_id}}' SEND SINGLE MODE ACK RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -423,7 +423,7 @@ Feature: SQS ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE SQS QUEUE EMITTER sqs_forward FROM notifications TO sqs_main QUEUE 'rejected_out_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
+        CREATE SQS QUEUE EMITTER sqs_forward FROM notifications TO sqs_main QUEUE 'rejected_out_{{test_id}}' SEND SINGLE MODE ACK RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
