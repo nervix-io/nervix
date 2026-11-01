@@ -441,7 +441,6 @@ pub enum EmitterPublishingModeKind {
     ClientAck,
     NoAck,
     BrokerAck,
-    NatsJetStream,
     RequestAck,
 }
 
@@ -461,11 +460,6 @@ pub enum EmitterPublishing<'a> {
         ack_timeout: &'a str,
         retry_policy: &'a RetryPolicy,
     },
-    NatsJetStream {
-        window: &'a AckWindow,
-        ack_timeout: &'a str,
-        retry_policy: &'a RetryPolicy,
-    },
     RequestAck {
         retry_policy: &'a RetryPolicy,
     },
@@ -477,15 +471,13 @@ impl<'a> EmitterPublishing<'a> {
             Self::ClientAck { retry_policy, .. }
             | Self::NoAck { retry_policy }
             | Self::BrokerAck { retry_policy, .. }
-            | Self::NatsJetStream { retry_policy, .. }
             | Self::RequestAck { retry_policy } => retry_policy,
         }
     }
     pub fn ack_timeout(self) -> Option<&'a str> {
         match self {
             Self::ClientAck { ack_timeout, .. }
-            | Self::BrokerAck { ack_timeout, .. }
-            | Self::NatsJetStream { ack_timeout, .. } => Some(ack_timeout),
+            | Self::BrokerAck { ack_timeout, .. } => Some(ack_timeout),
             Self::NoAck { .. } | Self::RequestAck { .. } => None,
         }
     }
@@ -497,7 +489,6 @@ impl<'a> EmitterPublishing<'a> {
             Self::ClientAck { .. } => EmitterPublishingModeKind::ClientAck,
             Self::NoAck { .. } => EmitterPublishingModeKind::NoAck,
             Self::BrokerAck { .. } => EmitterPublishingModeKind::BrokerAck,
-            Self::NatsJetStream { .. } => EmitterPublishingModeKind::NatsJetStream,
             Self::RequestAck { .. } => EmitterPublishingModeKind::RequestAck,
         }
     }
@@ -509,7 +500,6 @@ impl EmitterPublishingModeKind {
         match self {
             Self::ClientAck | Self::BrokerAck | Self::RequestAck => "ACK",
             Self::NoAck => "NO ACK",
-            Self::NatsJetStream => "JETSTREAM ACK",
         }
     }
 
@@ -520,9 +510,6 @@ impl EmitterPublishingModeKind {
                 "ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s"
             }
             Self::NoAck => "NO ACK RETRY POLICY BACKOFF 1s MAX 30s",
-            Self::NatsJetStream => {
-                "JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s"
-            }
             Self::RequestAck => "ACK RETRY POLICY BACKOFF 1s MAX 30s",
         }
     }
