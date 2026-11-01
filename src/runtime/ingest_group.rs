@@ -1671,6 +1671,9 @@ impl Runtime {
                 )?);
             }
         }
+        rows = self
+            .refuse_unrepresentable_metadata(routing, context, rows, collector, execution_now)
+            .await?;
         if rows.is_empty() {
             return Ok(());
         }
@@ -2010,6 +2013,60 @@ impl Runtime {
             }
         }
         Ok(())
+    }
+
+    /// Refuses every row whose message handed a field the ingestor's programs read a value that
+    /// field's type cannot hold, through every output route's message-error policy with code
+    /// `validation` and operation `admit`, and returns the rows that remain. A group none of whose
+    /// messages was refused returns as it came, without visiting a row.
+    async fn refuse_unrepresentable_metadata(
+        &self,
+        routing: &DomainRoutingSnapshot,
+        context: &IngestGroupContext,
+        mut rows: IngestGroupRows,
+        collector: &mut IngestRouteCollector,
+        execution_now: Timestamp,
+    ) -> error_stack::Result<IngestGroupRows, IngestGroupError> {
+        if !rows.ingest_metadata.refuses_any() {
+            return Ok(rows);
+        }
+        let output_routes = &context.output_routes;
+        let mut keep = BooleanBufferBuilder::new(rows.len());
+        for row in 0..rows.len() {
+            nervix_primitives::task::consume_budget().await;
+            let Some(refusal) = rows.ingest_metadata.refusal(row) else {
+                keep.append(true);
+                continue;
+            };
+            let error = structured_message_error(
+                execution_now,
+                MessageErrorCode::Validation,
+                refusal.message(),
+                MessageErrorOperation::Admit,
+                None,
+                [refusal.field_path()],
+            );
+            keep.append(false);
+            collector.input_refused |= output_routes
+                .routes
+                .iter()
+                .any(|output| matches!(output.message_error_policy, MessageErrorPolicy::Log));
+            let acks = std::mem::replace(&mut rows.acks[row], AckSet::empty());
+            self.handle_ingestor_message_error(IngestorMessageError {
+                routing,
+                domain: &context.domain,
+                ingestor: &context.ingestor,
+                output_routes,
+                record: &rows.row(row)?,
+                ingest_metadata: rows.metadata_row(row),
+                acks,
+                error,
+                materialized_state: HashMap::default(),
+                execution_now,
+            })
+            .await;
+        }
+        rows.select(&keep.finish())
     }
 
     /// Fans an ingestor-wide message error out to every output route's error policy, splitting

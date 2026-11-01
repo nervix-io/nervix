@@ -227,6 +227,7 @@ mod process_cluster;
 mod pulsar_delivery;
 mod pulsar_readiness;
 mod pulsar_subscriptions;
+mod rabbitmq_properties;
 mod restarted_voter;
 mod session_protocol;
 mod standalone_transaction;

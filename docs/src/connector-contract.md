@@ -1331,26 +1331,37 @@ vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the r
 the poll's scheduled instant, `HTTP ENDPOINT` the request's method, path, query, peer address and
 routed host, `WEBSOCKETS CONNECTION` the frame kind, `WEBSOCKETS ENDPOINT` the frame kind, the
 connection's peer address and its path, `KAFKA TOPIC` the topic, partition and offset,
-`SYSLOG LISTENER` the peer address, and every other entity none. The endpoint entities are served by
-the host itself rather than a connector crate, so the server's endpoint intake hands their values
-over the same way a connector's message does. Registry
+`RABBITMQ QUEUE` the delivery's exchange, routing key, delivery tag and redelivery flag followed by
+its AMQP basic properties, `SYSLOG LISTENER` the peer address, and every other entity none. The
+endpoint entities are served by the host itself rather than a connector crate, so the server's
+endpoint intake hands their values over the same way a connector's message does. Registry
 validation reads that declaration for the fields an ingestor's route programs and its
 `TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
 connector's message hands the host the value of every declared field in declared order, one typed
 call per field into the host's value sink, so the three cannot disagree. A value is a `STRING`,
-`BYTES`, `BOOL`, `U16`, `I32`, `I64` or `DATETIME`, or absent where the message carries none; a
-`STRING` such as a socket address may be written into the column in place instead of being
-allocated per message. A message that hands over another number of values than its entity declares,
-or a value of another type than its field's, is a connector defect the host refuses as a typed
-metadata error. A connector adds a field by declaring it and handing its value over: neither the
-contract nor the host names any connector's fields.
+`BYTES`, `BOOL`, `U8`, `U16`, `I32`, `I64`, `U64` or `DATETIME`, the transport's own type rather
+than a wider or narrower one; it is absent where the message carries none, and unrepresentable where
+the message carries one its field's type cannot hold, such as an AMQP timestamp after 2262-04-11,
+the last instant a `DATETIME` holds. An unrepresentable value hands over its declared type and a
+description of the transport value, never a substitute value and never an absence. A `STRING` such
+as a socket address may be written into the column in place instead of being allocated per message.
+A message that hands over another number of values than its entity declares, or a value of another
+type than its field's, is a connector defect the host refuses as a typed metadata error. A connector
+adds a field by declaring it and handing its value over: neither the contract nor the host names any
+connector's fields.
 
 The host projects metadata lazily. When an ingestor binds its programs, the host records which
 declared fields its route programs and its `TIMESTAMP AT metadata.<field>` read, and every ingest
 group of the ingestor builds Arrow columns for those fields and no others. A group of an ingestor
-that reads none visits no metadata value at all. Transport headers keep their projection whatever
-the programs read, because an ingestor's error-route programs may call `read_header` and are
-compiled with the domain's routing, outside the source host.
+that reads none visits no metadata value at all. A message whose value for a read field is
+unrepresentable is refused once its ingestor's `FILTER WHERE` has kept it and before its event time
+is selected: each output route's `ON MESSAGE ERROR` policy receives a message error with code
+`validation` and operation `admit` that names `metadata.<field>` and describes the value, and the
+message's ACK resolves through that policy as any other refused message's does. A value that is
+unrepresentable in a field no program reads refuses nothing, so the lazy projection still decides
+what a message costs and whether it can fail. Transport headers keep their projection whatever the
+programs read, because an ingestor's error-route programs may call `read_header` and are compiled
+with the domain's routing, outside the source host.
 
 Beside its fields and headers, a message names the position its transport gives it, where the
 transport has one: a Kafka record's topic, partition and offset, or a syslog frame's peer. It is the
@@ -1361,7 +1372,8 @@ Transport headers are visited from the borrowed message in the order the entity'
 [header model](#header-models) declares. The host copies them only when the quiesce control decides
 on a payload, which may retain it, or a WebSocket session must retain them after the source message
 ends. A retained payload keeps the value of every field its entity declares, whichever the programs
-read, and its position, so a replayed message builds the same columns a delivered one would; a
+read and an unrepresentable one with its description included, and its position, so a replayed
+message builds the same columns and meets the same refusal a delivered one would; a
 WebSocket frame keeps its connection's exact header snapshot by reference rather than a copy. HTTP
 endpoint and polling headers, WebSocket upgrade headers, Kafka record headers, NATS headers, Pulsar
 properties, RabbitMQ AMQP headers, and SQS attributes keep their transport's own semantics; other
@@ -1847,6 +1859,13 @@ acknowledged because another root failed. Each resolved root remains outstanding
 handoff until its own transport settlement completes. If the connection is lost, only unresolved
 positions follow the broker-redelivered recovery path; already confirmed positions are not counted
 again. Commit-oriented sources retain their declared batch settlement boundary.
+
+A RabbitMQ delivery hands its metadata over from the borrowed delivery itself, so a message copies
+nothing for it: the exchange it was published to, `''` for the default exchange, its routing key,
+the delivery tag its channel assigned and its redelivery flag, then the basic properties it carries,
+each absent where the publisher left it unset. The AMQP timestamp is a count of whole seconds since
+the Unix epoch and becomes that exact `DATETIME` instant; a count past 2262-04-11 is handed over
+unrepresentable, never absent.
 
 Once an individual transport settlement fails, the host retains the other admitted graph waits
 until they finish, without sending more operations on that transport. Only then does it reopen

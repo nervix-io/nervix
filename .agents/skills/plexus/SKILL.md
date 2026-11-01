@@ -279,6 +279,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `nervix_ingestor_header_values_dropped_total`. Read the
   [HTTP REQUEST ingestor contract](../../../docs/src/ingestors.md#http-request) for its declaration
   and header model.
+- For RABBITMQ QUEUE, `metadata.timestamp` reads the AMQP timestamp as whole seconds. A publisher
+  that writes milliseconds there sends an instant no `DATETIME` holds, so every message is refused
+  wherever a route or `TIMESTAMP AT` reads the field; check the producer's unit before choosing
+  `TIMESTAMP AT metadata.timestamp`. `metadata.exchange` is `''` for the default exchange. Read the
+  [RabbitMQ ingestor contract](../../../docs/src/ingestors.md#rabbitmq) for every field.
 - Treat domain execution time as one snapshot per accepted unit of work. Every expression in that
   unit uses the same instant, including filters, construction, keys, correlation and window
   programs, inferencer mappings, emitter `VALUES` and SQS FIFO groups, and subscription filters.

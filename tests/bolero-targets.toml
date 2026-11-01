@@ -3402,10 +3402,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__ingest_metadata__projection_tests__bolero_declared_metadata_rows_project_and_retain_exactly/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "ingest-metadata-projection"
-invariant = "Every value a message hands over for its entity's declared metadata fields, absent or of each declared type at its boundaries and borrowed or rendered, survives the connector's retained copy and the quiesce buffer's retain and replay with the message's ordered headers, shared header snapshot and transport position; a group builds exactly one column for each field its programs read, in declared order whatever order and repetition they name it in, holding every message's value with its validity, keeps every message's ordered headers and visits no value when no field is read."
+invariant = "Every value a message hands over for its entity's declared metadata fields, absent, unrepresentable with its declared type and description, or of each declared type at its boundaries and borrowed or rendered, survives the connector's retained copy and the quiesce buffer's retain and replay with the message's ordered headers, shared header snapshot and transport position; a group builds exactly one column for each field its programs read, in declared order whatever order and repetition they name it in, holding every message's value with its validity and a null for an unrepresentable one, refuses exactly the messages with an unrepresentable value in a read field, naming the first such field and its description, keeps every message's ordered headers and visits no value when no field is read."
 manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-server"

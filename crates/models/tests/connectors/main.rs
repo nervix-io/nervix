@@ -300,10 +300,28 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
             ConnectorKind::Nats,
         ),
-        IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::SortedByName)),
-            ConnectorKind::RabbitMq,
-        ),
+        IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
+            metadata: &[
+                ("exchange", IngestorMetadataType::String),
+                ("routing_key", IngestorMetadataType::String),
+                ("delivery_tag", IngestorMetadataType::U64),
+                ("redelivered", IngestorMetadataType::Bool),
+                ("content_type", IngestorMetadataType::String),
+                ("content_encoding", IngestorMetadataType::String),
+                ("message_id", IngestorMetadataType::String),
+                ("correlation_id", IngestorMetadataType::String),
+                ("reply_to", IngestorMetadataType::String),
+                ("type", IngestorMetadataType::String),
+                ("app_id", IngestorMetadataType::String),
+                ("user_id", IngestorMetadataType::String),
+                ("priority", IngestorMetadataType::U8),
+                ("expiration", IngestorMetadataType::String),
+                ("timestamp", IngestorMetadataType::Datetime),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::RabbitMq),
+        },
         IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => {
             headers_only(None, ConnectorKind::Redis)
         }

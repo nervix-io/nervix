@@ -78,7 +78,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'rabbitmq_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but RABBITMQ QUEUE ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'rabbitmq_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but RABBITMQ QUEUE ingestors declare only metadata.exchange, metadata.routing_key, metadata.delivery_tag, metadata.redelivered, metadata.content_type, metadata.content_encoding, metadata.message_id, metadata.correlation_id, metadata.reply_to, metadata.type, metadata.app_id, metadata.user_id, metadata.priority, metadata.expiration and metadata.timestamp"
       """
       CREATE RABBITMQ QUEUE INGESTOR rabbitmq_source
         FROM rabbit_main QUEUE 'Orders'

@@ -115,8 +115,9 @@ impl<'a> IngestRowHeaders<'a> {
 }
 
 /// Where a message's metadata values go: exactly one call for each field its entity declares, in
-/// the order the declaration lists them, the call of the field's declared type or `absent` where the
-/// message carries no value for that field.
+/// the order the declaration lists them: the call of the field's declared type, `absent` where the
+/// message carries no value for that field, or `unrepresentable` where it carries one the field's
+/// declared type cannot hold.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -134,16 +135,25 @@ pub trait IngestMetadataValues {
     fn bytes(&mut self, value: &[u8]);
     /// The value of a `BOOL` field.
     fn bool(&mut self, value: bool);
+    /// The value of a `U8` field.
+    fn u8(&mut self, value: u8);
     /// The value of a `U16` field.
     fn u16(&mut self, value: u16);
     /// The value of an `I32` field.
     fn i32(&mut self, value: i32);
     /// The value of an `I64` field.
     fn i64(&mut self, value: i64);
+    /// The value of a `U64` field.
+    fn u64(&mut self, value: u64);
     /// The value of a `DATETIME` field.
     fn datetime(&mut self, value: Timestamp);
     /// The message carries no value for the field, which reads as a typed null.
     fn absent(&mut self);
+    /// The message carries a value for a field of type `ty` that `ty` cannot hold, such as an
+    /// instant after the last one a `DATETIME` holds, and `value` describes it as its transport
+    /// wrote it, never with payload content. The host refuses the message where a program reads
+    /// the field and refuses nothing where none does: the value never reads as null.
+    fn unrepresentable(&mut self, ty: IngestorMetadataType, value: &dyn fmt::Display);
 }
 
 /// The typed metadata of one ingestor message, which hands the host the value of every field the
@@ -183,14 +193,22 @@ pub enum RetainedIngestMetadataValue {
     String(String),
     Bytes(Vec<u8>),
     Bool(bool),
+    U8(u8),
     U16(u16),
     I32(i32),
     I64(i64),
+    U64(u64),
     Datetime(Timestamp),
+    /// The message carried a value its field's declared type `ty` cannot hold, which `value`
+    /// describes as its transport wrote it.
+    Unrepresentable {
+        ty: IngestorMetadataType,
+        value: String,
+    },
 }
 
 impl RetainedIngestMetadataValue {
-    /// The declared type this value is of, or `None` for a field the message carried no value
+    /// The declared type this value is for, or `None` for a field the message carried no value
     /// for, which fits a field of any type.
     pub fn ty(&self) -> Option<IngestorMetadataType> {
         match self {
@@ -198,10 +216,13 @@ impl RetainedIngestMetadataValue {
             Self::String(_) => Some(IngestorMetadataType::String),
             Self::Bytes(_) => Some(IngestorMetadataType::Bytes),
             Self::Bool(_) => Some(IngestorMetadataType::Bool),
+            Self::U8(_) => Some(IngestorMetadataType::U8),
             Self::U16(_) => Some(IngestorMetadataType::U16),
             Self::I32(_) => Some(IngestorMetadataType::I32),
             Self::I64(_) => Some(IngestorMetadataType::I64),
+            Self::U64(_) => Some(IngestorMetadataType::U64),
             Self::Datetime(_) => Some(IngestorMetadataType::Datetime),
+            Self::Unrepresentable { ty, .. } => Some(*ty),
         }
     }
 }
@@ -244,10 +265,15 @@ impl IngestMessageMetadata for RetainedIngestMetadata {
                 RetainedIngestMetadataValue::String(value) => values.string(value),
                 RetainedIngestMetadataValue::Bytes(value) => values.bytes(value),
                 RetainedIngestMetadataValue::Bool(value) => values.bool(*value),
+                RetainedIngestMetadataValue::U8(value) => values.u8(*value),
                 RetainedIngestMetadataValue::U16(value) => values.u16(*value),
                 RetainedIngestMetadataValue::I32(value) => values.i32(*value),
                 RetainedIngestMetadataValue::I64(value) => values.i64(*value),
+                RetainedIngestMetadataValue::U64(value) => values.u64(*value),
                 RetainedIngestMetadataValue::Datetime(value) => values.datetime(*value),
+                RetainedIngestMetadataValue::Unrepresentable { ty, value } => {
+                    values.unrepresentable(*ty, value);
+                }
             }
         }
     }
@@ -276,6 +302,10 @@ impl IngestMetadataValues for RetainedIngestMetadataCapture<'_> {
         self.0.push(RetainedIngestMetadataValue::Bool(value));
     }
 
+    fn u8(&mut self, value: u8) {
+        self.0.push(RetainedIngestMetadataValue::U8(value));
+    }
+
     fn u16(&mut self, value: u16) {
         self.0.push(RetainedIngestMetadataValue::U16(value));
     }
@@ -288,12 +318,23 @@ impl IngestMetadataValues for RetainedIngestMetadataCapture<'_> {
         self.0.push(RetainedIngestMetadataValue::I64(value));
     }
 
+    fn u64(&mut self, value: u64) {
+        self.0.push(RetainedIngestMetadataValue::U64(value));
+    }
+
     fn datetime(&mut self, value: Timestamp) {
         self.0.push(RetainedIngestMetadataValue::Datetime(value));
     }
 
     fn absent(&mut self) {
         self.0.push(RetainedIngestMetadataValue::Absent);
+    }
+
+    fn unrepresentable(&mut self, ty: IngestorMetadataType, value: &dyn fmt::Display) {
+        self.0.push(RetainedIngestMetadataValue::Unrepresentable {
+            ty,
+            value: value.to_string(),
+        });
     }
 }
 
@@ -345,7 +386,7 @@ impl<'a> IngestMetadataRow<'a> {
 mod tests {
     use std::net::SocketAddr;
 
-    use nervix_models::Timestamp;
+    use nervix_models::{IngestorMetadataType, Timestamp};
 
     use super::{
         IngestMessageMetadata, IngestMetadataRow, IngestMetadataValues, IngestRowHeaders,
@@ -364,11 +405,14 @@ mod tests {
             values.rendered(&self.peer);
             values.bytes(b"key");
             values.bool(true);
+            values.u8(u8::MAX);
             values.u16(206);
             values.i32(-3);
             values.i64(42);
+            values.u64(u64::MAX);
             values.datetime(self.observed_at);
             values.absent();
+            values.unrepresentable(IngestorMetadataType::Datetime, &self.peer);
         }
     }
 
@@ -388,11 +432,38 @@ mod tests {
                 RetainedIngestMetadataValue::String("127.0.0.1:514".to_string()),
                 RetainedIngestMetadataValue::Bytes(b"key".to_vec()),
                 RetainedIngestMetadataValue::Bool(true),
+                RetainedIngestMetadataValue::U8(u8::MAX),
                 RetainedIngestMetadataValue::U16(206),
                 RetainedIngestMetadataValue::I32(-3),
                 RetainedIngestMetadataValue::I64(42),
+                RetainedIngestMetadataValue::U64(u64::MAX),
                 RetainedIngestMetadataValue::Datetime(Timestamp::from_unix_nanos(1_234)),
                 RetainedIngestMetadataValue::Absent,
+                RetainedIngestMetadataValue::Unrepresentable {
+                    ty: IngestorMetadataType::Datetime,
+                    value: "127.0.0.1:514".to_string(),
+                },
+            ]
+        );
+        let mut types = Vec::new();
+        for value in retained.values() {
+            types.push(value.ty());
+        }
+        assert_eq!(
+            types,
+            [
+                Some(IngestorMetadataType::String),
+                Some(IngestorMetadataType::String),
+                Some(IngestorMetadataType::Bytes),
+                Some(IngestorMetadataType::Bool),
+                Some(IngestorMetadataType::U8),
+                Some(IngestorMetadataType::U16),
+                Some(IngestorMetadataType::I32),
+                Some(IngestorMetadataType::I64),
+                Some(IngestorMetadataType::U64),
+                Some(IngestorMetadataType::Datetime),
+                None,
+                Some(IngestorMetadataType::Datetime),
             ]
         );
         assert_eq!(RetainedIngestMetadata::capture(&retained), retained);

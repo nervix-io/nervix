@@ -116,7 +116,10 @@ delivered. `TIMESTAMP NOW` records that snapshot. `TIMESTAMP AT <field>` reads a
 field and `TIMESTAMP AT metadata.<field>` a metadata field the source's entity declares; the field
 must be `DATETIME`, and `CREATE` and `ALTER` refuse an undeclared metadata field or one of another
 type, naming the fields the entity declares. A message that carries no value for the field is
-rejected as a null payload timestamp is. These and connector-owned event timestamps preserve the
+rejected as a null payload timestamp is, and one whose value no `DATETIME` holds is refused before
+selection, as a value its field's type cannot hold always is (see the metadata rules under
+[Value Construction and Filters](#value-construction-and-filters)). These and connector-owned event
+timestamps preserve the
 external instant exactly; `TIME RATE` never scales them. The internal low
 and high watermarks initially equal the selected event time, so source event time remains distinct
 from delivery and observation time throughout the graph. The 5 ms source-idle close and the
@@ -487,7 +490,8 @@ General notes:
 - public Models store structured expressions; the runtime never reparses Plexus
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
-  `metadata.topic`, `metadata.partition`, and `metadata.offset`, `SYSLOG LISTENER` declares
+  `metadata.topic`, `metadata.partition`, and `metadata.offset`, `RABBITMQ QUEUE` declares the
+  delivery's envelope and its AMQP basic properties, `SYSLOG LISTENER` declares
   `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
   `metadata.remote_addr`, and `metadata.host`, `WEBSOCKETS CONNECTION` declares
@@ -499,6 +503,11 @@ General notes:
 - an ingestor builds a metadata column only for the fields its route expressions or its
   `TIMESTAMP AT metadata.<field>` read, so an ingestor that reads none spends nothing per message
   on metadata
+- a message whose value for a read field its declared type cannot hold, such as an AMQP timestamp
+  after 2262-04-11, is refused once `FILTER WHERE` keeps it: every route's `ON MESSAGE ERROR` policy
+  receives a message error with code `validation` and operation `admit` that names
+  `metadata.<field>` and describes the value. The field never reads as null for it, and a field no
+  program reads refuses nothing
 - supported sources expose transport headers through `read_header(name)` and `read_headers(name)`;
   header names may be any `STRING` expression, and these functions may be used in both top-level
   `FILTER WHERE` and per-route expressions
@@ -1351,7 +1360,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | Not offered: The current queue declaration exposes transport headers but no typed AMQP delivery metadata namespace. |
+| Metadata | metadata.exchange: STRING OPTIONAL<br>metadata.routing_key: STRING OPTIONAL<br>metadata.delivery_tag: U64 OPTIONAL<br>metadata.redelivered: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.content_encoding: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.correlation_id: STRING OPTIONAL<br>metadata.reply_to: STRING OPTIONAL<br>metadata.type: STRING OPTIONAL<br>metadata.app_id: STRING OPTIONAL<br>metadata.user_id: STRING OPTIONAL<br>metadata.priority: U8 OPTIONAL<br>metadata.expiration: STRING OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
@@ -1367,6 +1376,22 @@ See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.
 Its string literal must contain 1 to 255 UTF-8 bytes, the AMQP short-string limit; a multibyte
 character contributes every byte to that limit. `SHOW CREATE INGESTOR` retains the exact queue
 name and the configured acknowledgement, retry and instance policies.
+
+Each delivery exposes its envelope and its AMQP basic properties as metadata.
+`metadata.exchange` is the exchange it was published to, `''` for the default exchange, which is
+AMQP's name for it, and `metadata.routing_key` the routing key it was published with.
+`metadata.delivery_tag` is the `U64` tag its consumer channel gave it, counting from 1 on each
+channel, so a reconnected instance starts again at 1. `metadata.redelivered` is true when the broker
+delivered the message before, such as after a requeue or a lost connection. `metadata.content_type`,
+`content_encoding`, `message_id`, `correlation_id`, `reply_to`, `type`, `app_id`, `user_id`,
+`priority`, `expiration` and `timestamp` are its basic properties, each null when the publisher did
+not set it. `priority` is the `U8` octet the publisher wrote, whatever priorities the queue
+supports, and `expiration` keeps the text the publisher wrote. `metadata.timestamp` reads the AMQP
+timestamp, a count of whole seconds since the Unix epoch, as that exact `DATETIME` instant, so
+`TIMESTAMP AT metadata.timestamp` admits a message at the instant its producer wrote. A count no
+`DATETIME` holds, past 2262-04-11, such as milliseconds written where AMQP specifies seconds, refuses
+its message wherever the ingestor's route programs or its `TIMESTAMP AT` read `metadata.timestamp`,
+with code `validation` and operation `admit`, and refuses nothing in an ingestor that reads none.
 
 
 Choose `MODE NO ACK`, `MODE ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY …`, or
