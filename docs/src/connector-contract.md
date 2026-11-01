@@ -1096,7 +1096,8 @@ and a required `OFFSET BY` choice between the domain's replicated offsets and a 
 group. Its emitter declares `NO ACK` and `ACK` with either window, optional batching with no
 protocol-fixed batch limit, since the producer's configurable `message.max.bytes` bounds each record
 it writes, and no envelope or properties. Headers are `ordered_repeats` exact names in both
-directions; the ingestor's metadata is the record's topic, partition and offset. A Kafka client
+directions; the ingestor's metadata is the record's topic, partition, offset, binary key, timestamp,
+timestamp kind and tombstone flag. A Kafka client
 requires `bootstrap.servers`, without which no consumer or producer reaches a broker. Every other
 property is librdkafka's, checked offline before commit, except the keys Nervix sets itself on the
 consumers and producers it runs, which the client refuses. librdkafka reads some properties under
@@ -1330,21 +1331,25 @@ Each source entity declares its typed metadata fields beside its other capabilit
 vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the response status and
 the poll's scheduled instant, `HTTP ENDPOINT` the request's method, path, query, peer address and
 routed host, `WEBSOCKETS CONNECTION` the frame kind, `WEBSOCKETS ENDPOINT` the frame kind, the
-connection's peer address and its path, `KAFKA TOPIC` the topic, partition and offset,
-`RABBITMQ QUEUE` the delivery's exchange, routing key, delivery tag and redelivery flag followed by
-its AMQP basic properties, `SYSLOG LISTENER` the peer address, and every other entity none. The
-endpoint entities are served by the host itself rather than a connector crate, so the server's
-endpoint intake hands their values over the same way a connector's message does. Registry
+connection's peer address and its path, `KAFKA TOPIC` the topic, partition, offset, binary key,
+timestamp, timestamp kind and tombstone flag, `RABBITMQ QUEUE` the delivery's exchange, routing key,
+delivery tag and redelivery flag followed by its AMQP basic properties, `SYSLOG LISTENER` the peer
+address, and every other entity none. The endpoint entities are served by the host itself rather
+than a connector crate, so the server's endpoint intake hands their values over the same way a
+connector's message does. Registry
 validation reads that declaration for the fields an ingestor's route programs and its
 `TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
 connector's message hands the host the value of every declared field in declared order, one typed
 call per field into the host's value sink, so the three cannot disagree. A value is a `STRING`,
 `BYTES`, `BOOL`, `U8`, `U16`, `I32`, `I64`, `U64` or `DATETIME`, the transport's own type rather
-than a wider or narrower one; it is absent where the message carries none, and unrepresentable where
-the message carries one its field's type cannot hold, such as an AMQP timestamp after 2262-04-11,
-the last instant a `DATETIME` holds. An unrepresentable value hands over its declared type and a
-description of the transport value, never a substitute value and never an absence. A `STRING` such
-as a socket address may be written into the column in place instead of being allocated per message.
+than a wider or narrower one, and it is absent where the message carries none. A connector that
+keeps a message whose transport value its field's type cannot hold hands that value over as
+unrepresentable, with its declared type and a description of the transport value, never a
+substitute value and never an absence: `RABBITMQ QUEUE` does so for an AMQP timestamp after
+2262-04-11, the last instant a `DATETIME` holds. `KAFKA TOPIC` instead fails the read of a record
+whose timestamp is out of range, as its paragraph below states, before any value is handed over.
+A `STRING` such as a socket address may be written into the column in place instead of being
+allocated per message.
 A message that hands over another number of values than its entity declares, or a value of another
 type than its field's, is a connector defect the host refuses as a typed metadata error. A connector
 adds a field by declaring it and handing its value over: neither the contract nor the host names any
@@ -1362,6 +1367,19 @@ unrepresentable in a field no program reads refuses nothing, so the lazy project
 what a message costs and whether it can fail. Transport headers keep their projection whatever the
 programs read, because an ingestor's error-route programs may call `read_header` and are compiled
 with the domain's routing, outside the source host.
+
+Kafka metadata borrows the record's key without allocating another byte sequence. Missing keys
+remain distinct from empty keys. Its timestamp is the exact instant of the driver's Unix
+milliseconds, with `create_time` or `log_append_time` as its kind; an unavailable timestamp has no
+instant or kind. A null value and an empty non-null value both lend an empty payload, but their
+tombstone flags differ. The codec decides whether an empty payload yields any rows. Every row
+that it yields shares the originating record's metadata and transport position. Kafka's
+`SUSPEND`-only quiesce declaration makes retained quiesce metadata unreachable for this entity.
+A present timestamp out of range is a typed source read failure, not an unrepresentable metadata
+value. If conversion fails after a valid prefix was gathered, the source returns that prefix and
+keeps one report for the next admitted read. A cancelled read leaves the report pending; no later
+record is taken while it is pending. The source declares this single-report bound beside its
+driver buffers.
 
 Beside its fields and headers, a message names the position its transport gives it, where the
 transport has one: a Kafka record's topic, partition and offset, or a syslog frame's peer. It is the
@@ -2908,6 +2926,13 @@ sequenceDiagram
   Domain teardown removes only that domain's definitions and ends its bound lifetimes, preserving
   other domains publishing the same host and path. The host continues to own quiesce, buffering,
   decoding, routing, flush cadence, and error reporting.
+  Both entities execute on every live node, independently of leadership and placement. The host
+  captures HTTP method, path, raw query, TCP peer and routed host, or WebSocket data-frame kind,
+  upgrade path and TCP peer. Requested metadata columns are projected from this retained context,
+  including during signaling and after buffered replay. Header reads retain the request's
+  lowercase names and repeated values in their per-name order; WebSocket reads use upgrade headers.
+  The [endpoint manual](ingestors.md#http-endpoint-and-websockets-endpoint) owns the public fields
+  and exact value contracts.
   `MODE ACK MAX <n> ACK TIMEOUT <duration>` gives each node's intake an explicit 1–65,535-response
   window. Immediate permit admission holds one response through the payload's existing ACK root;
   codec or local route refusal yields HTTP 400, successful graph completion 200, and downstream
@@ -2922,7 +2947,10 @@ sequenceDiagram
   Shared YAML encoding uses JSON-compatible flow syntax with quoted strings, preserving their
   complete contents through signaling and codec round trips.
   The source remains request-scoped. HTTP body reads and the driver's frame limits retain their
-  separate bounds. `MODE NO ACK` still confirms admission with 202.
+  separate bounds. The absolute physical ACK deadline starts at payload admission and is not
+  extended by keepalive. `MODE NO ACK` confirms HTTP admission with 202 and sends no per-frame
+  graph acknowledgement on WebSockets. Only that mode accepts `BUFFER MAX SIZE <bytes>`, with no
+  overflow clause: capacity refuses new input instead of discarding accepted bodies.
 
 ## Failure and observation
 
