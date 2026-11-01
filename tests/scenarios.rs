@@ -216,6 +216,7 @@ mod generated_http_payloads;
 mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
+mod kafka_metadata;
 mod mqtt_fixtures;
 mod mqtt_sessions;
 mod mysql_isolation;
@@ -31391,6 +31392,107 @@ async fn postgres_application_connections(world: &ScenarioWorld, application: &s
         .await
         .expect("failed to count Postgres connections")
         .get(0)
+}
+
+/// One connection the database serves, as its connection list records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PostgresBackend {
+    pid: i32,
+    /// When the server started this backend, in milliseconds of the server's own clock.
+    started_at_ms: i64,
+}
+
+/// The connections one Nervix client holds on the database, the oldest first.
+async fn postgres_application_backends(
+    world: &ScenarioWorld,
+    application: &str,
+) -> Vec<PostgresBackend> {
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
+        .expect("failed to connect to Postgres");
+    let rows = sqlx::query(
+        "SELECT pid, (extract(epoch FROM backend_start) * 1000)::bigint FROM pg_stat_activity \
+         WHERE application_name = $1 ORDER BY backend_start",
+    )
+    .bind(application)
+    .fetch_all(&client)
+    .await
+    .expect("failed to list Postgres connections");
+    let mut backends = Vec::with_capacity(rows.len());
+    for row in rows {
+        backends.push(PostgresBackend {
+            pid: row.get(0),
+            started_at_ms: row.get(1),
+        });
+    }
+    backends
+}
+
+/// A pool retires a connection at a lifetime and opens its replacement to keep its minimum. The
+/// server's own start times measure the delay, so load moves both of them together.
+#[then(
+    expr = "Postgres eventually replaces the connection of application {string} at least {string} \
+            after it started"
+)]
+async fn then_postgres_replaces_connection_after(
+    world: &mut ScenarioWorld,
+    application: String,
+    minimum: String,
+) {
+    let application = expand_placeholders(world, &application);
+    let minimum = parse_duration_text(&minimum)
+        .unwrap_or_else(|error| panic!("the minimum delay '{minimum}' is invalid: {error}"));
+    let minimum_ms = i64::try_from(minimum.as_millis())
+        .unwrap_or_else(|error| panic!("the minimum delay fits in i64 milliseconds: {error}"));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut first = None;
+    loop {
+        let backends = postgres_application_backends(world, &application).await;
+        if first.is_none() {
+            first = backends.first().copied();
+        }
+        // A pool of one client holds a few connections, so this reads a short list.
+        if let Some(first) = first
+            && let Some(replacement) = backends.iter().find(|backend| backend.pid != first.pid)
+        {
+            let measured_ms = replacement.started_at_ms - first.started_at_ms;
+            append_cucumber_log_line(&format!(
+                "Postgres replaced connection {} with {} after {measured_ms}ms",
+                first.pid, replacement.pid
+            ));
+            assert!(
+                measured_ms >= minimum_ms,
+                "Postgres replaced a connection of {application} after {measured_ms}ms, expected \
+                 at least {minimum_ms}ms"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for Postgres to replace a connection of {application}; observed \
+             {backends:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Ends every connection of one client from the server's side. Nothing reads an idle pooled
+/// connection, so its pool goes on holding it until something uses it.
+#[when(expr = "Postgres terminates the connections of application {string}")]
+async fn when_postgres_terminates_connections(world: &mut ScenarioWorld, application: String) {
+    let application = expand_placeholders(world, &application);
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
+        .expect("failed to connect to Postgres");
+    sqlx::query(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1",
+    )
+    .bind(&application)
+    .fetch_all(&client)
+    .await
+    .expect("failed to terminate Postgres connections");
 }
 
 #[then(expr = "Postgres never reports more than {int} connections for application {string}")]

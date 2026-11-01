@@ -40,7 +40,7 @@ use nervix_connector_kafka::testing_rdkafka::{
     client::DefaultClientContext,
     config::ClientConfig,
     consumer::{BaseConsumer, Consumer, StreamConsumer},
-    error::RDKafkaErrorCode,
+    error::{KafkaError, RDKafkaErrorCode},
     message::{Header as KafkaHeader, Headers, Message, OwnedHeaders, Timestamp as KafkaTimestamp},
     producer::{FutureProducer, FutureRecord},
     topic_partition_list::{Offset, TopicPartitionList},
@@ -2543,6 +2543,16 @@ impl Cluster {
         publish_kafka(&self.dependencies, topic, payload).await
     }
 
+    pub(crate) async fn publish_kafka_metadata_record(
+        &self,
+        topic: &str,
+        record: &crate::kafka_metadata::KafkaMetadataRecord,
+    ) -> io::Result<()> {
+        record
+            .publish(kafka_client_config(&self.dependencies)?, topic)
+            .await
+    }
+
     pub(crate) async fn publish_kafka_with_headers(
         &self,
         topic: &str,
@@ -2585,6 +2595,24 @@ impl Cluster {
         partitions: i32,
     ) -> io::Result<()> {
         ensure_kafka_topic_partitions(&self.dependencies, topic, partitions).await
+    }
+
+    /// Historical CreateTime records must survive the broker's retention scans.
+    pub(crate) async fn create_kafka_metadata_topic(&self, topic: &str) -> io::Result<()> {
+        let admin = kafka_admin_client(&self.dependencies)?;
+        let definition = NewTopic::new(topic, 1, TopicReplication::Fixed(1))
+            .set("message.timestamp.type", "CreateTime")
+            .set("retention.ms", "-1")
+            .set("retention.bytes", "-1");
+        let options = AdminOptions::new().request_timeout(Some(Duration::from_secs(5)));
+        let created = admin
+            .create_topics(&[definition], &options)
+            .await
+            .map_err(io::Error::other)?;
+        for result in created {
+            result.map_err(|(_, code)| io::Error::other(KafkaError::AdminOp(code)))?;
+        }
+        wait_for_kafka_topic_partitions(&self.dependencies, topic, 1).await
     }
 
     /// Subscribes a consumer group member that Nervix does not run to `topic` in `group`.

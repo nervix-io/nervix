@@ -855,6 +855,16 @@ pool with `RedisClientError::InvalidPoolLifetime`, naming the key above the sche
 `ClientConfigSchemaError::InvalidValue`, which the node reports as
 `OpenClientError::InvalidPoolLifetime`. It is a configuration failure, not a record rejection.
 
+A Postgres client's pool keys are refused at `CREATE CLIENT` unless `pool_acquire_timeout_ms`,
+`pool_idle_timeout_ms` and `pool_max_lifetime_ms` are positive, schedulable whole milliseconds and
+`pool_test_before_acquire` is a boolean. The pool reads them from the client's effective entries and
+checks them again: an invalid value fails opening the pool with
+`EmitterOpenError::InvalidConfiguration` above the `ClientConfigError` that names the key, and it is a
+configuration failure, not a record rejection. A checkout that runs out of
+`pool_acquire_timeout_ms` keeps the shared `DeadlineElapsed` with the key and its bound, beneath
+`EmitterOpenError::Initialize` while the pool opens and beneath `EmitterWriteError::NotInitialized`
+on a write, which the host retries on its policy.
+
 Redis subscription protocol and read failures retain their driver causes beneath
 `RedisPubSubIngestorError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
 the shared `DeadlineElapsed` with `idle_timeout_ms` and its configured bound beneath `IdleProbe`
@@ -985,6 +995,13 @@ client accepts under one name, such as `metadata.broker.list` for `bootstrap.ser
 `ClientConfigSchemaError::DriverAlias`, naming the key and the accepted name. A key written under
 librdkafka's `topic.` prefix is `ClientConfigSchemaError::DriverPrefix`, naming the key and the
 prefix. Both refusals sit beneath the same client context and carry no configured value.
+
+A Kafka record timestamp outside the signed Unix-nanosecond range retains
+`TimestampError::ArithmeticOverflow` beneath `KafkaTopicIngestorError::RecordTimestamp`, naming
+the topic, partition and offset, beneath `IngestorError::Read`. It is a source read failure, not
+a codec rejection, and never becomes a wrapped or absent metadata instant. When a later record
+in a collected read fails that conversion, the source returns the valid gathered prefix first and
+keeps exactly one report for its next admitted read. A cancelled read leaves that report pending.
 
 A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaTopicIngestorError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator

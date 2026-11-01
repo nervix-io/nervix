@@ -85,12 +85,13 @@ pub enum SyslogDeadlineScope {
 }
 
 impl SyslogDeadlineScope {
-    /// The clients whose waits `key` bounds.
-    fn of(key: DeadlineKey) -> Self {
+    /// The clients whose waits `key` bounds, where any do: Syslog keeps no connection pool.
+    fn of(key: DeadlineKey) -> Option<Self> {
         match key {
-            DeadlineKey::Timeout => Self::EmitterWrites,
-            DeadlineKey::ConnectTimeout => Self::ConnectionOrTlsHandshake,
-            DeadlineKey::IdleTimeout => Self::ListenerConnections,
+            DeadlineKey::Timeout => Some(Self::EmitterWrites),
+            DeadlineKey::ConnectTimeout => Some(Self::ConnectionOrTlsHandshake),
+            DeadlineKey::IdleTimeout => Some(Self::ListenerConnections),
+            DeadlineKey::PoolAcquireTimeout => None,
         }
     }
 
@@ -343,13 +344,15 @@ impl SyslogClientConfig {
     ) -> error_stack::Result<(), SyslogConfigError> {
         let schema = CreateClientSyslog::<u64>::DECLARATION.config;
         for key in DeadlineKey::iter() {
+            let Some(scope) = SyslogDeadlineScope::of(key) else {
+                continue;
+            };
             if Self::optional_value(entries, key.key()).is_none() {
                 continue;
             }
             let declared = schema
                 .key(key.key())
                 .verified("validate_keys refused every entry the client does not declare");
-            let scope = SyslogDeadlineScope::of(key);
             if !direction.reads(declared) || !scope.waits_over(direction, protocol) {
                 return Err(Report::new(SyslogConfigError::InapplicableDeadlineKey {
                     key: key.key(),

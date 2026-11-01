@@ -221,6 +221,16 @@ pub struct KafkaTopicIngestor {
 const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
+            holds: "a record conversion report after a gathered prefix",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: 1,
+                    unit: "report per ingestor instance",
+                },
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
             holds: "messages librdkafka prefetches",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Driver(
@@ -344,11 +354,15 @@ const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
 };
 
-/// Where a Kafka record sits in its topic.
+/// A Kafka record's position, key, timestamp and null-value state.
 const KAFKA_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
     IngestorMetadataField::new("topic", IngestorMetadataType::String),
     IngestorMetadataField::new("partition", IngestorMetadataType::I32),
     IngestorMetadataField::new("offset", IngestorMetadataType::I64),
+    IngestorMetadataField::new("key", IngestorMetadataType::Bytes),
+    IngestorMetadataField::new("timestamp", IngestorMetadataType::Datetime),
+    IngestorMetadataField::new("timestamp_type", IngestorMetadataType::String),
+    IngestorMetadataField::new("tombstone", IngestorMetadataType::Bool),
 ]);
 
 impl IngestorDeclaration for KafkaTopicIngestor {
