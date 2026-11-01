@@ -560,6 +560,33 @@ pub(super) mod tests {
         runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
+    /// The header values of a request that are not UTF-8 count on the counter the route's bound
+    /// ingestor resolved when it started, and a request with none counts nothing.
+    #[nervix_primitives::test]
+    async fn undecodable_header_values_count_on_the_bound_ingestor() {
+        let domain = domain("default");
+        let ingestor = named::<IngestorName>("event_source");
+        let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
+        let route = runtime
+            .resolve_endpoint("edge.example.com", "/events")
+            .into_route()
+            .assured("the fixture installs its endpoint route");
+        let dispatcher = runtime.inner.remote_dispatcher.load();
+        let dropped = runtime.inner.metrics.ingestor_header_values_dropped(
+            &domain,
+            &ingestor,
+            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+        );
+
+        route.count_dropped_header_values(0);
+        assert_eq!(dropped.get(), 0);
+        route.count_dropped_header_values(2);
+        assert_eq!(dropped.get(), 2);
+        route.count_dropped_header_values(1);
+        assert_eq!(dropped.get(), 3);
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
+    }
+
     #[nervix_primitives::test]
     async fn a_running_ingestor_refuses_a_second_start() {
         let domain = domain("default");
