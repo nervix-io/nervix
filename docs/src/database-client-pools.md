@@ -7,7 +7,8 @@ minimum and a maximum connection count as part of its definition.
 HTTP clients are outside this contract, including ClickHouse, HTTP polling, Prometheus, Sentry,
 OTEL, SQS, Iceberg REST, and the object-store transports. Broker clients, WebSockets, Syslog, and
 ZeroMQ keep their transport-specific connection policies. The pool clauses are available only for
-the four types listed above.
+the four types listed above. [ClickHouse connections](#clickhouse-connections) describes how a
+ClickHouse client, which has no bounded pool, reuses its connections.
 
 ## Declaring the bounds
 
@@ -101,7 +102,10 @@ that sets `timeout_ms` bounds each checkout, including connection establishment 
 by that value, and bounds initial validation and each insert separately. Its minimum keeper uses
 the same checkout bound. An exhausted pool reports `checking out a MySQL connection did not finish
 within timeout_ms` with the configured duration, then the emitter retries on its policy. Omitting
-`timeout_ms` leaves these MySQL waits unbounded. A Redis publish checks its connection out within the client's
+`timeout_ms` leaves these MySQL waits unbounded. Each isolated row's insert receives its own
+operation bound, so the key is not a deadline for the entire flush or its retries. See the
+[MySQL emitter contract](emitters.md#mysql) for insert sizing, TLS identity and exact value bindings.
+A Redis publish checks its connection out within the client's
 `connect_timeout_ms`, 30 seconds by default, the same deadline that bounds opening each new command
 connection: a checkout that runs out of it reports `checking out a Redis command connection did not
 finish within connect_timeout_ms` with the bound. A MongoDB write has only its driver's deadlines:
@@ -148,10 +152,12 @@ lifetime or after a failed `PING`, Nervix brings it back to `MIN` at once. If Re
 reached then, each attempt waits up to `connect_timeout_ms` and the next follows as soon as it ends,
 while a publisher that finds no connection idle still opens one for itself.
 
-For MySQL, opening the pool validates one connection, and the maintenance task brings the pool to
-`MIN` a second later. A checkout that fails ends its pass, which returns the connections it held,
-and the next pass tries again a second later, while an emitter that finds no connection idle still
-opens one for itself.
+For MySQL, opening the pool validates one connection, even with `MIN 0`. The maintenance task
+starts its first pass one second after initialization and waits one second after each completed
+pass before starting another. Establishment can take longer; when configured, `timeout_ms` bounds
+each checkout rather than the complete pass. A checkout that fails ends its pass, which returns
+the connections it held, and the next pass tries again a second later, while an emitter that finds
+no connection idle still opens one for itself. With `MIN 0` the keeper requests no connections.
 
 ## Connection lifetimes
 
@@ -230,6 +236,18 @@ to `CONFIG`. Connection-pool sizing is declared only through the `POOL SIZE` cla
 connector options for connection establishment, idle lifetime, and operation timeouts stay in
 `CONFIG` and do not restate either bound.
 
+For MySQL, `CREATE MYSQL CLIENT` refuses reserved sizing keys in standalone `CONFIG` and in the
+decoded `addr` query, without regard to ASCII case: `maxpoolsize`, `max_pool_size`, `minpoolsize`,
+`min_pool_size`, `pool_max`, `pool_min` and `pool_size`. Its declared standalone keys are `addr`,
+`timeout_ms`, `tls_ca_file`, `tls_cert_file` and `tls_key_file`. Driver URL options pass the
+driver's offline parser. Nervix installs the declared bounds on default driver pool options,
+replacing URL values for `inactive_connection_ttl`, `ttl_check_interval`, `abs_conn_ttl` and
+`abs_conn_ttl_jitter`. The driver's separate `conn_ttl` URL option is retained: it sets an expiry
+threshold, in seconds, for time since a connection's last I/O (`0` disables this check).
+When omitted, that check uses the server's `wait_timeout`. No standalone MySQL pool-lifetime
+`CONFIG` key is currently declared. Read the [MYSQL client key reference](connector-capabilities.md#mysql-client)
+before choosing connection settings.
+
 Both counts are strongly persisted with the rest of the client definition, and
 `SHOW CREATE CLIENT <name>;` reports them in the declared order:
 
@@ -247,3 +265,22 @@ There is no `ALTER CLIENT`. Change either bound the same way as any other part o
 definition: `DROP CLIENT` and `CREATE <CONNECTOR> CLIENT` in one transaction. A client that runtime entities
 reference is replaced together with them, under the existing transactional quiesce contract for
 those entities.
+
+## ClickHouse connections
+
+A ClickHouse client takes no `POOL SIZE` clause, and no declared bound limits how many connections
+it opens. None of this chapter's pool rules apply to it: there is no pool per client, per domain,
+per node, and no minimum is maintained. Each running ClickHouse emitter builds its own HTTP client
+from the client's configuration, so separate emitters of one client never share a connection, and
+adding emitters adds connections.
+
+An emitter sends one insert at a time, and an insert uses one connection until ClickHouse answers
+it, so an emitter uses one connection at a time, also while it writes the rows of a refused insert
+again one by one. A connection an insert finishes with stays open for the emitter's next insert
+until it has been idle for the client's `pool_idle_timeout_ms`, 2000 milliseconds unless the client
+sets it, and is closed after that. The client keeps idle connections without a count limit, and the
+next insert that finds none opens a new connection, resolving the host again. `tcp_keepalive_ms`,
+60000 milliseconds unless the client sets it, starts TCP keep-alive probes on a connection that has
+been idle that long. `timeout_ms` bounds each insert, its connection included; none of these keys
+bounds how many connections an emitter opens over time. [Emitters](./emitters.md#clickhouse)
+describes the client's keys.

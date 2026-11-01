@@ -70,10 +70,13 @@ impl Generated {
         }
     }
 
-    /// This statement, making every choice `requirements` name.
+    /// This statement, making the first choice each of `requirements` accepts.
     fn choosing(mut self, requirements: &[ChoiceRequirement]) -> Self {
         for requirement in requirements {
-            self.chosen.insert(requirement.option, requirement.choice);
+            let Some(first) = requirement.choices.first() else {
+                panic!("{} requires no choice of {}", self.kind, requirement.option);
+            };
+            self.chosen.insert(requirement.option, first);
         }
         self
     }
@@ -296,11 +299,10 @@ fn every_declared_delivery_and_quiesce_mode_parses_into_its_kind() {
                     continue;
                 };
                 for requirement in delivery.requires.iter().chain(quiesce.requires) {
-                    assert_eq!(
-                        source.chosen(requirement.option),
-                        Some(requirement.choice),
-                        "{text}"
-                    );
+                    let Some(chosen) = source.chosen(requirement.option) else {
+                        panic!("the source answers for {}: {text}", requirement.option);
+                    };
+                    assert!(requirement.accepts(chosen), "{text}");
                 }
             }
         }

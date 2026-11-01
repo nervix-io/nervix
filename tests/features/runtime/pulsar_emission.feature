@@ -28,7 +28,7 @@ Feature: Pulsar emission
           'addr' = '{{pulsar_addr}}'
         };
         CREATE PULSAR TOPIC INGESTOR pulsar_ingress
-        FROM pulsar_main TOPIC 'notifications_in_{{test_id}}' SUBSCRIPTION 'nervix_pulsar_emission_{{test_id}}' OWNED BY INGESTOR INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM pulsar_main TOPIC 'notifications_in_{{test_id}}' SUBSCRIPTION 'nervix_pulsar_emission_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

@@ -43,7 +43,9 @@ Feature: Emitter batching configuration
       };
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9324',
-        'region' = 'us-east-1'
+        'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret'
       };
       CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = 'http://public@127.0.0.1:8000/1',
@@ -143,7 +145,7 @@ Feature: Emitter batching configuration
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SQS QUEUE EMITTER sqs_batched FROM outgoing
         TO sqs_main QUEUE 'sqs_batched'
-          MODE BATCH RETRY POLICY BACKOFF 10ms MAX 1s
+          SEND BATCH MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
         BATCH MAX MESSAGES 100 MAX SIZE 256KiB
@@ -437,7 +439,9 @@ Feature: Emitter batching configuration
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9324',
-        'region' = 'us-east-1'
+        'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret'
       };
       CREATE SENTRY CLIENT sentry_main CONFIG { 'dsn' = 'http://public@127.0.0.1:8000/1', 'timeout_ms' = 5000 };
       CREATE MONGODB CLIENT mongodb_main POOL SIZE MIN 1 MAX 2 CONFIG {
@@ -454,19 +458,19 @@ Feature: Emitter batching configuration
       """
 
     Examples:
-      | cluster_size | connector_body                                                                                              | batch                                      | diagnostic                                                                 | emitter_kind       |
-      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 0 MAX SIZE 1MiB         | BATCH MAX MESSAGES must be between 1 and 65536, found 0                    | KAFKA TOPIC        |
-      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 65537 MAX SIZE 1MiB     | BATCH MAX MESSAGES must be between 1 and 65536, found 65537                | KAFKA TOPIC        |
-      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 10 MAX SIZE 0MiB        | BATCH MAX SIZE must be greater than zero                                   | KAFKA TOPIC        |
-      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 10 MAX SIZE 1.5MiB      | must be a whole number followed by B, KB, KiB, MB, MiB, GB, GiB, TB or TiB | KAFKA TOPIC        |
-      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 10 MAX SIZE 16777216TiB | exceeds the largest size a 64-bit byte count can hold                      | KAFKA TOPIC        |
-      | 1            | sqs_main QUEUE 'events' MODE BATCH RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL    | BATCH MAX MESSAGES 10 MAX SIZE 512KiB      | SQS QUEUE emitters accept BATCH MAX SIZE up to 256KiB                      | SQS QUEUE          |
-      | 1            | sentry_main MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING sentry_codec INHERIT ALL                 | BATCH MAX MESSAGES 10 MAX SIZE 900KB       | requires codec 'sentry_codec' to declare an ON EMITTING BATCH              | SENTRY EVENT       |
-      | 1            | mongodb_main COLLECTION 'events' MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq }     |                                            | BATCH MAX MESSAGES                                                         | MONGODB COLLECTION |
-      | 3            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 0 MAX SIZE 1MiB         | BATCH MAX MESSAGES must be between 1 and 65536, found 0                    | KAFKA TOPIC        |
-      | 3            | sqs_main QUEUE 'events' MODE BATCH RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL    | BATCH MAX MESSAGES 10 MAX SIZE 512KiB      | SQS QUEUE emitters accept BATCH MAX SIZE up to 256KiB                      | SQS QUEUE          |
-      | 3            | sentry_main MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING sentry_codec INHERIT ALL                 | BATCH MAX MESSAGES 10 MAX SIZE 900KB       | requires codec 'sentry_codec' to declare an ON EMITTING BATCH              | SENTRY EVENT       |
-      | 3            | mongodb_main COLLECTION 'events' MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq }     |                                            | BATCH MAX MESSAGES                                                         | MONGODB COLLECTION |
+      | cluster_size | connector_body                                                                                                    | batch                                      | diagnostic                                                                 | emitter_kind       |
+      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 0 MAX SIZE 1MiB         | BATCH MAX MESSAGES must be between 1 and 65536, found 0                    | KAFKA TOPIC        |
+      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 65537 MAX SIZE 1MiB     | BATCH MAX MESSAGES must be between 1 and 65536, found 65537                | KAFKA TOPIC        |
+      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 10 MAX SIZE 0MiB        | BATCH MAX SIZE must be greater than zero                                   | KAFKA TOPIC        |
+      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 10 MAX SIZE 1.5MiB      | must be a whole number followed by B, KB, KiB, MB, MiB, GB, GiB, TB or TiB | KAFKA TOPIC        |
+      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 10 MAX SIZE 16777216TiB | exceeds the largest size a 64-bit byte count can hold                      | KAFKA TOPIC        |
+      | 1            | sqs_main QUEUE 'events' SEND BATCH MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 10 MAX SIZE 2MiB        | SQS QUEUE emitters accept BATCH MAX SIZE up to 1MiB                        | SQS QUEUE          |
+      | 1            | sentry_main MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING sentry_codec INHERIT ALL                       | BATCH MAX MESSAGES 10 MAX SIZE 900KB       | requires codec 'sentry_codec' to declare an ON EMITTING BATCH              | SENTRY EVENT       |
+      | 1            | mongodb_main COLLECTION 'events' MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq }           |                                            | BATCH MAX MESSAGES                                                         | MONGODB COLLECTION |
+      | 3            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 0 MAX SIZE 1MiB         | BATCH MAX MESSAGES must be between 1 and 65536, found 0                    | KAFKA TOPIC        |
+      | 3            | sqs_main QUEUE 'events' SEND BATCH MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 10 MAX SIZE 2MiB        | SQS QUEUE emitters accept BATCH MAX SIZE up to 1MiB                        | SQS QUEUE          |
+      | 3            | sentry_main MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING sentry_codec INHERIT ALL                       | BATCH MAX MESSAGES 10 MAX SIZE 900KB       | requires codec 'sentry_codec' to declare an ON EMITTING BATCH              | SENTRY EVENT       |
+      | 3            | mongodb_main COLLECTION 'events' MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq }           |                                            | BATCH MAX MESSAGES                                                         | MONGODB COLLECTION |
 
   @emitter_batching_codec_grammar
   Scenario: ON EMITTING BATCH is only written after ON EMITTING

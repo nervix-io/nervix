@@ -133,10 +133,26 @@ def bounds_rows(bounds):
     ]
 
 
+def header_label(model):
+    """A declared header model as `DESCRIBE` names it: its layout and names, then what carries each
+    typed value where its values are typed."""
+    label = f"`{model['layout']}`, {model['names']} names"
+    if model["values"]:
+        label += f"; {model['values']}"
+    return label
+
+
+def header_meaning(model):
+    """What a declared header model means for the headers of one message."""
+    meaning = f"{model['layout_meaning']}; {model['names_meaning']}"
+    if model["values"]:
+        meaning += "; a value's exact type decides the type it travels as"
+    return meaning
+
+
 def header_model(model):
-    """A declared header model as the manuals state it: its layout and names, then their meaning."""
-    return (f"`{model['layout']}`, {model['names']} names: {model['layout_meaning']}; "
-            f"{model['names_meaning']}")
+    """A declared header model as the manuals state it: its label, then its meaning."""
+    return f"{header_label(model)}: {header_meaning(model)}"
 
 
 def entity_rows(row, side, notes):
@@ -220,12 +236,30 @@ def readers_text(surface, client):
     return " ".join(sentences) + "\n"
 
 
+def driver_names(client):
+    """The other names a client's driver reads for one property, which the client refuses."""
+    lines = []
+    if client["aliases"]:
+        lines.append("A property the driver reads under more than one name is accepted under one; "
+                     "the client refuses the other.\n")
+        lines.append(table([(f"`{alias['alias']}`", f"`{alias['accepted']}`") for alias in client["aliases"]],
+                           ("Refused driver name", "Accepted name")))
+    stripped = client["stripped_prefix"]
+    if stripped is not None:
+        own = ", ".join(f"`{name}`" for name in stripped["properties"]) or "none"
+        lines.append(f"The driver also strips its `{stripped['prefix']}` prefix from a key that names none of "
+                     f"its own properties and reads the rest as a property name, so the client refuses a key "
+                     f"written under the prefix, except the driver's own properties whose names begin with "
+                     f"it: {own}.\n")
+    return lines
+
+
 def render_matrix(surface, notes):
     validate_notes(surface, notes)
     lines = ["# Connector Capabilities\n", "This reference is generated from the current declarations in Plexus, the Nervix graph definition language. Regenerate it with `just connector-matrix`; `just validate-connector-matrix` rejects drift in this chapter and the generated manual regions.\n",
              "The tables describe the implemented surface. A connector Epic can extend a declaration and regenerate these tables in the same change. Modes below are complete bodies after `MODE`; options retain their declared order, exact value types, presence and defaults. Locator rule names identify the vocabulary's validator; see [External Names](ingestors.md#external-names).\n",
              "Ingest and emit are separate contracts: consuming a broker position and publishing a record need different acknowledgements. Each mirror column compares every declared entity of the same connector on the other side and explains transport differences. An absent capability requires reviewed explanatory prose; stale or missing explanations fail validation.\n",
-             "Client CONFIG keys below come from the same declaration used by validation, completion and public inspection. Keys are lowercase and case-sensitive; every key occurs at most once. Required keys, Nervix-owned value types and TLS identity pairs validate before storage. Driver property namespaces and address query options remain intentional pass-through; undeclared driver properties are confidential in public inspection. Kafka properties and Postgres, MySQL, Redis, RabbitMQ and NATS addresses also pass network-free driver checks before commit. Authentication, connectivity and checks requiring a remote service wait for initialization. Nervix-owned file values accept resource mount templates and must resolve to readable files; driver-owned file properties retain their native interpretation. HTTPS retains the driver's built-in trust roots; MQTT requires tls_ca_file for mqtts, as its key's conditional presence declares. tls_ca_file follows the connector's documented augmentation or replacement policy, and a client certificate requires its private key.\n"]
+             "Client CONFIG keys below come from the same declaration used by validation, completion and public inspection. Keys are lowercase and case-sensitive; every key occurs at most once. Required keys, Nervix-owned value types and TLS identity pairs validate before storage. Driver property namespaces and address query options remain intentional pass-through; undeclared driver properties are confidential in public inspection. Kafka properties and Postgres, MySQL, Redis, RabbitMQ and NATS addresses also pass network-free driver checks before commit. Authentication, connectivity and checks requiring a remote service wait for initialization. Nervix-owned file values accept resource mount templates and must resolve to readable files; driver-owned file properties retain their native interpretation. HTTPS retains the driver's built-in trust roots; MQTT requires tls_ca_file exactly for mqtts and refuses its TLS files with a plaintext address, as its keys' conditional presence declares. tls_ca_file follows the connector's documented augmentation or replacement policy, and a client certificate requires its private key.\n"]
     for side, title in (("ingest", "Ingest"), ("emit", "Emit")):
         lines.append(f"## {title}\n")
         for row in surface[side]:
@@ -248,6 +282,7 @@ def render_matrix(surface, notes):
         namespaces = ", ".join(client["namespaces"]) or "none; only declared keys are accepted"
         reserved = ", ".join(f"`{key}`" for key in client["reserved"]) or "none"
         lines.append(f"Delegated property namespaces: {namespaces}. Reserved keys: {reserved}.\n")
+        lines.extend(driver_names(client))
         readers = readers_text(surface, client)
         if readers:
             lines.append(readers)
@@ -296,15 +331,14 @@ def header_models_table(surface):
             model = row["headers"]
             if not model:
                 continue
-            key = (model["layout"], model["names"])
+            key = (model["layout"], model["names"], model["values"] or "")
             group = groups.setdefault(key, {"ingest": [], "emit": [], "meaning": model})
             group[side].append(f"`{row['entity']}`")
     rows = []
-    for (layout, names), group in sorted(groups.items()):
+    for _, group in sorted(groups.items()):
         model = group["meaning"]
-        rows.append((f"`{layout}`, {names} names", ", ".join(group["ingest"]) or "None",
-                     ", ".join(group["emit"]) or "None",
-                     f"{model['layout_meaning']}; {model['names_meaning']}"))
+        rows.append((header_label(model), ", ".join(group["ingest"]) or "None",
+                     ", ".join(group["emit"]) or "None", header_meaning(model)))
     return table(rows, ("Header model", "Ingest", "Emit", "Meaning"))
 
 
@@ -317,8 +351,7 @@ def side_headers(surface, side):
         if not model:
             without.append(f"`{row['entity']}`")
             continue
-        rows.append((f"`{row['entity']}`", f"`{model['layout']}`, {model['names']} names",
-                     f"{model['layout_meaning']}; {model['names_meaning']}"))
+        rows.append((f"`{row['entity']}`", header_label(model), header_meaning(model)))
     if side == "ingest":
         text = table(rows, ("Ingestor", "Header model", "What `read_header` and `read_headers` find"))
         closing = "carry no transport headers and refuse `read_header` and `read_headers`"

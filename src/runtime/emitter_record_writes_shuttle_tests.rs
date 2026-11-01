@@ -91,7 +91,7 @@ fn payload(rows: &[usize], bytes: &[u8]) -> PreparedPayload<EncodedPayload> {
         content: EncodedPayload {
             envelope: BatchEnvelope {
                 key: None,
-                headers: Vec::new(),
+                headers: EmitterHeaders::Text(Vec::new()),
                 message_group: None,
                 clauses: Some(Arc::new(modeled_envelope())),
             },

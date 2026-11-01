@@ -349,8 +349,9 @@ round synchronizes the owner's branch lifecycle before it installs a branch chec
 replica refuses a checkpoint only when that lifecycle does not name the branch, as for an evicted
 branch. A node without stable storage acknowledges nothing.
 
-While the checkpoint waits, it wakes on each replica report and rereads the schedule at least every
-100 milliseconds. A replica the schedule replaces is replaced in the wait. The wait fails when the
+While the checkpoint waits, it wakes on each replica report and, at least every 100 milliseconds,
+rereads the unit assignment publication the branch retains, which schedule installation replaces. A
+replica the schedule replaces is replaced in the wait. The wait fails when the
 schedule assigns fewer replicas than the checkpoint was captured for, when this node no longer
 executes the processor, and when the deadline passes with a replica still missing.
 
@@ -422,8 +423,9 @@ redelivered input does.
 A restarted node executes nothing until a linearizable read proves it has applied the committed
 schedule, so a former owner cannot resume a branch the cluster moved while it was away. See
 [Recovered Ownership Is Fenced](./shutdown.md#recovered-ownership-is-fenced). During execution, the
-boundary check at the start of every checkpoint, and the schedule rereads while it waits for
-replicas, refuse a checkpoint whose placement or ownership moved on while its callback ran.
+boundary check at the start of every checkpoint, and the rereads of the retained unit assignment
+while it waits for replicas, refuse a checkpoint whose placement or ownership moved on while its
+callback ran.
 
 A planned ownership handoff keeps the generation. Intake and boundary admission close first.
 Affected branches remain runnable until their admitted work and requested force flush complete;
@@ -815,11 +817,10 @@ branches.
 | Large backup and restore | `backup_guest_saves.feature`: two 40 MiB branch saves on one and three nodes, bounded bulk capture, interrupted capture cleanup, exact restored bytes and the next guest callback |
 | Large saves within the replica deadline | `large_wasm_state_replication.feature`: 40 MiB saves of interleaved branches reach the checkpoint boundary on three nodes with one replica; the interconnect check that a bulk response puts one whole bulk receive window in flight before its reader reads, backed by exactly one `bulk_window` reservation |
 
-The [WASM state qualification
-ledger](https://github.com/nervix-io/nervix/blob/main/tests/wasm-state-qualification-ledger.md)
-records the commands, the defects the qualification found and fixed, the validation record, and the
-measured cost of a durable checkpoint: 3 to 18 milliseconds per round for one branch, and 6 to 37
-milliseconds for sixteen concurrent branches that share a synchronization.
+The [WASM state qualification map](https://github.com/nervix-io/nervix/blob/main/tests/wasm-state-qualification-ledger.md)
+records crash windows, guarantees and their executable evidence.
+[WASM State 11](https://app.clickup.com/t/86bc22g2q) retains the historical validation results,
+audit findings and durable-checkpoint cost measurements, with their commands and tested revision.
 
 ## Retained Checkpoint Assignment
 

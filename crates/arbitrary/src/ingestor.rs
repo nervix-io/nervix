@@ -210,7 +210,8 @@ impl Arbitrary<'_> {
         let topic = self.pulsar_topic_name();
         let name = self.pulsar_subscription_name();
         let ownership = if self.entropy.flag() {
-            PulsarSubscriptionOwnership::Ingestor
+            let start_at = self.pulsar_start_position();
+            PulsarSubscriptionOwnership::Ingestor { start_at }
         } else {
             PulsarSubscriptionOwnership::Provisioned
         };
@@ -225,13 +226,43 @@ impl Arbitrary<'_> {
         self.quiescing_as_supported(source)
     }
 
-    /// An MQTT topic filter.
+    /// The explicit position of a newly created owned Pulsar subscription.
+    pub fn pulsar_start_position(&mut self) -> nervix_models::PulsarStartPosition {
+        if self.entropy.flag() {
+            nervix_models::PulsarStartPosition::Earliest
+        } else {
+            nervix_models::PulsarStartPosition::Latest
+        }
+    }
+
+    /// An MQTT topic filter read in any session, quality of service and delivery mode a
+    /// statement can pair: an acknowledged mode subscribes through a persistent session at QoS 1
+    /// or 2.
     pub fn mqtt_topic_source(&mut self) -> MqttTopicIngestor {
+        let client = self.name();
+        let topic = self.mqtt_topic_filter();
+        let instances = self.positive_u64();
+        let mode = self.mqtt_mode();
+        let acknowledged = mode.is_ack();
+        let session = if acknowledged {
+            MqttSession::Persistent
+        } else {
+            self.entropy
+                .pick([MqttSession::Clean, MqttSession::Persistent])
+        };
+        let qos = if acknowledged {
+            self.entropy.pick([MqttQos::Qos1, MqttQos::Qos2])
+        } else {
+            self.entropy
+                .pick([MqttQos::Qos0, MqttQos::Qos1, MqttQos::Qos2])
+        };
         let source = MqttTopicIngestor {
-            client: self.name(),
-            topic: self.mqtt_topic_filter(),
-            instances: self.positive_u64(),
-            mode: self.mqtt_mode(),
+            client,
+            topic,
+            instances,
+            session,
+            qos,
+            mode,
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -480,14 +511,8 @@ impl Arbitrary<'_> {
     }
 
     fn mqtt_mode(&mut self) -> MqttIngestMode {
-        let session = self
-            .entropy
-            .pick([MqttSession::Clean, MqttSession::Persistent]);
-        let qos = self
-            .entropy
-            .pick([MqttQos::AtMostOnce, MqttQos::AtLeastOnce]);
         match self.entropy.byte() % 3 {
-            0 => MqttIngestMode::NoAck { session, qos },
+            0 => MqttIngestMode::NoAck,
             1 => MqttIngestMode::AckSequential {
                 timeout: self.duration(),
                 retry_policy: self.retry_policy(),

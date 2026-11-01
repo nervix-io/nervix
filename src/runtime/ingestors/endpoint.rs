@@ -262,7 +262,7 @@ pub(super) mod tests {
     use std::collections::BTreeMap;
 
     use futures_util::FutureExt as _;
-    use nervix_connector::NoIngestHeaders;
+    use nervix_connector::{IngestMetadataRow, NoIngestHeaders};
     use nervix_execution::CpuClass;
     use nervix_models::{
         ClusterNodeName, ClusterSchedule, CodecJaqFormat, CodecJaqTransformations, CodecName,
@@ -440,7 +440,7 @@ pub(super) mod tests {
                 .dispatch(
                     &runtime,
                     br#"{"user_id":7}"#,
-                    &probe,
+                    IngestMetadataRow::headers(&probe),
                     &CancellationToken::new(),
                 )
                 .await;
@@ -526,7 +526,7 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":"seven"}"#,
-                &NoIngestHeaders,
+                IngestMetadataRow::headers(&NoIngestHeaders),
                 &CancellationToken::new(),
             )
             .await;
@@ -557,6 +557,33 @@ pub(super) mod tests {
             "the rejection renders the codec's whole chain: {rejection}"
         );
         assert_eq!(described.decode_rejections_total, 1);
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
+    }
+
+    /// The header values of a request that are not UTF-8 count on the counter the route's bound
+    /// ingestor resolved when it started, and a request with none counts nothing.
+    #[nervix_primitives::test]
+    async fn undecodable_header_values_count_on_the_bound_ingestor() {
+        let domain = domain("default");
+        let ingestor = named::<IngestorName>("event_source");
+        let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
+        let route = runtime
+            .resolve_endpoint("edge.example.com", "/events")
+            .into_route()
+            .assured("the fixture installs its endpoint route");
+        let dispatcher = runtime.inner.remote_dispatcher.load();
+        let dropped = runtime.inner.metrics.ingestor_header_values_dropped(
+            &domain,
+            &ingestor,
+            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+        );
+
+        route.count_dropped_header_values(0);
+        assert_eq!(dropped.get(), 0);
+        route.count_dropped_header_values(2);
+        assert_eq!(dropped.get(), 2);
+        route.count_dropped_header_values(1);
+        assert_eq!(dropped.get(), 3);
         runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
@@ -621,7 +648,7 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":7}"#,
-                &NoIngestHeaders,
+                IngestMetadataRow::headers(&NoIngestHeaders),
                 &CancellationToken::new(),
             )
             .await;
@@ -642,7 +669,7 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":8}"#,
-                &NoIngestHeaders,
+                IngestMetadataRow::headers(&NoIngestHeaders),
                 &CancellationToken::new(),
             )
             .await;
@@ -687,7 +714,7 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":7}"#,
-                &NoIngestHeaders,
+                IngestMetadataRow::headers(&NoIngestHeaders),
                 &CancellationToken::new(),
             )
             .await;
@@ -705,7 +732,7 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":7}"#,
-                &NoIngestHeaders,
+                IngestMetadataRow::headers(&NoIngestHeaders),
                 &CancellationToken::new(),
             )
             .await;
@@ -740,7 +767,7 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":"seven"}"#,
-                &NoIngestHeaders,
+                IngestMetadataRow::headers(&NoIngestHeaders),
                 &CancellationToken::new(),
             )
             .await;
@@ -828,7 +855,7 @@ pub(super) mod tests {
                 .dispatch(
                     &runtime,
                     body.as_bytes(),
-                    &NoIngestHeaders,
+                    IngestMetadataRow::headers(&NoIngestHeaders),
                     &CancellationToken::new(),
                 )
                 .await;

@@ -51,8 +51,7 @@ const PATH_BYTES: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789-_~";
 /// The bytes of a generated application header name, after its `x-` prefix, which no reserved
 /// transport field can take.
 const NAME_BYTES: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789-";
-/// The bytes of a generated application header value: visible ASCII, so a value never begins or
-/// ends with whitespace.
+/// Every visible ASCII byte remains in the generated application header domain.
 const VALUE_BYTES: &[u8] = b"!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
 
 /// The bytes of generated proxy credentials, after their `Basic ` scheme: the Base64 alphabet.
@@ -105,6 +104,23 @@ fn spelled(bytes: &[u8], alphabet: &[u8], limit: usize) -> String {
         spelled.push(char::from(alphabet[0]));
     }
     spelled
+}
+
+/// A bounded valid HTTP header value, retaining every selected character's UTF-8 bytes.
+fn header_value(bytes: &[u8]) -> String {
+    let mut value = String::new();
+    for byte in bytes.iter().take(24) {
+        value.push(match *byte {
+            0 => 'ü',
+            1 => '雪',
+            2 => 'é',
+            _ => char::from(VALUE_BYTES[usize::from(*byte) % VALUE_BYTES.len()]),
+        });
+    }
+    if value.is_empty() {
+        value.push('a');
+    }
+    value
 }
 
 impl RequestCase {
@@ -200,11 +216,12 @@ impl RequestCase {
         }
         for (name, value) in &self.headers {
             let name = format!("x-{}", spelled(name, NAME_BYTES, 12));
-            let value = spelled(value, VALUE_BYTES, 24);
+            let value = header_value(value);
             headers
                 .insert(
                     HttpHeaderName::parse(&name).assured("an x- token is an application header"),
-                    HttpHeaderValue::parse(&value).assured("visible ASCII is a valid header value"),
+                    HttpHeaderValue::parse(&value)
+                        .assured("generated UTF-8 is a valid header value"),
                 )
                 .assured("at most seven short headers fit the application envelope");
         }

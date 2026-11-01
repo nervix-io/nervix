@@ -882,8 +882,9 @@ mod tests {
             )
         );
 
-        let mqtt = "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' MODE NO ACK ON \
-                    QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_";
+        let mqtt = "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' SESSION \
+                    PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO \
+                    outgoing SET value = read_";
         assert!(suggest_client_expectations(mqtt, mqtt.len()).contains(
             &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
                 BuiltinFunctionScope::IngestorEntity(IngestorEntityKind::Mqtt(

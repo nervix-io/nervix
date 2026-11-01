@@ -1,10 +1,11 @@
-//! WebSockets client configuration values.
+//! WebSockets client configuration.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** The client's closed key set, endpoint, positive physical timers and inbound
-//!   frame/message/handoff limits, and TLS pairing rules, checked before commitment and after
-//!   templates are rendered.
-//! - **Depends on.** Client configuration entries, the URL parser and standard duration values.
+//! - **Owns.** The client's declared key schema, and the typed values of a configuration that
+//!   satisfies it, with the WebSocket rules the schema cannot state: an endpoint without a
+//!   fragment, counts within their representations and a schedulable derived idle deadline.
+//! - **Depends on.** The shared client configuration schema and deadline contract, the URL parser
+//!   and standard duration values.
 //! - **Must not know.** DNS, sockets, TLS file loading, signaling or runtime scheduling.
 
 #![cfg_attr(
@@ -21,70 +22,91 @@ use std::{
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use strum::EnumProperty as _;
 use thiserror::Error;
 use url::Url;
 
-use crate::{ClientConfigEntry, ClientDeadline, DEFAULT_CONNECT_TIMEOUT};
+use crate::{
+    ClientConfigEntry, ClientConfigKey, ClientConfigSchema, ClientConfigValue, ClientDeadline,
+    DEFAULT_CONNECT_TIMEOUT,
+};
 
-/// Nervix-owned CONFIG keys in their exact lowercase spelling.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    strum::AsRefStr,
-    strum::Display,
-    strum::EnumIter,
-    strum::EnumString,
-    strum::EnumProperty,
-)]
-#[strum(serialize_all = "snake_case")]
-pub enum WebsocketsClientKey {
-    Endpoint,
-    ConnectTimeoutMs,
-    PingIntervalMs,
-    #[strum(props(default = "30000"))]
-    IdleTimeoutMs,
-    #[strum(props(default = "16"))]
-    HandshakeBufferCapacity,
-    #[strum(props(default = "67108864"))]
-    MaxMessageSize,
-    #[strum(props(default = "16777216"))]
-    MaxFrameSize,
-    TlsCaFile,
-    TlsCertFile,
-    TlsKeyFile,
-}
+const ENDPOINT: ClientConfigKey =
+    ClientConfigKey::required("endpoint", ClientConfigValue::Url(&["ws", "wss"]));
+const HANDSHAKE_BUFFER_CAPACITY: ClientConfigKey = ClientConfigKey::defaulted(
+    "handshake_buffer_capacity",
+    ClientConfigValue::PositiveInteger,
+    "16",
+);
+const MAX_FRAME_SIZE: ClientConfigKey = ClientConfigKey::defaulted(
+    "max_frame_size",
+    ClientConfigValue::PositiveInteger,
+    "16777216",
+);
+const MAX_MESSAGE_SIZE: ClientConfigKey = ClientConfigKey::defaulted(
+    "max_message_size",
+    ClientConfigValue::PositiveInteger,
+    "67108864",
+);
+const PING_INTERVAL: ClientConfigKey =
+    ClientConfigKey::optional("ping_interval_ms", ClientConfigValue::Milliseconds);
 
-/// A configuration refusal names its key without printing endpoint or credential values.
+/// The idle deadline when neither `idle_timeout_ms` nor a ping interval supplies one, in CONFIG's
+/// milliseconds. It depends on the ping interval, so the schema cannot declare it as the idle
+/// key's default.
+const IDLE_TIMEOUT_WITHOUT_PINGS: &str = "30000";
+
+/// The keys a WebSockets client reads, shared by validation, completion, inspection and the typed
+/// configuration below.
+pub(super) const CLIENT_CONFIG: ClientConfigSchema = ClientConfigSchema::new(
+    &[
+        ClientConfigKey::CONNECT_TIMEOUT,
+        ENDPOINT,
+        HANDSHAKE_BUFFER_CAPACITY,
+        ClientConfigKey::IDLE_TIMEOUT,
+        MAX_FRAME_SIZE,
+        MAX_MESSAGE_SIZE,
+        PING_INTERVAL,
+        ClientConfigKey::TLS_CA.only_for_scheme(ENDPOINT.name, "wss"),
+        ClientConfigKey::TLS_CERT.only_for_scheme(ENDPOINT.name, "wss"),
+        ClientConfigKey::TLS_KEY.only_for_scheme(ENDPOINT.name, "wss"),
+    ],
+    &[],
+    &[],
+);
+
+/// A refusal names its key without printing endpoint or credential values. The schema's own
+/// refusal stays beneath `Schema`.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[cfg_attr(
     nervix_lint,
     nervix::error_boundary(outcome, reason = "pure WebSockets client configuration validation")
 )]
 pub enum WebsocketsClientConfigError {
-    #[error("'{key}' is not a key this client reads")]
-    UndeclaredKey { key: String },
-    #[error("'{key}' is set more than once")]
-    RepeatedKey { key: WebsocketsClientKey },
-    #[error("'endpoint' is required")]
-    MissingEndpoint,
-    #[error("'endpoint' must be a ws or wss URL with a host and without a fragment")]
-    InvalidEndpoint,
-    #[error("'{key}' must be positive whole milliseconds within the schedulable duration bound")]
-    InvalidDuration { key: WebsocketsClientKey },
-    #[error("'{key}' must be a positive decimal integer within its declared range")]
-    InvalidLimit { key: WebsocketsClientKey },
-    #[error("three '{key}' intervals exceed the schedulable idle deadline")]
-    IdleDerivationTooLong { key: WebsocketsClientKey },
-    #[error("'{key}' requires a wss endpoint")]
-    TlsRequiresSecureEndpoint { key: WebsocketsClientKey },
-    #[error("'tls_cert_file' and 'tls_key_file' must be set together")]
-    UnpairedTlsIdentity,
+    #[error("the configuration does not satisfy the client's declared keys")]
+    Schema,
+    #[error("'endpoint' must not have a fragment")]
+    EndpointFragment,
+    #[error("'{key}' must be at most {maximum}")]
+    AboveMaximum { key: &'static str, maximum: u32 },
+    #[error("three 'ping_interval_ms' intervals exceed the schedulable idle deadline")]
+    IdleDerivationTooLong,
+}
+
+/// A positive count whose representation sets the largest value a client holds.
+trait Count: FromStr<Err = ParseIntError> {
+    fn maximum() -> u32;
+}
+
+impl Count for NonZeroU16 {
+    fn maximum() -> u32 {
+        u32::from(Self::MAX.get())
+    }
+}
+
+impl Count for NonZeroU32 {
+    fn maximum() -> u32 {
+        Self::MAX.get()
+    }
 }
 
 /// Validated client values. Absence of a ping interval means the client only answers peer pings.
@@ -100,128 +122,88 @@ pub struct WebsocketsClientConfig {
 }
 
 impl WebsocketsClientConfig {
+    /// Holds `config` to the declared schema, then converts the effective values once.
     pub fn parse(
         config: &[ClientConfigEntry],
     ) -> error_stack::Result<Self, WebsocketsClientConfigError> {
+        CLIENT_CONFIG
+            .validate_rendered(config)
+            .change_context(WebsocketsClientConfigError::Schema)?;
+        let effective = CLIENT_CONFIG.effective_entries(config);
+        // The schema refused repeated keys above, so each key maps to its one value.
         let mut values = BTreeMap::new();
-        for entry in config {
-            let Ok(key) = WebsocketsClientKey::from_str(&entry.key) else {
-                return Err(Report::new(WebsocketsClientConfigError::UndeclaredKey {
-                    key: entry.key.clone(),
-                }));
-            };
-            if values.insert(key, entry.value.as_str()).is_some() {
-                return Err(Report::new(WebsocketsClientConfigError::RepeatedKey {
-                    key,
-                }));
-            }
+        for entry in &effective {
+            values.insert(entry.key.as_str(), entry.value.as_str());
         }
-        let Some(endpoint) = values.get(&WebsocketsClientKey::Endpoint) else {
-            return Err(Report::new(WebsocketsClientConfigError::MissingEndpoint));
-        };
-        let endpoint =
-            Url::parse(endpoint).change_context(WebsocketsClientConfigError::InvalidEndpoint)?;
-        if !matches!(endpoint.scheme(), "ws" | "wss")
-            || endpoint.host_str().is_none()
-            || endpoint.fragment().is_some()
-        {
-            return Err(Report::new(WebsocketsClientConfigError::InvalidEndpoint));
+        let endpoint = values
+            .get(ENDPOINT.name)
+            .verified("the schema requires an endpoint");
+        let endpoint = Url::parse(endpoint).verified("the schema parsed the endpoint as a URL");
+        if endpoint.fragment().is_some() {
+            return Err(Report::new(WebsocketsClientConfigError::EndpointFragment));
         }
-        for key in [
-            WebsocketsClientKey::TlsCaFile,
-            WebsocketsClientKey::TlsCertFile,
-            WebsocketsClientKey::TlsKeyFile,
-        ] {
-            if values.contains_key(&key) && endpoint.scheme() != "wss" {
-                return Err(Report::new(
-                    WebsocketsClientConfigError::TlsRequiresSecureEndpoint { key },
-                ));
-            }
-        }
-        if values.contains_key(&WebsocketsClientKey::TlsCertFile)
-            != values.contains_key(&WebsocketsClientKey::TlsKeyFile)
-        {
-            return Err(Report::new(
-                WebsocketsClientConfigError::UnpairedTlsIdentity,
-            ));
-        }
-        let connect_timeout = match Self::duration(&values, WebsocketsClientKey::ConnectTimeoutMs)?
-        {
-            Some(duration) => duration,
+        let connect_timeout = match Self::duration(&values, ClientConfigKey::CONNECT_TIMEOUT) {
+            Some(timeout) => timeout,
             None => DEFAULT_CONNECT_TIMEOUT,
         };
-        let ping_interval = Self::duration(&values, WebsocketsClientKey::PingIntervalMs)?;
-        let idle_timeout = match Self::duration(&values, WebsocketsClientKey::IdleTimeoutMs)? {
+        let ping_interval = Self::duration(&values, PING_INTERVAL);
+        let idle_timeout = match Self::duration(&values, ClientConfigKey::IDLE_TIMEOUT) {
             Some(timeout) => timeout,
-            None => match ping_interval {
-                Some(period) => {
-                    if period > ClientDeadline::LONGEST / 3 {
-                        return Err(Report::new(
-                            WebsocketsClientConfigError::IdleDerivationTooLong {
-                                key: WebsocketsClientKey::PingIntervalMs,
-                            },
-                        ));
-                    }
-                    period
-                        .checked_mul(3)
-                        .verified("three periods fit the checked schedulable deadline bound")
-                }
-                None => {
-                    let default = WebsocketsClientKey::IdleTimeoutMs
-                        .get_str("default")
-                        .verified("the idle key declares its default milliseconds");
-                    ClientDeadline::parse(default)
-                        .assured("the declared idle default is positive and schedulable")
-                        .duration()
-                }
-            },
+            None => Self::derived_idle_timeout(ping_interval)?,
         };
         Ok(Self {
             endpoint,
             connect_timeout,
             ping_interval,
             idle_timeout,
-            handshake_buffer_capacity: Self::limit(
-                &values,
-                WebsocketsClientKey::HandshakeBufferCapacity,
-            )?,
-            max_message_size: Self::limit(&values, WebsocketsClientKey::MaxMessageSize)?,
-            max_frame_size: Self::limit(&values, WebsocketsClientKey::MaxFrameSize)?,
+            handshake_buffer_capacity: Self::count(&values, HANDSHAKE_BUFFER_CAPACITY)?,
+            max_message_size: Self::count(&values, MAX_MESSAGE_SIZE)?,
+            max_frame_size: Self::count(&values, MAX_FRAME_SIZE)?,
         })
     }
 
-    /// Byte and item keys keep their single defaults beside the key declaration, in CONFIG's
-    /// decimal representation. The parsed fields enforce their positive, portable ranges.
-    fn limit<T: FromStr<Err = ParseIntError>>(
-        values: &BTreeMap<WebsocketsClientKey, &str>,
-        key: WebsocketsClientKey,
-    ) -> error_stack::Result<T, WebsocketsClientConfigError> {
-        let value = match values.get(&key) {
-            Some(value) => *value,
-            None => key
-                .get_str("default")
-                .verified("each size or capacity key declares its default"),
+    /// Three configured ping intervals, or the idle deadline without pings.
+    fn derived_idle_timeout(
+        ping_interval: Option<Duration>,
+    ) -> error_stack::Result<Duration, WebsocketsClientConfigError> {
+        let Some(period) = ping_interval else {
+            let default = ClientDeadline::parse(IDLE_TIMEOUT_WITHOUT_PINGS)
+                .assured("the idle deadline without pings is positive and schedulable");
+            return Ok(default.duration());
         };
-        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(Report::new(WebsocketsClientConfigError::InvalidLimit {
-                key,
-            }));
+        if period > ClientDeadline::LONGEST / 3 {
+            return Err(Report::new(
+                WebsocketsClientConfigError::IdleDerivationTooLong,
+            ));
         }
-        value
-            .parse::<T>()
-            .change_context(WebsocketsClientConfigError::InvalidLimit { key })
+        let derived = period
+            .checked_mul(3)
+            .verified("three periods fit the checked schedulable deadline bound");
+        Ok(derived)
     }
 
-    fn duration(
-        values: &BTreeMap<WebsocketsClientKey, &str>,
-        key: WebsocketsClientKey,
-    ) -> error_stack::Result<Option<Duration>, WebsocketsClientConfigError> {
-        let Some(value) = values.get(&key) else {
-            return Ok(None);
-        };
-        let duration = ClientDeadline::parse(value)
-            .change_context(WebsocketsClientConfigError::InvalidDuration { key })?;
-        Ok(Some(duration.duration()))
+    /// The schema admitted a positive decimal count, so only a count above what the
+    /// representation holds is refused here.
+    fn count<T: Count>(
+        values: &BTreeMap<&str, &str>,
+        key: ClientConfigKey,
+    ) -> error_stack::Result<T, WebsocketsClientConfigError> {
+        let value = values
+            .get(key.name)
+            .verified("effective entries fill every defaulted count");
+        value
+            .parse::<T>()
+            .change_context(WebsocketsClientConfigError::AboveMaximum {
+                key: key.name,
+                maximum: T::maximum(),
+            })
+    }
+
+    fn duration(values: &BTreeMap<&str, &str>, key: ClientConfigKey) -> Option<Duration> {
+        let value = values.get(key.name)?;
+        let deadline =
+            ClientDeadline::parse(value).verified("the schema admitted schedulable milliseconds");
+        Some(deadline.duration())
     }
 
     pub fn endpoint(&self) -> &Url {
@@ -233,7 +215,8 @@ impl WebsocketsClientConfig {
     pub fn ping_interval(&self) -> Option<Duration> {
         self.ping_interval
     }
-    /// The explicit idle timeout, three configured ping intervals, or the declared idle default.
+    /// The explicit idle timeout, three configured ping intervals, or the idle deadline without
+    /// pings.
     pub fn idle_timeout(&self) -> Duration {
         self.idle_timeout
     }

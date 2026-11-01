@@ -2701,7 +2701,10 @@ impl TransportState {
         self.tls_changed.notify_waiters();
         self.targets.rcu(|current| {
             let mut next = (**current).clone();
-            for (node, target) in current.iter() {
+            // Node order, not the table's hash order, so every process retires in one sequence.
+            let ordered: BTreeMap<&ClusterNodeName, &Arc<OutboundTarget>> =
+                current.iter().collect();
+            for (node, target) in ordered {
                 self.retire_target(target);
                 next.insert(
                     node.clone(),
@@ -2714,14 +2717,14 @@ impl TransportState {
             }
             next
         });
-        for target in self.targets.load().values() {
+        for target in self.targets_in_node_order().values() {
             self.ensure_preconnected_slots(target);
         }
         Ok(())
     }
 
     fn cancel_all_slots(&self) {
-        for target in self.targets.load().values() {
+        for target in self.targets_in_node_order().values() {
             self.retire_target(target);
         }
     }

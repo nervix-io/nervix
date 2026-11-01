@@ -31,6 +31,27 @@ const PUBLISH: u8 = 3;
 )]
 const PUBACK: u8 = 4;
 
+/// The control packet type of PUBREC, which answers a QoS 2 PUBLISH.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "MQTT 5 numbers PUBREC as control packet type 5")
+)]
+const PUBREC: u8 = 5;
+
+/// The control packet type of PUBREL, which releases a QoS 2 PUBLISH its receiver recorded.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "MQTT 5 numbers PUBREL as control packet type 6")
+)]
+const PUBREL: u8 = 6;
+
+/// The control packet type of PUBCOMP, which completes a QoS 2 PUBLISH its sender released.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "MQTT 5 numbers PUBCOMP as control packet type 7")
+)]
+const PUBCOMP: u8 = 7;
+
 /// The control packet type of SUBSCRIBE.
 #[cfg_attr(
     nervix_lint,
@@ -164,17 +185,29 @@ impl ScriptedConnection {
 
     /// Reads the client's SUBSCRIBE and answers it with a SUBACK that grants QoS 1.
     pub(crate) async fn grant_subscription(&mut self) {
+        self.grant_subscription_at(1).await;
+    }
+
+    /// Reads the client's SUBSCRIBE and answers it with a SUBACK that grants the QoS `qos`.
+    pub(crate) async fn grant_subscription_at(&mut self, qos: u8) {
         let (packet_type, body) = self.read_packet().await;
         assert_eq!(
             packet_type, SUBSCRIBE,
             "the client subscribes once connected"
         );
-        // SUBACK: the SUBSCRIBE's packet identifier, an empty property section, QoS 1 granted.
-        self.write(&[0x90, 0x04, body[0], body[1], 0, 1]).await;
+        // SUBACK: the SUBSCRIBE's packet identifier, an empty property section, the granted QoS.
+        self.write(&[0x90, 0x04, body[0], body[1], 0, qos]).await;
     }
 
     /// A QoS 1 PUBLISH to `events` under the packet identifier `packet_id`, carrying `payload`.
     pub(crate) fn publish_packet(packet_id: u16, payload: &[u8]) -> Vec<u8> {
+        // PUBLISH with the QoS 1 flags: no duplicate, QoS 1, no retain.
+        Self::publish_packet_with_flags(0x32, packet_id, payload)
+    }
+
+    /// A PUBLISH to `events` whose first byte is `first`, under the packet identifier
+    /// `packet_id`, carrying `payload`.
+    fn publish_packet_with_flags(first: u8, packet_id: u16, payload: &[u8]) -> Vec<u8> {
         let topic = b"events";
         let [topic_high, topic_low] = u16::try_from(topic.len())
             .expect("the topic is six bytes")
@@ -185,7 +218,7 @@ impl ScriptedConnection {
         // The packet identifier, and an empty property section.
         body.extend_from_slice(&[id_high, id_low, 0]);
         body.extend_from_slice(payload);
-        let mut packet = vec![0x32];
+        let mut packet = vec![first];
         // The Remaining Length: seven value bits a byte, least significant first, each byte but the
         // last with its continuation bit set.
         let mut remaining = body.len();
@@ -206,6 +239,37 @@ impl ScriptedConnection {
     /// `payload`.
     pub(crate) async fn write_publish(&mut self, packet_id: u16, payload: &[u8]) {
         self.write(&Self::publish_packet(packet_id, payload)).await;
+    }
+
+    /// Writes a QoS 2 PUBLISH to `events` under the packet identifier `packet_id`, carrying
+    /// `payload`.
+    pub(crate) async fn write_publish_exactly_once(&mut self, packet_id: u16, payload: &[u8]) {
+        // PUBLISH with the QoS 2 flags: no duplicate, QoS 2, no retain.
+        self.write(&Self::publish_packet_with_flags(0x34, packet_id, payload))
+            .await;
+    }
+
+    /// Reads the next packet the client sends, which must be a PUBREC, and returns the packet
+    /// identifier of the QoS 2 PUBLISH it records.
+    pub(crate) async fn read_pubrec(&mut self) -> u16 {
+        let (packet_type, body) = self.read_packet().await;
+        assert_eq!(packet_type, PUBREC, "the client sends a PUBREC");
+        u16::from_be_bytes([body[0], body[1]])
+    }
+
+    /// Releases the QoS 2 PUBLISH `packet_id` the client recorded with a PUBREL.
+    pub(crate) async fn pubrel(&mut self, packet_id: u16) {
+        let [high, low] = packet_id.to_be_bytes();
+        // PUBREL carries the reserved flags 0b0010, then the packet identifier.
+        self.write(&[(PUBREL << 4) | 0b0010, 0x02, high, low]).await;
+    }
+
+    /// Reads the next packet the client sends, which must be a PUBCOMP, and returns the packet
+    /// identifier of the QoS 2 PUBLISH it completes.
+    pub(crate) async fn read_pubcomp(&mut self) -> u16 {
+        let (packet_type, body) = self.read_packet().await;
+        assert_eq!(packet_type, PUBCOMP, "the client sends a PUBCOMP");
+        u16::from_be_bytes([body[0], body[1]])
     }
 
     /// Reads the next packet the client sends, which must be a PUBACK, and returns the packet

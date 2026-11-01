@@ -525,6 +525,17 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_backup_cut_application_if_armed(
+        &self,
+        domains: &std::collections::BTreeMap<DomainName, nervix_models::DomainState>,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_backup_cut_application_if_armed(domains)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_restore_branch_state_conversion_if_armed(&self, domain: &DomainName) {
         self.inner
             .fault_injection

@@ -35,7 +35,8 @@ pub(in crate::application) enum CutPhase {
     AlterationGuard,
     Reach,
     OpeningCounters,
-    /// Includes the replicated pause and its confirming drain.
+    /// Includes the replicated pause, its application across the cluster and its confirming
+    /// drain.
     Drain,
     Capture,
     ConfigurationCapture,
@@ -175,10 +176,12 @@ impl CutProgress {
         }
     }
 
-    /// Preserve the drain's typed outstanding-work report beneath this cut's attribution.
+    /// Preserve the typed report of a pause application or drain the cut's deadline ended, such as
+    /// the drain's outstanding work, beneath this cut's attribution.
     pub(super) fn drain_failure(&self, error: Report<DomainAlterError>) -> Report<BackupError> {
         match error.current_context() {
-            DomainAlterError::BackupQuiesceTimeout { .. }
+            DomainAlterError::BackupPauseTimeout { .. }
+            | DomainAlterError::BackupQuiesceTimeout { .. }
             | DomainAlterError::QuiesceTimeout { .. } => error.change_context(self.timeout()),
             _ => error.change_context(BackupError::CaptureDomain {
                 domain: self.domain.clone(),

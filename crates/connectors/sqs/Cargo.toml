@@ -32,6 +32,9 @@ nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-simd-kernels = { workspace = true }
+# Parses a CA file the same way Smithy's TLS context will, before Smithy reads it.
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
 shuttle = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
@@ -43,6 +46,7 @@ nervix-model-harness = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 nervix-recovery = { workspace = true }
 nervix-test-environment = { workspace = true }
+rcgen = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = [
   "io-util",

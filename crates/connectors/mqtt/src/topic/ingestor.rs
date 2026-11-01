@@ -398,11 +398,15 @@ impl MqttTopicIngestorPlan {
         Self {
             instances,
             default_client_id,
-            subscribe_filter: format!("$share/{share_group}/{topic}"),
+            subscribe_filter: format!(
+                "{}/{share_group}/{topic}",
+                nervix_models::MQTT_SHARED_SUBSCRIPTION_LEVEL
+            ),
             session,
             qos: match qos {
-                MqttQos::AtMostOnce => QoS::AtMostOnce,
-                MqttQos::AtLeastOnce => QoS::AtLeastOnce,
+                MqttQos::Qos0 => QoS::AtMostOnce,
+                MqttQos::Qos1 => QoS::AtLeastOnce,
+                MqttQos::Qos2 => QoS::ExactlyOnce,
             },
             acknowledgement: IngestorAcknowledgement::of(acknowledgement_window),
             client_id_conflict,
@@ -1135,7 +1139,7 @@ mod tests {
             share_group: "default~ingestor".to_string(),
             topic: "events".to_string(),
             session,
-            qos: MqttQos::AtLeastOnce,
+            qos: MqttQos::Qos1,
             acknowledgement_window: Some(nonzero!(1u64)),
             dns,
             read_ahead_dropped: IngestorMetricsFixture::new().counter(),
@@ -1494,7 +1498,7 @@ mod tests {
             share_group: "default~mqtt_notifications".to_string(),
             topic: "notifications".to_string(),
             session: MqttSession::Persistent,
-            qos: MqttQos::AtLeastOnce,
+            qos: MqttQos::Qos1,
             acknowledgement_window: Some(nonzero!(1u64)),
             dns: fixture.dns.clone(),
             read_ahead_dropped: IngestorMetricsFixture::new().counter(),

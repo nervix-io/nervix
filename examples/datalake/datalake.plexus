@@ -510,7 +510,7 @@ CREATE ICEBERG_REST CLIENT lakehouse_catalog
   };
 
 CREATE MQTT TOPIC INGESTOR iot_device_activity
-  FROM mqtt_devices TOPIC 'datalake/device_activity' INSTANCES 2 MODE NO ACK ON QUIESCE DROP
+  FROM mqtt_devices TOPIC 'datalake/device_activity' INSTANCES 2 SESSION CLEAN QOS 0 MODE NO ACK ON QUIESCE DROP
   DECODE USING device_activity_cbor_codec
   TIMESTAMP AT ts
   TO device_activity_landing

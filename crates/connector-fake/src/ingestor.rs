@@ -462,6 +462,7 @@ impl PacedIngestorConnector for FakeIngestor {
                 metadata,
             }],
             failures: Vec::new(),
+            dropped_header_values: 0,
             observed_at: scheduled_at,
         })
     }

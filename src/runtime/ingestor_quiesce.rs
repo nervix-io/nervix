@@ -412,15 +412,6 @@ impl BufferedIngestMetadata {
         }
     }
 
-    /// The metadata of a message that carries `headers` alone, such as an endpoint request.
-    pub(in crate::runtime) fn headers(headers: RetainedIngestHeaders) -> Self {
-        Self {
-            fields: RetainedIngestMetadata::none(),
-            headers: BufferedIngestHeaders::Copied(headers),
-            position: None,
-        }
-    }
-
     /// The metadata of a message a paced source returned owned: the values of the fields its
     /// entity declares, and its headers. A paced transport names no position.
     pub(in crate::runtime) fn polled(
@@ -434,10 +425,15 @@ impl BufferedIngestMetadata {
         }
     }
 
-    /// The metadata of a buffered message whose source carries no transport headers.
+    /// The metadata of a buffered message whose source declares no metadata field and carries no
+    /// transport headers.
     #[cfg(test)]
     pub(in crate::runtime) fn without_headers() -> Self {
-        Self::headers(RetainedIngestHeaders::none())
+        Self {
+            fields: RetainedIngestMetadata::none(),
+            headers: BufferedIngestHeaders::Copied(RetainedIngestHeaders::none()),
+            position: None,
+        }
     }
 
     pub(super) fn row(&self) -> IngestMetadataRow<'_> {

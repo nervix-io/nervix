@@ -302,17 +302,13 @@ impl DomainState {
                     }
                 }
                 Model::ClientWebsockets(client) => {
-                    if !client.config.iter().any(|entry| entry.value.contains("{{"))
-                        && let Err(report) = WebsocketsClientConfig::parse(&client.config)
-                    {
-                        let issue = report.current_context().clone();
-                        return Err(report.change_context(
+                    if !client.config.iter().any(|entry| entry.value.contains("{{")) {
+                        WebsocketsClientConfig::parse(&client.config).change_context(
                             RegistryError::InvalidWebsocketsClientConfig {
                                 domain: domain.clone(),
                                 client: client.name.clone(),
-                                issue,
                             },
-                        ));
+                        )?;
                     }
                     if let Some(signaling_protocol) = client.signaling_protocol.as_ref() {
                         let signaling_protocol = expect_kind(

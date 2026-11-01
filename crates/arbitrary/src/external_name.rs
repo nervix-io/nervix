@@ -11,15 +11,16 @@ use nervix_models::{
     ClickHouseTableName, ExternalName, KafkaConsumerGroupName, KafkaTopicName,
     MONGODB_NAMESPACE_MAX_BYTES, MongoDbCollectionName, MqttTopicFilter, MqttTopicName,
     MySqlTableName, NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName, PostgresTableName,
-    PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName, SqsQueueName,
+    PulsarSubscriptionName, PulsarTopicName, RabbitMqExchangeName, RabbitMqQueueName,
+    RedisChannelName, SqsQueueName,
 };
 
 use crate::Arbitrary;
 
 /// The longest Kafka topic, in bytes.
 const KAFKA_TOPIC_BYTES: usize = 249;
-/// The longest Kafka consumer group, NATS queue group, Pulsar subscription or RabbitMQ queue, in
-/// bytes.
+/// The longest Kafka consumer group, NATS queue group, Pulsar subscription, RabbitMQ queue or
+/// RabbitMQ exchange, in bytes.
 const SHORT_NAME_BYTES: usize = 255;
 /// The longest Pulsar topic, NATS subject or Redis channel, in bytes.
 const LONG_NAME_BYTES: usize = 1024;
@@ -107,6 +108,12 @@ impl Arbitrary<'_> {
     pub fn rabbitmq_queue_name(&mut self) -> RabbitMqQueueName {
         let text = self.pieces_text(ANY_PIECES, SHORT_NAME_BYTES);
         RabbitMqQueueName::parse(&text).assured("a generated queue name is within the bound")
+    }
+
+    /// A RabbitMQ exchange, under the same short-string bound as a queue.
+    pub fn rabbitmq_exchange_name(&mut self) -> RabbitMqExchangeName {
+        let text = self.pieces_text(ANY_PIECES, SHORT_NAME_BYTES);
+        RabbitMqExchangeName::parse(&text).assured("a generated exchange name is within the bound")
     }
 
     /// An SQS queue: letters, digits, `-` and `_`, where a FIFO queue's name ends in `.fifo`, 80

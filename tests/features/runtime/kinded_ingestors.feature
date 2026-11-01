@@ -28,7 +28,7 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE NATS CLIENT nats_main CONFIG { 'addr' = 'nats://127.0.0.1:4222' };
       CREATE PROMETHEUS CLIENT prom_main CONFIG { 'addr' = 'http://127.0.0.1:9090', 'timeout_ms' = 5000 };
       CREATE ZEROMQ CLIENT zmq_main CONFIG { 'addr' = 'tcp://127.0.0.1:5555', 'bind' = 'false' };
-      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1' };
+      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' };
       CREATE WEBSOCKETS CLIENT ws_main CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
       CREATE SYSLOG CLIENT syslog_main CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
       CREATE HTTP REQUEST INGESTOR http_request_source
@@ -53,7 +53,7 @@ Feature: Ingestors name their connector and entity in the statement head
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE PULSAR TOPIC INGESTOR pulsar_source
-        FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR
+        FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -162,7 +162,7 @@ Feature: Ingestors name their connector and entity in the statement head
     Then the last command output contains
       """
       CREATE PULSAR TOPIC INGESTOR pulsar_source
-        FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+        FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node

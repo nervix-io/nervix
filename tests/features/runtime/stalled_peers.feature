@@ -150,8 +150,8 @@ Feature: Stalled peers
         'addr' = 'amqps://{{rabbitmq_peer}}/%2f',
         'connect_timeout_ms' = '1000'
       };
-      CREATE RABBITMQ QUEUE EMITTER rabbit_out FROM notifications
-        TO rabbit_main QUEUE 'stalled_{{test_id}}'
+      CREATE RABBITMQ <entity> EMITTER rabbit_out FROM notifications
+        TO rabbit_main <destination>
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
@@ -166,9 +166,11 @@ Feature: Stalled peers
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | entity   | destination                                          |
+      | 1            | QUEUE    | QUEUE 'stalled_{{test_id}}'                          |
+      | 3            | QUEUE    | QUEUE 'stalled_{{test_id}}'                          |
+      | 1            | EXCHANGE | EXCHANGE 'stalled_{{test_id}}' ROUTING KEY 'stalled' |
+      | 3            | EXCHANGE | EXCHANGE 'stalled_{{test_id}}' ROUTING KEY 'stalled' |
 
   Scenario Outline: A RabbitMQ ingestor whose broker never answers its AMQP handshake is reported within connect_timeout_ms
     Given a <cluster_size> node nervix cluster is started
@@ -225,8 +227,8 @@ Feature: Stalled peers
         'addr' = 'amqp://{{rabbitmq_peer}}/%2f',
         'connect_timeout_ms' = '1000'
       };
-      CREATE RABBITMQ QUEUE EMITTER rabbit_out FROM notifications
-        TO rabbit_main QUEUE 'stalled_{{test_id}}'
+      CREATE RABBITMQ <entity> EMITTER rabbit_out FROM notifications
+        TO rabbit_main <destination>
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
@@ -241,9 +243,11 @@ Feature: Stalled peers
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | entity   | destination                                          |
+      | 1            | QUEUE    | QUEUE 'stalled_{{test_id}}'                          |
+      | 3            | QUEUE    | QUEUE 'stalled_{{test_id}}'                          |
+      | 1            | EXCHANGE | EXCHANGE 'stalled_{{test_id}}' ROUTING KEY 'stalled' |
+      | 3            | EXCHANGE | EXCHANGE 'stalled_{{test_id}}' ROUTING KEY 'stalled' |
 
   Scenario Outline: A RabbitMQ NO ACK emitter whose broker stops answering its round trip is reported within timeout_ms
     Given RabbitMQ is running
@@ -253,6 +257,9 @@ Feature: Stalled peers
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
+    # The queue is also bound under the exchange's key, so both entities reach the observed queue.
+    And RabbitMQ exchange "stalled_{{test_id}}" of type direct exists
+    And RabbitMQ queue "stalled_{{test_id}}" is bound to exchange "stalled_{{test_id}}" with routing key "stalled"
     And RabbitMQ queue "stalled_{{test_id}}" is observed
     When these Plexus commands are executed
       """
@@ -273,8 +280,8 @@ Feature: Stalled peers
         'addr' = '{{rabbitmq_stallable_addr}}',
         'timeout_ms' = '1000'
       };
-      CREATE RABBITMQ QUEUE EMITTER rabbit_out FROM notifications
-        TO rabbit_main QUEUE 'stalled_{{test_id}}'
+      CREATE RABBITMQ <entity> EMITTER rabbit_out FROM notifications
+        TO rabbit_main <destination>
         MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -316,9 +323,11 @@ Feature: Stalled peers
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | entity   | destination                                          |
+      | 1            | QUEUE    | QUEUE 'stalled_{{test_id}}'                          |
+      | 3            | QUEUE    | QUEUE 'stalled_{{test_id}}'                          |
+      | 1            | EXCHANGE | EXCHANGE 'stalled_{{test_id}}' ROUTING KEY 'stalled' |
+      | 3            | EXCHANGE | EXCHANGE 'stalled_{{test_id}}' ROUTING KEY 'stalled' |
 
   Scenario Outline: A Syslog collector whose server never answers its TLS handshake is reported within connect_timeout_ms
     Given a <cluster_size> node nervix cluster is started
@@ -698,11 +707,13 @@ Feature: Stalled peers
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_peer}}',
         'region' = 'us-east-1',
-        'timeout_ms' = 1000
+        'timeout_ms' = 1000,
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret'
       };
       CREATE SQS QUEUE EMITTER sqs_out FROM notifications
         TO sqs_main QUEUE 'stalled_{{test_id}}'
-        MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        SEND SINGLE MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -723,7 +734,69 @@ Feature: Stalled peers
       """
     Then within "20s" DESCRIBE EMITTER "sqs_out" on the leader node contains
       """
-      occurred after 1s
+      did not finish within timeout_ms 1s
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @sqs_ingestor_receive_deadline @deloxide_stress
+  Scenario Outline: An SQS QUEUE ingestor whose service stops answering is reported within timeout_ms
+    Given SQS is running
+    And a <cluster_size> node nervix cluster is started
+    And a stallable endpoint "sqs_peer" stands in front of "sqs_endpoint"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And SQS queue "stalled_in_{{test_id}}" exists
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE SQS CLIENT sqs_main CONFIG {
+        'endpoint' = '{{sqs_peer}}',
+        'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key',
+        'secret_access_key' = 'scenario-secret',
+        'timeout_ms' = 1000
+      };
+      CREATE SQS QUEUE INGESTOR sqs_in
+        FROM sqs_main QUEUE 'stalled_in_{{test_id}}'
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    And SQS message is published to queue "stalled_in_{{test_id}}"
+      """
+      {"user_id":1}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":1
+      """
+    When the stallable endpoint "sqs_peer" is paused
+    Then within "20s" DESCRIBE INGESTOR "sqs_in" on the leader node contains
+      """
+      did not finish within timeout_ms 1s
+      """
+    When the stallable endpoint "sqs_peer" is resumed
+    And SQS message is published to queue "stalled_in_{{test_id}}"
+      """
+      {"user_id":2}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":2
       """
 
     Examples:

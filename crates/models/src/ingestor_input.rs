@@ -153,6 +153,15 @@ impl IngestorInput {
         }
     }
 
+    /// The requirement of a transport's delivery mode its statement leaves unmet, as its entity
+    /// declares the mode. A client source's window requires no option choice.
+    pub fn unmet_delivery(&self) -> Option<crate::UnmetDeliveryRequirement> {
+        match self {
+            Self::Transport(input) => input.source.unmet_delivery(),
+            Self::Client(_) => None,
+        }
+    }
+
     /// The acknowledgement a transport's delivery mode declares. A client source acknowledges
     /// through its own window, which [`ClientIngestMode`](crate::ClientIngestMode) describes.
     pub fn transport_acknowledgement(&self) -> Option<IngestAcknowledgement<'_>> {

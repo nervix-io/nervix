@@ -39,7 +39,7 @@ use crate::{
     HttpRequestEmitterMode, IcebergTableEmitterMode, KafkaTopicEmitterMode,
     MongoDbCollectionEmitterMode, MqttTopicEmitterMode, MySqlTableEmitterMode,
     NatsSubjectEmitterMode, OtelEmitterMode, PostgresTableEmitterMode, PulsarTopicEmitterMode,
-    RabbitMqQueueEmitterMode, RedisPubSubEmitterMode, SchemaName, SentryEventEmitterMode,
+    RabbitMqEmitterMode, RedisPubSubEmitterMode, SchemaName, SentryEventEmitterMode,
     SqsQueueEmitterMode, SyslogCollectorEmitterMode, ZeroMqPushEmitterMode,
 };
 
@@ -352,6 +352,12 @@ pub trait EmitterEntityBody: EmitterPublication {
     fn commit_policy(&self) -> Option<(&str, crate::PayloadSizeLimit)> {
         None
     }
+
+    /// The key the body's destination routes each record by, for a destination that computes one
+    /// for every record: a `RABBITMQ EXCHANGE` emitter's `ROUTING KEY`.
+    fn routing_key(&self) -> Option<&Expression> {
+        None
+    }
 }
 
 /// What the kind of one connector's emitter entities answers for each of them.
@@ -380,7 +386,7 @@ emitter_destinations! {
         Http(HttpEmitter, HttpEmitterEntity, HttpRequestEmitterMode),
         Kafka(KafkaEmitter, KafkaEmitterEntity, KafkaTopicEmitterMode),
         Pulsar(PulsarEmitter, PulsarEmitterEntity, PulsarTopicEmitterMode),
-        RabbitMq(RabbitMqEmitter, RabbitMqEmitterEntity, RabbitMqQueueEmitterMode),
+        RabbitMq(RabbitMqEmitter, RabbitMqEmitterEntity, RabbitMqEmitterMode),
         Redis(RedisEmitter, RedisEmitterEntity, RedisPubSubEmitterMode),
         Mqtt(MqttEmitter, MqttEmitterEntity, MqttTopicEmitterMode),
         Nats(NatsEmitter, NatsEmitterEntity, NatsSubjectEmitterMode),
@@ -489,6 +495,12 @@ impl EmitterEntity {
     /// The exact mapped types declared by this configured entity.
     pub fn mapped_value_types(&self) -> Option<crate::MappedValueTypes> {
         self.body().mapped_value_types()
+    }
+
+    /// The expression that computes the key this emitter's destination routes each record by, for
+    /// a destination that computes one.
+    pub fn routing_key(&self) -> Option<&Expression> {
+        self.body().routing_key()
     }
 
     pub fn direct_value_mappings(&self) -> impl Iterator<Item = &EmitterValueMapping> {
