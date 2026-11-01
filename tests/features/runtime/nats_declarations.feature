@@ -226,7 +226,7 @@ Feature: NATS declarations
       | 1            | orders..created | holds an empty level separated by '.' |
       | 3            | orders..created | holds an empty level separated by '.' |
 
-  Scenario Outline: NATS SUBJECT emitters refuse publishing modes other than Core and JetStream
+  Scenario Outline: NATS SUBJECT emitters accept only MODE NO ACK
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
