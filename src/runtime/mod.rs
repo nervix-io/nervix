@@ -969,7 +969,7 @@ pub use entity_gate::{DEFAULT_DOMAIN_DRAIN_TIMEOUT, branch_task_stop_timeout};
 pub(crate) use entity_gate::{
     EmitterPublishingDrainState, EmitterPublishingDrainStatus, EntityGateLease,
 };
-pub(crate) use error::RuntimeError;
+pub(crate) use error::{ApplicationWait, RuntimeError};
 pub(crate) use events::RuntimeEvent;
 use execution_build_error::{ExecutionBuildError, ExecutionStep};
 pub(crate) use inferencer::onnx_environment;

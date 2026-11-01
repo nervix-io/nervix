@@ -16,7 +16,10 @@ use nervix_primitives::{sync::oneshot, task::JoinHandle};
 use nervix_recovery::Discarded as _;
 
 use super::*;
-use crate::common::port_pool::next_port;
+use crate::common::{
+    phase_deadline::PhaseDeadline, port_pool::next_port,
+    snapshot_receive_memory::try_hold_snapshot_receive_memory,
+};
 
 struct SnapshotProbe {
     transport: Transport,
@@ -29,17 +32,6 @@ struct SnapshotProbePort(u16);
 impl Drop for SnapshotProbePort {
     fn drop(&mut self) {
         release_test_ports(&[self.0]);
-    }
-}
-
-struct BulkHold {
-    faults: FaultInjection,
-    node: ClusterNodeName,
-}
-
-impl Drop for BulkHold {
-    fn drop(&mut self) {
-        self.faults.release_bulk_memory_on(&self.node);
     }
 }
 
@@ -147,12 +139,15 @@ impl Cluster {
                 read: StateCheckpointRead::Published,
             };
             let baseline = probe.fetch(node, request.clone(), &snapshot).await?;
-            self.fault_injection
-                .hold_bulk_memory_leaving_room_on(&node_name(node), 4096);
-            let hold = BulkHold {
-                faults: self.fault_injection.clone(),
-                node: node_name(node),
-            };
+            let executor = self.fault_injection.executor_on(&node_name(node));
+            let hold = PhaseDeadline::after(std::time::Duration::from_secs(60))
+                .poll_until(
+                    std::time::Duration::from_millis(10),
+                    |_| async { try_hold_snapshot_receive_memory(&executor, 4096) },
+                    |_| true,
+                )
+                .await
+                .assured("the snapshot probe admits its bounded bulk hold");
             let refused = probe
                 .transport
                 .request_stream(&node_name(node), request.clone())

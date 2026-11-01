@@ -250,6 +250,7 @@ fn poll_of(user_id: i64) -> IngestorPoll {
             metadata: nervix_connector::RetainedIngestMetadata::none(),
         }],
         failures: Vec::new(),
+        dropped_header_values: 0,
         observed_at: Timestamp::from_unix_nanos(1),
     }
 }

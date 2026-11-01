@@ -126,8 +126,8 @@ use scheduling::{
 use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
 use session_service::{
-    RuntimeStateApplication, SESSION_EVENT_CAPACITY, SessionEvents, SessionServiceInner,
-    apply_current_cluster_runtime_state,
+    ApplicationBound, RuntimeStateApplication, SESSION_EVENT_CAPACITY, SessionEvents,
+    SessionServiceInner, apply_current_cluster_runtime_state,
 };
 use startup::ApplicationStartup;
 use subscription::{SubscriptionInterests, SubscriptionSampler};
@@ -1581,7 +1581,9 @@ impl Application {
                 domains_rx,
                 schedule_shutdown.clone(),
             )
-            .run(|| apply_current_cluster_runtime_state(application))
+            .run(|| {
+                apply_current_cluster_runtime_state(application, ApplicationBound::ClusterBudget)
+            })
             .await;
         }));
         let events = SessionEvents::new(SESSION_EVENT_CAPACITY);

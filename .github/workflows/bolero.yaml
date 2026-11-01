@@ -52,8 +52,8 @@ jobs:
   # Check excludes this whole call only for its verified prose-only selection without `bolero-random`
   # or `fuzz`. A pull request runs this ordinary randomized and corpus job only with `bolero-random`,
   # which it carries only when its task requires the job: `fuzz` is the preferred Bolero evidence.
-  # Scheduled and manual runs always run it. Once selected, every ordinary property remains
-  # required, including on reruns.
+  # A manual run always runs it. Once selected, every ordinary property remains required,
+  # including on reruns.
   bolero-random:
     name: bolero-random
     if: (inputs.event-name || github.event_name) != 'pull_request' || contains(fromJSON(inputs.labels-json || '[]'), 'bolero-random')

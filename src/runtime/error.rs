@@ -82,6 +82,11 @@ pub enum RuntimeError {
         node_unavailability_timeout: Duration,
         readiness_propagation_bound: Duration,
     },
+    /// The deadline of the application's caller ended the wait it names. A local installation or
+    /// activation the application had begun finished before the wait, so this node holds no part
+    /// of a revision; the nodes keep applying the newest committed state on their own.
+    #[error("the caller's deadline ended the runtime application while it waited for {wait}")]
+    ApplicationDeadline { wait: ApplicationWait },
     /// The relay budget refused the acknowledgement watches of a batch another node delivered: they
     /// exceed the whole budget, or it had no room for them within the sender's admission bound. The
     /// execution admission refusal is beneath.
@@ -104,6 +109,23 @@ pub enum RuntimeError {
         domain: DomainName,
         relay: RelayName,
     },
+}
+
+/// The wait of an application of the committed runtime state that its caller's deadline ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum ApplicationWait {
+    /// For this node's next installation slot, before it read the state to install.
+    #[strum(to_string = "an installation slot")]
+    Installation,
+    /// For every live node to prepare `revision`, which this node had prepared.
+    #[strum(to_string = "every live node to prepare runtime revision {revision}")]
+    Preparation { revision: u64 },
+    /// For this node's installation slot to activate `revision`.
+    #[strum(to_string = "the installation slot to activate runtime revision {revision}")]
+    Activation { revision: u64 },
+    /// For every live node to ready `revision`, which this node had readied.
+    #[strum(to_string = "every live node to ready runtime revision {revision}")]
+    Readiness { revision: u64 },
 }
 
 impl RuntimeError {

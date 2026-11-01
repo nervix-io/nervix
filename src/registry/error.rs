@@ -18,7 +18,7 @@ use error_stack::{Context, Report};
 use nervix_models::{
     BranchSelection, ClientName, ConnectorKind, DomainName, EmitterEntityKind, EndpointName,
     EndpointType, FieldName, IngestorEntityKind, IngestorMetadataType, ModelKind, ModelName,
-    RelayName, WebsocketsClientConfigError, WebsocketsUpgradeHeadersError,
+    RelayName,
 };
 use thiserror::Error;
 
@@ -320,20 +320,20 @@ pub(crate) enum RegistryError {
         domain: DomainName,
         client: ClientName,
     },
+    /// The configuration's refusal is the frame beneath, rendered once in the chain.
     #[error(
-        "{} client '{client}' in domain '{domain}' cannot use its CONFIG: {issue}",
+        "{} client '{client}' in domain '{domain}' cannot use its CONFIG",
         ConnectorKind::Websockets
     )]
     InvalidWebsocketsClientConfig {
         domain: DomainName,
         client: ClientName,
-        issue: WebsocketsClientConfigError,
     },
-    #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its HEADERS: {issue}")]
+    /// The upgrade header refusal is the frame beneath, rendered once in the chain.
+    #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its HEADERS")]
     InvalidWebsocketsUpgradeHeaders {
         domain: DomainName,
         ingestor: ModelName,
-        issue: WebsocketsUpgradeHeadersError,
     },
     #[error("branch '{branch}' in domain '{domain}' uses BYTES in field '{field}'")]
     BranchFieldContainsBytes {

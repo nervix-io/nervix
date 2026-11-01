@@ -544,6 +544,43 @@ Feature: Configuration backup into a public archive
       | 1            |
       | 3            |
 
+  Scenario Outline: A backup waits for the domain lease of a commit whose first publication met a lapsed leader lease
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( id I64 );
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given client "owner" is connected to node "{{leader}}"
+    When client "owner" executes these Plexus commands
+      """
+      BEGIN;
+      ALTER SCHEMA event ADD FIELD note STRING OPTIONAL;
+      """
+    Given the leader refuses the next model publication in domain "{{domain}}" and the pause release after it with "a lapsed leader lease"
+    And transaction commit on node "{{leader}}" pauses after 1 statement
+    When client "owner" begins executing these Plexus commands in the background
+      """
+      COMMIT;
+      """
+    Then the transaction commit pause on node "{{leader}}" after 1 statement is reached
+    And the refusal of the model publication in domain "{{domain}}" and of its pause release was delivered
+    When the CLI begins backing up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "after-refused-publication.nvxb" in the background
+    Then the background CLI backup remains pending for "1s"
+    When the transaction commit pause on node "{{leader}}" after 1 statement is released
+    Then the background Plexus execution succeeds
+    And the background CLI backup finishes
+    And the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: A coordinator leadership change in the cut resumes the domain and retries the backup
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"

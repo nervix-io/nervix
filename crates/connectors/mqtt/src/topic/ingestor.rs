@@ -398,7 +398,10 @@ impl MqttTopicIngestorPlan {
         Self {
             instances,
             default_client_id,
-            subscribe_filter: format!("$share/{share_group}/{topic}"),
+            subscribe_filter: format!(
+                "{}/{share_group}/{topic}",
+                nervix_models::MQTT_SHARED_SUBSCRIPTION_LEVEL
+            ),
             session,
             qos: match qos {
                 MqttQos::AtMostOnce => QoS::AtMostOnce,

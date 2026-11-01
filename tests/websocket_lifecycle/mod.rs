@@ -2,7 +2,8 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** A scenario-local peer, its bounded event channel, opening cancellations,
-//!   graceful-close observations and measured reconnect delays.
+//!   graceful-close observations, measured reconnect delays, subprotocol answers and measured
+//!   ping cadence.
 //! - **Depends on.** The scenario world, execution primitives and the WebSocket protocol.
 //! - **Must not know.** Connector internals, host retry state or runtime ownership handles.
 
@@ -19,6 +20,8 @@ use crate::common::websocket_close::reply_to_close;
 
 mod bounds;
 mod peer;
+mod pings;
+mod subprotocol;
 
 #[given("a WebSocket declaration peer verifies upgrade headers and sends text and binary frames")]
 async fn declaration_peer(world: &mut ScenarioWorld) {
@@ -108,6 +111,11 @@ async fn peer_receives_close(world: &mut ScenarioWorld) {
             PeerEvent::SentClose(_) => panic!("this peer never initiates a close"),
             PeerEvent::OpeningCancelled => {
                 panic!("the lifecycle peer did not complete its upgrade")
+            }
+            PeerEvent::Upgraded { .. }
+            | PeerEvent::SignalingCompleted(_)
+            | PeerEvent::ReceivedPing(_) => {
+                panic!("the lifecycle peer reports neither subprotocol offers nor pings")
             }
         }
     }

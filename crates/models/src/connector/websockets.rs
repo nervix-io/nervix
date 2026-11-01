@@ -27,7 +27,8 @@ mod upgrade_headers;
 #[cfg(test)]
 mod upgrade_headers_tests;
 
-pub use config::{WebsocketsClientConfig, WebsocketsClientConfigError, WebsocketsClientKey};
+use config::CLIENT_CONFIG;
+pub use config::{WebsocketsClientConfig, WebsocketsClientConfigError};
 pub use frame::WebsocketsFrameType;
 pub use upgrade_headers::{
     WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, WebsocketsUpgradeHeadersError,
@@ -51,27 +52,6 @@ use crate::{
     IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
     IngestorReferenceKind, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
     PositionClass, SignalingProtocolName,
-};
-
-/// The current keys this connector reads, shared by validation, completion and inspection.
-const CLIENT_CONFIG: crate::ClientConfigSchema = {
-    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
-    ClientConfigSchema::new(
-        &[
-            K::CONNECT_TIMEOUT,
-            K::required("endpoint", V::Url(&["ws", "wss"])),
-            K::optional("handshake_buffer_capacity", V::PositiveInteger),
-            K::IDLE_TIMEOUT,
-            K::optional("max_frame_size", V::PositiveInteger),
-            K::optional("max_message_size", V::PositiveInteger),
-            K::optional("ping_interval_ms", V::Milliseconds),
-            K::TLS_CA,
-            K::TLS_CERT,
-            K::TLS_KEY,
-        ],
-        &[],
-        &[],
-    )
 };
 
 #[derive(

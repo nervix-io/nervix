@@ -23,7 +23,7 @@ Feature: MQTT ingestion
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_main
         CONFIG {
-          'addr' = '{{mqtt_addr}}?keep_alive=30',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
@@ -84,7 +84,7 @@ Feature: MQTT ingestion
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_main
         CONFIG {
-          'addr' = '{{mqtt_addr}}?keep_alive=30',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-reconnect-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications

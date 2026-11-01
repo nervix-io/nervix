@@ -2,7 +2,8 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Listening connections, bounded events, opening cancellation, public connection
-//!   confirmation, payload release, graceful-close observations and measured reconnect instants.
+//!   confirmation, payload release, graceful-close observations, measured reconnect instants,
+//!   scripted subprotocol answers and measured client ping arrivals.
 //! - **Depends on.** Execution primitives, I/O errors and the WebSocket protocol.
 //! - **Must not know.** Scenario state, connector internals or runtime ownership handles.
 
@@ -12,13 +13,18 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
     net::{TcpListener, TcpStream},
-    sync::{mpsc, oneshot},
+    sync::{
+        mpsc::{self, error::TrySendError},
+        oneshot,
+    },
     task::{AbortOnDropHandle, JoinError},
     time::{Instant, timeout},
 };
 use tokio_tungstenite::tungstenite::{
     Error as WebsocketError, Message,
     error::ProtocolError,
+    handshake::server::{ErrorResponse, Request, Response},
+    http::HeaderValue,
     protocol::{CloseFrame, frame::coding::CloseCode},
 };
 
@@ -103,6 +109,33 @@ pub(super) enum PeerEvent {
     ReceivedClose,
     TransportFailure(tokio_tungstenite::tungstenite::Error),
     Ended,
+    /// An opening upgrade completed, with the client's `sec-websocket-protocol` offer exactly as
+    /// it arrived, when the client made one.
+    Upgraded {
+        offer: Option<String>,
+    },
+    /// The peer is about to answer the client's signaling handshake. The instant is taken before
+    /// the answer is written, so the client cannot have read the answer earlier.
+    SignalingCompleted(Instant),
+    /// A client ping arrived.
+    ReceivedPing(Instant),
+}
+
+/// What a subprotocol peer answers to the `sec-websocket-protocol` offer of every opening upgrade.
+pub(crate) enum SubprotocolAnswer {
+    /// Selects this protocol, whether or not the client offered it.
+    Select(String),
+    /// Selects no protocol, whatever the client offered.
+    Nothing,
+}
+
+/// Sends an event a test may never wait for. A full channel drops it, so a peer that keeps
+/// answering connections or pings never stops on its observer; a closed one ends the peer.
+fn report(events: &mpsc::Sender<PeerEvent>, event: PeerEvent) -> bool {
+    match events.try_send(event) {
+        Ok(()) | Err(TrySendError::Full(_)) => true,
+        Err(TrySendError::Closed(_)) => false,
+    }
 }
 
 impl WebsocketPeer {
@@ -408,6 +441,247 @@ impl WebsocketPeer {
             events,
             payload: None,
             task: AbortOnDropHandle::new(task),
+        }
+    }
+}
+
+impl WebsocketPeer {
+    /// Answers the subprotocol offer of every opening upgrade as scripted and reports the offer
+    /// it read. Over each connection the client keeps, it sends one payload, then reads until the
+    /// client closes. A client that refuses the answer ends its connection right after the upgrade.
+    pub(crate) fn subprotocol(listener: TcpListener, answer: SubprotocolAnswer) -> Self {
+        let (events_tx, events) = mpsc::channel(64);
+        let task = nervix_primitives::task::spawn(async move {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let (stream, _) = listener.accept().await?;
+                let mut offer = None;
+                #[expect(
+                    clippy::result_large_err,
+                    reason = "tungstenite requires an unboxed HTTP rejection response in its \
+                              handshake callback"
+                )]
+                let answer_upgrade = |request: &Request,
+                                      mut response: Response|
+                 -> Result<Response, ErrorResponse> {
+                    if let Some(value) = request.headers().get("sec-websocket-protocol") {
+                        let value = value
+                            .to_str()
+                            .assured("a Nervix client offers visible-ASCII subprotocol tokens");
+                        offer = Some(value.to_string());
+                    }
+                    if let SubprotocolAnswer::Select(protocol) = &answer {
+                        response.headers_mut().insert(
+                            "sec-websocket-protocol",
+                            HeaderValue::from_str(protocol)
+                                .assured("the scripted subprotocol is a header value"),
+                        );
+                    }
+                    Ok(response)
+                };
+                let mut socket =
+                    match tokio_tungstenite::accept_hdr_async(stream, answer_upgrade).await {
+                        Ok(socket) => socket,
+                        // A refusing client can end TCP before the upgrade's last bytes are written.
+                        // Any other upgrade failure remains a fixture failure.
+                        Err(error) => {
+                            opening_failure(error)?;
+                            continue;
+                        }
+                    };
+                if !report(&events_tx, PeerEvent::Upgraded { offer }) {
+                    return Ok(());
+                }
+                if socket
+                    .send(Message::Text("{\"user_id\":42}".into()))
+                    .await
+                    .is_err()
+                {
+                    // The client refused the answer and ended this connection.
+                    continue;
+                }
+                while let Some(message) = socket.next().await {
+                    nervix_primitives::task::consume_budget().await;
+                    match message {
+                        Ok(Message::Close(_)) => {
+                            reply_to_close(&mut socket).await?;
+                            break;
+                        }
+                        Ok(_) => {
+                            if socket.flush().await.is_err() {
+                                break;
+                            }
+                        }
+                        // A refused or dropped connection ends; the next one is answered the same.
+                        Err(_) => break,
+                    }
+                }
+            }
+        });
+        Self {
+            events,
+            payload: None,
+            task: AbortOnDropHandle::new(task),
+        }
+    }
+
+    /// Accepts one connection and holds the client's signaling handshake open for `hold` after its
+    /// subscription arrives, reading all the while, before answering it with `{"ready":true}`.
+    /// Then it sends one payload and reports every client ping with the instant it arrived. Pings
+    /// read before the answer are reported before `SignalingCompleted`, so a ping that signaling
+    /// should have withheld is visible in order.
+    pub(crate) fn ping_cadence(listener: TcpListener, hold: Duration) -> Self {
+        let (events_tx, events) = mpsc::channel(64);
+        let task = nervix_primitives::task::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .map_err(io::Error::other)?;
+            let peer = PingCadencePeer {
+                socket,
+                events: events_tx,
+            };
+            peer.run(hold).await
+        });
+        Self {
+            events,
+            payload: None,
+            task: AbortOnDropHandle::new(task),
+        }
+    }
+}
+
+/// Whether the test still observes a peer's events. A peer whose observer left ends quietly.
+enum Observation {
+    Continues,
+    Left,
+}
+
+/// The next client frame that is not a ping, once every ping before it is reported and answered.
+enum AfterPings {
+    Frame(Message),
+    Failed(WebsocketError),
+    Ended,
+    ObserverLeft,
+}
+
+/// The one connection a ping-cadence peer accepts, with the events it reports.
+struct PingCadencePeer {
+    socket: tokio_tungstenite::WebSocketStream<TcpStream>,
+    events: mpsc::Sender<PeerEvent>,
+}
+
+impl PingCadencePeer {
+    async fn run(mut self, hold: Duration) -> io::Result<()> {
+        if !report(&self.events, PeerEvent::Connected(Instant::now())) {
+            return Ok(());
+        }
+        if let Observation::Left = self.await_subscription().await? {
+            return Ok(());
+        }
+        if let Observation::Left = self.hold_signaling(hold).await? {
+            return Ok(());
+        }
+        if !report(&self.events, PeerEvent::SignalingCompleted(Instant::now())) {
+            return Ok(());
+        }
+        self.send_text("{\"ready\":true}").await?;
+        self.send_text("{\"user_id\":42}").await?;
+        self.record_pings_until_the_connection_ends().await
+    }
+
+    /// Reports each ping with the instant it arrived and flushes the pong the transport queued
+    /// for it, until another frame, a failure or the end of the connection arrives.
+    async fn next_after_pings(&mut self) -> io::Result<AfterPings> {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match self.socket.next().await {
+                Some(Ok(Message::Ping(_))) => {
+                    if !report(&self.events, PeerEvent::ReceivedPing(Instant::now())) {
+                        return Ok(AfterPings::ObserverLeft);
+                    }
+                    self.socket.flush().await.map_err(io::Error::other)?;
+                }
+                Some(Ok(frame)) => return Ok(AfterPings::Frame(frame)),
+                Some(Err(error)) => return Ok(AfterPings::Failed(error)),
+                None => return Ok(AfterPings::Ended),
+            }
+        }
+    }
+
+    /// The client's signaling opens with its subscription, its first text frame.
+    async fn await_subscription(&mut self) -> io::Result<Observation> {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match self.next_after_pings().await? {
+                AfterPings::Frame(Message::Text(_)) => return Ok(Observation::Continues),
+                AfterPings::Frame(_) => self.socket.flush().await.map_err(io::Error::other)?,
+                AfterPings::Failed(error) => return Err(io::Error::other(error)),
+                AfterPings::Ended => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "the client ended before its signaling subscription",
+                    ));
+                }
+                AfterPings::ObserverLeft => return Ok(Observation::Left),
+            }
+        }
+    }
+
+    /// Keeps reading for `hold` without answering the subscription. The hold elapsing with the
+    /// connection open is the scripted path.
+    async fn hold_signaling(&mut self, hold: Duration) -> io::Result<Observation> {
+        let held = timeout(hold, self.read_while_held()).await;
+        match held {
+            Err(_) => Ok(Observation::Continues),
+            Ok(ended_early) => ended_early,
+        }
+    }
+
+    /// Returns only when the held connection fails, ends or loses its observer.
+    async fn read_while_held(&mut self) -> io::Result<Observation> {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match self.next_after_pings().await? {
+                AfterPings::Frame(_) => self.socket.flush().await.map_err(io::Error::other)?,
+                AfterPings::Failed(error) => return Err(io::Error::other(error)),
+                AfterPings::Ended => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "the client ended while its signaling was held",
+                    ));
+                }
+                AfterPings::ObserverLeft => return Ok(Observation::Left),
+            }
+        }
+    }
+
+    async fn send_text(&mut self, text: &str) -> io::Result<()> {
+        self.socket
+            .send(Message::Text(text.into()))
+            .await
+            .map_err(io::Error::other)
+    }
+
+    /// Reports every later ping, then how the connection ended.
+    async fn record_pings_until_the_connection_ends(&mut self) -> io::Result<()> {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let ending = match self.next_after_pings().await? {
+                AfterPings::Frame(Message::Close(_)) => {
+                    reply_to_close(&mut self.socket).await?;
+                    PeerEvent::ReceivedClose
+                }
+                AfterPings::Frame(_) => {
+                    self.socket.flush().await.map_err(io::Error::other)?;
+                    continue;
+                }
+                AfterPings::Failed(error) => PeerEvent::TransportFailure(error),
+                AfterPings::Ended => PeerEvent::Ended,
+                AfterPings::ObserverLeft => return Ok(()),
+            };
+            report(&self.events, ending);
+            return Ok(());
         }
     }
 }

@@ -380,9 +380,12 @@ pub struct IngestorPollMessage {
 ///
 /// `failures` contains individual records a connector could not materialize while allowing the
 /// other messages from the same external response to continue through intake.
+/// `dropped_header_values` counts header values the connector skipped because they were not
+/// valid UTF-8, without discarding their message or treating the header as a record failure.
 pub struct IngestorPoll {
     pub messages: Vec<IngestorPollMessage>,
     pub failures: Vec<Report<IngestorError>>,
+    pub dropped_header_values: usize,
     pub observed_at: Timestamp,
 }
 

@@ -458,6 +458,15 @@ fn client(kind: ConnectorKind) -> Option<Value> {
         })
         .collect();
     let options: Vec<_> = options.iter().map(option).collect();
+    let aliases: Vec<_> = config
+        .aliases()
+        .iter()
+        .map(|alias| json!({ "alias": alias.alias, "accepted": alias.accepted }))
+        .collect();
+    let stripped_prefix = match config.stripped_prefix() {
+        Some(stripped) => json!({ "prefix": stripped.prefix, "properties": stripped.properties }),
+        None => Value::Null,
+    };
     let constraints: &[&str] = match kind {
         ConnectorKind::Otel => &[
             nervix_models::OTEL_HEADERS_FORMAT,
@@ -467,7 +476,8 @@ fn client(kind: ConnectorKind) -> Option<Value> {
     };
     Some(
         json!({ "kind": kind.keyword(), "pool": pool, "config_owner": config_owner, "options": options,
-            "keys": keys, "namespaces": namespaces, "reserved": config.reserved(), "constraints": constraints }),
+            "keys": keys, "namespaces": namespaces, "reserved": config.reserved(), "aliases": aliases,
+            "stripped_prefix": stripped_prefix, "constraints": constraints }),
     )
 }
 
@@ -490,6 +500,9 @@ fn client_key(key: &ClientConfigKey) -> Value {
         ClientConfigPresence::OptionalForScheme { address, scheme } => {
             format!("optional; requires `{address}` to use `{scheme}`")
         }
+        ClientConfigPresence::ExactlyForScheme { address, scheme } => {
+            format!("required when `{address}` uses `{scheme}`; refused otherwise")
+        }
         ClientConfigPresence::OptionalForQuery {
             address,
             option,
@@ -502,6 +515,10 @@ fn client_key(key: &ClientConfigKey) -> Value {
     };
     let value = match declared_value {
         ClientConfigValue::Url(schemes) => format!("URL ({})", schemes.join(" or ")),
+        ClientConfigValue::HostPortUrl(schemes) => format!(
+            "URL naming only a host and a port ({})",
+            schemes.join(" or ")
+        ),
         ClientConfigValue::DriverUrl(url) => {
             let mut owned_options = Vec::with_capacity(url.owned.len());
             for option in url.owned {
