@@ -64,6 +64,11 @@ impl IngestMessageHeaders for NoIngestHeaders {
 pub struct RetainedIngestHeaders(Vec<(String, String)>);
 
 impl RetainedIngestHeaders {
+    /// Takes already validated transport header pairs in their declared order.
+    pub fn from_pairs(pairs: Vec<(String, String)>) -> Self {
+        Self(pairs)
+    }
+
     /// Copies the headers an ingestor message carries right now.
     pub fn capture(headers: &dyn IngestMessageHeaders) -> Self {
         let mut retained = Vec::new();

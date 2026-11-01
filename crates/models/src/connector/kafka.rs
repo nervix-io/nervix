@@ -5,7 +5,8 @@
 //! - **Owns.** The Kafka client Model, the topic source and emitter Models with their offset and
 //!   delivery modes, the topic and consumer group names a source reads with the rules Kafka holds
 //!   them to, and what each entity declares.
-//!   Client declarations also own public configuration keys, types and confidentiality.
+//!   Client declarations also own public configuration keys, types and confidentiality, and the
+//!   one name a client accepts for each librdkafka property.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The Kafka driver, or how a topic is consumed or
 //!   produced to.
@@ -52,14 +53,13 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
             K::optional("auto.offset.reset", V::String).driver(),
             K::required("bootstrap.servers", V::String).driver(),
             K::optional("client.id", V::String).driver(),
+            K::optional("delivery.timeout.ms", V::UnsignedInteger).driver(),
             K::optional("fetch.wait.max.ms", V::UnsignedInteger).driver(),
             K::optional("heartbeat.interval.ms", V::PositiveInteger).driver(),
             K::optional("linger.ms", V::UnsignedInteger).driver(),
             K::optional("message.max.bytes", V::PositiveInteger).driver(),
-            K::optional("message.timeout.ms", V::UnsignedInteger).driver(),
             K::optional("queue.buffering.max.messages", V::UnsignedInteger).driver(),
             K::optional("sasl.mechanism", V::String).driver(),
-            K::optional("sasl.mechanisms", V::String).driver(),
             K::optional("sasl.oauthbearer.config", V::String)
                 .secret()
                 .driver(),
@@ -95,7 +95,79 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
             "group.id",
         ],
     )
+    .with_driver_aliases(LIBRDKAFKA_ALIASES, Some(LIBRDKAFKA_TOPIC_PREFIX))
 };
+
+/// The other names librdkafka reads for its properties, each with the name a Kafka client accepts
+/// instead: the Apache Kafka Java client's, which librdkafka reads as an alias. Sorted by the name
+/// refused, as read from the property table of librdkafka 2.12.1, which the Kafka connector links
+/// and whose own name lookup its tests hold these pairs to.
+const LIBRDKAFKA_ALIASES: &[crate::ClientConfigAlias] = {
+    use crate::ClientConfigAlias as A;
+    &[
+        A {
+            alias: "compression.codec",
+            accepted: "compression.type",
+        },
+        A {
+            alias: "fetch.message.max.bytes",
+            accepted: "max.partition.fetch.bytes",
+        },
+        A {
+            alias: "max.in.flight",
+            accepted: "max.in.flight.requests.per.connection",
+        },
+        A {
+            alias: "message.send.max.retries",
+            accepted: "retries",
+        },
+        A {
+            alias: "message.timeout.ms",
+            accepted: "delivery.timeout.ms",
+        },
+        A {
+            alias: "metadata.broker.list",
+            accepted: "bootstrap.servers",
+        },
+        A {
+            alias: "queue.buffering.max.ms",
+            accepted: "linger.ms",
+        },
+        A {
+            alias: "request.required.acks",
+            accepted: "acks",
+        },
+        A {
+            alias: "sasl.mechanisms",
+            accepted: "sasl.mechanism",
+        },
+        A {
+            alias: "sasl.oauthbearer.client.id",
+            accepted: "sasl.oauthbearer.client.credentials.client.id",
+        },
+        A {
+            alias: "sasl.oauthbearer.client.secret",
+            accepted: "sasl.oauthbearer.client.credentials.client.secret",
+        },
+    ]
+};
+
+/// librdkafka reads a key that names none of its global properties as a property of the default
+/// topic configuration, after stripping a leading `topic.`, so that spelling would be a second
+/// name for each default-topic property. Its own global properties whose names begin with the
+/// prefix, as read from librdkafka 2.12.1's property table, stay what they are.
+const LIBRDKAFKA_TOPIC_PREFIX: crate::ClientConfigStrippedPrefix =
+    crate::ClientConfigStrippedPrefix {
+        prefix: "topic.",
+        properties: &[
+            "topic.blacklist",
+            "topic.metadata.propagation.max.ms",
+            "topic.metadata.refresh.fast.cnt",
+            "topic.metadata.refresh.fast.interval.ms",
+            "topic.metadata.refresh.interval.ms",
+            "topic.metadata.refresh.sparse",
+        ],
+    };
 
 /// The longest topic Kafka admits, in bytes.
 const KAFKA_TOPIC_MAX: usize = 249;
@@ -248,7 +320,7 @@ const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
         DeclaredWait {
             wait: "delivery under NO ACK",
-            bound: WaitBound::Driver("message.timeout.ms, 300 s"),
+            bound: WaitBound::Driver("delivery.timeout.ms, 300 s"),
         },
         DeclaredWait {
             wait: "delivery under ACK",

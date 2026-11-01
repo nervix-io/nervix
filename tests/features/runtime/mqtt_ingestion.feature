@@ -23,11 +23,11 @@ Feature: MQTT ingestion
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_main
         CONFIG {
-          'addr' = '{{mqtt_addr}}?keep_alive=30',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK
+        FROM mqtt_main TOPIC 'notifications_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -84,11 +84,11 @@ Feature: MQTT ingestion
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_main
         CONFIG {
-          'addr' = '{{mqtt_addr}}?keep_alive=30',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-reconnect-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_main TOPIC 'notifications_reconnect_{{test_id}}' MODE NO ACK
+        FROM mqtt_main TOPIC 'notifications_reconnect_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -152,7 +152,7 @@ Feature: MQTT ingestion
           'client_id' = 'nervix-cucumber-ingestor-noack-parallel-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_main TOPIC 'notifications_noack_parallel_{{test_id}}' QOS 1 MODE NO ACK
+        FROM mqtt_main TOPIC 'notifications_noack_parallel_{{test_id}}' SESSION CLEAN QOS 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -175,6 +175,144 @@ Feature: MQTT ingestion
     Then the relay subscription receives a payload
       """
       "user_id":44
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  # One ingestor for each legal pairing: NO ACK in either session at QoS 0, 1 or 2, and both
+  # acknowledged modes in the persistent session at QoS 1 or 2. Each topic receives one publish at
+  # its ingestor's quality of service, so a QoS 2 subscription completes the PUBREC, PUBREL and
+  # PUBCOMP exchange with the broker before its record reaches the relay.
+  @mqtt_subscription_pairings
+  Scenario Outline: Every legal pairing of an MQTT ingestor's session, quality of service and mode delivers what its topic receives
+    Given MQTT is running
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = '{{mqtt_addr}}' };
+      CREATE MQTT TOPIC INGESTOR clean_qos0_no_ack
+        FROM mqtt_main TOPIC 'pairing_clean_qos0_no_ack_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE MQTT TOPIC INGESTOR clean_qos1_no_ack
+        FROM mqtt_main TOPIC 'pairing_clean_qos1_no_ack_{{test_id}}' SESSION CLEAN QOS 1 MODE NO ACK
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE MQTT TOPIC INGESTOR clean_qos2_no_ack
+        FROM mqtt_main TOPIC 'pairing_clean_qos2_no_ack_{{test_id}}' SESSION CLEAN QOS 2 MODE NO ACK
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE MQTT TOPIC INGESTOR kept_qos0_no_ack
+        FROM mqtt_main TOPIC 'pairing_kept_qos0_no_ack_{{test_id}}' SESSION PERSISTENT QOS 0 MODE NO ACK
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE MQTT TOPIC INGESTOR kept_qos1_no_ack
+        FROM mqtt_main TOPIC 'pairing_kept_qos1_no_ack_{{test_id}}' SESSION PERSISTENT QOS 1 MODE NO ACK
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE MQTT TOPIC INGESTOR kept_qos2_no_ack
+        FROM mqtt_main TOPIC 'pairing_kept_qos2_no_ack_{{test_id}}' SESSION PERSISTENT QOS 2 MODE NO ACK
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE MQTT TOPIC INGESTOR kept_qos1_ack_sequential
+        FROM mqtt_main TOPIC 'pairing_kept_qos1_ack_sequential_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE MQTT TOPIC INGESTOR kept_qos1_ack_parallel
+        FROM mqtt_main TOPIC 'pairing_kept_qos1_ack_parallel_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX 4 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE MQTT TOPIC INGESTOR kept_qos2_ack_sequential
+        FROM mqtt_main TOPIC 'pairing_kept_qos2_ack_sequential_{{test_id}}' SESSION PERSISTENT QOS 2 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE MQTT TOPIC INGESTOR kept_qos2_ack_parallel
+        FROM mqtt_main TOPIC 'pairing_kept_qos2_ack_parallel_{{test_id}}' SESSION PERSISTENT QOS 2 MODE ACK PARALLEL MAX 4 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    When MQTT message is published to topic "pairing_clean_qos0_no_ack_{{test_id}}"
+      """
+      {"user_id":201}
+      """
+    When MQTT QoS 1 message is published to topic "pairing_clean_qos1_no_ack_{{test_id}}"
+      """
+      {"user_id":202}
+      """
+    When MQTT QoS 2 message is published to topic "pairing_clean_qos2_no_ack_{{test_id}}"
+      """
+      {"user_id":203}
+      """
+    When MQTT message is published to topic "pairing_kept_qos0_no_ack_{{test_id}}"
+      """
+      {"user_id":204}
+      """
+    When MQTT QoS 1 message is published to topic "pairing_kept_qos1_no_ack_{{test_id}}"
+      """
+      {"user_id":205}
+      """
+    When MQTT QoS 2 message is published to topic "pairing_kept_qos2_no_ack_{{test_id}}"
+      """
+      {"user_id":206}
+      """
+    When MQTT QoS 1 message is published to topic "pairing_kept_qos1_ack_sequential_{{test_id}}"
+      """
+      {"user_id":207}
+      """
+    When MQTT QoS 1 message is published to topic "pairing_kept_qos1_ack_parallel_{{test_id}}"
+      """
+      {"user_id":208}
+      """
+    When MQTT QoS 2 message is published to topic "pairing_kept_qos2_ack_sequential_{{test_id}}"
+      """
+      {"user_id":209}
+      """
+    When MQTT QoS 2 message is published to topic "pairing_kept_qos2_ack_parallel_{{test_id}}"
+      """
+      {"user_id":210}
+      """
+    Then within "60s" the relay subscription receives payloads
+      """
+      "user_id":201
+      "user_id":202
+      "user_id":203
+      "user_id":204
+      "user_id":205
+      "user_id":206
+      "user_id":207
+      "user_id":208
+      "user_id":209
+      "user_id":210
       """
 
     Examples:
@@ -375,7 +513,7 @@ Feature: MQTT ingestion
           'client_id' = 'nervix-cucumber-ingestor-ack-seq-out-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'notifications_ack_seq_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM mqtt_ingress TOPIC 'notifications_ack_seq_{{test_id}}' SESSION PERSISTENT QOS <qos> MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -397,7 +535,7 @@ Feature: MQTT ingestion
       status: running
       """
     When emitter "mqtt_forward" enters fault mode
-    And MQTT QoS 1 message is published to topic "notifications_ack_seq_{{test_id}}"
+    And MQTT QoS <qos> message is published to topic "notifications_ack_seq_{{test_id}}"
       """
       {"user_id":45}
       """
@@ -416,9 +554,11 @@ Feature: MQTT ingestion
       """
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 1             |
+      | cluster_size | replica_count | qos |
+      | 1            | 0             | 1   |
+      | 3            | 1             | 1   |
+      | 1            | 0             | 2   |
+      | 3            | 1             | 2   |
 
   # The ingestor's client connects to the broker listener that holds it to a 10-second keep-alive
   # and closes a connection that sends nothing for 15 seconds. The stalled emitter holds the
@@ -834,8 +974,8 @@ Feature: MQTT ingestion
 
     Examples:
       | cluster_size | replica_count | mode_tag | mode                                                                                             |
-      | 1            | 0             | noack    | MODE NO ACK                                                                                      |
-      | 3            | 1             | noack    | MODE NO ACK                                                                                      |
+      | 1            | 0             | noack    | SESSION CLEAN QOS 0 MODE NO ACK                                                                  |
+      | 3            | 1             | noack    | SESSION CLEAN QOS 0 MODE NO ACK                                                                  |
       | 1            | 0             | ack      | SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms |
       | 3            | 1             | ack      | SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms |
 
@@ -958,7 +1098,7 @@ Feature: MQTT ingestion
           'client_id' = 'nervix-cucumber-ingestor-poison-{{test_id}}'
         };
       CREATE MQTT TOPIC INGESTOR mqtt_poison
-        FROM mqtt_main TOPIC 'poison_{{test_id}}' QOS 1 MODE NO ACK
+        FROM mqtt_main TOPIC 'poison_{{test_id}}' SESSION CLEAN QOS 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL

@@ -6,7 +6,7 @@ The tables describe the implemented surface. A connector Epic can extend a decla
 
 Ingest and emit are separate contracts: consuming a broker position and publishing a record need different acknowledgements. Each mirror column compares every declared entity of the same connector on the other side and explains transport differences. An absent capability requires reviewed explanatory prose; stale or missing explanations fail validation.
 
-Client CONFIG keys below come from the same declaration used by validation, completion and public inspection. Keys are lowercase and case-sensitive; every key occurs at most once. Required keys, Nervix-owned value types and TLS identity pairs validate before storage. Driver property namespaces and address query options remain intentional pass-through; undeclared driver properties are confidential in public inspection. Kafka properties and Postgres, MySQL, Redis, RabbitMQ and NATS addresses also pass network-free driver checks before commit. Authentication, connectivity and checks requiring a remote service wait for initialization. Nervix-owned file values accept resource mount templates and must resolve to readable files; driver-owned file properties retain their native interpretation. HTTPS retains the driver's built-in trust roots; MQTT requires tls_ca_file for mqtts, as its key's conditional presence declares. tls_ca_file follows the connector's documented augmentation or replacement policy, and a client certificate requires its private key.
+Client CONFIG keys below come from the same declaration used by validation, completion and public inspection. Keys are lowercase and case-sensitive; every key occurs at most once. Required keys, Nervix-owned value types and TLS identity pairs validate before storage. Driver property namespaces and address query options remain intentional pass-through; undeclared driver properties are confidential in public inspection. Kafka properties and Postgres, MySQL, Redis, RabbitMQ and NATS addresses also pass network-free driver checks before commit. Authentication, connectivity and checks requiring a remote service wait for initialization. Nervix-owned file values accept resource mount templates and must resolve to readable files; driver-owned file properties retain their native interpretation. HTTPS retains the driver's built-in trust roots; MQTT requires tls_ca_file exactly for mqtts and refuses its TLS files with a plaintext address, as its keys' conditional presence declares. tls_ca_file follows the connector's documented augmentation or replacement policy, and a client certificate requires its private key.
 
 ## Ingest
 
@@ -54,14 +54,14 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | HTTP ENDPOINT | Compare `HTTP REQUEST`: options, modes, headers, reference. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
+| Entity | HTTP ENDPOINT | Compare `HTTP REQUEST`: options, modes, headers, reference, ingest metadata. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
 | Reference | Http endpoint |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
-| Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |  |
+| Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL |  |
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
@@ -117,15 +117,15 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes. Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
 | Reference | MQTT client |  |
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |  |
-| Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1) |  |
-| Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); optional; default CLEAN<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); optional; default 0 |  |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |  |
+| Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |  |
 | Headers | Not offered: Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |  |
-| Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | Not offered: The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace. |  |
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | written |  |
-| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |  |
+| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE, PUBACK and PUBREC requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |  |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |  |
 | Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound.<br>ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow only. NO ACK retains backpressure. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
@@ -154,7 +154,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`: options, modes. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names. |
+| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE`: locator, options, modes. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names. |
 | Reference | RABBITMQ client |  |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -234,7 +234,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes. Receiving uses a visibility timeout and deletion; publishing uses single or batch service requests and may declare a FIFO group. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
+| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers. Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
 | Reference | SQS client |  |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -267,7 +267,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Acknowledgement confirmation | none |  |
 | Buffers | accepted signaling frames retained for source reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |  |
 | Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |  |
-| Driver limits | None declared. |  |
+| Driver limits | The opening upgrade response carries at most 124 header fields, and at most 64 KiB arrives before its head ends; a larger response fails that connection attempt.<br>The response head arrives within 512 reads that, after the 64th, average at least 128 bytes; a peer that trickles it fails that connection attempt. |  |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |  |
 
 ### WEBSOCKETS ENDPOINT ingest
@@ -281,7 +281,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Options in statement order | No entity-specific options. |  |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
-| Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |  |
+| Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL |  |
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
@@ -371,7 +371,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |  |
-| Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, message.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |  |
+| Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |  |
 | Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
@@ -400,7 +400,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`: options, modes. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names. |
+| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`: options, modes, emit envelope/properties. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names. |
 | Reference | RABBITMQ client |  |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -410,11 +410,32 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
 | Batch transformation required | no |  |
-| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
+| Envelope | MANDATORY |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
-| Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>unroutable messages the broker returns under NO ACK: unbounded |  |
+| Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |  |
 | Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the queue check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |  |
+
+### RABBITMQ EXCHANGE emit
+
+| Capability | Declaration | Mirror and transport reason |
+| --- | --- | --- |
+| Entity | RABBITMQ EXCHANGE | Compare `RABBITMQ QUEUE`: locator, options, modes, emit envelope/properties. No ingestor consumes an exchange: the exchange routes each message by the key its record computes to the queues bound to it, and a RABBITMQ QUEUE ingestor consumes one of those queues. Publishing waits for a channel answer or publisher confirmation, as it does for a queue. |
+| Reference | RABBITMQ client |  |
+| Locator and validation rule | EXCHANGE 'events' (rabbitmq_exchange) |  |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Options in statement order | `ROUTING KEY input.category` (expression); required |  |
+| Headers | `write_header`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |  |
+| Body | ENCODE USING &lt;codec&gt; |  |
+| BATCH | optional |  |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
+| Batch transformation required | no |  |
+| Envelope | MANDATORY |  |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |  |
+| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the exchange check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |  |
+| Driver limits | A frame above the negotiated frame_max ends the connection.<br>A routing key longer than the 255 bytes an AMQP short string carries is not sent; its record is rejected. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |  |
 
 ### REDIS PUBSUB emit
@@ -505,21 +526,21 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes. Receiving uses a visibility timeout and deletion; publishing uses single or batch service requests and may declare a FIFO group. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
+| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers, emit envelope/properties. Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
 | Reference | SQS client |  |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
-| Modes (complete bodies after MODE) | SINGLE RETRY POLICY BACKOFF 1s MAX 30s<br>BATCH RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `FIFO GROUP tenant` (expression); `FIFO GROUP FROM BRANCH` (keyword choice); optional; omitted when unset |  |
-| Headers | `write_header`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |  |
+| Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Options in statement order | `FIFO GROUP tenant` (expression); `FIFO GROUP FROM BRANCH` (keyword choice); optional; omitted when unset<br>`SEND SINGLE` (keyword choice); `SEND BATCH` (keyword choice); required |  |
+| Headers | `write_header`; `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
-| Protocol batch maximum | 256KiB |  |
+| Protocol batch maximum | 1MiB |  |
 | Batch transformation required | no |  |
-| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
+| Envelope | DELAY 5s<br>DEDUPLICATION ID id |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | The connector holds no buffer between its transport and the host. |  |
 | Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start and a send: `timeout_ms`; unbounded when omitted |  |
-| Driver limits | A batch request holds at most 10 entries and 256 KiB; a record above 256 KiB is rejected. |  |
+| Driver limits | A batch request holds at most 10 entries and 1 MiB; a record above 1 MiB is rejected. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### SENTRY EVENT emit
@@ -781,14 +802,14 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | --- | --- | --- | --- | --- | --- |
 | `connect_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
 | `endpoint` | required | URL (ws or wss) | Nervix; strict | no | none |
-| `handshake_buffer_capacity` | optional | positive integer | Nervix; strict | no | none |
+| `handshake_buffer_capacity` | optional; default `16` | positive integer | Nervix; strict | no | none |
 | `idle_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
-| `max_frame_size` | optional | positive integer | Nervix; strict | no | none |
-| `max_message_size` | optional | positive integer | Nervix; strict | no | none |
+| `max_frame_size` | optional; default `16777216` | positive integer | Nervix; strict | no | none |
+| `max_message_size` | optional; default `67108864` | positive integer | Nervix; strict | no | none |
 | `ping_interval_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
-| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
-| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
-| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+| `tls_ca_file` | optional; requires `endpoint` to use `wss` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional; requires `endpoint` to use `wss` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional; requires `endpoint` to use `wss` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
@@ -806,14 +827,13 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `auto.offset.reset` | optional | string | driver; best effort | no | none |
 | `bootstrap.servers` | required | string | driver; best effort | no | none |
 | `client.id` | optional | string | driver; best effort | no | none |
+| `delivery.timeout.ms` | optional | unsigned integer | driver; best effort | no | none |
 | `fetch.wait.max.ms` | optional | unsigned integer | driver; best effort | no | none |
 | `heartbeat.interval.ms` | optional | positive integer | driver; best effort | no | none |
 | `linger.ms` | optional | unsigned integer | driver; best effort | no | none |
 | `message.max.bytes` | optional | positive integer | driver; best effort | no | none |
-| `message.timeout.ms` | optional | unsigned integer | driver; best effort | no | none |
 | `queue.buffering.max.messages` | optional | unsigned integer | driver; best effort | no | none |
 | `sasl.mechanism` | optional | string | driver; best effort | no | none |
-| `sasl.mechanisms` | optional | string | driver; best effort | no | none |
 | `sasl.oauthbearer.config` | optional | string | driver; best effort | yes | none |
 | `sasl.password` | optional | string | driver; best effort | yes | none |
 | `sasl.username` | optional | string | driver; best effort | yes | none |
@@ -827,6 +847,24 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `ssl.key.pem` | optional | string | driver; best effort | yes | none |
 
 Delegated property namespaces: all driver property names. Reserved keys: `allow.auto.create.topics`, `delivery.report.only.error`, `enable.auto.commit`, `enable.partition.eof`, `group.id`.
+
+A property the driver reads under more than one name is accepted under one; the client refuses the other.
+
+| Refused driver name | Accepted name |
+| --- | --- |
+| `compression.codec` | `compression.type` |
+| `fetch.message.max.bytes` | `max.partition.fetch.bytes` |
+| `max.in.flight` | `max.in.flight.requests.per.connection` |
+| `message.send.max.retries` | `retries` |
+| `message.timeout.ms` | `delivery.timeout.ms` |
+| `metadata.broker.list` | `bootstrap.servers` |
+| `queue.buffering.max.ms` | `linger.ms` |
+| `request.required.acks` | `acks` |
+| `sasl.mechanisms` | `sasl.mechanism` |
+| `sasl.oauthbearer.client.id` | `sasl.oauthbearer.client.credentials.client.id` |
+| `sasl.oauthbearer.client.secret` | `sasl.oauthbearer.client.credentials.client.secret` |
+
+The driver also strips its `topic.` prefix from a key that names none of its own properties and reads the rest as a property name, so the client refuses a key written under the prefix, except the driver's own properties whose names begin with it: `topic.blacklist`, `topic.metadata.propagation.max.ms`, `topic.metadata.refresh.fast.cnt`, `topic.metadata.refresh.fast.interval.ms`, `topic.metadata.refresh.interval.ms`, `topic.metadata.refresh.sparse`.
 
 ### PULSAR client
 
@@ -901,11 +939,11 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `addr` | required | URL (mqtt or mqtts) | Nervix; strict | no | none |
+| `addr` | required | URL naming only a host and a port (mqtt or mqtts) | Nervix; strict | no | none |
 | `client_id` | optional | string | Nervix; strict | no | none |
-| `tls_ca_file` | required when `addr` uses `mqtts` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
-| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
-| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+| `tls_ca_file` | required when `addr` uses `mqtts`; refused otherwise | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional; requires `addr` to use `mqtts` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional; requires `addr` to use `mqtts` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 

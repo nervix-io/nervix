@@ -1144,10 +1144,10 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         let elasticmq_name = self.container_name("elasticmq");
         let elasticmq = self
             .start_container("elasticmq", 9324.tcp(), "ElasticMQ", || {
-                GenericImage::new("softwaremill/elasticmq-native", "1.6.12")
+                GenericImage::new("softwaremill/elasticmq-native", "1.7.1")
                     .with_exposed_port(9324.tcp())
                     .with_wait_for(WaitFor::message_on_either_std(
-                        "ElasticMQ server (1.6.12) started",
+                        "ElasticMQ server (1.7.1) started",
                     ))
                     .with_container_name(&elasticmq_name)
                     .with_network(&network)

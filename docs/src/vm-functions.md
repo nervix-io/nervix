@@ -180,7 +180,12 @@ window aggregates, and UDFs. The compiler handles those specially. For a tree th
 path.
 
 No builtin has side effects. The language's one side effect, `write_header`, is an `INVOKE`
-statement rather than an expression.
+statement rather than an expression. `CompileOptions::header_writes` carries the header values the
+emitter's entity declares, and a program compiled without them refuses `INVOKE`. The compiler holds
+the name to a `STRING` and the value to one of the declared exact types, `STRING` for text values,
+both non-null, and moves each into a register of its own type. The host reads the value back from
+that typed register as the record's text or typed header, so an integer or a byte string reaches a
+typed transport without passing through text.
 
 A value rule that both folding and execution apply is defined once in the catalog:
 
@@ -1375,7 +1380,8 @@ Treat this as the checklist for a new builtin, or for a new family.
     the serialized `just benchmark-ab` for any end-to-end claim.
     - Claim vectorization only after inspecting the generated instructions for the target.
     - Claim a speedup only from a same-host A/B.
-    - Record the result beside the existing report.
+    - Record the result on the function's ClickUp task, beside the
+      [VM functions measurement report](https://app.clickup.com/t/86bc202hj).
 11. **Document it.**
     - Add its contract to [Expression Functions](./filter-map-functions.md), including a catalog
       row.

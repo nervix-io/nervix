@@ -199,7 +199,7 @@ Feature: Kafka emission
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
         FROM mqtt_ingress
         TOPIC 'notifications_headers_in_{{test_id}}'
-        MODE NO ACK
+        SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
           INHERIT ALL
@@ -280,7 +280,7 @@ Feature: Kafka emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -353,7 +353,7 @@ Feature: Kafka emission
       };
       CREATE KAFKA CLIENT unavailable_kafka_sink CONFIG {
         'bootstrap.servers' = '127.0.0.1:1',
-        'message.timeout.ms' = '100',
+        'delivery.timeout.ms' = '100',
         'socket.timeout.ms' = '100'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
