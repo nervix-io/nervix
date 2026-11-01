@@ -333,8 +333,9 @@ own expression. HTTPS retains certificate and hostname verification.
 The optional `tls_cert_file` and `tls_key_file` settings must be supplied together, and mounted TLS
 files use the client's pinned resource version. The optional `follow_redirects` and `proxy`
 settings mean for the emitter what they mean for HTTP polling, as
-[HTTP client transport](#http-client-transport) describes. Validation does not probe the
-destination.
+[HTTP client transport](#http-client-transport) describes. The client's `secret.<name>` keys are
+for [polling headers](ingestors.md#http-request) and the emitter sends none of them. Validation
+does not probe the destination.
 
 Method, path and `write_header` name and value expressions must each be exact, non-null `STRING`
 values. Request expressions read the original `input` and, with a codec, finalized `output` and

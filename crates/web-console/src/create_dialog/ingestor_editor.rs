@@ -13,15 +13,17 @@
 
 use leptos::prelude::*;
 use nervix_models::{
-    HttpIngestorEntity, HttpRequestHeader, IngestDeliveryKind, IngestQuiesceKind,
-    IngestQuiesceOverflow, IngestorEntityKind, OptionDeclaration, OptionForm, OptionPresence,
-    WebsocketsIngestorEntity, WebsocketsUpgradeHeader,
+    HttpIngestorEntity, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceOverflow,
+    IngestorEntityKind, OptionDeclaration, OptionForm, OptionPresence, WebsocketsIngestorEntity,
+    WebsocketsUpgradeHeader,
 };
 
 use super::{
-    ChoiceControl, ChoiceGroup, CreateSignals, RequestSender, event_target_textarea_value,
-    event_target_value, ingestor_draft::TimestampDraft, ingestor_route_editor::IngestorRouteEditor,
-    ingestor_source_draft::IngestorEntityDraft,
+    ChoiceControl, ChoiceGroup, CreateSignals, RequestSender, event_target_checked,
+    event_target_textarea_value, event_target_value,
+    ingestor_draft::TimestampDraft,
+    ingestor_route_editor::IngestorRouteEditor,
+    ingestor_source_draft::{IngestorEntityDraft, RequestHeaderDraft},
 };
 
 #[derive(Clone, Copy)]
@@ -263,7 +265,7 @@ fn RequestHeadersEditor(signals: CreateSignals) -> impl IntoView {
     let pending = move || signals.progress.get().is_pending();
     view! {
         <fieldset class="create-field create-ingestor-request-headers" data-option="HEADERS">
-            <legend>"HEADERS · optional literal request fields"</legend>
+            <legend>"HEADERS · optional request fields, literal or from a client secret"</legend>
             <For each=move || { (0..signals.ingestor.get().source.request_headers.len()).collect::<Vec<_>>() }
                 key=|index| *index
                 children=move |index| view! {
@@ -282,7 +284,9 @@ fn RequestHeadersEditor(signals: CreateSignals) -> impl IntoView {
                                     signals.edit();
                                 } />
                         </label>
-                        <label class="create-field"><span>"Value"</span>
+                        <label class="create-field">
+                            <span>{move || if signals.ingestor.get().source.request_headers.get(index)
+                                .is_some_and(|header| header.client_secret) { "Client key" } else { "Value" }}</span>
                             <input class="create-ingestor-request-header-value" type="text" autocomplete="off"
                                 disabled=pending
                                 prop:value=move || match signals.ingestor.get().source.request_headers.get(index) {
@@ -296,6 +300,17 @@ fn RequestHeadersEditor(signals: CreateSignals) -> impl IntoView {
                                     signals.edit();
                                 } />
                         </label>
+                        <label class="create-check"><input class="create-ingestor-request-header-secret" type="checkbox"
+                            prop:checked=move || signals.ingestor.get().source.request_headers.get(index)
+                                .is_some_and(|header| header.client_secret)
+                            disabled=pending
+                            on:change=move |event| {
+                                let client_secret = event_target_checked(&event);
+                                signals.ingestor.update(|draft| {
+                                    if let Some(header) = draft.source.request_headers.get_mut(index) { header.client_secret = client_secret; }
+                                });
+                                signals.edit();
+                            } /><span>"Client secret"</span></label>
                         <button type="button" class="create-ingestor-request-header-remove" disabled=pending
                             on:click=move |_| {
                                 signals.ingestor.update(|draft| {
@@ -307,9 +322,7 @@ fn RequestHeadersEditor(signals: CreateSignals) -> impl IntoView {
                 } />
             <button type="button" class="create-ingestor-request-headers-add" disabled=pending
                 on:click=move |_| {
-                    signals.ingestor.update(|draft| draft.source.request_headers.push(HttpRequestHeader {
-                        name: String::new(), value: String::new(),
-                    }));
+                    signals.ingestor.update(|draft| draft.source.request_headers.push(RequestHeaderDraft::default()));
                     signals.edit();
                 }>"Add request header"</button>
         </fieldset>

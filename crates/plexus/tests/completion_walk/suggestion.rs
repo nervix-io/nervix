@@ -96,6 +96,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     // Server-issued identities are quoted literals rather than Plexus names.
     ("transaction_id", "'nx_transaction'"),
     ("request_header_name", "'x-nx-header'"),
+    ("client_secret_key", "'secret.nx_key'"),
     ("upgrade_header_name", "'x-nx-header'"),
     ("word", "nx_word"),
 ];

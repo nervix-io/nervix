@@ -23,12 +23,12 @@ use super::{
 };
 use crate::{
     ClickHouseEmitter, ClientProducerIngestor, EmitterEntity, EmitterEntityKind, EmitterReference,
-    HttpEmitter, HttpEndpointIngestor, HttpIngestor, HttpRequestIngestor, IcebergCatalog,
-    IcebergEmitter, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntity,
-    IngestorEntityBody, IngestorEntityKind, IngestorEntityModel, IngestorInput, KafkaEmitter,
-    KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, LocatorDeclaration, MongoDbEmitter,
-    MqttEmitter, MqttIngestor, MqttTopicIngestor, MySqlEmitter, NatsEmitter, NatsIngestor,
-    NatsSubjectIngestor, OptionDeclaration, OptionPresence, OtelEmitter, OtelMetric,
+    HttpEmitter, HttpEndpointIngestor, HttpIngestor, HttpRequestHeaderValue, HttpRequestIngestor,
+    IcebergCatalog, IcebergEmitter, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
+    IngestorEntity, IngestorEntityBody, IngestorEntityKind, IngestorEntityModel, IngestorInput,
+    KafkaEmitter, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, LocatorDeclaration,
+    MongoDbEmitter, MqttEmitter, MqttIngestor, MqttTopicIngestor, MySqlEmitter, NatsEmitter,
+    NatsIngestor, NatsSubjectIngestor, OptionDeclaration, OptionPresence, OtelEmitter, OtelMetric,
     OtelMetricKind, PostgresEmitter, PrometheusIngestor, PrometheusQueryIngestor, PulsarEmitter,
     PulsarIngestor, PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestor, RabbitMqQueueIngestor,
     RedisEmitter, RedisIngestor, RedisPubSubIngestor, SentryEmitter, SqsEmitter, SqsFifoGroup,
@@ -398,11 +398,13 @@ impl IngestorPresentationModel for HttpRequestIngestor {
                 .headers
                 .iter()
                 .map(|header| {
-                    format!(
-                        "{} = {}",
-                        string_literal(&header.name),
-                        string_literal(&header.value)
-                    )
+                    let value = match &header.value {
+                        HttpRequestHeaderValue::Literal(value) => string_literal(value),
+                        HttpRequestHeaderValue::ClientSecret(key) => {
+                            format!("CLIENT SECRET {}", string_literal(key))
+                        }
+                    };
+                    format!("{} = {value}", string_literal(&header.name))
                 })
                 .collect();
             presentation.written_option("HEADERS", format!("{{ {} }}", fields.join(", ")));

@@ -63,7 +63,7 @@ fn option_value(value: OptionValue) -> String {
         OptionValue::Name(name) => format!("string literal checked by {}", name.label),
         OptionValue::Expression => "expression".to_owned(),
         OptionValue::Mapping => "named expressions".to_owned(),
-        OptionValue::LiteralMapping => "named string literals".to_owned(),
+        OptionValue::RequestHeaders => "named string literals or client secrets".to_owned(),
         OptionValue::Client(connector) => format!("{connector} client"),
         OptionValue::Clause => "composed clause".to_owned(),
         OptionValue::Size => "byte size".to_owned(),
@@ -486,7 +486,9 @@ fn client(kind: ConnectorKind) -> Option<Value> {
     Some(
         json!({ "kind": kind.keyword(), "pool": pool, "config_owner": config_owner, "options": options,
             "keys": keys, "namespaces": namespaces, "reserved": config.reserved(), "aliases": aliases,
-            "stripped_prefix": stripped_prefix, "constraints": constraints }),
+            "stripped_prefix": stripped_prefix,
+            "secret_keys": config.secret_key_prefix().map(|prefix| format!("{prefix}*")),
+            "constraints": constraints }),
     )
 }
 

@@ -1283,6 +1283,11 @@ TLS keys on `ws`, and unpaired identity files are typed refusals naming their ke
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a ingestor cannot produce its validated header collection. Rendered client values are
 validated again by the connector before opening transport.
+`HttpRequestHeadersError` is the frame beneath the registry's `InvalidHttpRequestHeaders` context,
+which names only the ingestor and its domain. It names the offending header of a polling
+ingestor's `HEADERS`, and the client key of a `CLIENT SECRET` it cannot read, with the client where
+the key is undeclared. It never quotes the key's value, and neither does the connector's
+`InvalidHeader` when a rendered secret cannot be a header at open.
 An Iceberg emitter's location refusal names its domain, emitter and `LOCATION`, with the
 vocabulary's typed location failure beneath that context. A malformed URL retains its URL-parser
 cause; a storage-scheme mismatch names the found scheme and the schemes its declared client

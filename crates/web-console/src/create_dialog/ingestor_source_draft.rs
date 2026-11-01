@@ -18,21 +18,21 @@ use error_stack::{Report, ResultExt as _};
 use nervix_models::{
     ChoiceRequirement, ClientIngestorEntity, ClientName, DomainClockPeriod, EndpointIngestMode,
     EndpointName, HttpEndpointIngestor, HttpIngestorEntity, HttpRequestHeader,
-    HttpRequestIngestMode, HttpRequestIngestor, IngestDeliveryKind, IngestQuiesceKind,
-    IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind,
-    KafkaConsumerGroupName, KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode,
-    KafkaTopicIngestor, KafkaTopicName, ModelName, MqttIngestMode, MqttIngestorEntity, MqttQos,
-    MqttSession, MqttTopicFilter, MqttTopicIngestor, NatsIngestMode, NatsIngestorEntity,
-    NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectName, NodeRef, PayloadSizeLimit,
-    PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor, PulsarIngestMode,
-    PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
-    PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode, RabbitMqIngestorEntity,
-    RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName, RedisIngestorEntity,
-    RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SqsIngestMode, SqsIngestorEntity,
-    SqsQueueIngestor, SqsQueueName, SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor,
-    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
-    WebsocketsIngestorEntity, WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, ZeroMqIngestMode,
-    ZeroMqIngestorEntity, ZeroMqPullIngestor,
+    HttpRequestHeaderValue, HttpRequestIngestMode, HttpRequestIngestor, IngestDeliveryKind,
+    IngestQuiesceKind, IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity,
+    IngestorEntityKind, KafkaConsumerGroupName, KafkaIngestMode, KafkaIngestorEntity,
+    KafkaOffsetMode, KafkaTopicIngestor, KafkaTopicName, ModelName, MqttIngestMode,
+    MqttIngestorEntity, MqttQos, MqttSession, MqttTopicFilter, MqttTopicIngestor, NatsIngestMode,
+    NatsIngestorEntity, NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectName, NodeRef,
+    PayloadSizeLimit, PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor,
+    PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName,
+    PulsarSubscriptionOwnership, PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode,
+    RabbitMqIngestorEntity, RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName,
+    RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SqsIngestMode,
+    SqsIngestorEntity, SqsQueueIngestor, SqsQueueName, SyslogIngestMode, SyslogIngestorEntity,
+    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestMode, WebsocketsIngestorEntity, WebsocketsUpgradeHeader,
+    WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
 };
 use strum::IntoEnumIterator as _;
 use thiserror::Error;
@@ -43,6 +43,46 @@ use super::SelectedReference;
 pub(super) enum OffsetChoice {
     Domain,
     ConsumerGroup,
+}
+
+/// One polled request header as a form edits it: its value is what the statement writes, either
+/// the header's value or the client key that holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct RequestHeaderDraft {
+    pub(super) name: String,
+    pub(super) value: String,
+    pub(super) client_secret: bool,
+}
+
+impl From<&RequestHeaderDraft> for HttpRequestHeader {
+    fn from(draft: &RequestHeaderDraft) -> Self {
+        let value = if draft.client_secret {
+            HttpRequestHeaderValue::ClientSecret(draft.value.clone())
+        } else {
+            HttpRequestHeaderValue::Literal(draft.value.clone())
+        };
+        Self {
+            name: draft.name.clone(),
+            value,
+        }
+    }
+}
+
+impl From<&HttpRequestHeader> for RequestHeaderDraft {
+    fn from(header: &HttpRequestHeader) -> Self {
+        match &header.value {
+            HttpRequestHeaderValue::Literal(value) => Self {
+                name: header.name.clone(),
+                value: value.clone(),
+                client_secret: false,
+            },
+            HttpRequestHeaderValue::ClientSecret(key) => Self {
+                name: header.name.clone(),
+                value: key.clone(),
+                client_secret: true,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -58,7 +98,7 @@ pub(super) struct IngestorEntityDraft {
     pub(super) subscription_ownership: Option<PulsarSubscriptionOwnership>,
     pub(super) query: String,
     pub(super) method: String,
-    pub(super) request_headers: Vec<HttpRequestHeader>,
+    pub(super) request_headers: Vec<RequestHeaderDraft>,
     pub(super) max_body_size: String,
     pub(super) upgrade_headers: Vec<WebsocketsUpgradeHeader>,
     pub(super) every: String,
@@ -277,7 +317,11 @@ impl IngestorEntityDraft {
             IngestorEntityKind::Http(HttpIngestorEntity::Request) => HttpRequestIngestor {
                 client: self.client()?,
                 method: self.required(&self.method, IngestorEntityDraftError::Method)?,
-                headers: self.request_headers.clone(),
+                headers: self
+                    .request_headers
+                    .iter()
+                    .map(HttpRequestHeader::from)
+                    .collect(),
                 max_body_size: self.max_body_size()?,
                 every: self.every()?,
                 mode: HttpRequestIngestMode::NoAck,
@@ -754,16 +798,16 @@ pub(super) enum IngestorEntityDraftError {
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        CodecName, CreateStatement, GeneralErrorPolicy, HttpIngestorEntity, IngestDeliveryKind,
-        IngestQuiesceKind, IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind,
-        KafkaIngestorEntity, Model, ModelKind, ModelName, MqttIngestMode, MqttIngestor,
-        MqttIngestorEntity, MqttQos, MqttSession, NatsIngestorEntity, NodeRef, PulsarIngestor,
-        PulsarIngestorEntity, PulsarSubscriptionOwnership, RedisIngestorEntity,
-        RequestedResourceVersion, Statement, WebsocketsIngestorEntity,
+        CodecName, CreateStatement, GeneralErrorPolicy, HttpIngestorEntity, HttpRequestHeader,
+        HttpRequestHeaderValue, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceOverflow,
+        IngestorEntity, IngestorEntityKind, KafkaIngestorEntity, Model, ModelKind, ModelName,
+        MqttIngestMode, MqttIngestor, MqttIngestorEntity, MqttQos, MqttSession, NatsIngestorEntity,
+        NodeRef, PulsarIngestor, PulsarIngestorEntity, PulsarSubscriptionOwnership,
+        RedisIngestorEntity, RequestedResourceVersion, Statement, WebsocketsIngestorEntity,
     };
     use nervix_plexus::statement::parse_statement;
 
-    use super::{IngestorEntityDraft, IngestorEntityDraftError, OffsetChoice};
+    use super::{IngestorEntityDraft, IngestorEntityDraftError, OffsetChoice, RequestHeaderDraft};
     use crate::create_dialog::{
         SelectedReference,
         ingestor_draft::{IngestorDraft, TimestampDraft},
@@ -859,7 +903,11 @@ mod tests {
         match source {
             IngestorEntity::Http(HttpIngestor::Request(entity)) => {
                 draft.method = entity.method.clone();
-                draft.request_headers = entity.headers.clone();
+                draft.request_headers = entity
+                    .headers
+                    .iter()
+                    .map(RequestHeaderDraft::from)
+                    .collect();
                 draft.max_body_size = entity
                     .max_body_size
                     .map(|limit| limit.to_string())
@@ -922,6 +970,26 @@ mod tests {
             }
         }
         draft
+    }
+
+    #[test]
+    fn a_request_header_row_is_a_literal_until_it_reads_a_client_secret() {
+        let mut row = RequestHeaderDraft {
+            name: "authorization".to_string(),
+            value: "secret.api_token".to_string(),
+            client_secret: false,
+        };
+        assert_eq!(
+            HttpRequestHeader::from(&row).value,
+            HttpRequestHeaderValue::Literal("secret.api_token".to_string())
+        );
+        row.client_secret = true;
+        let header = HttpRequestHeader::from(&row);
+        assert_eq!(
+            header.value,
+            HttpRequestHeaderValue::ClientSecret("secret.api_token".to_string())
+        );
+        assert_eq!(RequestHeaderDraft::from(&header), row);
     }
 
     #[test]

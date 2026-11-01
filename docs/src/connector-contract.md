@@ -840,7 +840,7 @@ is declared as it behaves, and a buffer that nothing bounds yet is declared unbo
 shows each gap until its connector closes it. A `PROMETHEUS QUERY` or `HTTP REQUEST` response is
 bounded by its statement's `MAX BODY SIZE` (16 MiB where omitted). A response that exceeds the
 bound fails the poll, which the ingestor reports as its transient error, and the next poll reads
-again. The HTTP polling request's method and literal headers are carried by the typed ingestor plan;
+again. The HTTP polling request's method and headers are carried by the typed ingestor plan;
 its client supplies the required total `timeout_ms` and TLS settings. The polling client follows
 redirects and uses a proxy only as [HTTP client transport](#http-client-transport) describes. An
 HTTP response carries its status and scheduled poll instant into the same metadata group as its
@@ -1014,6 +1014,15 @@ projection, masking secrets and address credentials/query options as `********`.
 serialization retains values for strongly persisted configuration and backup archives; archives
 remain secret-bearing under [Backup And Restore](backup-and-restore.md). Existing entity `DESCRIBE`
 output references clients by name and does not print their CONFIG.
+
+A client schema may also declare a family of secret keys its operator names, as the `HTTP` client
+does with `secret.<name>`. Nervix owns these keys and no driver reads them, so the family is not a
+delegated namespace: `ownership_label` stays `Nervix`, and the client stays strict about every
+other key. Inspection masks them as it masks a key with no public declaration. An `HTTP REQUEST`
+ingestor reads one with a `CLIENT SECRET '<key>'` header value. The statement holds only that name,
+the registry refuses at `CREATE` and `ALTER` a name its client does not hold or does not keep
+secret and a value no header can carry, without quoting the value, and the connector takes the
+value from its rendered configuration at open and marks the field sensitive.
 
 `DESCRIBE CLIENT <name>` reads the stored client in the selected domain and reports its connector
 and effective CONFIG. The schema represents an optional key with a declared default separately
