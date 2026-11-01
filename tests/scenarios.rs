@@ -6024,6 +6024,7 @@ impl IngestorLogicTransportFixture {
             Self::Mqtt => {
                 r#"FROM logic_mqtt
         TOPIC 'logic_notifications_{{test_id}}'
+        SESSION CLEAN QOS 0
         MODE NO ACK"#
             }
             Self::Nats => {
@@ -19412,7 +19413,8 @@ impl UnacknowledgedSourceFixture {
         ON QUIESCE SUSPEND"
             }
             Self::Mqtt => {
-                "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}' MODE NO ACK
+                "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}' SESSION CLEAN QOS 0
+          MODE NO ACK
         ON QUIESCE DROP"
             }
             Self::Nats => {
