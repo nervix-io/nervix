@@ -335,8 +335,8 @@ mod tests {
         assert_eq!(
             message.as_deref(),
             Some(
-                "invalid client 'sensors' in domain 'sales': 'keep_alive_ms' must be whole seconds \
-                 from 1 s through 65535 s"
+                "invalid client 'sensors' in domain 'sales': 'keep_alive_ms' must be whole \
+                 seconds from 1 s through 65535 s"
             )
         );
         assert!(!format!("{report:?}").contains("private-mqtt-password"));

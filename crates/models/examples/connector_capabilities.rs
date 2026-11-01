@@ -175,14 +175,20 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
 }
 
 /// The header model of one side as the matrix states it, or `null` for a side whose messages carry
-/// no transport headers.
+/// no transport headers. `values` states what carries each typed value, and is `null` for text.
 fn header_model(model: Option<HeaderModel>) -> Value {
-    let Some(HeaderModel { layout, names }) = model else {
+    let Some(HeaderModel {
+        layout,
+        names,
+        values,
+    }) = model
+    else {
         return Value::Null;
     };
     json!({
         "layout": layout.as_ref(), "names": names.as_ref(),
         "layout_meaning": layout.meaning(), "names_meaning": names.meaning(),
+        "values": values.carried(),
     })
 }
 
@@ -423,6 +429,10 @@ fn emitter_template(kind: EmitterEntityKind, body: &str) -> String {
         EmitterBodyForm::Native => String::new(),
     };
     body_clause.push_str(&option_template(&payload_options));
+    // Each envelope clause the entity declares follows the payload, written at most once.
+    for clause in declared.envelope {
+        body_clause.push_str(&format!("\n    [{}]", clause.example()));
+    }
     let batch = match declared.batch {
         EmitterBatchLegality::Required { .. } => "\n  BATCH MAX MESSAGES <count> MAX SIZE <bytes>",
         EmitterBatchLegality::Optional { .. } => {

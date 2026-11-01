@@ -1,4 +1,4 @@
-//! RabbitMqQueueIngestor, RabbitMqQueueEmitter connector entities.
+//! RabbitMqQueueIngestor, RabbitMqQueueEmitter and RabbitMqExchangeEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public queue connector implementation surface.
@@ -17,9 +17,15 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+pub mod exchange;
 pub mod queue;
+pub use exchange::*;
 pub use queue::*;
 
 mod address;
+mod channel_closure;
+mod connection;
 mod offline_config;
+mod publisher;
+pub use connection::RabbitMqConnectError;
 pub use offline_config::validate_client_configuration;

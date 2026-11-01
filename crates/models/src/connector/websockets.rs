@@ -157,7 +157,14 @@ const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Fixed(WEBSOCKETS_CONTROL_FRAME_BUDGET),
         },
     ],
-    driver_limits: &[],
+    // The transport's handshake parser fixes these bounds of the opening response; no client key
+    // reaches them.
+    driver_limits: &[
+        "The opening upgrade response carries at most 124 header fields, and at most 64 KiB \
+         arrives before its head ends; a larger response fails that connection attempt.",
+        "The response head arrives within 512 reads that, after the 64th, average at least 128 \
+         bytes; a peer that trickles it fails that connection attempt.",
+    ],
 };
 
 /// What the connector of a WEBSOCKETS ENDPOINT holds and how long it waits.

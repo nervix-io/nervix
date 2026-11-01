@@ -372,7 +372,10 @@ fn the_admitted_publish_buffer_names_the_client_key_and_the_default_it_states() 
     let ClientConfigPresence::Defaulted(default) = declared.presence else {
         panic!("max_packet_size has a declared default");
     };
-    assert_eq!(setting, format!("max_packet_size, {default} bytes when omitted"));
+    assert_eq!(
+        setting,
+        format!("max_packet_size, {default} bytes when omitted")
+    );
 }
 
 #[test]

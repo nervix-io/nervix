@@ -797,6 +797,25 @@ body size and the limit as typed fields and becomes a record rejection of that m
 lost connection, and a close whose reason never arrives fail the attempt as an infrastructure
 failure, which the emitter retries on its backoff.
 
+A message the broker returns unrouted under `MANDATORY`, with its publisher confirm under `ACK` or
+before the round trip that ends a `NO ACK` write, is a record rejection with code `external` and
+operation `publish` whose message names the broker's reply code and text, such as `rabbitmq
+returned the message unrouted with reply code 312: NO_ROUTE`. A routing key longer than an AMQP
+short string carries is a `RabbitMqRecordError` keeping the driver's `ShortStringError` as its
+source and the key's length as a typed field, and becomes the same kind of rejection before the
+message is written. A return the emitter cannot attribute to a message of its write fails the
+attempt instead, because no record can be named as unrouted. An exchange emitter whose passive check
+finds no exchange fails to open with `EmitterOpenError::MissingExternalEntity`, naming the exchange
+and keeping the broker's `NOT_FOUND` answer, a `lapin::Error`, as its typed cause; `DESCRIBE EMITTER`
+shows it as `RabbitMQ exchange '<name>' does not exist`. Any other failure of that check is an
+initialization failure. Both are retried on the emitter's backoff.
+
+The registry refuses a `ROUTING KEY` that does not compute an exact, non-null, non-sensitive
+`STRING` as `ConnectorDeclarationIssue::EnvelopeValue`, the issue envelope values share, with the
+site written as the statement writes it: `ROUTING KEY requires an exact, non-null, non-sensitive
+STRING value`. The host reports a routing key that fails or produces no value for a record as an
+`evaluation` error of the `publish` operation whose message begins `ROUTING KEY`.
+
 Syslog emission and WebSocket-client ingestion retain DNS failures from the node resolver beneath
 their existing infrastructure contexts: `EmitterOpenError::Initialize` while a Syslog sender opens
 and `IngestorError::Resume` while a WebSocket source connects or reconnects. The resolver's typed
@@ -1213,9 +1232,12 @@ An envelope clause or `PROPERTIES` key the entity does not declare is
 `EnvelopeDeclarationError` that names the entity and the clause or key; an envelope duration
 reuses the duration issues under `DELIVER AFTER` or `DELAY`, and an envelope expression that is
 not an exact, non-null, non-sensitive value of its type is `EnvelopeValue`, naming the clause or
-key and the expected type with the VM's compile failure beneath it. These are command refusals
-before publication, including during `ALTER`, rather than retried source or sink initialization
-failures. They never include a record's values.
+key and the expected type with the VM's compile failure beneath it. An `SQS QUEUE` emitter that
+writes `DELAY` for a FIFO queue, a `DELAY` other than whole seconds up to 900s, or a
+`DEDUPLICATION ID` for a standard queue is refused with `SqsFifoQueueDelay`, `SqsDelay` or
+`SqsStandardQueueDeduplication`, naming the queue or the duration as written. These are command
+refusals before publication, including during `ALTER`, rather than retried source or sink
+initialization failures. They never include a record's values.
 
 MySQL table-name construction refuses empty path parts and more than two parts with typed
 `ExternalNameError` outcomes. Its offline client check refuses pool-sizing URL parameters through
