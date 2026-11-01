@@ -228,15 +228,18 @@ Feature: Web console visual schema and branch creation
     Then selector ".create-schema-ref [data-value='tenant_key']" exists
     When selector ".create-schema-ref [data-value='tenant_key']" is clicked
     And selector ".create-ttl" is filled with "5m"
+    Then selector ".create-partitions" has value "1"
+    And selector ".create-preview" contains "CREATE BRANCH bounded_tenants SCHEMA tenant_key TTL 5m;"
+    When selector ".create-partitions" is filled with "4"
     And selector ".create-limit-instances" is clicked
     And selector ".create-max-instances" is filled with "3"
-    Then selector ".create-preview" contains "MAX INSTANCES 3 EVICT LRU"
+    Then selector ".create-preview" contains "TTL 5m PARTITIONS 4 MAX INSTANCES 3 EVICT LRU"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
     And selector ".prompt-row input" is filled with "SHOW CREATE BRANCH bounded_tenants;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE BRANCH bounded_tenants SCHEMA tenant_key TTL 5m MAX INSTANCES 3 EVICT LRU;" exactly 2 times
+    Then selector ".terminal" contains "CREATE BRANCH bounded_tenants SCHEMA tenant_key TTL 5m PARTITIONS 4 MAX INSTANCES 3 EVICT LRU;" exactly 2 times
 
   Scenario: Changing a branch draft's domain retains and invalidates its selected schema
     Given a 1 node nervix cluster is started
