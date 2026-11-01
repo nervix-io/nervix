@@ -326,7 +326,10 @@ current connection, retry and deadline limits.
   transient error while the emitter retries.
 - Provision Iceberg table columns with names and types matching the emitter's `VALUES`. A
   required `NAMESPACE` names the catalog namespace independently of the Nervix domain; provision
-  each of its case-preserving dot-separated levels before starting the emitter. A
+  each of its case-preserving dot-separated levels before starting the emitter. Until the catalog
+  holds the namespace and the table, the emitter retries its open and `DESCRIBE EMITTER` names the
+  namespace or the table it lacks. Move an emitter to another namespace with `SET TO`, restating
+  its complete destination with the new `NAMESPACE` and that table's `LOCATION`. A
   `DATETIME`, at the top level or inside a `VEC` or `ARRAY`, is written at the containing
   microsecond and needs a `timestamptz` column, not `timestamptz_ns`. A commit writes each mapped
   column into the table column of its name, in any `VALUES` order, and a null into each optional
@@ -354,6 +357,12 @@ current connection, retry and deadline limits.
 - A Kafka client never sets `allow.auto.create.topics`; `CREATE KAFKA CLIENT` refuses it. Provision each
   topic a Kafka ingestor reads: an ingestor never creates its topic and reports it as missing until
   it exists.
+- Every Kafka client writes each librdkafka property under the Apache Kafka Java client's name,
+  such as `bootstrap.servers`, `linger.ms`, `acks`, `retries`, `compression.type` and
+  `delivery.timeout.ms`, and writes no `topic.` prefixed key other than librdkafka's own
+  `topic.metadata.*` and `topic.blacklist`. `CREATE KAFKA CLIENT` refuses librdkafka's other
+  name for a property, even alone, and a `topic.` prefixed key. Read `Connector Capabilities` →
+  `KAFKA client` for each refused name and the name to write.
 - For Kafka source control-call deadlines and bounded execution, follow `Ingestors` → `Client
   Deadlines`. Keep `socket.timeout.ms` distinct from the consumer-group commit caller deadline;
   an unanswered commit is retained before another can start.
@@ -461,9 +470,8 @@ current connection, retry and deadline limits.
   legitimately returns more. Samples enter the graph in batches of at most 1024.
 - Treat Kafka `NO ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
-  share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces any
-  `message.timeout.ms` or `delivery.timeout.ms` in the client's `CONFIG` as the producer's delivery
-  bound. The producer always reports every record, so `delivery.report.only.error` in a client's
+  share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces the
+  client's `delivery.timeout.ms` as the producer's delivery bound. The producer always reports every record, so `delivery.report.only.error` in a client's
   `CONFIG` has no effect.
 - A `KAFKA TOPIC` emitter's `TIMESTAMP <expression>` is each record's Kafka create time: an exact,
   non-null, non-sensitive `DATETIME`, written as the millisecond that contains it. A time before

@@ -242,6 +242,109 @@ fn client_schema_refuses_every_key_nervix_sets() {
 }
 
 #[test]
+fn client_schema_accepts_each_librdkafka_property_under_the_java_clients_name() {
+    let config = CreateClientKafka::<u64>::DECLARATION.config;
+    let broker = config_entry("bootstrap.servers", "127.0.0.1:9092");
+    let pairs: Vec<_> = config
+        .aliases()
+        .iter()
+        .map(|alias| (alias.alias, alias.accepted))
+        .collect();
+    assert_eq!(
+        pairs,
+        [
+            ("compression.codec", "compression.type"),
+            ("fetch.message.max.bytes", "max.partition.fetch.bytes"),
+            ("max.in.flight", "max.in.flight.requests.per.connection"),
+            ("message.send.max.retries", "retries"),
+            ("message.timeout.ms", "delivery.timeout.ms"),
+            ("metadata.broker.list", "bootstrap.servers"),
+            ("queue.buffering.max.ms", "linger.ms"),
+            ("request.required.acks", "acks"),
+            ("sasl.mechanisms", "sasl.mechanism"),
+            (
+                "sasl.oauthbearer.client.id",
+                "sasl.oauthbearer.client.credentials.client.id"
+            ),
+            (
+                "sasl.oauthbearer.client.secret",
+                "sasl.oauthbearer.client.credentials.client.secret"
+            ),
+        ]
+    );
+    for alias in config.aliases() {
+        assert_eq!(
+            config.key(alias.alias),
+            None,
+            "'{}' is no declared key",
+            alias.alias
+        );
+        let refusal = config
+            .validate(&[broker.clone(), config_entry(alias.alias, "1")])
+            .expect_err("a Kafka client writes each librdkafka property under one name");
+        assert_eq!(
+            refusal.current_context(),
+            &ClientConfigSchemaError::DriverAlias {
+                key: alias.alias.to_string(),
+                accepted: alias.accepted,
+            }
+        );
+        let mut accepted = vec![config_entry(alias.accepted, "1")];
+        if alias.accepted != "bootstrap.servers" {
+            accepted.push(broker.clone());
+        }
+        config
+            .validate(&accepted)
+            .assured("librdkafka reads the accepted name and checks its value offline");
+    }
+}
+
+#[test]
+fn client_schema_refuses_a_key_written_under_librdkafkas_topic_prefix() {
+    let config = CreateClientKafka::<u64>::DECLARATION.config;
+    let broker = config_entry("bootstrap.servers", "127.0.0.1:9092");
+    let stripped = config
+        .stripped_prefix()
+        .assured("the Kafka client declares librdkafka's topic prefix");
+    assert_eq!(stripped.prefix, "topic.");
+    for key in [
+        "topic.message.timeout.ms",
+        "topic.delivery.timeout.ms",
+        "topic.acks",
+        "topic.auto.offset.reset",
+        "topic.compression.type",
+        "topic.enable.auto.commit",
+    ] {
+        let refusal = config
+            .validate(&[broker.clone(), config_entry(key, "1")])
+            .expect_err("librdkafka reads the key as a default-topic property's other name");
+        assert_eq!(
+            refusal.current_context(),
+            &ClientConfigSchemaError::DriverPrefix {
+                key: key.to_string(),
+                prefix: "topic.",
+            }
+        );
+    }
+    assert_eq!(
+        stripped.properties,
+        [
+            "topic.blacklist",
+            "topic.metadata.propagation.max.ms",
+            "topic.metadata.refresh.fast.cnt",
+            "topic.metadata.refresh.fast.interval.ms",
+            "topic.metadata.refresh.interval.ms",
+            "topic.metadata.refresh.sparse",
+        ]
+    );
+    for property in stripped.properties {
+        config
+            .validate(&[broker.clone(), config_entry(property, "1000")])
+            .assured("librdkafka's own global properties under the prefix pass through");
+    }
+}
+
+#[test]
 fn client_schema_accepts_the_broker_list_with_any_driver_property() {
     CreateClientKafka::<u64>::DECLARATION
         .config

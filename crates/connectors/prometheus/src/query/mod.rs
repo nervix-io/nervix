@@ -159,6 +159,7 @@ impl PacedIngestorConnector for PrometheusQueryIngestor {
         Ok(IngestorPoll {
             messages,
             failures,
+            dropped_header_values: 0,
             observed_at: actual_utc_now(),
         })
     }
