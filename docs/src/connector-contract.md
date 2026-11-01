@@ -919,7 +919,7 @@ remain in their owning work records until that delivery.
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits, and any alternative locators a body may write instead of it, each with its own keywords and name; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
 | Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
-| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
+| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys, and the other names its driver reads for one property: each pair of names with the one the client accepts, and a prefix the driver strips from a key before reading it, with the driver's own properties that begin with it. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
 composed head and canonical rendering use the vocabulary's connector kind; a console choice uses
@@ -929,7 +929,10 @@ how clients connect, pool or execute.
 
 Client keys are lowercase and case-sensitive. The pure registry refuses unknown, repeated,
 missing-required or mistyped Nervix-owned keys and incomplete TLS identities before a candidate
-can become an active graph. Kafka properties and object-store/catalog properties are explicitly
+can become an active graph. It also refuses a key its driver reads as another name for a property
+the client accepts under one name, and a key written under a prefix the driver strips, since the
+driver would apply whichever of two entries for one property it was handed last. Kafka properties
+and object-store/catalog properties are explicitly
 driver-delegated; database, Redis, RabbitMQ and NATS address query options belong to their driver.
 Undeclared delegated values are confidential in public inspection. Drivers retain their existing
 trust policy: HTTPS without a custom CA uses their built-in roots, while MQTT's `mqtts` address
@@ -946,7 +949,9 @@ Applying a model step under an accepted transaction or restore instead waits for
 capacities with `QueueAdmission::WaitForPlace`; lack of room has not judged the configuration.
 The service task's existing shutdown cancellation ends the wait. A charge larger than the whole
 class or a closed executor still fails inspection, and no uncharged config copy is made while waiting.
-Rendered values also pass the existing WebSockets configuration and Prometheus API-root owners;
+Rendered values also pass the WebSockets configuration owner, which holds a schema-valid
+WebSockets client to an endpoint without a fragment, counts within their ranges and a derivable
+idle deadline, and the Prometheus API-root owner;
 an optional Redis subscription capacity passes the same range parser its ingestor plan uses.
 Ingestor-only presence requirements stay with that plan.
 MQTT's representative first instance uses the same instance-template renderer as execution.
@@ -964,11 +969,21 @@ refusal before either a PULL or PUSH socket opens; an omitted value selects conn
 The MySQL offline check also applies the vocabulary's pooled-client reserved-key declaration to
 URL query parameters. A pool override is a value-free refusal naming `POOL SIZE`, before storage
 or connection attempts; the host uses that same declaration for resolved configuration. MySQL's
-current client schema declares only the address and CA file its implementation consumes. Its
+current client schema declares `addr`, `timeout_ms`, `tls_ca_file`, `tls_cert_file` and
+`tls_key_file`, with paired certificate and key files. Its
 table declaration admits one or two nonempty, case-preserving identifier parts, and the connector
 quotes each part separately. Its declared placeholder bound is shared with the statement divider;
 the bound narrows rows by mapped column count. The [MySQL manual](emitters.md#mysql) gives its
 exact binary binding and conflict semantics.
+
+The insert measure counts SQL text and binary bound values, excluding packet headers, parameter
+types and the execute null bitmap. It does not narrow a write by the server's
+`max_allowed_packet`; operators leave protocol headroom below that setting. Mounted TLS files
+enable TLS. They preserve the URL's verification policy when `require_ssl=true` selected one,
+otherwise starting from the driver's TLS defaults. The node's shared pool validates
+one connection at open, then its minimum keeper waits one second before each pass and counts
+checked-out connections together with idle ones. Its `timeout_ms` is an operation bound, shared
+with that keeper, rather than a bound on the complete maintenance pass or emitter flush.
 
 The Postgres client schema declares its address as a driver URL whose scheme and `sslmode` Nervix
 owns: validation and the connector read the one TLS policy through the same declared option, and
@@ -1080,7 +1095,14 @@ it writes, and no envelope or properties. Headers are `ordered_repeats` exact na
 directions; the ingestor's metadata is the record's topic, partition and offset. A Kafka client
 requires `bootstrap.servers`, without which no consumer or producer reaches a broker. Every other
 property is librdkafka's, checked offline before commit, except the keys Nervix sets itself on the
-consumers and producers it runs, which the client refuses. The Kafka-specific declaration tests,
+consumers and producers it runs, which the client refuses. librdkafka reads some properties under
+two names and applies the one it is handed last. The client declares each such pair, read from
+the vendored librdkafka 2.12.1, and accepts only the Apache Kafka Java client's name. It also
+declares librdkafka's `topic.` prefix, under which librdkafka reads any default-topic property, and
+refuses a key written under it, except librdkafka's own global `topic.` properties. So every
+property has one name, and the offline check and every consumer and producer see one value for it.
+A Kafka connector test pins the pairs and the prefix exceptions to the linked librdkafka through its
+own name lookup. The Kafka-specific declaration tests,
 generated grammar conformance and one-/three-node public declaration scenarios qualify these facts
 together.
 
@@ -2101,8 +2123,9 @@ that entire byte capacity is a record rejection naming its size and the capacity
 can admit it. Native queue accounting charges payload bytes alone, independently of the Kafka
 record's wire-size limit. A temporary full queue in `NO ACK` remains an infrastructure failure
 paced by the host's retry policy. The emitter also hands librdkafka the window's bound. Under `MODE ACK` it sets the
-producer's `message.timeout.ms` to `ACK TIMEOUT`, rounded up to the millisecond, after the client's
-own entries, and drops `delivery.timeout.ms`, the other name librdkafka reads that bound from. A
+producer's `delivery.timeout.ms` to `ACK TIMEOUT`, rounded up to the millisecond, replacing the
+client's own entry. A Kafka client accepts that librdkafka property under this name alone, so no
+other entry can set it. A
 producer left at librdkafka's five-minute default would keep retrying a record after the publish
 stopped waiting for it, and could deliver that copy beside the one the host's retry sends.
 librdkafka checks message timeouts about once a second, so the producer gives a record up within
@@ -2637,7 +2660,13 @@ sequenceDiagram
   arbitrary UTF-8 text and the exact key and reason of every refusal.
 - **Iceberg emitter.** It stages Arrow data locally on the node's filesystem storage workers, prepares
   data files, and publishes a catalog update once its `COMMIT EACH` cadence, which the host measures
-  from staging, ends or its staged files reach the maximum commit size. Open plans how its commits
+  from staging, ends or its staged files reach the maximum commit size. Open loads the declared
+  table from the REST catalog. A REST catalog answers a missing namespace and a missing table alike,
+  so a catalog that does not hold the table is asked for the table's namespace, and the open fails
+  with `EmitterOpenError::MissingExternalEntity` naming the namespace, or the table in a namespace
+  the catalog holds. The host retries that open on the emitter's backoff until an operator
+  provisions what it lacks. Any other catalog failure is `EmitterOpenError::Initialize`, with the
+  catalog's typed error beneath. Open then plans how its commits
   write the mapped columns into the loaded table, matching them to the table's columns by name and
   Iceberg type after recursively narrowing UTC nanosecond datetimes to microseconds in the staged
   schema, and refuses a table whose required column `VALUES` leaves out or maps from an expression
@@ -2710,10 +2739,14 @@ sequenceDiagram
   `WEBSOCKETS CONNECTION` source through `IngestorConnector` and `BrokerIngestorConnector`. It has
   no emitter or listening endpoint. Its plan carries resolved client configuration, the node
   resolver, validated literal upgrade headers and an optional compiled signaling protocol. The
-  vocabulary owns its strict CONFIG schema: endpoint, positive connection/ping/idle durations,
-  positive handoff/message/frame limits and TLS
-  file keys restricted to secure endpoints with paired client identity files. Registry creation
-  and source construction after template rendering both validate it. The omitted connection
+  client's declared key schema is its one key validator: the endpoint, positive
+  connection/ping/idle durations, positive handoff/message/frame limits with their declared
+  defaults, and TLS file keys restricted to secure endpoints with paired client identity files.
+  The vocabulary's typed WebSockets configuration converts schema-valid entries once and adds
+  only what the schema cannot state: an endpoint without a fragment, each count within its
+  range, and three ping intervals within the schedulable bound when they derive the idle
+  deadline. Registry creation and source construction after template rendering both validate
+  it. The omitted connection
   timeout is thirty seconds; omitted ping cadence means only answering peer pings. `open` prepares local transport and TLS
   state without resolving a name or connecting; `resume` resolves and connects, completes any
   signaling handshake, and only then reports readiness. Accepted data from a successful
@@ -2730,7 +2763,14 @@ sequenceDiagram
   share that immutable snapshot, so suspension, reconnection and quiesce replay preserve the
   correct headers. The host builds the typed `frame_type` STRING column and supplies header
   reads from that snapshot. Request headers use the validated vocabulary collection; protocol
-  fields and repeated names cannot override the generated upgrade. Client pings begin after
+  fields and repeated names cannot override the generated upgrade. The one protocol field the
+  collection accepts is a `sec-websocket-protocol` offer of unique subprotocol tokens, written as
+  the tokens joined by commas: the transport compares the peer's selection with each
+  comma-separated element exactly, so whitespace would become part of a token. The transport
+  fails an upgrade whose answer contradicts the request. `resume` turns that refusal into a typed
+  connection failure, keeps the transport's refusal attached, and tries no further address,
+  because the endpoint, not an address, refused the offer. Neither that failure nor a refusal of
+  a malformed offer prints a subprotocol, since an offer can carry a credential. Client pings begin after
   signaling at the configured cadence, with the close handshake's existing one-second budget
   declared once in the vocabulary and shared by both transport operations, and continue alongside
   data reads. Protocol control frames remain transport concerns.
@@ -2806,10 +2846,13 @@ sequenceDiagram
 
 ## Failure and observation
 
-The compiler failure-contract gate reads exact source-owned semantic outcome classifications for
-SQL mapped-column refusals and MongoDB value/document refusals. Their callers produce definitive
-record rejections with the record position and safe field path. Infrastructure and batch failures
-return contextual reports. [Errors And Diagnostics](errors-and-diagnostics.md) owns the compiler
+The compiler failure-contract gate reads exact source-owned outcome classifications at the
+contract's payload preparation and Sentry's override of it, Kafka's `ACK TIMEOUT` conversion,
+Postgres's mapped-column refusal, and MongoDB's value and document refusals. A value BSON cannot
+hold is rejected with its record position and safe field path, and an oversized document with its
+record position. A mapped column type that MySQL, Postgres or MongoDB cannot bind, and field names
+no MongoDB document can hold, fail the whole publish. Infrastructure and batch failures return
+contextual reports. [Errors And Diagnostics](errors-and-diagnostics.md) owns the compiler
 classification contract; these annotations do not change acknowledgement or retry policy.
 
 An ingestor opens all source instances before registration, so a failed source start leaves no

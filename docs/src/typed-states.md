@@ -6,7 +6,12 @@ Client configuration declarations distinguish required, optional, defaulted and 
 ownership, typed value rules, TLS certificate/identity file roles and delegated property namespaces.
 `All` is an explicit driver namespace, not an empty-prefix sentinel. The vocabulary schema owns
 key presence, duplicates, type checks and TLS pairing; rendered mount values cross that same
-boundary again before storage. Driver-specific validation stays in connector engines called by
+boundary again before storage. A driver's other names for one property are declared pairs, each
+naming the one key the schema accepts, and a prefix the driver strips is declared with the
+driver's own properties under it. An empty table and an absent prefix mean the driver reads every
+property under one name. The schema refuses a declared other name and a key under the prefix with
+`DriverAlias` and `DriverPrefix` before any declared or delegated key is read, so exact-key
+duplicate detection also covers the driver's names. Driver-specific validation stays in connector engines called by
 the composition root. Confidential inspection is an explicit projection of complete entries;
 stored configuration and archive serialization do not consume that projection.
 Defaulted keys carry their declared value in their presence variant. The effective-entry projection
@@ -758,7 +763,7 @@ absent. Reused source sites never replace run-local instance identity.
 
 `ProcessRecord` requires its compile-time/runtime diagnostic selection, and an artifact requires
 whole-process or selected scope. A selected export cannot qualify a source process whose other
-findings it omitted. The current version-2 wire conversion checks every required field, bound,
+findings it omitted. The current version-3 wire conversion checks every required field, bound,
 identity and review once; unsupported versions fail from their header without another shape or a
 default. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) owns the
 current representation, qualification policy and coverage limits.
@@ -1050,8 +1055,10 @@ the selected bound address and its acknowledgement belong to that same armed req
 
 Domain-clock publication carries lifecycle pause, generation and start
 point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;
-a present assignment contains its state identity, optional primary, executors and replicas
-together. An absent primary represents an assignment without one primary owner. Replication routes
+a present assignment carries its state identity and, once the entity is placed, its checkpoint
+owners: an optional primary, executors and replicas together. An assignment without checkpoint
+owners is an installed identity awaiting placement, and an absent primary represents a placed
+assignment without one primary owner. Replication routes
 retain that same slot and an optional state intake; ending an intake permanently fences its exact
 route before the routing publication withdraws it. Assignment absence and ended intake are distinct
 states: identity removal invalidates every reader, while state retirement may leave the entity's

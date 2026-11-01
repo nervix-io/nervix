@@ -476,6 +476,15 @@ fn client(kind: ConnectorKind) -> Option<Value> {
         })
         .collect();
     let options: Vec<_> = options.iter().map(option).collect();
+    let aliases: Vec<_> = config
+        .aliases()
+        .iter()
+        .map(|alias| json!({ "alias": alias.alias, "accepted": alias.accepted }))
+        .collect();
+    let stripped_prefix = match config.stripped_prefix() {
+        Some(stripped) => json!({ "prefix": stripped.prefix, "properties": stripped.properties }),
+        None => Value::Null,
+    };
     let constraints: &[&str] = match kind {
         ConnectorKind::Otel => &[
             nervix_models::OTEL_HEADERS_FORMAT,
@@ -485,7 +494,8 @@ fn client(kind: ConnectorKind) -> Option<Value> {
     };
     Some(
         json!({ "kind": kind.keyword(), "pool": pool, "config_owner": config_owner, "options": options,
-            "keys": keys, "namespaces": namespaces, "reserved": config.reserved(), "constraints": constraints }),
+            "keys": keys, "namespaces": namespaces, "reserved": config.reserved(), "aliases": aliases,
+            "stripped_prefix": stripped_prefix, "constraints": constraints }),
     )
 }
 
