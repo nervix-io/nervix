@@ -74,6 +74,46 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "metadata.method"
+entity = "HTTP ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_metadata.feature", scenario = "An HTTP endpoint ingestor routes requests by their metadata and reads every field" },
+  { feature = "tests/features/runtime/endpoint_metadata.feature", scenario = "An acknowledged HTTP endpoint delivers the request's metadata before answering" },
+]
+
+[[capability]]
+capability = "metadata.path"
+entity = "HTTP ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_metadata.feature", scenario = "An HTTP endpoint ingestor routes requests by their metadata and reads every field" },
+  { feature = "tests/features/runtime/endpoint_metadata.feature", scenario = "An acknowledged HTTP endpoint delivers the request's metadata before answering" },
+]
+
+[[capability]]
+capability = "metadata.query"
+entity = "HTTP ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_metadata.feature", scenario = "An HTTP endpoint ingestor routes requests by their metadata and reads every field" },
+  { feature = "tests/features/runtime/endpoint_metadata.feature", scenario = "An acknowledged HTTP endpoint delivers the request's metadata before answering" },
+]
+
+[[capability]]
+capability = "metadata.remote_addr"
+entity = "HTTP ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_metadata.feature", scenario = "An HTTP endpoint ingestor routes requests by their metadata and reads every field" },
+  { feature = "tests/features/runtime/endpoint_metadata.feature", scenario = "An acknowledged HTTP endpoint delivers the request's metadata before answering" },
+]
+
+[[capability]]
+capability = "metadata.host"
+entity = "HTTP ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_metadata.feature", scenario = "An HTTP endpoint ingestor routes requests by their metadata and reads every field" },
+  { feature = "tests/features/runtime/endpoint_metadata.feature", scenario = "An acknowledged HTTP endpoint delivers the request's metadata before answering" },
+]
+
+[[capability]]
 capability = "METHOD"
 entity = "HTTP REQUEST EMITTER"
 scenarios = [
@@ -1033,6 +1073,27 @@ capability = "MODE NO ACK"
 entity = "WEBSOCKETS ENDPOINT INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/websocket_ingestion.feature", scenario = "Websocket endpoint ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "metadata.frame_type"
+entity = "WEBSOCKETS ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_metadata.feature", scenario = "A WebSocket endpoint ingestor routes frames by their type and reads its connection's metadata" },
+]
+
+[[capability]]
+capability = "metadata.remote_addr"
+entity = "WEBSOCKETS ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_metadata.feature", scenario = "A WebSocket endpoint ingestor routes frames by their type and reads its connection's metadata" },
+]
+
+[[capability]]
+capability = "metadata.path"
+entity = "WEBSOCKETS ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_metadata.feature", scenario = "A WebSocket endpoint ingestor routes frames by their type and reads its connection's metadata" },
 ]
 
 [[capability]]

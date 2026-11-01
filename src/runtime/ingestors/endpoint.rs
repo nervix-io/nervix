@@ -262,7 +262,7 @@ pub(super) mod tests {
     use std::collections::BTreeMap;
 
     use futures_util::FutureExt as _;
-    use nervix_connector::NoIngestHeaders;
+    use nervix_connector::{IngestMetadataRow, NoIngestHeaders};
     use nervix_execution::CpuClass;
     use nervix_models::{
         ClusterNodeName, ClusterSchedule, CodecJaqFormat, CodecJaqTransformations, CodecName,
@@ -440,7 +440,7 @@ pub(super) mod tests {
                 .dispatch(
                     &runtime,
                     br#"{"user_id":7}"#,
-                    &probe,
+                    IngestMetadataRow::headers(&probe),
                     &CancellationToken::new(),
                 )
                 .await;
@@ -526,7 +526,7 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":"seven"}"#,
-                &NoIngestHeaders,
+                IngestMetadataRow::headers(&NoIngestHeaders),
                 &CancellationToken::new(),
             )
             .await;
@@ -621,7 +621,7 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":7}"#,
-                &NoIngestHeaders,
+                IngestMetadataRow::headers(&NoIngestHeaders),
                 &CancellationToken::new(),
             )
             .await;
@@ -642,7 +642,7 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":8}"#,
-                &NoIngestHeaders,
+                IngestMetadataRow::headers(&NoIngestHeaders),
                 &CancellationToken::new(),
             )
             .await;
@@ -687,7 +687,7 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":7}"#,
-                &NoIngestHeaders,
+                IngestMetadataRow::headers(&NoIngestHeaders),
                 &CancellationToken::new(),
             )
             .await;
@@ -705,7 +705,7 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":7}"#,
-                &NoIngestHeaders,
+                IngestMetadataRow::headers(&NoIngestHeaders),
                 &CancellationToken::new(),
             )
             .await;
@@ -740,7 +740,7 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":"seven"}"#,
-                &NoIngestHeaders,
+                IngestMetadataRow::headers(&NoIngestHeaders),
                 &CancellationToken::new(),
             )
             .await;
@@ -828,7 +828,7 @@ pub(super) mod tests {
                 .dispatch(
                     &runtime,
                     body.as_bytes(),
-                    &NoIngestHeaders,
+                    IngestMetadataRow::headers(&NoIngestHeaders),
                     &CancellationToken::new(),
                 )
                 .await;

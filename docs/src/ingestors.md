@@ -488,9 +488,11 @@ General notes:
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
   `metadata.topic`, `metadata.partition`, and `metadata.offset`, `SYSLOG LISTENER` declares
-  `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`, and
-  `WEBSOCKETS CONNECTION` declares `metadata.frame_type`; every field is optional and none is
-  sensitive
+  `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
+  `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
+  `metadata.remote_addr`, and `metadata.host`, `WEBSOCKETS CONNECTION` declares
+  `metadata.frame_type`, and `WEBSOCKETS ENDPOINT` declares `metadata.frame_type`,
+  `metadata.remote_addr`, and `metadata.path`; every field is optional and none is sensitive
 - a route expression may read any declared field; `CREATE` and `ALTER` refuse a route that reads a
   field its entity does not declare, naming the ingestor, the route's relay and the fields the
   entity does declare. `FILTER WHERE` reads headers but not `metadata.<field>`
@@ -534,8 +536,11 @@ Some ingestors receive additional source data alongside the decoded payload body
 
 The `name` argument can be any expression that returns `STRING`. Both functions are available in top-level `FILTER WHERE` and in per-route `SET` / `WHERE` expressions for these sources:
 
-- `HTTP ENDPOINT` and `HTTP REQUEST` expose HTTP headers with UTF-8 values
-- `WEBSOCKETS ENDPOINT` exposes UTF-8 headers from the opening HTTP upgrade request
+- `HTTP ENDPOINT` and `HTTP REQUEST` expose HTTP headers with UTF-8 values; an `HTTP ENDPOINT`
+  drops a request header value that is not UTF-8 and counts it in
+  `nervix_ingestor_header_values_dropped_total`
+- `WEBSOCKETS ENDPOINT` exposes UTF-8 headers from the opening HTTP upgrade request, dropping and
+  counting a value that is not UTF-8 the same way
 - `WEBSOCKETS CONNECTION` exposes printable ASCII headers from its opening HTTP upgrade response
 - `KAFKA TOPIC` exposes Kafka record headers
 - `NATS SUBJECT` exposes message headers
@@ -2017,7 +2022,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | No entity-specific options. |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
-| Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |
+| Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2052,7 +2057,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | No entity-specific options. |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
-| Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |
+| Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2076,8 +2081,49 @@ The ACK window is explicit: `MAX` is 1–65,535 outstanding payloads per ingesto
 An acknowledged endpoint requires `ON QUIESCE REJECT RETRY AFTER <duration>`. The sender owns
 retry; there is no endpoint `RETRY POLICY`, `ACK PARALLEL`, or `BATCH` clause. `BUFFER MAX SIZE`
 is available with `MODE NO ACK`. Transport headers are available through `read_header` and
-`read_headers`; these declarations have no typed request metadata namespace. Both ingestors
+`read_headers`, and each entity declares the typed metadata of a request or a frame. Both ingestors
 execute on every cluster node and are excluded from placement members and placement completion.
+
+An `HTTP ENDPOINT` ingestor reads each admitted request's metadata in its route expressions:
+
+| Field | Value |
+| --- | --- |
+| `metadata.method` | The request's method. The endpoint admits only `POST`, so an admitted request always reads `POST`. |
+| `metadata.path` | The path of the request target, exactly as the request wrote it, without its query. Routing matches it exactly, so it is the endpoint's `PATH`. |
+| `metadata.query` | The query of the request target after `?`, exactly as written and not decoded: empty for a target that ends with `?`, and absent for one with no `?`. |
+| `metadata.remote_addr` | The address and port of the peer whose TCP connection carried the request, such as `127.0.0.1:52144` or `[2001:db8::1]:52144`. It is the connection's peer, not a forwarding header such as `X-Forwarded-For`. |
+| `metadata.host` | The host the request was routed by: its `Host` value in ASCII lowercase and without its port, one of the names of the endpoint's `VHOST`. |
+
+A `WEBSOCKETS ENDPOINT` ingestor reads each data frame's metadata:
+
+| Field | Value |
+| --- | --- |
+| `metadata.frame_type` | `text` or `binary`, the kind of the data frame. |
+| `metadata.remote_addr` | The address and port of the peer whose TCP connection opened the WebSocket. |
+| `metadata.path` | The path the connection's upgrade request named, which is the endpoint's `PATH`. |
+
+Every field is a `STRING`, and every frame of a connection reads the same `remote_addr` and `path`,
+including frames its signaling protocol accepts before the handshake ends. Each node reads the
+requests and frames it receives, so a field never depends on the node that owns the ingestor's
+output. A body that `BUFFER` retains keeps its metadata, and its replay reads the values it
+arrived with. This route keeps only acme's requests and records the peer that sent each one:
+
+```plexus
+CREATE HTTP ENDPOINT INGESTOR tenant_requests
+  FROM intake MODE NO ACK
+  ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
+  TO acme_events
+    INHERIT ALL
+    SET peer = metadata.remote_addr, query = metadata.query
+    WHERE metadata.query = 'tenant=acme'
+    UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+Header values follow the same contract on both endpoints: a value that is UTF-8, whether or not it
+is ASCII, reaches `read_header` and `read_headers` unchanged, and a value that is not UTF-8 is
+dropped and counted in `nervix_ingestor_header_values_dropped_total` for every ingestor the request
+or WebSocket upgrade was routed to.
 
 For example, this Plexus declaration holds the HTTP response while its payload's acknowledgement
 root waits for every attached downstream route:

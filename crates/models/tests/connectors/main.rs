@@ -318,7 +318,13 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
         ),
         IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-            metadata: &[],
+            metadata: &[
+                ("method", IngestorMetadataType::String),
+                ("path", IngestorMetadataType::String),
+                ("query", IngestorMetadataType::String),
+                ("remote_addr", IngestorMetadataType::String),
+                ("host", IngestorMetadataType::String),
+            ],
             every_node: true,
             reference: IngestorReferenceKind::Endpoint(EndpointType::Http),
         },
@@ -332,7 +338,11 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
         }
         IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-            metadata: &[],
+            metadata: &[
+                ("frame_type", IngestorMetadataType::String),
+                ("remote_addr", IngestorMetadataType::String),
+                ("path", IngestorMetadataType::String),
+            ],
             every_node: true,
             reference: IngestorReferenceKind::Endpoint(EndpointType::Websockets),
         },

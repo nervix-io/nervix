@@ -3401,6 +3401,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__endpoint__metadata_tests__bolero_endpoint_request_and_frame_metadata_retain_and_project_exactly/corpus"
+domain_version = 1
+features = []
+id = "endpoint-request-metadata"
+invariant = "Every endpoint request's method, path, present, empty or absent query, IPv4 or IPv6 peer and Host value in either letter case with or without a port, and every WebSocket frame's kind, peer and path, hand over exactly the values their entity declares in declared order and of each declared type, the host as routing reads it; they survive the quiesce buffer's retain and replay with the request's ordered headers and the connection's shared header snapshot, and a group reading every declared field builds each column with them."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/endpoint_metadata_tests.rs"
+test = "runtime::endpoint::metadata_tests::bolero_endpoint_request_and_frame_metadata_retain_and_project_exactly"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/models/src/connector/websockets/__fuzz__/connector__websockets__config_tests__bolero_client_config_preserves_every_valid_connection_setting/corpus"
 domain_version = 2
 features = []

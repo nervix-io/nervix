@@ -119,6 +119,11 @@ Nervix records these raw metric families:
   dropped because its separate 64-outcome read-ahead quota was full. The driver counts each drop
   immediately, including during a downstream acknowledgement wait; see
   [MQTT source connections](./connector-contract.md#mqtt-source-connections)
+- `nervix_ingestor_header_values_dropped_total`: transport header values an ingestor dropped
+  because they are not UTF-8, such as a request header an `HTTP ENDPOINT` received in Latin-1. An
+  endpoint counts such a value once for each ingestor its request or WebSocket upgrade was routed
+  to, on the node that received it; see
+  [HTTP ENDPOINT And WEBSOCKETS ENDPOINT](./ingestors.md#http-endpoint-and-websockets-endpoint)
 - `nervix_session_subscriptions`: open session subscriptions the node delivers from a relay. The
   node advertises interest in the relay to the cluster exactly while this is above zero, and the
   series stays at `0` once the relay's last subscription on the node closes
@@ -150,10 +155,11 @@ Prometheus receives raw values only. The `/metrics` endpoint is encoded by the P
 
 The four ingestor-quiesce families, `nervix_ingestor_unfolding_refused_total`,
 `nervix_ingestor_transport_redeliveries_total`, `nervix_ingestor_decode_rejections_total`,
-`nervix_ingestor_oversized_payloads_total` and `nervix_ingestor_read_ahead_dropped_payloads_total`
-use `domain`, `ingestor`, and `physical_node_id` labels.
-Buffer families are gauges; dropped, rejected, refused, redelivered, decode-rejection and oversized
-families are monotonic counters. They are process-local: quiesce buffers do not migrate during
+`nervix_ingestor_oversized_payloads_total`, `nervix_ingestor_read_ahead_dropped_payloads_total` and
+`nervix_ingestor_header_values_dropped_total` use `domain`, `ingestor`, and `physical_node_id`
+labels.
+Buffer families are gauges; dropped, rejected, refused, redelivered, decode-rejection, oversized
+and dropped-header-value families are monotonic counters. They are process-local: quiesce buffers do not migrate during
 termination or failover.
 
 Quiesce, refusal, redelivery, decode-rejection and oversized children are registered when the
@@ -161,7 +167,8 @@ ingestor starts, and `DESCRIBE INGESTOR` registers the redelivery, decode-reject
 children at zero on the node that runs the ingestor.
 The MQTT read-ahead counter is registered at zero when that ingestor starts. It is exported through
 Prometheus and remains on that physical node across connection restarts; `DESCRIBE INGESTOR` does
-not project this counter.
+not project this counter. The dropped-header-value counter is registered at zero when an ingestor
+starts on a node and is exported through Prometheus only; `DESCRIBE INGESTOR` does not project it.
 Client-ingestor outcome children are registered when its endpoint starts, and subscription loss
 counters when delivery starts. These bounded series may therefore appear at zero before their
 first observation. Their labels and counting contracts are unchanged.

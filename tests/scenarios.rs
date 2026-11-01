@@ -28335,6 +28335,44 @@ async fn when_http_payload_is_posted_to_node_with_header(
         .expect("failed to post http payload with header");
 }
 
+#[when(
+    expr = "http payload is posted to node {string} with host {string} path {string} and header \
+            {string} with base64 bytes {string}"
+)]
+async fn when_http_payload_is_posted_to_node_with_header_bytes(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    header_name: String,
+    header_bytes: String,
+    #[step] step: &Step,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let header_bytes = BASE64_STANDARD
+        .decode(header_bytes.trim())
+        .unwrap_or_else(|error| panic!("invalid base64 header value '{header_bytes}': {error}"));
+    append_cucumber_log_line(&format!(
+        "http publish: node={node_id} host={host} path={path} header={header_name} \
+         header_bytes={header_bytes:02x?} payload={payload}"
+    ));
+    world.last_publish_at = Some(Instant::now());
+    world
+        .cluster()
+        .publish_http_with_header_bytes(
+            &node_id,
+            &host,
+            &path,
+            &payload,
+            &header_name,
+            &header_bytes,
+        )
+        .await
+        .expect("failed to post http payload with a header of raw bytes");
+}
+
 #[when(expr = "http payload is posted to node {string} with host {string} path {string} and fails")]
 async fn when_http_payload_is_posted_to_node_and_fails(
     world: &mut ScenarioWorld,

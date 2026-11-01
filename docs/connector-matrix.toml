@@ -16,7 +16,6 @@ properties = "This entity declares no typed PROPERTIES block; any encoded record
 
 [entity."HTTP ENDPOINT"]
 ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
-metadata = "HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields."
 mirror = "Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position."
 
 [entity."KAFKA TOPIC"]
@@ -82,7 +81,6 @@ mirror = "An outbound connection or server endpoint receives frames. The declare
 
 [entity."WEBSOCKETS ENDPOINT"]
 ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
-metadata = "The current frame declaration has no typed frame or handshake metadata namespace."
 mirror = "An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload."
 
 [entity."SYSLOG LISTENER"]
