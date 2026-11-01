@@ -1789,6 +1789,7 @@ CREATE NATS STREAM EMITTER <name>
   (SUBJECT 'orders.created')
     MODE <mode>
     ENCODE USING <codec>
+    [MESSAGE ID id]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
