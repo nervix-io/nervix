@@ -3,9 +3,11 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The header model an entity declares for each side: what a repeated header name
-//!   keeps, the order in which names travel, how names compare, and which literal `write_header`
-//!   calls of an emitter the model makes meaningless.
-//! - **Depends on.** Nothing beyond the standard library and strum.
+//!   keeps, the order in which names travel, how names compare, the exact types a value has and
+//!   what the transport carries each as, and which literal `write_header` calls of an emitter the
+//!   model makes meaningless.
+//! - **Depends on.** The scalar types a transport carries, the standard library, strum and
+//!   indexmap.
 //! - **Must not know.** Any one connector, how a connector reads or writes its transport's
 //!   headers, or the grammar that spells `read_header` and `write_header`.
 //!
@@ -24,8 +26,11 @@ use std::{
     fmt::{Display, Formatter},
 };
 
+use indexmap::IndexMap;
 use meticulous::OptionExt as _;
 use strum::{AsRefStr, EnumIter, EnumProperty};
+
+use crate::PropertyType;
 
 /// What a repeated header name keeps, and the order in which the names of one message travel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, AsRefStr, EnumIter, EnumProperty)]
@@ -109,6 +114,75 @@ impl HeaderNames {
     }
 }
 
+/// One exact type a header value may have, and the value type its transport carries it as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HeaderValueType {
+    pub ty: PropertyType,
+    /// The transport's own name for the type it carries a value of `ty` as, such as SQS's
+    /// `Number`.
+    pub carried_as: &'static str,
+}
+
+/// The exact types the values of one side's headers have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HeaderValues {
+    /// Every value is a `STRING`, carried as the transport's text value.
+    Text,
+    /// Every value has exactly one of these types, which the transport carries as the value type
+    /// each names, such as the string, number and binary attributes of an SQS message.
+    Typed(&'static [HeaderValueType]),
+}
+
+impl HeaderValues {
+    /// Every exact type a value may have, in declared order.
+    pub fn types(self) -> Vec<PropertyType> {
+        match self {
+            Self::Text => vec![PropertyType::String],
+            Self::Typed(types) => types.iter().map(|declared| declared.ty).collect(),
+        }
+    }
+
+    /// The exact types a value may have, as a diagnostic lists them: `STRING`, or `STRING, U8 or
+    /// BYTES`.
+    pub fn listed(self) -> String {
+        let types = self.types();
+        let Some((last, leading)) = types.split_last() else {
+            return String::new();
+        };
+        if leading.is_empty() {
+            return last.to_string();
+        }
+        let mut names = Vec::with_capacity(leading.len());
+        for ty in leading {
+            names.push(ty.to_string());
+        }
+        format!("{} or {last}", names.join(", "))
+    }
+
+    /// What the transport carries each value type as, as the manuals and `DESCRIBE` state it:
+    /// `STRING as String; U8, I64 as Number`. Text values have nothing to state, because their
+    /// transport carries text.
+    pub fn carried(self) -> Option<String> {
+        let Self::Typed(types) = self else {
+            return None;
+        };
+        // The types one transport value type carries are stated together, in the order the
+        // declaration first names that value type.
+        let mut carriers: IndexMap<&'static str, Vec<String>> = IndexMap::new();
+        for declared in types {
+            carriers
+                .entry(declared.carried_as)
+                .or_default()
+                .push(declared.ty.to_string());
+        }
+        let mut carried = Vec::with_capacity(carriers.len());
+        for (carried_as, types) in carriers {
+            carried.push(format!("{} as {carried_as}", types.join(", ")));
+        }
+        Some(carried.join("; "))
+    }
+}
+
 /// How one side of an entity keeps the transport headers of a message: what `read_header` and
 /// `read_headers` find on a message an ingestor reads, or what the `write_header` calls of one
 /// record become on the message an emitter publishes.
@@ -118,22 +192,34 @@ pub struct HeaderModel {
     pub layout: HeaderLayout,
     /// How names compare.
     pub names: HeaderNames,
+    /// The exact types a value has.
+    pub values: HeaderValues,
 }
 
 impl HeaderModel {
-    /// A model whose names match only a name spelled the same.
+    /// A model whose names match only a name spelled the same and whose values are text.
     pub const fn exact(layout: HeaderLayout) -> Self {
         Self {
             layout,
             names: HeaderNames::Exact,
+            values: HeaderValues::Text,
         }
     }
 
-    /// A model whose names are recorded in ASCII lowercase.
+    /// A model whose names are recorded in ASCII lowercase and whose values are text.
     pub const fn lowercase(layout: HeaderLayout) -> Self {
         Self {
             layout,
             names: HeaderNames::Lowercase,
+            values: HeaderValues::Text,
+        }
+    }
+
+    /// This model, with values of exactly the declared types.
+    pub const fn with_typed_values(self, types: &'static [HeaderValueType]) -> Self {
+        Self {
+            values: HeaderValues::Typed(types),
+            ..self
         }
     }
 
@@ -170,10 +256,15 @@ impl HeaderModel {
 }
 
 /// A model is written as its layout and its names, such as `ordered_repeats, exact names`, the
-/// way `DESCRIBE` shows it.
+/// way `DESCRIBE` shows it, followed by what its transport carries each value type as where its
+/// values are typed: `last_wins, exact names; STRING as String; BYTES as Binary`.
 impl Display for HeaderModel {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}, {} names", self.layout.as_ref(), self.names.as_ref())
+        write!(f, "{}, {} names", self.layout.as_ref(), self.names.as_ref())?;
+        match self.values.carried() {
+            Some(carried) => write!(f, "; {carried}"),
+            None => Ok(()),
+        }
     }
 }
 

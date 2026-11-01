@@ -295,10 +295,11 @@ pub struct PropertyDeclaration {
     pub ty: PropertyType,
 }
 
-/// The exact type of a property's value: one of the scalars a transport carries in a property.
+/// The exact type of a scalar a transport carries beside a payload: the value of a property, or
+/// of a header on a side whose [header model](crate::HeaderModel) declares typed values.
 ///
-/// A property is never a float, whose values do not all equal themselves, so two records whose
-/// properties are equal can always share a payload.
+/// Such a value is never a float, whose values do not all equal themselves, so two records whose
+/// properties and headers are equal can always share a payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
 pub enum PropertyType {
     U8,

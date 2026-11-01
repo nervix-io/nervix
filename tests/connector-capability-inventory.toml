@@ -983,6 +983,20 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "DEDUPLICATION ID"
+entity = "SQS QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS FIFO emitters name each message's deduplication id" },
+]
+
+[[capability]]
+capability = "DELAY"
+entity = "SQS QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS QUEUE emitters delay each message by their DELAY" },
+]
+
+[[capability]]
 capability = "FIFO GROUP <expression>"
 entity = "SQS QUEUE EMITTER"
 scenarios = [
@@ -997,14 +1011,21 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE BATCH"
+capability = "MODE ACK"
+entity = "SQS QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS QUEUE emitter publishes JSON payloads from a relay" },
+]
+
+[[capability]]
+capability = "SEND BATCH"
 entity = "SQS QUEUE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS batch emission isolates a poison record" },
 ]
 
 [[capability]]
-capability = "MODE SINGLE"
+capability = "SEND SINGLE"
 entity = "SQS QUEUE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS QUEUE emitter publishes JSON payloads from a relay" },

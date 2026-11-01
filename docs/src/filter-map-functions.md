@@ -867,13 +867,17 @@ is rejected when it is validated, with a message such as `function 'read_header'
 to ingestors whose connector supports headers`, `MQTT TOPIC ingestors do not support read_header or
 read_headers`, or `MQTT emitters do not support write_header`.
 
-`write_header` arguments must be statically non-null `STRING` expressions, and a sensitive argument
-requires `leak_sensitive(...)`. They are evaluated after payload construction and route filtering.
-Calls are staged in source order in a route-local envelope; if any call fails, no payload or partial
-header envelope is published. Where the emitter keeps one value per name, a second call whose name is a
-string literal equal, as the emitter compares names, to an earlier literal one is refused when the
-statement is validated. See [Header invocations](emitters.md#header-invocations) for each emitter's
-header model.
+`write_header` arguments must be statically non-null. The name is a `STRING`, and the value has an
+exact type its emitter's [header model](connector-contract.md#header-models) declares: `STRING` on
+every emitter, and on `SQS QUEUE` also `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64` and
+`BYTES`, which SQS carries as `Number` and `Binary` attributes. Any other type is refused when the
+statement is validated, with a message such as `write_header value must be STRING, found Int64`. A
+sensitive argument requires `leak_sensitive(...)`. They are evaluated after payload construction and
+route filtering. Calls are staged in source order in a route-local envelope; if any call fails, no
+payload or partial header envelope is published. Where the emitter keeps one value per name, a
+second call whose name is a string literal equal, as the emitter compares names, to an earlier
+literal one is refused when the statement is validated. See
+[Header invocations](emitters.md#header-invocations) for each emitter's header model.
 
 ## Lookups And UDF Calls
 

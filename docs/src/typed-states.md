@@ -231,12 +231,12 @@ either that string or an explicit null. Planning resolves the declared default i
 platform string; connector preparation uses it only when the codec's event omits the field.
 
 A NATS ingestor Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`, so a stored ingestor
-holds the archived union of both. The registry's `NERVIX MODEL NJS` archive signature identifies
-the current Model layout, including that union, the required branch partition count, Sentry
-platform, and an ingestor's `TIMESTAMP AT metadata.<field>` source. Consensus's `raft_jetstream_`
-keyspaces and current state metadata encoding identify its stored shapes. An unrecognized
-signature, namespace or encoding fails with the owning storage error and requires the stored data
-to be recreated.
+holds the archived union of both. The registry's `NERVIX MODEL NJS` archive signature identifies the
+current Model layout, including that union, the required branch partition count, Sentry platform, an
+ingestor's `TIMESTAMP AT metadata.<field>` source and an SQS QUEUE emitter's `SEND` request shape.
+Consensus's `raft_jetstream_` keyspaces and current state metadata encoding identify its stored
+shapes. An unrecognized signature, namespace or encoding fails with the owning storage error and
+requires the stored data to be recreated.
 
 ## Absence And Distinct States
 

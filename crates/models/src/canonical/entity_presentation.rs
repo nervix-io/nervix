@@ -638,6 +638,7 @@ impl EmitterEntity {
                     None => None,
                 };
                 presentation.optional_option("FIFO GROUP", group);
+                presentation.written_option("SEND", entity.send.keyword().to_owned());
             }
             Self::Otel(entity) => presentation.otel_options(entity)?,
             Self::ClickHouse(ClickHouseEmitter::Table(entity)) => {
