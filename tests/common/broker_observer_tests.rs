@@ -17,7 +17,7 @@ use nervix_primitives::{
 use rstest::rstest;
 
 use crate::{
-    broker_observer::{BrokerMessage, BrokerObserver},
+    broker_observer::{BrokerMessage, BrokerObserver, TypedBrokerHeader},
     nats_observer::NatsObserver,
     nats_observer_tests::StandInNatsServer,
 };
@@ -169,9 +169,15 @@ async fn a_stalled_delivery_still_fails_at_the_captured_sequence_deadline() {
 #[nervix_primitives::test]
 async fn forwarded_reads_preserve_the_complete_message_and_observer() {
     let (messages, receiver) = mpsc::channel(2);
+    let typed_headers = vec![TypedBrokerHeader {
+        name: "user".to_string(),
+        data_type: "Number".to_string(),
+        value: "7".to_string(),
+    }];
     let message = BrokerMessage::from_bytes(b"\xff", headers())
         .with_key(Some("key".to_string()))
-        .with_group(Some("group".to_string()));
+        .with_group(Some("group".to_string()))
+        .with_typed_headers(typed_headers.clone());
     messages.send(message).await.assured("the channel has room");
     messages
         .send(BrokerMessage::from_bytes(b"next", Vec::new()))
@@ -191,6 +197,7 @@ async fn forwarded_reads_preserve_the_complete_message_and_observer() {
     assert_eq!(first.headers, headers());
     assert_eq!(first.key.as_deref(), Some("key"));
     assert_eq!(first.group.as_deref(), Some("group"));
+    assert_eq!(first.typed_headers, typed_headers);
     assert_eq!(
         observer
             .try_next_payload(Duration::ZERO)

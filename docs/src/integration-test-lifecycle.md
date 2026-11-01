@@ -122,8 +122,11 @@ for recovery from persisted state. Their diagnostic inventory includes active/or
 the corresponding lifecycle or restore stress selection. No phase or suite budget changes.
 
 The Kafka record-metadata fixture sends explicit binary keys, millisecond-aligned timestamps and
-null or non-null payloads, with one delivery pending at a time. It uses the existing Kafka fixture's
-five-second delivery, request and queue limits, observed through a six-second whole-send bound;
+null or non-null payloads, with one delivery pending at a time. Its isolated topics explicitly use
+`CreateTime` and disable time and size retention: the historical record timestamps must not make
+their segments eligible for the broker's periodic cleanup before Nervix reads them. It uses the
+existing Kafka fixture's five-second delivery, request and queue limits, observed through a
+six-second whole-send bound;
 timeout and driver causes remain typed. It adds no transport retry. The one- and three-node
 outlines check all three ACK modes, null versus empty values, and historical event-time windows in
 two branches. Their sixty-second output assertions observe the graph's result. The metadata

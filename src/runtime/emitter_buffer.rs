@@ -371,14 +371,25 @@ impl EmitterPublishBatch {
     /// The name and value bytes of `headers`, which one row is published with.
     fn header_bytes(headers: &EmitterHeaders) -> u64 {
         let mut bytes = 0_u64;
-        for (name, value) in headers {
-            let name_len: u64 = name.len().arch_into();
-            let value_len: u64 = value.len().arch_into();
-            bytes = bytes
-                .checked_add(name_len)
-                .assured(BYTES_IN_MEMORY)
-                .checked_add(value_len)
-                .assured(BYTES_IN_MEMORY);
+        match headers {
+            EmitterHeaders::Text(headers) => {
+                for (name, value) in headers {
+                    let name_len: u64 = name.len().arch_into();
+                    let value_len: u64 = value.len().arch_into();
+                    bytes = bytes
+                        .checked_add(name_len)
+                        .assured(BYTES_IN_MEMORY)
+                        .checked_add(value_len)
+                        .assured(BYTES_IN_MEMORY);
+                }
+            }
+            EmitterHeaders::Typed(headers) => {
+                for header in headers {
+                    bytes = bytes
+                        .checked_add(header.held_bytes())
+                        .assured(BYTES_IN_MEMORY);
+                }
+            }
         }
         bytes
     }
@@ -455,7 +466,8 @@ impl EmitterPublishBatch {
     }
 
     pub(super) fn headers_for_row(&self, row: usize) -> Option<&EmitterHeaders> {
-        static EMPTY: EmitterHeaders = Vec::new();
+        // The headers of a row whose emitter's route makes no write.
+        static EMPTY: EmitterHeaders = EmitterHeaders::Text(Vec::new());
 
         match &self.headers {
             Some(headers) => headers.get(row),
@@ -1059,7 +1071,10 @@ mod tests {
             Some(Timestamp::from_unix_nanos(0))
         );
 
-        let headers = vec![vec![("route".to_string(), "fast".to_string())]];
+        let headers = vec![EmitterHeaders::Text(vec![(
+            "route".to_string(),
+            "fast".to_string(),
+        )])];
         let with_headers = EmitterPublishBatch::new(
             named("test_relay"),
             batch.clone(),
@@ -1520,8 +1535,8 @@ mod tests {
             named("test_relay"),
             second_batch,
             Some(vec![
-                vec![("name".to_string(), "value".to_string())],
-                Vec::new(),
+                EmitterHeaders::Text(vec![("name".to_string(), "value".to_string())]),
+                EmitterHeaders::Text(Vec::new()),
             ]),
             Timestamp::from_unix_nanos(100),
         )
@@ -1594,9 +1609,9 @@ mod tests {
     #[test]
     fn a_flush_reports_each_delivered_row_once_and_no_rejected_row() {
         let headers = vec![
-            vec![("a".to_string(), "1".to_string())],
-            vec![("b".to_string(), "22".to_string())],
-            vec![("c".to_string(), "333".to_string())],
+            EmitterHeaders::Text(vec![("a".to_string(), "1".to_string())]),
+            EmitterHeaders::Text(vec![("b".to_string(), "22".to_string())]),
+            EmitterHeaders::Text(vec![("c".to_string(), "333".to_string())]),
         ];
         let mut mixed = EmitterPublishBatch::new(
             named("test_relay"),

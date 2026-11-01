@@ -924,7 +924,7 @@ remain in their owning work records until that delivery.
 | Side | What the entity declares |
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
-| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which only the two RabbitMQ emitter entities declare one, the `MANDATORY` clause. |
+| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which only SQS QUEUE and the two RabbitMQ emitter entities declare any yet: SQS QUEUE the `DELAY` and `DEDUPLICATION ID` clauses, and each RabbitMQ entity the `MANDATORY` clause. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys, and the other names its driver reads for one property: each pair of names with the one the client accepts, and a prefix the driver strips from a key before reading it, with the driver's own properties that begin with it. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
@@ -1237,6 +1237,12 @@ to fit one. The layouts are:
 
 Names are either `exact`, matching only a name spelled the same, or `lowercase`, recorded in ASCII
 lowercase so that two spellings that differ in letter case are one name, as HTTP field names are.
+Values are text, a `STRING`, on every side but one whose transport types its header values: there
+the model lists each exact type a value may have and the transport type it travels as. `SQS QUEUE`
+emitters declare `STRING` as `String`, `U8` to `I64` as `Number` and `BYTES` as `Binary`, the data
+types of an SQS message attribute. The registry and the VM accept a `write_header` value only of a
+declared type, so a float, a `BOOL` or a `DATETIME` is refused on `SQS QUEUE` and anything but a
+`STRING` on every other emitter.
 On the ingest side the model is what `read_header` and `read_headers` find: `read_headers` returns
 a name's values in the order the model keeps them, at most one of them under `last_wins` and
 `sorted_by_name`, and a `lowercase` entity's names are read in lowercase. On the emit side it is what
@@ -1245,7 +1251,8 @@ the `write_header` calls of one record become on the published message.
 <!-- connector-matrix:headers:start -->
 | Header model | Ingest | Emit | Meaning |
 | --- | --- | --- | --- |
-| `last_wins`, exact names | `SQS QUEUE` | `PULSAR TOPIC`, `SQS QUEUE` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+| `last_wins`, exact names | `SQS QUEUE` | `PULSAR TOPIC` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+| `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | None | `SQS QUEUE` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
 | `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC` | `KAFKA TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, exact names | `NATS SUBJECT` | `NATS SUBJECT` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, lowercase names | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT` | None | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
@@ -1261,7 +1268,8 @@ earlier literal one is refused when the statement is validated, because on every
 write would replace the earlier one. The refusal names the emitter, the header and both `INVOKE`
 positions. A name an expression computes is the emitter's to settle at run time under its model.
 `DESCRIBE INGESTOR` and `DESCRIBE EMITTER` show the side's model as
-`headers: <layout>, <names> names`, or `headers: none`, and the per-entity tables of the
+`headers: <layout>, <names> names`, followed by `; <types> as <transport type>` for each transport
+type of a typed model, or `headers: none`, and the per-entity tables of the
 [ingestor](./ingestors.md) and [emitter](./emitters.md) manuals and of
 [Connector Capabilities](./connector-capabilities.md) state it.
 
@@ -1317,9 +1325,13 @@ attach to. It declares no header model or metadata field and supports only `SUSP
 
 Each source entity declares its typed metadata fields beside its other capabilities in the
 vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the response status and
-the poll's scheduled instant, `WEBSOCKETS CONNECTION` the frame kind, `KAFKA TOPIC` the topic,
-partition, offset, binary key, timestamp, timestamp kind and tombstone flag, `SYSLOG LISTENER` the
-peer address, and every other entity none. Registry
+the poll's scheduled instant, `HTTP ENDPOINT` the request's method, path, query, peer address and
+routed host, `WEBSOCKETS CONNECTION` the frame kind, `WEBSOCKETS ENDPOINT` the frame kind, the
+connection's peer address and its path, `KAFKA TOPIC` the topic, partition, offset, binary key,
+timestamp, timestamp kind and tombstone flag, `SYSLOG LISTENER` the peer address, and every other
+entity none. The endpoint entities are served by the host itself rather than a connector crate,
+so the server's endpoint intake hands their values over the same way a connector's message does.
+Registry
 validation reads that declaration for the fields an ingestor's route programs and its
 `TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
 connector's message hands the host the value of every declared field in declared order, one typed
@@ -1368,8 +1380,11 @@ An HTTP poll retains every response-header value whose bytes are valid UTF-8, in
 characters, as the same UTF-8 bytes and in each field's repeat order. It drops an invalid UTF-8
 value alone while retaining the response body and other headers, and hands the drop count to the
 host for
-`nervix_ingestor_header_values_dropped_total`. An HTTP request emitter sends every admitted
-`write_header` value as its exact UTF-8 bytes.
+`nervix_ingestor_header_values_dropped_total`. An `HTTP ENDPOINT` request and a
+`WEBSOCKETS ENDPOINT` upgrade hand over their request-header values the same way: a value whose
+bytes are valid UTF-8 is read as those bytes, and the server's endpoint intake drops an invalid
+value alone and counts it once for each ingestor the request or upgrade was routed to. An HTTP
+request emitter sends every admitted `write_header` value as its exact UTF-8 bytes.
 `read_header` and `read_headers` are validated against that declaration, and header values do not
 travel through relays unless an ingestor writes them into schema-backed fields. See
 [Header Context](./ingestors.md#header-context) for the exact expression behavior. The session
@@ -1955,12 +1970,23 @@ batch payload where two members' envelopes differ. A payload shares its members'
 batch they came from rather than copying it, and a retained payload keeps it with its bytes. An
 emitter that writes no envelope carries nothing beside its batches or in its payloads.
 
+A record emitter reads its record's `write_header` writes in the form its entity's header model
+declares. `EmitterRecord::headers` holds them, name and text, where the model's values are text,
+and `EmitterRecord::typed_headers` holds them as `TypedRecordHeader`s, each a name and a
+`PropertyValue` of exactly one declared type, where the model's values are typed; the other field
+is empty. The host evaluates each write once, when it admits the record, keeps the writes in the
+order the route makes them and retains them with the payload, so every attempt carries the writes
+the first attempt carried.
+
 A record emitter reads its record's envelope from `EmitterRecord::envelope`: the three flags, the
 timestamp, the two durations, the reply target, the message and deduplication identities, the
 routing key, and the properties in written order, each a `RecordProperty` under the name its entity declares with a
 `PropertyValue` of exactly the declared `PropertyType`. A property is never a float, so equal
 envelopes always compare equal. A connector receives only what its entity declares, and an entity
-that declares nothing always receives the empty envelope. Only an entity whose body is a codec,
+that declares nothing always receives the empty envelope. `SQS QUEUE` declares `DELAY`, which it
+sends as each message's `DelaySeconds`, and `DEDUPLICATION ID`, which it sends as each message's
+`MessageDeduplicationId`; the registry refuses `DELAY` for a FIFO queue, outside whole seconds from
+`1s` to `900s`, and `DEDUPLICATION ID` for a standard queue. Only an entity whose body is a codec,
 whose records a record emitter publishes, declares envelope clauses or properties, so no envelope
 is evaluated for a row, row request, HTTP request or native client emitter.
 
@@ -2332,11 +2358,11 @@ shrink with a candidate: `connector-row-request-division` the division rule and 
 `emitter-batch-subdivision` and `emitter-batch-packing` the candidates, seals, relay, branch and
 envelope grouping and the exact container bytes, `codec-bounded-encodings` and
 `bounded-write-limits` the exact sizes under `MAX SIZE`, `emitter-row-preparations` and
-`emitter-retained-payloads` the membership and byte-for-byte retry, `sqs-batch-requests`,
-`mqtt-publish-packets`, `postgres-insert-measures` and `mysql-insert-measures` the connector-specific
-measures. The MySQL property compares the complete statement and bound parameters with the
-driver's binary serializer, including qualified table names, quoted column keys, nulls and
-nonempty slices of a rotated membership sequence.
+`emitter-retained-payloads` the membership and byte-for-byte retry, text and typed headers
+included, `sqs-batch-requests`, `mqtt-publish-packets`, `postgres-insert-measures` and
+`mysql-insert-measures` the connector-specific measures. The MySQL property compares the complete
+statement and bound parameters with the driver's binary serializer, including qualified table
+names, quoted column keys, nulls and nonempty slices of a rotated membership sequence.
 `mongodb-write-answers` checks the rows a failed MongoDB write delivers, rejects and leaves unresolved.
 `mongodb-bson-mapping` checks the complete native document encoding and stored-size measure:
 integer widths, floating-point bits (including non-finite values), native dates at millisecond
@@ -2776,7 +2802,11 @@ sequenceDiagram
   deadline. Registry creation and source construction after template rendering both validate
   it. The omitted connection
   timeout is thirty seconds; omitted ping cadence means only answering peer pings. `open` prepares local transport and TLS
-  state without resolving a name or connecting; `resume` resolves and connects, completes any
+  state without resolving a name or connecting. For a `wss` endpoint it takes the rustls
+  configuration that the shared `RustlsClientConfigProvider` builds from the client's entries: the
+  bundled WebPKI roots and the platform's native roots with the client's `tls_ca_file` added, and
+  the identity of its `tls_cert_file` and `tls_key_file`. A file it cannot parse therefore fails
+  `open`, and with it the ingestor's start. `resume` resolves and connects, completes any
   signaling handshake, and only then reports readiness. Accepted data from a successful
   handshake stays in one bounded `HandshakeFrames` handoff for polling before new socket frames.
   Its capacity is `handshake_buffer_capacity` (default 16 messages), with each message bounded by
@@ -2798,7 +2828,10 @@ sequenceDiagram
   fails an upgrade whose answer contradicts the request. `resume` turns that refusal into a typed
   connection failure, keeps the transport's refusal attached, and tries no further address,
   because the endpoint, not an address, refused the offer. Neither that failure nor a refusal of
-  a malformed offer prints a subprotocol, since an offer can carry a credential. Client pings begin after
+  a malformed offer prints a subprotocol, since an offer can carry a credential. Every other failed
+  connection, TLS handshake or upgrade, an answer other than `101` and an opening response beyond
+  the transport's fixed header-count and head-size limits included, gives way to the next resolved
+  address within the same budget; the declaration states those limits as driver limits. Client pings begin after
   signaling at the configured cadence, with the close handshake's existing one-second budget
   declared once in the vocabulary and shared by both transport operations, and continue alongside
   data reads. Protocol control frames remain transport concerns.

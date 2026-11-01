@@ -9,7 +9,7 @@ Feature: Kafka record keys, timestamps and tombstones
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    And Kafka topic "event_time_{{test_id}}" exists with 1 partitions
+    And Kafka metadata topic "event_time_{{test_id}}" is created
     When these Plexus statements are executed on the leader node
       """
       CREATE SCHEMA event ( tenant STRING, value I64 );
@@ -74,7 +74,7 @@ Feature: Kafka record keys, timestamps and tombstones
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    And Kafka topic "metadata_{{test_id}}" exists with 1 partitions
+    And Kafka metadata topic "metadata_{{test_id}}" is created
     When these Plexus statements are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
@@ -128,7 +128,7 @@ Feature: Kafka record keys, timestamps and tombstones
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    And Kafka topic "tombstones_{{test_id}}" exists with 1 partitions
+    And Kafka metadata topic "tombstones_{{test_id}}" is created
     When these Plexus statements are executed on the leader node
       """
       CREATE SCHEMA event ( marker STRING );

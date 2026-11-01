@@ -54,14 +54,14 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | HTTP ENDPOINT | Compare `HTTP REQUEST`: options, modes, headers, reference. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
+| Entity | HTTP ENDPOINT | Compare `HTTP REQUEST`: options, modes, headers, reference, ingest metadata. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
 | Reference | Http endpoint |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
-| Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |  |
+| Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL |  |
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
@@ -234,7 +234,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes. Receiving uses a visibility timeout and deletion; publishing uses single or batch service requests and may declare a FIFO group. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
+| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers. Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
 | Reference | SQS client |  |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -267,7 +267,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Acknowledgement confirmation | none |  |
 | Buffers | accepted signaling frames retained for source reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |  |
 | Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |  |
-| Driver limits | None declared. |  |
+| Driver limits | The opening upgrade response carries at most 124 header fields, and at most 64 KiB arrives before its head ends; a larger response fails that connection attempt.<br>The response head arrives within 512 reads that, after the 64th, average at least 128 bytes; a peer that trickles it fails that connection attempt. |  |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |  |
 
 ### WEBSOCKETS ENDPOINT ingest
@@ -281,7 +281,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Options in statement order | No entity-specific options. |  |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
-| Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |  |
+| Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL |  |
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
@@ -526,21 +526,21 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes. Receiving uses a visibility timeout and deletion; publishing uses single or batch service requests and may declare a FIFO group. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
+| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers, emit envelope/properties. Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
 | Reference | SQS client |  |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
-| Modes (complete bodies after MODE) | SINGLE RETRY POLICY BACKOFF 1s MAX 30s<br>BATCH RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `FIFO GROUP tenant` (expression); `FIFO GROUP FROM BRANCH` (keyword choice); optional; omitted when unset |  |
-| Headers | `write_header`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |  |
+| Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Options in statement order | `FIFO GROUP tenant` (expression); `FIFO GROUP FROM BRANCH` (keyword choice); optional; omitted when unset<br>`SEND SINGLE` (keyword choice); `SEND BATCH` (keyword choice); required |  |
+| Headers | `write_header`; `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
-| Protocol batch maximum | 256KiB |  |
+| Protocol batch maximum | 1MiB |  |
 | Batch transformation required | no |  |
-| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
+| Envelope | DELAY 5s<br>DEDUPLICATION ID id |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | The connector holds no buffer between its transport and the host. |  |
 | Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start and a send: `timeout_ms`; unbounded when omitted |  |
-| Driver limits | A batch request holds at most 10 entries and 256 KiB; a record above 256 KiB is rejected. |  |
+| Driver limits | A batch request holds at most 10 entries and 1 MiB; a record above 1 MiB is rejected. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### SENTRY EVENT emit

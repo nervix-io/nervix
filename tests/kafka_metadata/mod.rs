@@ -18,6 +18,16 @@ const PUBLISH_LIMIT: Duration = Duration::from_secs(5);
 /// Observe a delivery after the client's five-second limit can finish it.
 const PUBLISH_OBSERVATION: Duration = Duration::from_secs(6);
 
+#[given(expr = "Kafka metadata topic {string} is created")]
+async fn create_metadata_topic(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    world
+        .cluster()
+        .create_kafka_metadata_topic(&topic)
+        .await
+        .assured("a fresh metadata topic keeps its historical CreateTime records");
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct KafkaMetadataRecord {

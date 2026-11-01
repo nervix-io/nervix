@@ -128,10 +128,10 @@ single_client_emitter_plan! {
 }
 
 single_client_emitter_plan! {
-    /// An SQS emitter: the queue it sends to and whether it batches its requests.
+    /// An SQS emitter: the queue it sends to and the request shape it sends its messages in.
     SqsQueueEmitterPlan {
         queue: nervix_models::SqsQueueName,
-        mode: SqsPublishingMode,
+        send: nervix_models::SqsSend,
         batch: Option<EmitterBatchPolicy>,
     }
 }
