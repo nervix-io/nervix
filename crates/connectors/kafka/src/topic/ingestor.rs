@@ -29,6 +29,10 @@ mod rejection;
 #[path = "ingestor_retirement.rs"]
 mod retirement;
 
+#[cfg(test)]
+#[path = "ingestor_metadata_tests.rs"]
+mod metadata_tests;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroUsize,
@@ -48,6 +52,7 @@ use nervix_connector::{
 use nervix_execution::Executor;
 use nervix_models::{
     ClientConfigEntry, ConnectorKind, KafkaPartitionSchedule, KafkaTopicName, Timestamp,
+    TimestampError,
 };
 use nervix_primitives::{
     sync::{Arc, watch},
@@ -329,6 +334,16 @@ pub enum KafkaTopicIngestorError {
     ReadAssignment { topic: String },
     #[error("Kafka topic '{topic}' partition {partition} returned the maximum offset")]
     OffsetOverflow { topic: String, partition: i32 },
+    #[error(
+        "{connector} record in topic '{topic}' partition {partition} offset {offset} has a \
+         timestamp outside the signed Unix-nanosecond range",
+        connector = ConnectorKind::Kafka
+    )]
+    RecordTimestamp {
+        topic: String,
+        partition: i32,
+        offset: i64,
+    },
     #[error("Kafka batch timeout exceeds the monotonic clock range")]
     BatchDeadline,
     #[error(
@@ -497,9 +512,39 @@ impl KafkaConsumerAssignment {
     }
 }
 
+/// The driver's unavailable time or one validated instant with its original timestamp kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KafkaRecordTimestamp {
+    Unavailable,
+    CreateTime(Timestamp),
+    LogAppendTime(Timestamp),
+}
+
+impl TryFrom<rdkafka::Timestamp> for KafkaRecordTimestamp {
+    type Error = Report<TimestampError>;
+
+    fn try_from(source: rdkafka::Timestamp) -> Result<Self, Self::Error> {
+        // The driver's own conversion resolves Kafka's external unavailable encoding.
+        let Some(millis) = source.to_millis() else {
+            return Ok(Self::Unavailable);
+        };
+        let nanos = millis
+            .checked_mul(i64::from(super::NANOS_PER_MILLI))
+            .ok_or_else(|| Report::new(TimestampError::ArithmeticOverflow))?;
+        let instant = Timestamp::from_unix_nanos(nanos);
+        let timestamp = match source {
+            rdkafka::Timestamp::NotAvailable => Self::Unavailable,
+            rdkafka::Timestamp::CreateTime(_) => Self::CreateTime(instant),
+            rdkafka::Timestamp::LogAppendTime(_) => Self::LogAppendTime(instant),
+        };
+        Ok(timestamp)
+    }
+}
+
 pub struct KafkaTopicIngestorMessage {
     message: rdkafka::message::OwnedMessage,
     position: KafkaOffsetPosition,
+    timestamp: KafkaRecordTimestamp,
 }
 
 impl KafkaTopicIngestorMessage {
@@ -517,7 +562,19 @@ impl KafkaTopicIngestorMessage {
             partition: message.partition(),
             offset: next_offset,
         };
-        Ok(Self { message, position })
+        let timestamp =
+            KafkaRecordTimestamp::try_from(message.timestamp()).change_context_lazy(|| {
+                KafkaTopicIngestorError::RecordTimestamp {
+                    topic: message.topic().to_string(),
+                    partition: message.partition(),
+                    offset: message.offset(),
+                }
+            })?;
+        Ok(Self {
+            message,
+            position,
+            timestamp,
+        })
     }
 }
 
@@ -565,12 +622,31 @@ impl IngestorMessage for KafkaTopicIngestorMessage {
 }
 
 /// The values of the metadata `KAFKA TOPIC` declares, in its order: the record's topic, partition
-/// and offset.
+/// and offset, binary key, timestamp and kind, and whether its value is null.
 impl IngestMessageMetadata for KafkaTopicIngestorMessage {
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         values.string(self.message.topic());
         values.i32(self.message.partition());
         values.i64(self.message.offset());
+        match self.message.key() {
+            Some(key) => values.bytes(key),
+            None => values.absent(),
+        }
+        match self.timestamp {
+            KafkaRecordTimestamp::Unavailable => {
+                values.absent();
+                values.absent();
+            }
+            KafkaRecordTimestamp::CreateTime(instant) => {
+                values.datetime(instant);
+                values.string("create_time");
+            }
+            KafkaRecordTimestamp::LogAppendTime(instant) => {
+                values.datetime(instant);
+                values.string("log_append_time");
+            }
+        }
+        values.bool(self.message.payload().is_none());
     }
 }
 
@@ -590,6 +666,8 @@ pub struct KafkaTopicIngestor {
     instance_index: u64,
     assignment: KafkaConsumerAssignment,
     observed_generation: Option<u64>,
+    /// A conversion failure after a gathered prefix, reported by the next admitted read.
+    pending_read_error: Option<Report<KafkaTopicIngestorError>>,
 }
 
 #[async_trait]
@@ -622,6 +700,7 @@ impl IngestorConnector for KafkaTopicIngestor {
             instance_index,
             assignment: KafkaConsumerAssignment::default(),
             observed_generation: None,
+            pending_read_error: None,
         })
     }
 
@@ -714,6 +793,14 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
         request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
+        if self.pending_read_error.is_some() && cancellation.is_cancelled() {
+            return Ok(IngestorBatch::Interrupted {
+                gathered: Vec::new(),
+            });
+        }
+        if let Some(error) = self.pending_read_error.take() {
+            return Err(error.change_context(IngestorError::Read { connector: KAFKA }));
+        }
         let first = match &mut self.offset_mode {
             KafkaTopicIngestorOffsetMode::Domain { rebalance, .. } => {
                 nervix_primitives::select! {
@@ -767,9 +854,13 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
                 next = self.consumer.recv() => {
                     match next {
                         Ok(message) => {
-                            let message = KafkaTopicIngestorMessage::from_message(message.detach())
-                                .change_context(IngestorError::Read { connector: KAFKA })?;
-                            messages.push(message);
+                            match KafkaTopicIngestorMessage::from_message(message.detach()) {
+                                Ok(message) => messages.push(message),
+                                Err(error) => {
+                                    self.pending_read_error = Some(error);
+                                    break;
+                                }
+                            }
                         }
                         Err(error) => {
                             warn!(error = %error, "failed to receive another Kafka batch message");
@@ -1703,9 +1794,9 @@ mod tests {
 
         let message = rdkafka::message::OwnedMessage::new(
             Some(b"{}".to_vec()),
-            None,
+            Some(vec![0, 255]),
             "orders".to_string(),
-            rdkafka::Timestamp::NotAvailable,
+            rdkafka::Timestamp::CreateTime(1_234),
             3,
             42,
             None,
@@ -1720,7 +1811,11 @@ mod tests {
             [
                 Value::String("orders".to_string()),
                 Value::I32(3),
-                Value::I64(42)
+                Value::I64(42),
+                Value::Bytes(vec![0, 255]),
+                Value::Datetime(Timestamp::from_unix_nanos(1_234_000_000)),
+                Value::String("create_time".to_string()),
+                Value::Bool(false),
             ]
         );
         let declared = IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic)

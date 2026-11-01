@@ -74,6 +74,13 @@ the group's row bound and the vocabulary's frame labels. An estimate that exceed
 is a typed error before allocation; the ingest group adds the opening operation's context and
 retains the cause for its general-error policy.
 
+A Kafka record keeps an unavailable timestamp distinct from its create-time and log-append-time
+variants. A present variant carries a validated signed-nanosecond timestamp converted exactly from
+the driver's milliseconds. Kafka's external unavailable encoding is resolved at this boundary;
+an out-of-range present timestamp is a typed conversion failure. Missing binary keys are `None`,
+empty keys remain present empty bytes, and the null-payload tombstone flag preserves the distinction
+from a present empty payload when both lend an empty slice to a codec.
+
 A paced poll message carries a typed metadata variant. HTTP polling supplies its response status
 and scheduled poll instant in that variant, while sources with no integration fields carry the
 headers-only variant. The host copies the variant into a matching quiesce buffer and Arrow builder;

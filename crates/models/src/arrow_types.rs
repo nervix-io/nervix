@@ -190,6 +190,14 @@ mod tests {
                 ("topic".to_owned(), DataType::Utf8, true),
                 ("partition".to_owned(), DataType::Int32, true),
                 ("offset".to_owned(), DataType::Int64, true),
+                ("key".to_owned(), DataType::Binary, true),
+                (
+                    "timestamp".to_owned(),
+                    DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+                    true,
+                ),
+                ("timestamp_type".to_owned(), DataType::Utf8, true),
+                ("tombstone".to_owned(), DataType::Boolean, true),
             ])
         );
         assert_eq!(
