@@ -78,7 +78,7 @@ Feature: Kafka record keys, timestamps and tombstones
     When these Plexus statements are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
-      CREATE SCHEMA observed ( seq I64, key_hex STRING, record_time DATETIME OPTIONAL, time_type STRING OPTIONAL, tombstone BOOL );
+      CREATE SCHEMA observed ( seq I64, key_hex STRING, record_time DATETIME OPTIONAL, time_type STRING OPTIONAL, tombstone BOOL OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA observed UNBRANCHED;
@@ -132,7 +132,7 @@ Feature: Kafka record keys, timestamps and tombstones
     When these Plexus statements are executed on the leader node
       """
       CREATE SCHEMA event ( marker STRING );
-      CREATE SCHEMA observed ( marker STRING, record_offset I64, tombstone BOOL );
+      CREATE SCHEMA observed ( marker STRING, record_offset I64 OPTIONAL, tombstone BOOL OPTIONAL );
       CREATE CODEC empty_codec FROM TOML TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '{marker: "seen"}';
       CREATE RELAY events SCHEMA observed UNBRANCHED;
