@@ -10,10 +10,21 @@ complete field; entity presentation distinguishes omission from an explicitly wr
 The registry's current archive signature and consensus keyspace namespace fence this shape before
 decoding; existing current-header corruption and namespace validation tests qualify those owners.
 
+SQS QUEUE emitter generators draw both `SEND` request shapes beside the `MODE ACK` retry policy and
+the optional FIFO group. The Model/archive, registry, consensus and canonical Plexus properties
+preserve the request shape, and the archive signature and consensus keyspace namespace fence the
+current SQS emitter shape before decoding.
+
 Ingestor generators draw every timestamp source, `TIMESTAMP AT metadata.<field>` included, in
 `CREATE` and in `ALTER ... SET TIMESTAMP`. The Model/archive, registry, consensus and canonical
 Plexus properties preserve the metadata source distinctly from a payload field of the same name,
 and the same signature and namespace fence that shape.
+
+MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
+persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration
+admits is generated and none it refuses. The Model/archive, registry, consensus and canonical
+Plexus properties preserve the session, quality of service and mode as separate written values,
+and the archive signature and consensus keyspace namespace fence this shape before decoding.
 
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions
@@ -158,5 +169,5 @@ durations, expressions and properties of any name in written order. `models-arch
 consensus Model targets carry them through their Model storage boundaries with the complete Model.
 `models-emitter-envelopes` compares the envelope alone through JSON and the archive, and
 `plexus-emitter-envelopes` reads its canonical section back through the shared envelope grammar.
-The Plexus domain draws only what an entity declares, so canonical statement round trips carry an
-envelope once a connector entity declares a clause.
+The Plexus domain draws only what an entity declares, so canonical statement round trips carry the
+envelopes connector entities declare: SQS QUEUE's `DELAY` and `DEDUPLICATION ID`.

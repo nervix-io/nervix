@@ -31,7 +31,7 @@ use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::queue::{
-    EmptyCaFile, InvalidSqsClientKey, SQS, SqsPublishingMode, SqsQueueEmitter, SqsQueueIngestor,
+    EmptyCaFile, InvalidSqsClientKey, SQS, SqsQueueEmitter, SqsQueueIngestor,
     SqsQueueIngestorError, SqsQueueIngestorPlan,
     connection::{SqsClientConfig, SqsRequest},
 };
@@ -470,13 +470,13 @@ async fn a_send_that_cannot_connect_fails_the_publish_without_answering_a_record
     let fixture = Fixture::start().await;
     let endpoint = RefusedEndpoint::reserve();
     let port = endpoint.port();
-    for (mode, operation) in [
+    for (send, operation) in [
         (
-            SqsPublishingMode::Single,
+            nervix_models::SqsSend::Single,
             "SQS SendMessage failed: dispatch failure: ",
         ),
         (
-            SqsPublishingMode::Batch,
+            nervix_models::SqsSend::Batch,
             "SQS SendMessageBatch failed: dispatch failure: ",
         ),
     ] {
@@ -489,7 +489,7 @@ async fn a_send_that_cannot_connect_fails_the_publish_without_answering_a_record
         let mut connector = SqsQueueEmitter {
             client,
             queue_url: format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"),
-            mode,
+            send,
         };
         let record = EmitterRecord::new(
             EmitterRecordId::new(0),
@@ -1096,14 +1096,14 @@ async fn a_send_the_service_never_answers_ends_within_timeout_ms_in_both_modes()
         key: "timeout_ms".to_string(),
         value: budget.as_millis().to_string(),
     });
-    for (mode, request, message) in [
+    for (send, request, message) in [
         (
-            SqsPublishingMode::Single,
+            nervix_models::SqsSend::Single,
             "an SQS send",
             "SQS SendMessage failed: an SQS send did not finish within timeout_ms 300ms",
         ),
         (
-            SqsPublishingMode::Batch,
+            nervix_models::SqsSend::Batch,
             "an SQS batch send",
             "SQS SendMessageBatch failed: an SQS batch send did not finish within timeout_ms 300ms",
         ),
@@ -1114,7 +1114,7 @@ async fn a_send_the_service_never_answers_ends_within_timeout_ms_in_both_modes()
         let mut connector = SqsQueueEmitter {
             client,
             queue_url: format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"),
-            mode,
+            send,
         };
         let record = EmitterRecord::new(
             EmitterRecordId::new(0),
@@ -1130,8 +1130,8 @@ async fn a_send_the_service_never_answers_ends_within_timeout_ms_in_both_modes()
                 .expect("a send the service never answers ends within the client's timeout_ms")
                 .into_parts();
 
-        assert!(outcome.delivered.is_empty(), "{mode:?}");
-        assert!(outcome.rejected.is_empty(), "{mode:?}");
+        assert!(outcome.delivered.is_empty(), "{send:?}");
+        assert!(outcome.rejected.is_empty(), "{send:?}");
         let failure = outcome
             .infrastructure_error
             .expect("a send the service never answers fails the publish");
@@ -1146,8 +1146,8 @@ async fn a_send_the_service_never_answers_ends_within_timeout_ms_in_both_modes()
                 elapsed.bound
             )),
             Some((request, DeadlineKey::Timeout, budget)),
-            "{mode:?}: {failure:?}"
+            "{send:?}: {failure:?}"
         );
-        assert_eq!(message_of(&failure), Some(message), "{mode:?}");
+        assert_eq!(message_of(&failure), Some(message), "{send:?}");
     }
 }

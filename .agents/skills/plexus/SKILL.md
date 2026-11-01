@@ -14,11 +14,17 @@ clause order or connector options from memory.
 For Plexus connector choices, read [Connector Capabilities](https://docs.nervix.io/connector-capabilities.md)
 alongside the entity's Ingestors or Emitters section. Its generated tables show modes, option
 requirements, metadata types, each side's header model, batching, buffer bounds, network waits and
-the reasons ingest and emit differ. Read headers the way the source's model records them, such as
+the reasons ingest and emit differ. Read `Plexus Overview` → `Statement catalog` for connector and
+entity heads, kind-preserving alterations, and name-based inspection. Choose the complete declared
+pair before assembling its body, including when its connector has one entity. Read headers the way
+the source's model records them, such as
 lowercase HTTP field names, and on an emitter that keeps one value per header name write each literal
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
-headers, response-header reads, frame metadata and the closed client CONFIG key set.
+headers, subprotocol offers, response-header reads, frame metadata and the closed client CONFIG key
+set, including the trust roots `tls_ca_file` adds to and how inspection redacts an endpoint. Offer
+subprotocols only through `HEADERS { 'sec-websocket-protocol' = '...' }`, and expect the peer to
+select one of them: any other answer fails the connection.
 For ClickHouse HTTP connection tuning, client certificates, compression and which insert failures
 reject a row rather than retry, read the ClickHouse Emitters section and the generated client key
 reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured values;
@@ -266,6 +272,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   evaluates returned data with a fresh execution snapshot. The declared quiesce mode still decides
   whether polling is suspended or buffered; withholding work does not pause or re-anchor the
   cadence. Connector timeouts, retries, backoff, and cancellation remain physical.
+- For HTTP REQUEST polling, `metadata.polled_at` is the scheduled instant and `metadata.status`
+  is the successful HTTP status. A `204 No Content` response emits no row. `read_header` retains
+  non-ASCII UTF-8 values; invalid UTF-8 header values are omitted and counted in
+  `nervix_ingestor_header_values_dropped_total`. Read the
+  [HTTP REQUEST ingestor contract](../../../docs/src/ingestors.md#http-request) for its declaration
+  and header model.
 - Treat domain execution time as one snapshot per accepted unit of work. Every expression in that
   unit uses the same instant, including filters, construction, keys, correlation and window
   programs, inferencer mappings, emitter `VALUES` and SQS FIFO groups, and subscription filters.
@@ -477,7 +489,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   request field is evaluated, a failed method, path, header write or body encoding rejects the
   record through `ON MESSAGE ERROR` before any part of its request is sent, and a retry resends the
   prepared request unchanged. Declare
-  `Content-Type` and any idempotency key with `write_header`; see
+  `Content-Type` and any idempotency key with `write_header`, whose valid UTF-8 value reaches
+  the request as the same bytes, including non-ASCII characters; see
   [HTTP requests](../../../docs/src/emitters.md#http-requests). Complete valid `2xx` response
   headers deliver the record without waiting for the response body. `401`, `403`, `407`, `408`,
   `425`, `429`, and `5xx` retain it for retry; other `3xx`/`4xx` statuses and `101` reject that
@@ -496,7 +509,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   [HTTP inspection](../../../docs/src/emitters.md#http-inspection-and-metrics).
 - Write a supported emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
   emitter clause and route construction, before `FLUSH`; it is required for CLIENT, ClickHouse,
-  Postgres, MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
+  Postgres, MySQL, and MongoDB emitters and limited to `1MiB` for SQS. A batching Sentry emitter needs a
   codec with `ON EMITTING BATCH`, and a batching protobuf codec needs `BATCH MESSAGE`. Compatible
   rows from successive Arrow carriers in one flush may share a payload, but rows from different
   source relays or concrete branches cannot. For the database emitters, the clause bounds each insert
@@ -601,8 +614,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - End every transport ingestor source body with an explicit source-supported `ON QUIESCE` body
   immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `HTTP ENDPOINT` and
   `WEBSOCKETS ENDPOINT`, an explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include
-  `RETRY AFTER` for endpoint `REJECT`. Use `MQTT TOPIC` `SUSPEND` only with
-  `SESSION PERSISTENT QOS 1`. Do not invent a default or use a mode offered by another entity.
+  `RETRY AFTER` for endpoint `REJECT`. Write every `MQTT TOPIC` ingestor's `SESSION CLEAN` or
+  `SESSION PERSISTENT` and its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, and use its `ACK` modes
+  and `SUSPEND` only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Do not invent a default or
+  use a mode offered by another entity.
 - A server endpoint WebSocket keeps its route and signaling protocol for the connection. After
   its source stops or is replaced, reconnect to use the new source; after signaling, the next
   refused payload on the preceding connection closes with 1013. Configured routes without a live

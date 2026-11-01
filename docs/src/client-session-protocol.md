@@ -67,9 +67,11 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Edges | The wire crate, `nervix-client-wire` | The FlatBuffers schema, frame verification and ownership, the session limits, the typed requests, replies, events, transfers and rows the schema describes, the display text of a row, and how frames travel in gRPC and WebSocket messages. It knows no registry, runtime, consensus, parser, Arrow, or client dispatch. |
 | Edges | The session service in `nervix-server` | Authenticating a call, one session per transport connection, correlation, the ordered and concurrent lanes, cancellation against admission, typed rejections, reply encoding and transfer, the control and subscription lanes a session's frames wait in, unsolicited events, domain clock attachments, the upload stream, the backup download stream, the restore stream, and carrying a download or a restore over a console WebSocket of its own. |
 | Edges | The Row encoder in `nervix-server` | Binding one subscription generation to the row schema it announces and writing selected Arrow rows into bounded frames. |
-| Control plane | The command pipeline and transaction use cases | Durable execution identity, admission, exact recovery, domain mutation ownership, plan fencing, the transaction lifecycle, and the completion barrier. |
+| Edges | The session command and transaction adapters in `nervix-server` | Command admission and retained outcomes, and a session's transaction lifecycle, its binding, statement preflight and the replicated commit with the quiescence it recovers from. |
+| Edges | Session subscriptions | Creation and deletion, the per-session subscription set, the generation each subscription opens with, its lifecycle, and its filter and sampling. |
+| Control plane | The command pipeline and transaction use cases | Durable execution identity, exact recovery, domain mutation ownership, plan fencing, transaction application, impact and inspection, and the completion barrier. |
 | Control plane | Backup execution and retained archives | Assembling a backup's archive from one applied revision, retaining it under the backup's execution reference until a download collects it or its retry validity ends, and the bounded stream that sends it. |
-| Control plane | Session subscriptions | Creation and deletion, the generation each subscription opens with, its lifecycle, its filter and sampling, the delivery of one generation to its session, and the interest lease it holds on its relay. |
+| Control plane | Subscription delivery | The delivery of one subscription generation to its session, and the interest lease it holds on its relay. |
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
 | Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
 | Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access, bulk column copies, retained domain clock events, retained reads of the clock of each followed domain with its projections, and the Rust client's producers and consumers with their typed outcomes, settlements and Arrow batches built and read one column level at a time. |
@@ -83,8 +85,8 @@ serves itself, such as `USE`; everything it knows about the cluster arrives over
 
 The Rust client and CLI declare their edge ownership in gated compiler source contracts. Their
 session maps remain client-owned synchronization outside the server record-path acquisition rule.
-Server relay subscription fan-out remains recurring data-plane execution with its own source
-contracts and exact-operation repair expectations. The annotations change no session framing,
+Server relay subscription fan-out remains recurring data-plane execution under its own source
+contracts and holds no repair expectation. The annotations change no session framing,
 recovery or delivery guarantee. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts)
 owns this compiler boundary. [Execution Primitives](./execution-primitives.md) owns the shared
 backend selection, portable reference types and declared unmodeled exceptions used by the Rust
@@ -1676,6 +1678,11 @@ archive's summary: its size and BLAKE3 digest, the capture time, the instant the
 retaining the archive, whether resource bytes are included, the number of users, and each domain's
 revision, cut kind and quiesce counters, section count, and bytes. The summary is part of the recorded outcome, so repeating the
 command under its reference returns the same summary and never assembles a second archive.
+
+A quiesced cut whose pause commits after its cut deadline is refused before the coordinator
+starts installation, even if reconciliation already installed that pause. The command records
+the timeout after resuming the domain and produces no archive. This is the cut's deadline;
+client command-wait and download bounds retain their separate meanings.
 
 A download call carries exactly one `BackupDownloadRequest`, which names the backup's execution
 reference, and the node authenticates the call from its metadata before it reads the request. A

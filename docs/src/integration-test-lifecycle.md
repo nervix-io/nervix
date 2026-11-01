@@ -209,7 +209,7 @@ resubmitting an outcome that might already have produced output.
 | Element | Where it runs | Owner |
 | --- | --- | --- |
 | Scenario steps and hooks | One runner task: Cucumber polls every running scenario, and the suite watchdog around them, from the task the binary's main thread blocks on | `tests/scenarios.rs` |
-| Scenario admission and timing | Feature permits, prioritized run slots, the long-running declaration, queue reasons, and accumulated attempt times in the runner process | `scenario_schedule.rs` and `scenario_phase.rs` |
+| Scenario admission and timing | Feature permits, prioritized run slots, declared scenario weights and lengths, queue reasons, and accumulated attempt times in the runner process | `scenario_schedule.rs` and `scenario_phase.rs` |
 | In-process nodes | One Tokio task per node on the binary's multi-threaded runtime, which has one worker thread per CPU | The cluster fixture, `tests/common/cluster.rs` |
 | Server processes | Child processes of the scenario executable itself, started under the name `nervix-server` | The server-process fixture, `tests/common/server_process.rs`, and the program selection in `tests/common/process_program.rs` |
 | Real-process cluster | Three server children with separate durable stores, ports and identities under one test certificate authority | `tests/common/server_process_cluster.rs`, using the server-process fixture |
@@ -220,7 +220,7 @@ resubmitting an outcome that might already have produced output.
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | HTTP proxies | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP proxy fixture, `tests/common/http_proxy.rs` |
 | Unaccepted addresses | No task: a listening socket at a chosen loopback address and the one connection that fills its accept queue, so the kernel drops every later handshake. The scenario world owns both until the scenario ends | `tests/common/unaccepted_address.rs` |
-| Backup cut holds | No harness task: the fault injector's lease, drain or capture gate holds each backup cut that reaches it on that cut's own task in the node, until the scenario releases the gate or for the duration the scenario timed from the cut's arrival | `src/fault_injection/backup_cut.rs`, driven by the backup steps in `tests/backup/mod.rs` and `tests/backup/wait.rs` |
+| Backup cut holds | No harness task: the fault injector's lease, committed-pause, drain or capture gate holds each backup cut that reaches it on that cut's own task in the node, and its pause-application gate holds each node's wait for the cluster to ready a revision that pauses the domain on the task applying that revision, until the scenario releases the gate or for the duration the scenario timed from each arrival | `src/fault_injection/backup_cut.rs`, driven by the backup steps in `tests/backup/mod.rs` and `tests/backup/wait.rs` |
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact payload multiplicities, generator occurrences, broker counts and sequences, and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs` and `subscription_payloads.rs`, used by the payload, generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
 | Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
@@ -233,7 +233,7 @@ resubmitting an outcome that might already have produced output.
 | Broker observers | One task on the binary's runtime per observer, which reads the broker's client and hands each message to the step over a bounded channel and is aborted when the scenario drops the observer. A core NATS observer has no task of its own, because its client already buffers what the server delivers | The cluster fixture, `tests/common/cluster.rs`, the delivery owner, `tests/common/broker_observer.rs`, and the NATS observer, `tests/common/nats_observer.rs` |
 | Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. A stallable or silent endpoint listens on a port drawn from the port pool, so it is never handed a port another scenario's peers may still dial, and records each connection it accepts with the client's address, when it accepted it and when it stopped forwarding or holding it, which a step counting its connections reports when it fails. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards, and gives a stallable or silent endpoint's port back | The stallable and silent endpoints, `tests/common/stallable_tcp_proxy.rs`, the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes, and the Iceberg catalog gate, `tests/common/iceberg_catalog_gate.rs`, which serves HTTP/1.1 and holds each commit to one table until the scenario refuses or passes it |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
-| Snapshot receive probe | One authenticated interconnect transport, using placements from a validated public backup archive. Its listener port comes from the shared scenario pool. An owner-ending channel wakes its cleanup task on normal completion, panic or cancellation; that task shuts down the transport before releasing its temporary credentials and port reservation. A failed bind also returns its reservation. Normal completion awaits cleanup. A scoped Bulk-memory hold releases on every exit. Requests retain the snapshot protocol's own deadline, and complete checkpoint bytes and digest are compared before and after a capacity refusal | `tests/common/cluster/snapshot_receive.rs`, driven by `tests/backup/snapshot_receive.rs` |
+| Snapshot receive probe | One authenticated interconnect transport, using placements from a validated public backup archive. Its listener port comes from the shared scenario pool. An owner-ending channel wakes its cleanup task on normal completion, panic or cancellation; that task shuts down the transport before releasing its temporary credentials and port reservation. A failed bind also returns its reservation. Normal completion awaits cleanup. A scoped reservation holds all but 4096 bytes of the node's Bulk capacity and releases on every exit. Earlier reservation releases cannot enlarge the allowance. Whole-reservation nonblocking attempts share one 60-second fixture deadline and preserve the last typed refusal; they never retain a partial grant while earlier work finishes. Requests retain the snapshot protocol's own deadline, and complete checkpoint bytes and digest are compared before and after a capacity refusal | `tests/common/cluster/snapshot_receive.rs`, driven by `tests/backup/snapshot_receive.rs` |
 
 The Syslog mixed-framing sender assembles its octet-counted and non-transparent frames before
 connecting and writes them together on its runtime task. A stalled scenario runner cannot leave
@@ -595,20 +595,41 @@ the measurements and failed attempts; changing the environment does not explain 
 retry observation.
 
 Admission grants feature capacity and the attempt's share of the run slots in one decision, after
-both are available. A scenario holds both through the end of teardown. A first run holds one slot.
-A retry holds a larger share, so it runs beside fewer scenarios than the run that failed. The first
+both are available. A scenario holds both through the end of teardown. The `@slots_N` tag declares
+its load as a positive whole number of slots. It counts on the feature, rule, scenario and an
+outline's examples; Cucumber carries example tags into the expanded scenario. The largest
+inherited declaration applies, independently of tag order, and a scenario without one has weight
+one. An invalid numeric declaration fails with the tag and scenario identity.
+
+An attempt holds the larger of its declared weight and its retry share, capped at a quarter of the
+pool, rounded down, and at least one slot. A weight above the pool's capacity therefore still
+admits in a small local run. In a 48-slot pool, weight four holds four slots on the first attempt
+and first retry, and six on the second retry; a weight above twelve holds twelve on every attempt.
+Pools of one, two or three slots give every attempt one. The cap preserves concurrent admission;
+no weight makes a scenario exclusive.
+
+A retry can hold a larger share, so it runs beside fewer scenarios than the run that failed. The first
 retry holds a sixteenth of the pool, and each later retry holds twice the share of the run before
-it. With Cucumber's two retries, the second retry holds an eighth, so the shares are 1, 3 and 6 of
-CI's 48 slots. Every run holds at least one slot, so a pool of fewer than sixteen slots gives its
-first retry one. A run past the configured retries, as a `--retry` override allows, keeps the last
-retry's share. No run holds more than a quarter of the pool, so no scenario runs alone. A retry
-whose share is not yet free keeps the slots that free up until its share fits. Otherwise the first
-attempts behind it would take those slots one at a time and starve it.
+it. With Cucumber's two retries, the second retry holds an eighth, so an unweighted scenario's
+shares are 1, 3 and 6 of CI's 48 slots. Every run holds at least one slot, so a pool of fewer than
+sixteen slots gives its first retry one. A run past the configured retries, as a `--retry` override
+allows, keeps the last retry's share. An eligible attempt whose share is not yet free keeps the
+slots that free up until its share fits. This applies to weighted first attempts as well as
+retries: smaller attempts behind it cannot consume those slots one at a time and starve it.
+
+Declare weights from measured load per attempt, including CPU work or memory demand rather than
+elapsed time alone. Compare complete sharded runs on the same product source for run-slot
+utilization, runner stalls, retries and suite length against the suite watchdog's budget. Keep the
+measurements and the declaration decision on the owning ClickUp task. A weight accounts for load;
+timing assumptions still have to hold beside the rest of the suite, including on the first
+attempt. Passing only after a weight or retry share quiets the machine identifies a scenario defect
+to repair.
 
 The active-scenario diagnostic names the feature limit or run slot a waiting scenario needs. Each
 `scenario started` line names the run slots the attempt holds. The suite summary counts scenario
 work as each attempt's running time multiplied by the slots it holds, and it reports the
-slot-seconds retries held beyond one slot each. That figure is what the larger shares cost the run.
+slot-seconds reservations held beyond one slot per attempt. That figure is what declared weights
+and retry shares together cost the run.
 Replayed against the 15 retries of Check run 40044052881, the shares cost 6,876 slot-seconds,
 about 143 seconds of a full 48-slot run. Against the 5 retries of run 39987498652, they cost about
 21 seconds.
@@ -648,8 +669,9 @@ A scenario declares itself long-running when its attempts reach two minutes in a
 producer. In the first run above, 34 attempts outside the limited features reached two minutes,
 about one in a hundred, while the median attempt took 25 seconds. The suite summary lists every
 attempt that reached two minutes without the declaration. The declaration orders admission only.
-A declared scenario's attempts take the same share of the run slots as any other scenario's, and
-run beside the rest of the suite. Its retries, deadlines and budgets are unchanged.
+A long-running declaration changes admission order independently of a scenario's weight. The
+attempt still holds the larger of its weight and retry share, and runs beside the rest of the
+suite. Its retries, deadlines and budgets are unchanged.
 
 The CI jobs divide the work at the scenario boundary:
 
@@ -959,6 +981,12 @@ and on the cut's own task in the node, and the step that injects the holds only 
 first one ended. A stalled runner delays when the step learns of a release, never the release
 itself. When the command is expected to outlast every hold, the step still watches it and reports a
 command that ends early with its own outcome.
+
+The committed-pause gate holds the cut coordinator after its replicated pause completes and
+before it tries to install the paused revision. It leaves reconciliation free to apply that
+revision. The elapsed-pause outline holds there beyond the cut's budget and requires the
+installation refusal, no archive and a resumed domain on one and three nodes. Its 25-second hold
+is measured on the cut's own task against the existing 20-second cut budget.
 
 A gate holds every cut that reaches it, not only the first. When the leader cannot record a
 backup's outcome, because leadership moved or because it could not confirm that it still leads,
@@ -2148,7 +2176,7 @@ compaction failed; see [Terminal Teardown](./shutdown.md#terminal-teardown).
 ### What Cleanup Releases
 
 Before diagnostics and node shutdown, the after hook releases every armed backup cut gate,
-including its lease, drain and capture boundaries. The gate owner publishes release to existing
+including its lease, pause-application, drain and capture boundaries. The gate owner publishes release to existing
 waiters before clearing its registry, so a cut that already borrowed a gate continues and a
 later cut finds no hold. Cleanup applies after failed steps as well as successful bodies and is
 idempotent. It does not cancel an admitted backup or claim that releasing its gate completes it.
@@ -2976,6 +3004,10 @@ scenario at a time, and its chain took 48.8 minutes of the 85.5-minute unsharded
 console features that run two at a time, and of every feature of long-running scenarios. A shard
 admits its runs to its own run slots and feature limits.
 
+Declared weights apply at admission inside each shard. Shards still deal runs by count: a weight
+expresses simultaneous load, while balancing total work needs an elapsed-work estimate. A weight
+also has a different effective cap in different local slot pools, so it is not a shard-work unit.
+
 `SCENARIO_SHARDS` in the Check workflow sets the number of shards, and `scenarios-build` turns it
 into the shards' matrix. In that run, a third of the 240,698 slot-seconds of work fills 48 slots
 for 28.5 minutes, while the longest attempt ran for 37.5 minutes, so the longest attempt bounds a
@@ -3756,6 +3788,8 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | One cleanup budget per cluster, and truthful phases | `stuck_nodes_spend_one_cleanup_budget_in_a_cluster_of_one_and_of_three`, `a_node_left_stopping_keeps_what_it_holds_until_its_own_task_ends`, `a_single_node_cleanup_keeps_how_its_task_ended`, `a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports`, `the_finished_phase_is_published_only_once_cleanup_has_completed`, `an_active_scenario_publishes_its_phase_and_the_age_of_that_phase` |
 | A stop a scenario waits for is timed by the node's own ending, and a node that outlives a wait is named with its shutdown phase | `a_stop_is_timed_from_its_first_request_to_the_ending_of_the_node_task`, `a_node_that_had_ended_before_it_was_asked_to_stop_took_no_time_to_stop`, `a_stopping_node_is_read_with_its_shutdown_phase_and_its_own_deadline`, `a_stop_record_reads_as_the_transition_the_harness_prints`, `a_node_left_stopping_is_recorded_with_where_its_own_shutdown_stood` |
 | Each retry holds twice the share of the run before it, from a sixteenth of the pool and never more than a quarter; a retry keeps the slots that free up until its share fits, gives its whole share back when it ends or is cancelled, and the suite summary counts the slot time it holds beyond one slot | `each_retry_holds_twice_the_share_of_the_run_before_it`, `a_retry_holds_its_share_of_the_run_slots_until_it_ends`, `a_retry_waiting_for_its_share_keeps_the_slots_that_free_up`, `a_cancelled_retry_returns_its_whole_share`, `the_suite_summary_counts_the_slot_time_a_retry_holds_beyond_one_slot` |
+| Positive numeric weights inherit from features, rules, scenarios and expanded examples; the largest declaration combines with the retry share and stays within the quarter cap, including in small pools | `scenario_weight_reads_feature_rule_scenario_and_expanded_example_tags`, `scenario_weight_uses_the_largest_declaration_without_changing_length`, `scenario_weight_refuses_invalid_numeric_declarations_with_their_tag`, `scenario_weight_combines_with_retries_by_maximum_and_caps_every_attempt` |
+| Weighted first attempts retain and release their whole reservation, gather free slots ahead of smaller successors, retain retry priority and feature limits, and contribute their reservation cost to the summary | `scenario_weight_holds_its_slots_through_the_admissions_lifetime`, `scenario_weight_gathers_free_slots_before_smaller_first_attempts`, `scenario_weight_still_gives_retries_priority_and_respects_feature_limits`, `scenario_weight_summary_counts_a_first_attempts_extra_reservation` |
 | Feature waits do not occupy run slots, and limited chains start before and progress beside bulk work | `a_queued_web_console_scenario_does_not_hold_a_run_slot`, `limited_features_are_taken_up_before_the_bulk`, `the_next_limited_scenario_gets_a_slot_beside_bulk_work`, `releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain`, `each_web_console_feature_starts_before_one_feature_consumes_the_group` |
 | A declared long-running scenario is admitted ahead of ordinary first attempts and behind retries, runs beside the bulk instead of after it, and the suite summary names every undeclared attempt of two minutes, finished or still running | `a_declared_long_scenario_is_admitted_before_queued_ordinary_first_attempts`, `a_retry_runs_before_a_declared_long_first_attempt`, `a_declared_long_scenario_queued_last_runs_beside_the_bulk_instead_of_after_it`, `long_running_is_declared_by_a_tag_of_the_scenario_its_rule_or_its_feature`, `an_undeclared_attempt_of_two_minutes_names_its_scenario_long_running`, `the_suite_summary_names_every_undeclared_attempt_of_two_minutes_finished_or_running` |
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |

@@ -253,6 +253,111 @@ Feature: Iceberg declarations
       | 3            |                                 | , 's3.endpoint' = '{{rustfs_addr}}' |
 
 
+  @iceberg_namespace_alteration
+  Scenario Outline: ALTER ICEBERG TABLE EMITTER SET TO moves an emitter to a table in another catalog namespace
+    Given Iceberg dependencies are running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "moved_{{test_id}}" exists at "s3://nervix-iceberg/tables/moved_{{test_id}}" with columns
+      """
+      user_id I64
+      action STRING
+      """
+    And Iceberg table "moved_{{test_id}}" in namespace "Archive_{{test_id}}.Events" exists at "s3://nervix-iceberg/tables/archive_moved_{{test_id}}" with columns
+      """
+      user_id I64
+      action STRING
+      """
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64,
+        action STRING
+      );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer,
+        action string
+      );
+      CREATE CODEC notification_codec
+      FROM WIRE JSON SCHEMA notification_wire
+      TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge iceberg-alteration-{{test_id}}.example.com;
+      CREATE ENDPOINT notification_ingress
+      ON edge
+      PATH '/notifications'
+      TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR notification_source
+      FROM notification_ingress MODE NO ACK
+      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+      TO notifications
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE S3 CLIENT s3_main
+      CONFIG {
+        'endpoint' = '{{rustfs_addr}}',
+        'region' = 'us-east-1',
+        'access_key_id' = 'rustfsadmin',
+        'secret_access_key' = 'rustfsadmin',
+        'path_style_access' = true
+      };
+      CREATE ICEBERG_REST CLIENT iceberg_catalog
+      CONFIG {
+        'uri' = '{{iceberg_rest_addr}}',
+        'warehouse' = 's3://nervix-iceberg/warehouse'
+      };
+      CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'moved_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/moved_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { 'user_id' = input.user_id, 'action' = input.action }
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "iceberg-alteration-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":61,"action":"FIRST"}
+      """
+    Then the Iceberg table "moved_{{test_id}}" eventually contains a row
+      """
+      {"user_id":61,"action":"FIRST"}
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      ALTER ICEBERG TABLE EMITTER iceberg_notifications SET TO s3_main TABLE 'moved_{{test_id}}' NAMESPACE 'Archive_{{test_id}}.Events' LOCATION 's3://nervix-iceberg/tables/archive_moved_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { 'user_id' = input.user_id, 'action' = input.action };
+      SHOW CREATE EMITTER iceberg_notifications;
+      """
+    Then the last command output contains
+      """
+      TABLE 'moved_{{test_id}}' NAMESPACE 'Archive_{{test_id}}.Events'
+      """
+    And within "10s" DESCRIBE EMITTER "iceberg_notifications" on the leader node contains
+      """
+      NAMESPACE 'Archive_{{test_id}}.Events'
+      """
+    When http payload is posted to host "iceberg-alteration-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":62,"action":"SECOND"}
+      """
+    Then the Iceberg table "moved_{{test_id}}" in namespace "Archive_{{test_id}}.Events" eventually contains a row
+      """
+      {"user_id":62,"action":"SECOND"}
+      """
+    And within "30s" the Iceberg table "moved_{{test_id}}" holds exactly these rows
+      """
+      {"user_id":61,"action":"FIRST"}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: An Iceberg emitter refuses unsupported publishing and construction clauses
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -322,7 +427,7 @@ Feature: Iceberg declarations
       """
     Then within "5s" DESCRIBE EMITTER "iceberg_notifications" on the leader node contains
       """
-      failed to initialize Iceberg table Analytics.Events.events
+      failed to load ICEBERG table 'events' in namespace 'Analytics.Events'
       """
     And the last command output contains
       """

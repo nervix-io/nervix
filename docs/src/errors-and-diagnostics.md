@@ -218,6 +218,7 @@ provides.
 | Shared C binding | `ClientError` as the current context, and the `BackupDownloadError` beneath a failed download | The `NX_ERROR_*` kind of the failure |
 | Session edge | `ConsensusError::LeadershipLost` as the current context of a proposal report | A leader redirect in place of a failed command |
 | Transaction application | `RuntimeError`'s revision preparation and readiness timeouts as the current context | Apply the cluster state again and retry, in place of failing the transaction |
+| Quiesced backup cut | `RuntimeError::ApplicationDeadline` as the current context of its pause's application, then `DomainAlterError`'s pause application and drain timeouts as the current context | The cut's timeout with its active phase, in place of a failure to stop ingestion or a capture failure |
 | Session transaction binding | `SessionTransactionBindingError` as the current context | The `TransactionTakenOver` or `TransactionDetached` disposition |
 | Postgres, MySQL and ClickHouse emitters | The driver's SQLSTATE, code or named rejection in the current context | Whether the destination refused rows for good or the attempt failed as infrastructure |
 | Connectors that resolve through a driver's DNS hook | `DnsLookupError::find_in` over the causes the driver wraps around the lookup | Keep the typed lookup failure beneath the connection failure |
@@ -441,9 +442,11 @@ answers a Model canonical Plexus cannot spell with a fixed diagnostic.
 ### Plexus Language And Formatter
 
 MQTT QoS refusals identify the supplied number, its source span, and the levels that the ingestor
-or emitter accepts. A refused `ON QUIESCE SUSPEND` identifies `SUSPEND` and its required
-`SESSION PERSISTENT QOS 1` pairing. Completion offers the quiesce modes the written session can
-use; a clean session or QoS 0 offers `BUFFER` and `DROP`.
+or emitter accepts. An MQTT ingestor `ACK` mode outside a persistent session at QoS 1 or 2 is
+refused with the mode underlined and the session and QoS the statement writes named beside the
+required pairing. A refused `ON QUIESCE SUSPEND` identifies `SUSPEND` and its required
+`SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the quiesce modes the
+written session can use; a clean session or QoS 0 offers `BUFFER` and `DROP`.
 
 The language layer reports rejected source the same way. Lexing and parsing each create the report
 at the stage that failed, and its context names that stage and holds the rejected text with every
@@ -796,12 +799,34 @@ body size and the limit as typed fields and becomes a record rejection of that m
 lost connection, and a close whose reason never arrives fail the attempt as an infrastructure
 failure, which the emitter retries on its backoff.
 
+A message the broker returns unrouted under `MANDATORY`, with its publisher confirm under `ACK` or
+before the round trip that ends a `NO ACK` write, is a record rejection with code `external` and
+operation `publish` whose message names the broker's reply code and text, such as `rabbitmq
+returned the message unrouted with reply code 312: NO_ROUTE`. A routing key longer than an AMQP
+short string carries is a `RabbitMqRecordError` keeping the driver's `ShortStringError` as its
+source and the key's length as a typed field, and becomes the same kind of rejection before the
+message is written. A return the emitter cannot attribute to a message of its write fails the
+attempt instead, because no record can be named as unrouted. An exchange emitter whose passive check
+finds no exchange fails to open with `EmitterOpenError::MissingExternalEntity`, naming the exchange
+and keeping the broker's `NOT_FOUND` answer, a `lapin::Error`, as its typed cause; `DESCRIBE EMITTER`
+shows it as `RabbitMQ exchange '<name>' does not exist`. Any other failure of that check is an
+initialization failure. Both are retried on the emitter's backoff.
+
+The registry refuses a `ROUTING KEY` that does not compute an exact, non-null, non-sensitive
+`STRING` as `ConnectorDeclarationIssue::EnvelopeValue`, the issue envelope values share, with the
+site written as the statement writes it: `ROUTING KEY requires an exact, non-null, non-sensitive
+STRING value`. The host reports a routing key that fails or produces no value for a record as an
+`evaluation` error of the `publish` operation whose message begins `ROUTING KEY`.
+
 Syslog emission and WebSocket-client ingestion retain DNS failures from the node resolver beneath
 their existing infrastructure contexts: `EmitterOpenError::Initialize` while a Syslog sender opens
 and `IngestorError::Resume` while a WebSocket source connects or reconnects. The resolver's typed
 missing-name, no-address, timeout, invalid-name or transport cause stays in the error report.
-Address, TLS and WebSocket-upgrade failures remain connection outcomes. None is a record rejection,
-and a DNS result by itself never marks a Syslog record delivered.
+Address, TLS and WebSocket-upgrade failures remain connection outcomes. A WebSocket peer whose
+upgrade answer contradicts the request's subprotocol offer fails resume with the connector's typed
+refusal, which keeps the transport's refusal attached for typed inspection and prints no
+subprotocol, since an offer can carry a credential. None is a record rejection, and a DNS result
+by itself never marks a Syslog record delivered.
 
 Redis command connections receive the node resolver through the driver's DNS hook. A failed
 initial or later pool connection keeps the resolver's typed failure in
@@ -943,7 +968,7 @@ the connector's description of the failure for the emitter's transient error, an
 TIMEOUT` is again the confirmation window's `ConfirmationWindowError`. A delivery error about the
 record itself, an invalid or oversized message, timestamp or record, rejects that record through
 `ON MESSAGE ERROR` instead. A producer that librdkafka cannot create keeps its `KafkaError` beneath
-`EmitterOpenError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `message.timeout.ms` can
+`EmitterOpenError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `delivery.timeout.ms` can
 hold is `KafkaMessageTimeoutError::TooLong` beneath `EmitterOpenError::InvalidConfiguration`. A
 finish whose producer queue does not empty before its deadline keeps librdkafka's `KafkaError`
 beneath `EmitterFinishError::Unsent`, which counts the records whose delivery report has not been
@@ -960,7 +985,11 @@ their existing reporting path. A Kafka client's attempt to set a host-owned key,
 `allow.auto.create.topics` or `delivery.report.only.error`, is
 `ClientConfigSchemaError::Reserved` beneath the registry's client context, naming the domain,
 client and owned key without its configured value. The source and both inspectors enforce `false`
-after pass-through configuration.
+after pass-through configuration. A key librdkafka reads as another name for a property the
+client accepts under one name, such as `metadata.broker.list` for `bootstrap.servers`, is
+`ClientConfigSchemaError::DriverAlias`, naming the key and the accepted name. A key written under
+librdkafka's `topic.` prefix is `ClientConfigSchemaError::DriverPrefix`, naming the key and the
+prefix. Both refusals sit beneath the same client context and carry no configured value.
 
 A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaTopicIngestorError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
@@ -1204,9 +1233,17 @@ An envelope clause or `PROPERTIES` key the entity does not declare is
 `EnvelopeDeclarationError` that names the entity and the clause or key; an envelope duration
 reuses the duration issues under `DELIVER AFTER` or `DELAY`, and an envelope expression that is
 not an exact, non-null, non-sensitive value of its type is `EnvelopeValue`, naming the clause or
-key and the expected type with the VM's compile failure beneath it. These are command refusals
-before publication, including during `ALTER`, rather than retried source or sink initialization
-failures. They never include a record's values.
+key and the expected type with the VM's compile failure beneath it. An `SQS QUEUE` emitter that
+writes `DELAY` for a FIFO queue, a `DELAY` other than whole seconds up to 900s, or a
+`DEDUPLICATION ID` for a standard queue is refused with `SqsFifoQueueDelay`, `SqsDelay` or
+`SqsStandardQueueDeduplication`, naming the queue or the duration as written. These are command
+refusals before publication, including during `ALTER`, rather than retried source or sink
+initialization failures. They never include a record's values. An ingestor whose delivery mode lacks
+the option choices its entity declares for it, such as an MQTT `ACK` mode outside a persistent
+session at QoS 1 or 2, is `ConnectorDeclarationIssue::Delivery`, carrying the vocabulary's typed
+`UnmetDeliveryRequirement` that names the entity, the mode, every required choice and the choice the
+statement writes for each option. The grammar refuses the same statement with the same text,
+underlining the mode.
 
 MySQL table-name construction refuses empty path parts and more than two parts with typed
 `ExternalNameError` outcomes. Its offline client check refuses pool-sizing URL parameters through
@@ -1257,6 +1294,15 @@ client's value is printed. A TLS file that either Iceberg client cannot use stop
 open with `EmitterOpenError::InvalidConfiguration`. Beneath it, `IcebergClientTlsError` names the
 catalog or the object-store client, and the shared `TlsClientConfigError` beneath that names the
 file and the step that failed.
+An Iceberg emitter whose catalog does not hold the declared table stops at open with
+`EmitterOpenError::MissingExternalEntity`: its kind is `namespace` when the catalog holds no
+namespace of the declared name, and `table`, named `<namespace>.<table>`, when it holds the
+namespace without the table. Beneath it, `IcebergTableOpenError::MissingNamespace` or
+`MissingTable` names what the catalog lacks, and its description is the emitter's transient error,
+such as `ICEBERG table 'orders' does not exist in namespace 'Analytics.Events'`. A catalog that fails
+the load, or fails the namespace lookup that tells the two apart, stops the open with
+`EmitterOpenError::Initialize`, with `IcebergTableOpenError::Load` or `NamespaceLookup` above the
+catalog's own typed error.
 An emitter whose connector keeps one value per header name and whose `INVOKE` clause writes one literal
 header name twice is refused with `RegistryError::ReplacedHeaderWrite`, which names the domain, the
 emitter, the emitter's connector and entity, the header as the emitter's
@@ -1367,7 +1413,17 @@ session receives render the whole chain, such as `failed to start domain 'edge':
 runtime revision 7: failed to build domain execution for 'edge': failed to load lookup 'zips': ...`,
 and a domain whose build failed records the same chain as its instantiation error. Revision
 preparation and readiness timeouts keep variants of their own, which a transaction recognizes in
-the report's top context to retry its application rather than fail it.
+the report's top context to retry its application rather than fail it. A caller that bounds the
+application by a deadline of its own, as a quiesced backup cut applying its pause, receives
+`RuntimeError::ApplicationDeadline` when that deadline ends one of the application's waits, naming
+the wait: an installation slot, or every live node preparing or readying a revision. The pause path
+reports it beneath `DomainAlterError::BackupPauseTimeout`, and the cut attributes that to its drain
+phase as its timeout, such as `timed out waiting to capture domain 'edge': phase=drain, ...: timed
+out applying the backup pause of domain 'edge': the caller's deadline ended the runtime application
+while it waited for every live node to ready runtime revision 9`. An already elapsed deadline
+refuses the first installation wait immediately, even when its slot is available; attribution
+does not depend on whether the timer driver has processed that deadline yet. A pause committed
+after its cut's deadline therefore retains the installation refusal beneath the pause timeout.
 
 ### Ingestors, Emitters And Generators
 
@@ -2869,14 +2925,18 @@ The compiler architecture gate owns typed tooling failures for invalid source co
 conflicting findings and incomplete compiler passes. `ContractProblem` retains the specific
 argument, kind or missing contract coordinate inside an `error-stack` report until the Rust
 diagnostic boundary formats it. Reports preserve source location, resolved receiver/operation,
-owner and compiled configuration context. Missing or stale analysis fails rather than becoming a
-zero debt count. These are repository validation errors and add no runtime failure variants.
+owner and compiled configuration context. Missing, stale or incomplete compiler evidence fails the
+gate; compiler findings feed no debt count. These are repository validation errors and add no
+runtime failure variants.
 [Data-Plane Concurrency](data-plane-concurrency.md) owns the gate's coverage and synchronization policy.
 
-The isolated architecture compiler emits ordinary Rust tool diagnostics:
+The isolated architecture compiler emits sixteen ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and
-`nervix::invalid_contract`, together with the typed error diagnostics above. Source contracts and narrow reason-bearing expectations own the
-architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
+`nervix::invalid_contract`; the four failure diagnostics above; the six architecture diagnostics
+[Data-Plane Concurrency](./data-plane-concurrency.md#resolved-architecture-boundaries) describes;
+and `nervix::clamped_arithmetic` and `nervix::combinator_control_flow`. The
+[architecture rule matrix](./architecture-enforcement.md#rule-contracts) lists them by family.
+Source contracts and narrow reason-bearing expectations own the architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
 compiler reports and changed inputs fail the repository command; they are tooling failures, with
 no runtime error or public protocol disposition. The diagnostic gate rejects unresolved Nervix
 warnings too. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostics-and-reviewed-exceptions)
@@ -3023,8 +3083,9 @@ commands and the gate.
 Paired `compile_fail` and compiling doctests hold current APIs beside their failure paths. The DNS
 hook accepts `DnsLookupReport` as a standard error, and the recovery API classifies a real outcome.
 The VM's function injection receives the selected rows' earlier errors together with domain time.
-Resolved compiler fixtures hold the contextual-report, discarded-outcome and canonical panic rules;
-the source guard separately rejects textual string errors, including inactive code.
+Resolved compiler fixtures hold the contextual-report, discarded-outcome, informative-replacement
+and canonical panic rules; the source guard separately rejects textual string errors, including
+inactive code.
 
 ## Adding A Fallible Operation
 

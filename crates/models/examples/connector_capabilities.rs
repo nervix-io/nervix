@@ -101,11 +101,10 @@ fn requirements(requirements: &[ChoiceRequirement]) -> String {
     if requirements.is_empty() {
         return String::new();
     }
-    let choices: Vec<_> = requirements
-        .iter()
-        .map(|requirement| format!("{} {}", requirement.option, requirement.choice))
-        .collect();
-    format!(" (requires {})", choices.join(" and "))
+    format!(
+        " (requires {})",
+        ChoiceRequirement::conjunction(requirements)
+    )
 }
 
 fn ingestor(kind: IngestorEntityKind) -> Value {
@@ -175,14 +174,20 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
 }
 
 /// The header model of one side as the matrix states it, or `null` for a side whose messages carry
-/// no transport headers.
+/// no transport headers. `values` states what carries each typed value, and is `null` for text.
 fn header_model(model: Option<HeaderModel>) -> Value {
-    let Some(HeaderModel { layout, names }) = model else {
+    let Some(HeaderModel {
+        layout,
+        names,
+        values,
+    }) = model
+    else {
         return Value::Null;
     };
     json!({
         "layout": layout.as_ref(), "names": names.as_ref(),
         "layout_meaning": layout.meaning(), "names_meaning": names.meaning(),
+        "values": values.carried(),
     })
 }
 
@@ -422,6 +427,10 @@ fn emitter_template(kind: EmitterEntityKind, body: &str) -> String {
         EmitterBodyForm::Native => String::new(),
     };
     body_clause.push_str(&option_template(&payload_options));
+    // Each envelope clause the entity declares follows the payload, written at most once.
+    for clause in declared.envelope {
+        body_clause.push_str(&format!("\n    [{}]", clause.example()));
+    }
     let batch = match declared.batch {
         EmitterBatchLegality::Required { .. } => "\n  BATCH MAX MESSAGES <count> MAX SIZE <bytes>",
         EmitterBatchLegality::Optional { .. } => {
@@ -458,6 +467,15 @@ fn client(kind: ConnectorKind) -> Option<Value> {
         })
         .collect();
     let options: Vec<_> = options.iter().map(option).collect();
+    let aliases: Vec<_> = config
+        .aliases()
+        .iter()
+        .map(|alias| json!({ "alias": alias.alias, "accepted": alias.accepted }))
+        .collect();
+    let stripped_prefix = match config.stripped_prefix() {
+        Some(stripped) => json!({ "prefix": stripped.prefix, "properties": stripped.properties }),
+        None => Value::Null,
+    };
     let constraints: &[&str] = match kind {
         ConnectorKind::Otel => &[
             nervix_models::OTEL_HEADERS_FORMAT,
@@ -467,7 +485,8 @@ fn client(kind: ConnectorKind) -> Option<Value> {
     };
     Some(
         json!({ "kind": kind.keyword(), "pool": pool, "config_owner": config_owner, "options": options,
-            "keys": keys, "namespaces": namespaces, "reserved": config.reserved(), "constraints": constraints }),
+            "keys": keys, "namespaces": namespaces, "reserved": config.reserved(), "aliases": aliases,
+            "stripped_prefix": stripped_prefix, "constraints": constraints }),
     )
 }
 
@@ -490,6 +509,9 @@ fn client_key(key: &ClientConfigKey) -> Value {
         ClientConfigPresence::OptionalForScheme { address, scheme } => {
             format!("optional; requires `{address}` to use `{scheme}`")
         }
+        ClientConfigPresence::ExactlyForScheme { address, scheme } => {
+            format!("required when `{address}` uses `{scheme}`; refused otherwise")
+        }
         ClientConfigPresence::OptionalForQuery {
             address,
             option,
@@ -502,6 +524,10 @@ fn client_key(key: &ClientConfigKey) -> Value {
     };
     let value = match declared_value {
         ClientConfigValue::Url(schemes) => format!("URL ({})", schemes.join(" or ")),
+        ClientConfigValue::HostPortUrl(schemes) => format!(
+            "URL naming only a host and a port ({})",
+            schemes.join(" or ")
+        ),
         ClientConfigValue::DriverUrl(url) => {
             let mut owned_options = Vec::with_capacity(url.owned.len());
             for option in url.owned {
