@@ -2,7 +2,8 @@ Feature: Emitters write envelope clauses only where their entity declares them
 
   An emitter's envelope clauses follow its payload and set what its transport carries beside each
   payload. A clause or PROPERTIES key the emitter's entity does not declare is refused where it is
-  written. No entity declares one yet, so a node refuses each clause form on every emitter entity.
+  written. Only the RabbitMQ entities declare a clause, MANDATORY, so a node refuses each clause
+  form on every entity that does not declare it.
 
   @emitter_envelope
   Scenario Outline: Every emitter entity refuses the envelope clauses it does not declare
