@@ -801,8 +801,11 @@ Syslog emission and WebSocket-client ingestion retain DNS failures from the node
 their existing infrastructure contexts: `EmitterOpenError::Initialize` while a Syslog sender opens
 and `IngestorError::Resume` while a WebSocket source connects or reconnects. The resolver's typed
 missing-name, no-address, timeout, invalid-name or transport cause stays in the error report.
-Address, TLS and WebSocket-upgrade failures remain connection outcomes. None is a record rejection,
-and a DNS result by itself never marks a Syslog record delivered.
+Address, TLS and WebSocket-upgrade failures remain connection outcomes. A WebSocket peer whose
+upgrade answer contradicts the request's subprotocol offer fails resume with the connector's typed
+refusal, which keeps the transport's refusal attached for typed inspection and prints no
+subprotocol, since an offer can carry a credential. None is a record rejection, and a DNS result
+by itself never marks a Syslog record delivered.
 
 Redis command connections receive the node resolver through the driver's DNS hook. A failed
 initial or later pool connection keeps the resolver's typed failure in
