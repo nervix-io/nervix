@@ -60,7 +60,7 @@ Feature: Emitters write envelope clauses only where their entity declares them
     And these Plexus commands fail with "found REPLY"
       """
       CREATE MQTT TOPIC EMITTER generated FROM events TO destination_client TOPIC 'devices/Orders'
-        MODE QOS 0 RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING events_codec
+        QOS 0 MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING events_codec
         REPLY TO reply_queue
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """

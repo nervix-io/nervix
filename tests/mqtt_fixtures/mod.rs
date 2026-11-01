@@ -34,7 +34,7 @@ async fn publish_through_connection_stall(
     let topic = expand_placeholders(world, "fixture_publication_{{test_id}}");
     let payload = expand_placeholders(world, docstring(step));
     let endpoints = world.dependencies.endpoints();
-    let observer = common::cluster::observe_mqtt(endpoints, &topic)
+    let observer = common::cluster::observe_mqtt(endpoints, &topic, rumqttc::QoS::AtMostOnce)
         .await
         .expect("the observer must subscribe before publication");
     let endpoint = url::Url::parse(endpoints.get(MQTT_ADDR).expect("MQTT is running"))

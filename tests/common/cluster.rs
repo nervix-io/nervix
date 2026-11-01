@@ -3000,7 +3000,16 @@ impl Cluster {
     }
 
     pub(crate) async fn observe_mqtt(&self, topic: &str) -> io::Result<BrokerObserver> {
-        observe_mqtt(&self.dependencies, topic).await
+        observe_mqtt(&self.dependencies, topic, QoS::AtMostOnce).await
+    }
+
+    /// Observes `topic` through a QoS 2 subscription, so the broker delivers each publish at the
+    /// quality of service it was published with.
+    pub(crate) async fn observe_mqtt_at_published_qos(
+        &self,
+        topic: &str,
+    ) -> io::Result<BrokerObserver> {
+        observe_mqtt(&self.dependencies, topic, QoS::ExactlyOnce).await
     }
 
     pub(crate) async fn observe_rabbitmq(&self, queue: &str) -> io::Result<BrokerObserver> {
@@ -6532,9 +6541,23 @@ async fn publish_zeromq(addr: &str, payload: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// The quality of service the observer's broker delivered a publish at, as the observer's `qos`
+/// header states it.
+fn delivered_qos_level(qos: QoS) -> &'static str {
+    match qos {
+        QoS::AtMostOnce => "0",
+        QoS::AtLeastOnce => "1",
+        QoS::ExactlyOnce => "2",
+    }
+}
+
+/// Observes `topic` through a subscription at `subscription`. A broker delivers a publish at the
+/// lower of the quality of service it was published with and this one, which each observed message
+/// states in its `qos` header.
 pub(crate) async fn observe_mqtt(
     dependencies: &DependencyEndpoints,
     topic: &str,
+    subscription: QoS,
 ) -> io::Result<BrokerObserver> {
     let client_id = format!(
         "nervix-cucumber-observer-{}-{}",
@@ -6553,7 +6576,7 @@ pub(crate) async fn observe_mqtt(
     let topic = topic.to_string();
 
     client
-        .subscribe(topic.as_str(), QoS::AtMostOnce)
+        .subscribe(topic.as_str(), subscription)
         .await
         .map_err(io::Error::other)?;
 
@@ -6570,8 +6593,11 @@ pub(crate) async fn observe_mqtt(
                 }
                 Ok(MqttEvent::Incoming(Incoming::Publish(publish))) => {
                     if publish.topic.as_ref() == topic.as_bytes() {
-                        let message =
-                            BrokerMessage::from_bytes(publish.payload.as_ref(), Vec::new());
+                        let delivered_at = delivered_qos_level(publish.qos).to_owned();
+                        let message = BrokerMessage::from_bytes(
+                            publish.payload.as_ref(),
+                            vec![("qos".to_owned(), delivered_at)],
+                        );
                         if payload_tx.send(message).await.is_err() {
                             break;
                         }

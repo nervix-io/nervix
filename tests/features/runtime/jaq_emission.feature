@@ -231,7 +231,7 @@ Feature: JAQ emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-emitter-{{test_id}}'
         };
-        CREATE MQTT TOPIC EMITTER mqtt_notifications_out FROM notifications TO mqtt_main TOPIC 'notifications_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_notifications_out FROM notifications TO mqtt_main TOPIC 'notifications_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

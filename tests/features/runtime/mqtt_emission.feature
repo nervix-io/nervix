@@ -42,7 +42,7 @@ Feature: MQTT emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-emitter-{{test_id}}'
         };
-        CREATE MQTT TOPIC EMITTER mqtt_notifications_out FROM notifications TO mqtt_main TOPIC 'notifications_out_{{test_id}}' MODE QOS 1 ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_notifications_out FROM notifications TO mqtt_main TOPIC 'notifications_out_{{test_id}}' QOS 1 MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -74,8 +74,11 @@ Feature: MQTT emission
       | 3            | 0             |
       | 3            | 1             |
 
-  @mqtt_emitter_qos1_boundary
-  Scenario Outline: MQTT QoS 1 holds the input offset until PUBACK
+  # An attached emitter holds its input's offset until a record completes, and the quality of service
+  # says where it completes. The paused endpoint carries nothing either way, so a QOS 0 record
+  # completes once the client takes it, while a QOS 1 or 2 record waits for the broker's answer.
+  @mqtt_emitter_boundary
+  Scenario Outline: An attached MQTT <qos> emitter completes a record at <boundary>
     Given Kafka is running
     And MQTT is running
     And a stallable MQTT endpoint is configured
@@ -125,8 +128,7 @@ Feature: MQTT emission
       };
       CREATE ATTACHED MQTT TOPIC EMITTER mqtt_boundary FROM notifications
         TO mqtt_sink TOPIC 'mqtt_boundary_out_{{test_id}}'
-          MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 300ms
-            RETRY POLICY BACKOFF 100ms MAX 200ms
+          <qos> MODE <mode>
           ENCODE USING notification_codec
         INHERIT ALL
         <batch>
@@ -144,7 +146,7 @@ Feature: MQTT emission
       """
       {"user_id":42}
       """
-    Then within "2s" Kafka consumer group "mqtt_boundary_group_{{test_id}}" next offset for topic "mqtt_boundary_in_{{test_id}}" partition 0 is "below 1"
+    Then within "<while_paused>" Kafka consumer group "mqtt_boundary_group_{{test_id}}" next offset for topic "mqtt_boundary_in_{{test_id}}" partition 0 is "<offset_while_paused>"
     And the relay subscription does not receive a payload within "500ms"
     When the stallable endpoint "mqtt" is resumed
     Then the observed broker receives a payload
@@ -153,13 +155,168 @@ Feature: MQTT emission
       """
     And within "5s" Kafka consumer group "mqtt_boundary_group_{{test_id}}" next offset for topic "mqtt_boundary_in_{{test_id}}" partition 0 is "at least 1"
 
-    # A batch payload is one PUBLISH packet, so its PUBACK is the completion point.
+    # A batch payload is one PUBLISH packet, so its answer is the completion point.
     Examples:
-      | cluster_size | batch                              | payload          |
-      | 1            |                                    | {"user_id":42}   |
-      | 3            |                                    | {"user_id":42}   |
-      | 1            | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
-      | 3            | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
+      | cluster_size | qos   | mode                                                                      | boundary            | while_paused | offset_while_paused | batch                              | payload          |
+      | 1            | QOS 0 | NO ACK RETRY POLICY BACKOFF 100ms MAX 200ms                               | client accept       | 30s          | at least 1          |                                    | {"user_id":42}   |
+      | 3            | QOS 0 | NO ACK RETRY POLICY BACKOFF 100ms MAX 200ms                               | client accept       | 30s          | at least 1          |                                    | {"user_id":42}   |
+      | 1            | QOS 1 | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms     | PUBACK              | 2s           | below 1             |                                    | {"user_id":42}   |
+      | 3            | QOS 1 | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms     | PUBACK              | 2s           | below 1             |                                    | {"user_id":42}   |
+      | 1            | QOS 1 | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms     | PUBACK              | 2s           | below 1             | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
+      | 3            | QOS 1 | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms     | PUBACK              | 2s           | below 1             | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
+      | 1            | QOS 2 | ACK PARALLEL MAX 2 ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms | the broker's answer | 2s           | below 1             |                                    | {"user_id":42}   |
+      | 3            | QOS 2 | ACK PARALLEL MAX 2 ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms | the broker's answer | 2s           | below 1             |                                    | {"user_id":42}   |
+
+  # The broker delivers a QOS 2 publish and answers PUBREC once it took the publish, and PUBCOMP only
+  # for the client's PUBREL. The endpoint drops every PUBREL, so the record is delivered and its
+  # exchange never completes: the emitter keeps the offset until a retry's exchange reaches PUBCOMP.
+  @mqtt_emitter_pubcomp_boundary
+  Scenario Outline: An attached MQTT QOS 2 emitter holds the input offset until PUBCOMP
+    Given Kafka is running
+    And MQTT is running
+    And an MQTT endpoint that drops chosen publishes is configured
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "pubcomp_in_{{test_id}}" exists with 1 partitions
+    And MQTT topic "pubcomp_out_{{test_id}}" is observed
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification ( user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_ingress TOPIC 'pubcomp_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'pubcomp_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 120s
+            RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE MQTT CLIENT mqtt_sink CONFIG {
+        'addr' = '{{mqtt_filtered_addr}}',
+        'client_id' = 'nervix-pubcomp-{{test_id}}'
+      };
+      CREATE ATTACHED MQTT TOPIC EMITTER pubcomp_out FROM notifications
+        TO mqtt_sink TOPIC 'pubcomp_out_{{test_id}}'
+          QOS 2 MODE ACK SEQUENTIAL ACK TIMEOUT 1s
+            RETRY POLICY BACKOFF 100ms MAX 200ms
+          ENCODE USING notification_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then Kafka consumer group "pubcomp_group_{{test_id}}" eventually has 1 consumers
+    When the MQTT endpoint drops every PUBREL
+    And Kafka message is published to topic "pubcomp_in_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then the observed broker receives a payload
+      """
+      {"user_id":42}
+      """
+    And within "60s" DESCRIBE EMITTER "pubcomp_out" on the leader node contains
+      """
+      transient error: the broker did not answer within ACK TIMEOUT 1s
+      """
+    And within "2s" Kafka consumer group "pubcomp_group_{{test_id}}" next offset for topic "pubcomp_in_{{test_id}}" partition 0 is "below 1"
+    When the MQTT endpoint forwards every publish
+    Then within "60s" Kafka consumer group "pubcomp_group_{{test_id}}" next offset for topic "pubcomp_in_{{test_id}}" partition 0 is "at least 1"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # A QoS 2 subscription lets the broker deliver each publish at the quality of service the emitter
+  # published it with, so the observed level is the one the statement wrote.
+  @mqtt_emitter_pairings
+  Scenario Outline: An MQTT <qos> emitter in MODE <mode_name> publishes at that quality of service
+    Given MQTT is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And MQTT topic "pairing_out_{{test_id}}" is observed at the quality of service it is published with
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification ( user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE MQTT CLIENT mqtt_ingress CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-pairing-ingress-{{test_id}}'
+      };
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'pairing_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE MQTT CLIENT mqtt_sink CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-pairing-emitter-{{test_id}}'
+      };
+      CREATE MQTT TOPIC EMITTER pairing_out FROM notifications
+        TO mqtt_sink TOPIC 'pairing_out_{{test_id}}'
+          <qos> MODE <mode>
+          ENCODE USING notification_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And MQTT message is published to topic "pairing_in_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then the observed broker receives a payload
+      """
+      {"user_id":42}
+      """
+    And the last observed broker message has headers
+      """
+      qos=<level>
+      """
+
+    Examples:
+      | cluster_size | qos   | level | mode_name      | mode                                                                 |
+      | 1            | QOS 0 | 0     | NO ACK         | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                            |
+      | 3            | QOS 0 | 0     | NO ACK         | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                            |
+      | 1            | QOS 1 | 1     | ACK SEQUENTIAL | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |
+      | 3            | QOS 1 | 1     | ACK SEQUENTIAL | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |
+      | 1            | QOS 1 | 1     | ACK PARALLEL   | ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s |
+      | 3            | QOS 1 | 1     | ACK PARALLEL   | ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s |
+      | 1            | QOS 2 | 2     | ACK SEQUENTIAL | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |
+      | 3            | QOS 2 | 2     | ACK SEQUENTIAL | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |
+      | 1            | QOS 2 | 2     | ACK PARALLEL   | ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s |
+      | 3            | QOS 2 | 2     | ACK PARALLEL   | ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s |
 
   # One MQTT message carries four records, which the ingest codec splits into one batch, so the
   # emitter hands all four to its client in one publish. The endpoint drops the first record's
@@ -167,7 +324,7 @@ Feature: MQTT emission
   # first record's answer misses ACK TIMEOUT, the confirmation window settles the answers the
   # broker gave, so the emitter sends again only the first record.
   @mqtt_emitter_confirmation_window
-  Scenario Outline: An MQTT <mode> emitter sends again only the record its broker never answered
+  Scenario Outline: An MQTT <qos> emitter sends again only the record its broker never answered
     Given MQTT is running
     And an MQTT endpoint that drops chosen publishes is configured
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -206,7 +363,7 @@ Feature: MQTT emission
       };
       CREATE MQTT TOPIC EMITTER window_out FROM notifications
         TO mqtt_sink TOPIC 'window_out_{{test_id}}'
-          MODE <mode> ACK PARALLEL MAX 8 ACK TIMEOUT 10s
+          <qos> MODE ACK PARALLEL MAX 8 ACK TIMEOUT 10s
             RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING notification_codec
         INHERIT ALL
@@ -244,7 +401,7 @@ Feature: MQTT emission
       """
 
     Examples:
-      | cluster_size | mode  |
+      | cluster_size | qos   |
       | 1            | QOS 1 |
       | 3            | QOS 1 |
       | 1            | QOS 2 |
@@ -290,7 +447,7 @@ Feature: MQTT emission
       };
       CREATE MQTT TOPIC EMITTER held_output FROM held_events
         TO mqtt_held TOPIC 'held_out_{{test_id}}'
-          MODE QOS 0 RETRY POLICY BACKOFF 100ms MAX 1s
+          QOS 0 MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING held_codec
         INHERIT ALL
         FLUSH IMMEDIATE

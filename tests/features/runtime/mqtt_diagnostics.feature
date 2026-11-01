@@ -6,7 +6,7 @@ Feature: MQTT refusals identify the token and its legal session or QoS
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus statements fail with "MQTT ingestor QOS must be 0, 1 or 2, found <qos>"
+    When these Plexus statements fail with "MQTT QOS must be 0, 1 or 2, found <qos>"
       """
       CREATE MQTT TOPIC INGESTOR incoming FROM broker TOPIC 'events'
         SESSION PERSISTENT QOS <qos> MODE NO ACK ON QUIESCE DROP
@@ -27,10 +27,10 @@ Feature: MQTT refusals identify the token and its legal session or QoS
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus statements fail with "MQTT emitter QOS must be 0, 1, or 2, found <qos>"
+    When these Plexus statements fail with "MQTT QOS must be 0, 1 or 2, found <qos>"
       """
       CREATE MQTT TOPIC EMITTER outgoing FROM events TO broker TOPIC 'events'
-        MODE QOS <qos> RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec
+        QOS <qos> MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 

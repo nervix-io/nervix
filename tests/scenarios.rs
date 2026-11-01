@@ -1406,13 +1406,24 @@ fn when_mqtt_endpoint_drops_publishes_carrying(world: &mut ScenarioWorld, #[step
         .drop_publishes_carrying(payload.into_bytes());
 }
 
+/// From now on the MQTT endpoint drops every PUBREL, so the broker delivers each QoS 2 publish and
+/// answers its PUBREC, and never sends the PUBCOMP that completes it.
+#[when("the MQTT endpoint drops every PUBREL")]
+fn when_mqtt_endpoint_drops_every_pubrel(world: &mut ScenarioWorld) {
+    world
+        .mqtt_publish_filter
+        .as_ref()
+        .expect("an MQTT endpoint that drops chosen publishes must be configured first")
+        .drop_releases();
+}
+
 #[when("the MQTT endpoint forwards every publish")]
 fn when_mqtt_endpoint_forwards_every_publish(world: &mut ScenarioWorld) {
     world
         .mqtt_publish_filter
         .as_ref()
         .expect("an MQTT endpoint that drops chosen publishes must be configured first")
-        .forward_every_publish();
+        .forward_every_packet();
 }
 
 #[given("a stallable Pulsar endpoint is configured")]
@@ -25693,6 +25704,18 @@ async fn given_mqtt_topic_is_observed(world: &mut ScenarioWorld, topic: String) 
         world
             .cluster()
             .observe_mqtt(&topic)
+            .await
+            .expect("failed to observe mqtt topic"),
+    );
+}
+
+#[given(expr = "MQTT topic {string} is observed at the quality of service it is published with")]
+async fn given_mqtt_topic_is_observed_at_published_qos(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    world.broker_observer = Some(
+        world
+            .cluster()
+            .observe_mqtt_at_published_qos(&topic)
             .await
             .expect("failed to observe mqtt topic"),
     );

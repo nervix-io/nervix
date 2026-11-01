@@ -48,7 +48,7 @@ Feature: MQTT name resolution
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
-      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -121,7 +121,7 @@ Feature: MQTT name resolution
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
-      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -179,7 +179,7 @@ Feature: MQTT name resolution
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
-      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -267,7 +267,7 @@ Feature: MQTT name resolution
       };
       CREATE ATTACHED MQTT TOPIC EMITTER mqtt_boundary FROM notifications
         TO mqtt_sink TOPIC 'mqtt_dns_boundary_out_{{test_id}}'
-          MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 300ms
+          QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 300ms
             RETRY POLICY BACKOFF 100ms MAX 200ms
           ENCODE USING notification_codec
         INHERIT ALL
@@ -336,7 +336,7 @@ Feature: MQTT name resolution
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
-      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 200ms MAX 1s
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
