@@ -2781,7 +2781,11 @@ sequenceDiagram
   deadline. Registry creation and source construction after template rendering both validate
   it. The omitted connection
   timeout is thirty seconds; omitted ping cadence means only answering peer pings. `open` prepares local transport and TLS
-  state without resolving a name or connecting; `resume` resolves and connects, completes any
+  state without resolving a name or connecting. For a `wss` endpoint it takes the rustls
+  configuration that the shared `RustlsClientConfigProvider` builds from the client's entries: the
+  bundled WebPKI roots and the platform's native roots with the client's `tls_ca_file` added, and
+  the identity of its `tls_cert_file` and `tls_key_file`. A file it cannot parse therefore fails
+  `open`, and with it the ingestor's start. `resume` resolves and connects, completes any
   signaling handshake, and only then reports readiness. Accepted data from a successful
   handshake stays in one bounded `HandshakeFrames` handoff for polling before new socket frames.
   Its capacity is `handshake_buffer_capacity` (default 16 messages), with each message bounded by
@@ -2803,7 +2807,10 @@ sequenceDiagram
   fails an upgrade whose answer contradicts the request. `resume` turns that refusal into a typed
   connection failure, keeps the transport's refusal attached, and tries no further address,
   because the endpoint, not an address, refused the offer. Neither that failure nor a refusal of
-  a malformed offer prints a subprotocol, since an offer can carry a credential. Client pings begin after
+  a malformed offer prints a subprotocol, since an offer can carry a credential. Every other failed
+  connection, TLS handshake or upgrade, an answer other than `101` and an opening response beyond
+  the transport's fixed header-count and head-size limits included, gives way to the next resolved
+  address within the same budget; the declaration states those limits as driver limits. Client pings begin after
   signaling at the configured cadence, with the close handshake's existing one-second budget
   declared once in the vocabulary and shared by both transport operations, and continue alongside
   data reads. Protocol control frames remain transport concerns.
