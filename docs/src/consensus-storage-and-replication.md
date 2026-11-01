@@ -456,16 +456,16 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_partition_send_logs`,
-`raft_partition_send_meta`, `raft_partition_send_state`, and `raft_partition_send_snapshots`.
-Opening it validates the complete keyspace namespace before reading any records. This namespace
-identifies the current Model shape, including the required serialized Sentry platform field, an
-ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape,
-`ALTER BRANCH` among the archived statements and the branch partition count every resolved branch
-declaration of the committed schedule carries. Its state metadata requires the current
-`RestoredLifecycle` encoding, including the durable restore installation gate and the unit-keyed
-committed schedule in which a relay of a partitioned branch is scheduled as one unit per
-partition. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
+The dedicated database owns exactly four current keyspaces: `raft_partition_qos_logs`,
+`raft_partition_qos_meta`, `raft_partition_qos_state`, and `raft_partition_qos_snapshots`. Opening
+it validates the complete keyspace namespace before reading any records. This namespace identifies
+the current Model shape, including the required serialized Sentry platform field, an ingestor's
+`TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the session and
+quality of service an MQTT TOPIC ingestor writes beside its delivery mode, `ALTER BRANCH` among the
+archived statements and the branch partition count every resolved branch declaration of the
+committed schedule carries. Its state metadata requires the current `RestoredLifecycle` encoding,
+including the durable restore installation gate and the unit-keyed committed schedule in which a
+relay of a partitioned branch is scheduled as one unit per partition. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
 and snapshot installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).

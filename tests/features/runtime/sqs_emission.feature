@@ -29,7 +29,7 @@ Feature: SQS emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -112,7 +112,7 @@ Feature: SQS emission
         'client_id' = 'nervix-cucumber-sqs-poison-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'sqs_poison_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'sqs_poison_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -199,7 +199,7 @@ Feature: SQS emission
         'client_id' = 'nervix-cucumber-sqs-noncharacter-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notes
-      FROM mqtt_ingress TOPIC 'sqs_noncharacter_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'sqs_noncharacter_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING note_codec
       TO notes
       INHERIT ALL
@@ -283,7 +283,7 @@ Feature: SQS emission
         'client_id' = 'nervix-cucumber-sqs-fifo-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_orders
-      FROM mqtt_ingress TOPIC 'sqs_fifo_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'sqs_fifo_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING order_codec
       TIMESTAMP NOW
       TO orders
@@ -372,7 +372,7 @@ Feature: SQS emission
         'client_id' = 'nervix-cucumber-sqs-fifo-kept-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_orders
-      FROM mqtt_ingress TOPIC 'sqs_fifo_kept_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'sqs_fifo_kept_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING order_codec
       TIMESTAMP NOW
       TO orders
@@ -463,7 +463,7 @@ Feature: SQS emission
         'client_id' = 'nervix-cucumber-sqs-fifo-failed-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_orders
-      FROM mqtt_ingress TOPIC 'sqs_fifo_failed_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'sqs_fifo_failed_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING order_codec
       TIMESTAMP NOW
       TO orders
@@ -562,7 +562,7 @@ Feature: SQS emission
         'client_id' = 'nervix-cucumber-sqs-typed-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_readings
-      FROM mqtt_ingress TOPIC 'sqs_typed_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'sqs_typed_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING reading_codec
       TO readings
       INHERIT ALL
@@ -644,7 +644,7 @@ Feature: SQS emission
         'client_id' = 'nervix-cucumber-sqs-dedup-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_orders
-      FROM mqtt_ingress TOPIC 'sqs_dedup_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'sqs_dedup_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING order_codec
       TO orders
       INHERIT ALL
@@ -719,7 +719,7 @@ Feature: SQS emission
         'client_id' = 'nervix-cucumber-sqs-delay-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'sqs_delay_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'sqs_delay_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL

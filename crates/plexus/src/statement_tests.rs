@@ -46,11 +46,12 @@ fn numeric_slots_offer_a_named_placeholder_rather_than_nothing() {
             "instance_count",
         ),
         (
-            "CREATE MQTT TOPIC INGESTOR i FROM c TOPIC 't' MODE ACK PARALLEL MAX ",
+            "CREATE MQTT TOPIC INGESTOR i FROM c TOPIC 't' SESSION PERSISTENT QOS 1 MODE ACK \
+             PARALLEL MAX ",
             "max_in_flight",
         ),
         (
-            "CREATE MQTT TOPIC INGESTOR i FROM c TOPIC 't' QOS ",
+            "CREATE MQTT TOPIC INGESTOR i FROM c TOPIC 't' SESSION CLEAN QOS ",
             "mqtt_qos",
         ),
         (
