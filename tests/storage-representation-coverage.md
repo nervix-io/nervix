@@ -10,6 +10,11 @@ complete field; entity presentation distinguishes omission from an explicitly wr
 The registry's current archive signature and consensus keyspace namespace fence this shape before
 decoding; existing current-header corruption and namespace validation tests qualify those owners.
 
+SQS QUEUE emitter generators draw both `SEND` request shapes beside the `MODE ACK` retry policy and
+the optional FIFO group. The Model/archive, registry, consensus and canonical Plexus properties
+preserve the request shape, and the archive signature and consensus keyspace namespace fence the
+current SQS emitter shape before decoding.
+
 `REDIS PUBSUB` ingestor generators draw both subscriptions, a `CHANNEL` and a `PATTERN`, each from
 any text within its byte bound and the pattern from glob characters too. The Model/archive,
 registry, consensus and canonical Plexus properties preserve which subscription an ingestor holds
@@ -163,5 +168,5 @@ durations, expressions and properties of any name in written order. `models-arch
 consensus Model targets carry them through their Model storage boundaries with the complete Model.
 `models-emitter-envelopes` compares the envelope alone through JSON and the archive, and
 `plexus-emitter-envelopes` reads its canonical section back through the shared envelope grammar.
-The Plexus domain draws only what an entity declares, so canonical statement round trips carry an
-envelope once a connector entity declares a clause.
+The Plexus domain draws only what an entity declares, so canonical statement round trips carry the
+envelopes connector entities declare: SQS QUEUE's `DELAY` and `DEDUPLICATION ID`.

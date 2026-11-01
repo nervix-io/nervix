@@ -116,8 +116,8 @@ Feature: Batching across broker and message emitters
       | 1            | NATS JetStream | batched_{{test_id}}  | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                                                                                                          | emitter SUBJECT 'batched_{{test_id}}' MODE JETSTREAM ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s | NATS SUBJECT   |
       | 1            | ZeroMQ         | {{zeromq_emit_addr}} | CREATE ZEROMQ CLIENT emitter CONFIG { 'addr' = '{{zeromq_emit_addr}}', 'bind' = 'false' };                                                                               | emitter MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                                     | ZEROMQ PUSH    |
       | 3            | ZeroMQ         | {{zeromq_emit_addr}} | CREATE ZEROMQ CLIENT emitter CONFIG { 'addr' = '{{zeromq_emit_addr}}', 'bind' = 'false' };                                                                               | emitter MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                                     | ZEROMQ PUSH    |
-      | 3            | SQS            | batched_{{test_id}}  | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' }; | emitter QUEUE 'batched_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 50ms MAX 1s                                         | SQS QUEUE      |
-      | 1            | SQS            | batched_{{test_id}}  | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' }; | emitter QUEUE 'batched_{{test_id}}' MODE BATCH RETRY POLICY BACKOFF 50ms MAX 1s                                          | SQS QUEUE      |
+      | 3            | SQS            | batched_{{test_id}}  | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' }; | emitter QUEUE 'batched_{{test_id}}' SEND SINGLE MODE ACK RETRY POLICY BACKOFF 50ms MAX 1s                                | SQS QUEUE      |
+      | 1            | SQS            | batched_{{test_id}}  | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' }; | emitter QUEUE 'batched_{{test_id}}' SEND BATCH MODE ACK RETRY POLICY BACKOFF 50ms MAX 1s                                 | SQS QUEUE      |
 
   @emitter_batch_brokers
   Scenario Outline: A batch message carries the key, headers and FIFO group its members share
@@ -177,19 +177,19 @@ Feature: Batching across broker and message emitters
       | [{"seq":2,"tenant":"beta","source":"web"},{"seq":4,"tenant":"beta","source":"web"}] | <beta_key> | source=web | <beta_group> |
 
     Examples:
-      | cluster_size | target   | destination            | client                                                                                                                                                                   | connector_body                                                                                             | acme_key          | beta_key          | acme_group        | beta_group        | emitter_kind   |
-      | 1            | Kafka    | keyed_{{test_id}}      | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };                                                                                           | emitter TOPIC 'keyed_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | KAFKA TOPIC    |
-      | 3            | Kafka    | keyed_{{test_id}}      | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };                                                                                           | emitter TOPIC 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                             | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | KAFKA TOPIC    |
-      | 1            | Pulsar   | keyed_{{test_id}}      | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };                                                                                                      | emitter TOPIC 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                             | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | PULSAR TOPIC   |
-      | 3            | Pulsar   | keyed_{{test_id}}      | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };                                                                                                      | emitter TOPIC 'keyed_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | PULSAR TOPIC   |
-      | 1            | RabbitMQ | keyed_{{test_id}}      | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };                                                                                                  | emitter QUEUE 'keyed_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     |                   |                   |                   |                   | RABBITMQ QUEUE |
-      | 3            | RabbitMQ | keyed_{{test_id}}      | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };                                                                                                  | emitter QUEUE 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                             |                   |                   |                   |                   | RABBITMQ QUEUE |
-      | 1            | NATS     | keyed_{{test_id}}      | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                                                                                                          | emitter SUBJECT 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                           |                   |                   |                   |                   | NATS SUBJECT   |
-      | 3            | NATS     | keyed_{{test_id}}      | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                                                                                                          | emitter SUBJECT 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                           |                   |                   |                   |                   | NATS SUBJECT   |
-      | 1            | SQS      | keyed_{{test_id}}      | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' }; | emitter QUEUE 'keyed_{{test_id}}' MODE BATCH RETRY POLICY BACKOFF 50ms MAX 1s                              |                   |                   |                   |                   | SQS QUEUE      |
-      | 3            | SQS      | keyed_{{test_id}}      | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' }; | emitter QUEUE 'keyed_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 50ms MAX 1s                             |                   |                   |                   |                   | SQS QUEUE      |
-      | 1            | SQS      | keyed_{{test_id}}.fifo | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' }; | emitter QUEUE 'keyed_{{test_id}}.fifo' FIFO GROUP FROM BRANCH MODE SINGLE RETRY POLICY BACKOFF 50ms MAX 1s |                   |                   | {"tenant":"acme"} | {"tenant":"beta"} | SQS QUEUE      |
-      | 3            | SQS      | keyed_{{test_id}}.fifo | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' }; | emitter QUEUE 'keyed_{{test_id}}.fifo' FIFO GROUP FROM BRANCH MODE BATCH RETRY POLICY BACKOFF 50ms MAX 1s  |                   |                   | {"tenant":"acme"} | {"tenant":"beta"} | SQS QUEUE      |
+      | cluster_size | target   | destination            | client                                                                                                                                                                   | connector_body                                                                                                      | acme_key          | beta_key          | acme_group        | beta_group        | emitter_kind   |
+      | 1            | Kafka    | keyed_{{test_id}}      | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };                                                                                           | emitter TOPIC 'keyed_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s              | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | KAFKA TOPIC    |
+      | 3            | Kafka    | keyed_{{test_id}}      | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };                                                                                           | emitter TOPIC 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                      | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | KAFKA TOPIC    |
+      | 1            | Pulsar   | keyed_{{test_id}}      | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };                                                                                                      | emitter TOPIC 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                      | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | PULSAR TOPIC   |
+      | 3            | Pulsar   | keyed_{{test_id}}      | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };                                                                                                      | emitter TOPIC 'keyed_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s              | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | PULSAR TOPIC   |
+      | 1            | RabbitMQ | keyed_{{test_id}}      | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };                                                                                                  | emitter QUEUE 'keyed_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s              |                   |                   |                   |                   | RABBITMQ QUEUE |
+      | 3            | RabbitMQ | keyed_{{test_id}}      | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };                                                                                                  | emitter QUEUE 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                      |                   |                   |                   |                   | RABBITMQ QUEUE |
+      | 1            | NATS     | keyed_{{test_id}}      | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                                                                                                          | emitter SUBJECT 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                    |                   |                   |                   |                   | NATS SUBJECT   |
+      | 3            | NATS     | keyed_{{test_id}}      | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                                                                                                          | emitter SUBJECT 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                    |                   |                   |                   |                   | NATS SUBJECT   |
+      | 1            | SQS      | keyed_{{test_id}}      | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' }; | emitter QUEUE 'keyed_{{test_id}}' SEND BATCH MODE ACK RETRY POLICY BACKOFF 50ms MAX 1s                              |                   |                   |                   |                   | SQS QUEUE      |
+      | 3            | SQS      | keyed_{{test_id}}      | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' }; | emitter QUEUE 'keyed_{{test_id}}' SEND SINGLE MODE ACK RETRY POLICY BACKOFF 50ms MAX 1s                             |                   |                   |                   |                   | SQS QUEUE      |
+      | 1            | SQS      | keyed_{{test_id}}.fifo | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' }; | emitter QUEUE 'keyed_{{test_id}}.fifo' FIFO GROUP FROM BRANCH SEND SINGLE MODE ACK RETRY POLICY BACKOFF 50ms MAX 1s |                   |                   | {"tenant":"acme"} | {"tenant":"beta"} | SQS QUEUE      |
+      | 3            | SQS      | keyed_{{test_id}}.fifo | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' }; | emitter QUEUE 'keyed_{{test_id}}.fifo' FIFO GROUP FROM BRANCH SEND BATCH MODE ACK RETRY POLICY BACKOFF 50ms MAX 1s  |                   |                   | {"tenant":"acme"} | {"tenant":"beta"} | SQS QUEUE      |
 
   @emitter_batch_brokers @sqs_batch_request_answers
   Scenario Outline: An SQS batch request answers for every batch message it carries
@@ -236,7 +236,7 @@ Feature: Batching across broker and message emitters
       };
       CREATE SQS QUEUE EMITTER answered FROM events
         TO emitter QUEUE 'answered_{{test_id}}'
-          MODE BATCH RETRY POLICY BACKOFF 50ms MAX 1s
+          SEND BATCH MODE ACK RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
         INVOKE write_header('tenant', output.tenant)
@@ -500,12 +500,12 @@ Feature: Batching across broker and message emitters
       };
       CREATE SQS QUEUE EMITTER attributed FROM events
         TO emitter QUEUE 'attributed_{{test_id}}'
-          MODE <publishing_mode> RETRY POLICY BACKOFF 50ms MAX 1s
+          SEND <publishing_mode> MODE ACK RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL EXCEPT note
-        SET note = repeat(input.note, 262123)
+        SET note = repeat(input.note, 1048555)
         INVOKE write_header('source', 'web')
-        BATCH MAX MESSAGES 3 MAX SIZE 256KiB
+        BATCH MAX MESSAGES 3 MAX SIZE 1MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
@@ -516,8 +516,8 @@ Feature: Batching across broker and message emitters
       CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
       START;
       """
-    # Record 1 alone fills MAX SIZE 256KiB to the byte, so the emitter builds its message, but its
-    # source attribute takes the message past the 256 KiB SQS allows a body and its attributes
+    # Record 1 alone fills MAX SIZE 1MiB to the byte, so the emitter builds its message, but its
+    # source attribute takes the message past the 1 MiB SQS allows a body and its attributes
     # together. The emitter rejects it before sending anything, and record 2 still leaves.
     And http payload is posted to host "attributed-{{test_id}}.example.com" path "/events"
       """
@@ -525,7 +525,7 @@ Feature: Batching across broker and message emitters
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":1 | "error_code":"external" | "operation":"publish" | SQS message is 262159 bytes
+      "seq":1 | "error_code":"external" | "operation":"publish" | SQS message is 1048591 bytes
       """
     And within "30s" the observed broker receives exactly these messages
       | payload               | key | headers    | group |

@@ -73,9 +73,8 @@ metadata = "The driver exposes no peer identity on receive. Only frame 0 is inge
 mirror = "The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map."
 
 [entity."SQS QUEUE"]
-envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
 metadata = "The current queue declaration exposes message attributes through headers but no separate typed receipt metadata namespace."
-mirror = "Receiving uses a visibility timeout and deletion; publishing uses single or batch service requests and may declare a FIFO group. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix."
+mirror = "Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."WEBSOCKETS CONNECTION"]
