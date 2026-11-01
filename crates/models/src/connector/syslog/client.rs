@@ -189,19 +189,13 @@ impl<'a> SyslogEntries<'a> {
     /// declaration owns the refusal of any other value.
     fn protocol(&self) -> Option<SyslogProtocol> {
         let protocol = self.rendered(PROTOCOL_KEY)?;
-        match SyslogProtocol::of_choice(protocol) {
-            Ok(protocol) => Some(protocol),
-            Err(_) => None,
-        }
+        SyslogProtocol::of_choice(protocol).ok()
     }
 
     /// The framing the client selects, when `framing` is rendered and one of its choices.
     fn framing(&self) -> Option<SyslogFraming> {
         let framing = self.rendered(FRAMING_KEY)?;
-        match SyslogFraming::of_choice(framing) {
-            Ok(framing) => Some(framing),
-            Err(_) => None,
-        }
+        SyslogFraming::of_choice(framing).ok()
     }
 
     /// RFC 5425 leaves TLS one framing, whichever side reads the client.
@@ -235,16 +229,14 @@ impl<'a> SyslogEntries<'a> {
                     }
                 }
             }
-            Some(SyslogProtocol::Udp | SyslogProtocol::Tcp) => {
-                if self.has(CONNECT_TIMEOUT_KEY) {
-                    return Err(Report::new(ClientConfigSchemaError::RequiresChoice {
-                        key: CONNECT_TIMEOUT_KEY,
-                        selector: PROTOCOL_KEY,
-                        choices: TLS_PROTOCOL,
-                    }));
-                }
+            Some(SyslogProtocol::Udp | SyslogProtocol::Tcp) if self.has(CONNECT_TIMEOUT_KEY) => {
+                return Err(Report::new(ClientConfigSchemaError::RequiresChoice {
+                    key: CONNECT_TIMEOUT_KEY,
+                    selector: PROTOCOL_KEY,
+                    choices: TLS_PROTOCOL,
+                }));
             }
-            None => {}
+            Some(SyslogProtocol::Udp | SyslogProtocol::Tcp) | None => {}
         }
         Ok(())
     }

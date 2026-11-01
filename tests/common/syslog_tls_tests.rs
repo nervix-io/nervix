@@ -1,8 +1,10 @@
-//! Real TLS regressions for the Syslog sender's independence from runner polling.
+//! Real TLS regressions for the Syslog sender: its independence from runner polling, and how it
+//! observes a peer that refuses it.
 //!
 //! Layer: test harness.
-//! - **Owns.** A TLS peer with the scenario's one-second handshake deadline, and a caller that
-//!   stops polling its send until the peer has received the complete frame or timed out.
+//! - **Owns.** A TLS peer with the scenario's one-second handshake deadline, a caller that stops
+//!   polling its send until the peer has received the complete frame or timed out, and a peer that
+//!   requires a client certificate.
 //! - **Depends on.** The actual scenario sender, Rustls and the binary's runtime workers.
 //! - **Must not know.** Nervix graph execution or the scenario world's resource storage.
 
@@ -15,9 +17,9 @@ use nervix_primitives::{
     task::AbortOnDropHandle,
     time::timeout,
 };
-use rcgen::{CertificateParams, KeyPair};
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
-use rustls_pki_types::{PrivateKeyDer, ServerName, pem::PemObject as _};
+use rcgen::{Certificate, CertificateParams, KeyPair};
+use rustls::{ClientConfig, RootCertStore, ServerConfig, server::WebPkiClientVerifier};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject as _};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_rustls::TlsAcceptor;
 
@@ -29,6 +31,64 @@ const HANDSHAKE_BOUND: Duration = Duration::from_secs(1);
 const FIXTURE_BOUND: Duration = Duration::from_secs(30);
 const FRAME: &[u8] = b"12 test payload";
 
+/// A loopback peer's self-signed identity, which the peer's sender trusts.
+struct PeerIdentity {
+    key: KeyPair,
+    certificate: Certificate,
+}
+
+impl PeerIdentity {
+    fn generate() -> Self {
+        nervix_interconnect::install_rustls_crypto_provider();
+        let key = KeyPair::generate().assured("the test key algorithm is supported");
+        let certificate = CertificateParams::new(vec!["127.0.0.1".to_string()])
+            .assured("a loopback IP is a valid certificate name")
+            .self_signed(&key)
+            .assured("the generated test key signs its certificate");
+        Self { key, certificate }
+    }
+
+    /// The roots that trust this identity and nothing else.
+    fn roots(&self) -> RootCertStore {
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(self.certificate.der().clone())
+            .assured("the generated certificate is a valid trust anchor");
+        roots
+    }
+
+    fn certificate_chain(&self) -> Vec<CertificateDer<'static>> {
+        vec![self.certificate.der().clone()]
+    }
+
+    fn private_key(&self) -> PrivateKeyDer<'static> {
+        PrivateKeyDer::from_pem_slice(self.key.serialize_pem().as_bytes())
+            .assured("rcgen serializes its key as valid PEM")
+    }
+
+    async fn bind() -> TcpListener {
+        TcpListener::bind("127.0.0.1:0")
+            .await
+            .assured("the fixture can bind a loopback listener")
+    }
+
+    /// The sender a scenario step would use for `listener`: it trusts this identity and presents
+    /// no certificate of its own.
+    fn sender(&self, listener: &TcpListener) -> SyslogTlsSender {
+        let addr = listener
+            .local_addr()
+            .assured("the bound listener has an address");
+        let config = ClientConfig::builder()
+            .with_root_certificates(self.roots())
+            .with_no_client_auth();
+        SyslogTlsSender::new(
+            addr.to_string(),
+            ServerName::try_from("127.0.0.1").assured("the loopback IP is a valid server name"),
+            config,
+        )
+    }
+}
+
 struct TlsPeer {
     sender: SyslogTlsSender,
     start_handshake: oneshot::Sender<()>,
@@ -38,37 +98,14 @@ struct TlsPeer {
 
 impl TlsPeer {
     async fn start() -> Self {
-        nervix_interconnect::install_rustls_crypto_provider();
-        let key = KeyPair::generate().assured("the test key algorithm is supported");
-        let certificate = CertificateParams::new(vec!["127.0.0.1".to_string()])
-            .assured("a loopback IP is a valid certificate name")
-            .self_signed(&key)
-            .assured("the generated test key signs its certificate");
-        let mut roots = RootCertStore::empty();
-        roots
-            .add(certificate.der().clone())
-            .assured("the generated certificate is a valid trust anchor");
-        let config = ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        let server_key = PrivateKeyDer::from_pem_slice(key.serialize_pem().as_bytes())
-            .assured("rcgen serializes its key as valid PEM");
+        let identity = PeerIdentity::generate();
         let server = ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(vec![certificate.der().clone()], server_key)
+            .with_single_cert(identity.certificate_chain(), identity.private_key())
             .assured("the generated server certificate matches its key");
         let acceptor = TlsAcceptor::from(StdArc::new(server));
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .assured("the fixture can bind a loopback listener");
-        let addr = listener
-            .local_addr()
-            .assured("the bound listener has an address");
-        let sender = SyslogTlsSender::new(
-            addr.to_string(),
-            ServerName::try_from("127.0.0.1").assured("the loopback IP is a valid server name"),
-            config,
-        );
+        let listener = PeerIdentity::bind().await;
+        let sender = identity.sender(&listener);
         let (receipt, received) = oneshot::channel();
         let (start_handshake, handshake_started) = oneshot::channel();
         let task = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
@@ -158,4 +195,40 @@ async fn a_syslog_tls_split_write_finishes_while_the_runner_is_unpolled() {
         .await
         .assured("the caller closes its retained TLS sender");
     peer.task.await.assured("the TLS peer completed its read");
+}
+
+/// A peer that requires a client certificate, as a SYSLOG listener with `tls_client_ca_file` does,
+/// refuses the sender a scenario step uses, which presents none. Under TLS 1.3 the sender finishes
+/// its handshake before the peer judges it, so the refusal reaches the sender as the alert or the
+/// end its session's first read returns.
+#[nervix_primitives::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_syslog_tls_sender_without_a_certificate_observes_a_peer_that_requires_one_refuse_it() {
+    let identity = PeerIdentity::generate();
+    let verifier = WebPkiClientVerifier::builder(StdArc::new(identity.roots()))
+        .build()
+        .assured("roots holding one trust anchor build a client verifier");
+    let server = ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(identity.certificate_chain(), identity.private_key())
+        .assured("the generated server certificate matches its key");
+    let acceptor = TlsAcceptor::from(StdArc::new(server));
+    let listener = PeerIdentity::bind().await;
+    let sender = identity.sender(&listener);
+    let peer = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .assured("the sender connects to the peer");
+        let handshake = timeout(FIXTURE_BOUND, acceptor.accept(stream))
+            .await
+            .assured("the peer judges the sender within the fixture bound");
+        assert!(
+            handshake.is_err(),
+            "the peer accepted a sender that presented no certificate"
+        );
+    }));
+    timeout(FIXTURE_BOUND, sender.refused(FRAME.to_vec()))
+        .await
+        .assured("the sender observes the refusal within the fixture bound");
+    peer.await.assured("the peer judged the sender");
 }
