@@ -83,8 +83,8 @@ boundaries for error-record delivery. `ON GENERAL ERROR` remains node-level beca
 source or transport failures that are not tied to one message or output route.
 
 `MAX BATCH SIZE` counts logical Arrow value, offset, and validity bytes. It excludes unused Arrow
-buffer capacity and object overhead. In delivery modes, `MAX <n>` is only an in-flight window for
-`ACK PARALLEL`; `MODE NO ACK` never accepts it.
+buffer capacity and object overhead. In delivery modes, `MAX <n>` bounds the in-flight window of
+`ACK PARALLEL` or endpoint `ACK`; `MODE NO ACK` never accepts it.
 
 At runtime, the ingestor:
 
@@ -139,13 +139,21 @@ Every source body declares its delivery mode with `MODE`, polled and listener so
   <duration> MAX <duration>` lets at most `n` payloads await their acknowledgement; `BATCH TIMEOUT`
   is the longest wait for a partial batch. A `CLIENT PRODUCER` ingestor writes `ACK PARALLEL MAX
   <n> ACK TIMEOUT ...` without `BATCH TIMEOUT`.
+- `ACK MAX <n> ACK TIMEOUT <duration>` is the endpoint response mode. It holds at most `n`
+  outstanding payloads per ingestor on each node and requires `ON QUIESCE REJECT RETRY AFTER
+  <duration>`. The sender owns retry.
 
-`ACK TIMEOUT` bounds how long a payload may make no acknowledgement progress, not how long its
-processing takes. Work under way on its records reports them alive on the physical clock: a node
-that received a record from another node does for as long as it holds it, the node delivering a
+For `ACK SEQUENTIAL` and `ACK PARALLEL`, `ACK TIMEOUT` bounds how long a payload may make no
+acknowledgement progress, not how long its processing takes. Work under way on its records reports
+them alive on the physical clock: a node that received a record from another node does for as long
+as it holds it, the node delivering a
 record to another node does until that node has admitted it, and an emitter whose publish waits for
 a retry does for the records it holds. A payload whose records report nothing for its `ACK TIMEOUT`
 is delivered again, and its earlier delivery is not cancelled and may still complete.
+
+Endpoint `ACK TIMEOUT` instead bounds the complete response wait on the physical clock; progress
+does not restart it. Expiry reports `processing_failed` with cause `ack_timeout` without undoing
+admitted effects. See [endpoint ingestion](#http-endpoint-and-websockets-endpoint).
 
 Each entity accepts only the modes it can honor, and completion offers only those:
 
@@ -157,10 +165,11 @@ keeps the ingestor's accepted policy.
 
 | Entity | `MODE` forms |
 | --- | --- |
-| `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `NO ACK`, `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` |
-| `RABBITMQ QUEUE`, `SQS QUEUE` | `ACK SEQUENTIAL ...` |
+| `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC`, `RABBITMQ QUEUE` | `NO ACK`, `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` |
+| `SQS QUEUE` | `ACK SEQUENTIAL ...` |
 | `CLIENT PRODUCER` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` without `BATCH TIMEOUT` |
-| `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
+| `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `NO ACK`, `ACK MAX <n> ACK TIMEOUT <duration>` |
+| `HTTP REQUEST`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
 
 In an `ACK` mode an ingestor acknowledges a message on its transport only once every route and error
 delivery the message unfolded into has completed, and it reports that progress only once the
@@ -247,9 +256,10 @@ The shared mode vocabulary is:
   HTTP requests and new WebSocket upgrades receive 503; HTTP includes `Retry-After`, rounded up to
   whole seconds. Established WebSockets close with code 1013 (Try Again Later).
 - Endpoint buffering, for `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT`, is `BUFFER MAX SIZE <bytes>`
-  without `ON OVERFLOW`. Requests that fit receive 202 and are held. A full buffer, or a body that
-  cannot fit, is rejected with HTTP 503 or a WebSocket 1013 close; an acknowledged body is never
-  discarded by buffer policy.
+  without `ON OVERFLOW`, available only with `MODE NO ACK`. HTTP requests that fit receive 202 and
+  are held; WebSocket data frames that fit are held without a per-frame acknowledgement. A full
+  buffer, or a body that cannot fit, is rejected with HTTP 503 or a WebSocket 1013 close; an accepted
+  body is never discarded by buffer policy. `MODE ACK` requires `REJECT RETRY AFTER <duration>`.
 
 A read already in progress when an ingestor quiesces ends without losing what its source took from
 the transport: under `SUSPEND` those payloads still dispatch before the source suspends, and under
@@ -265,7 +275,7 @@ A source accepts only the modes it can honor, and completion of its body offers 
 | `NATS SUBJECT`, `REDIS PUBSUB`, `WEBSOCKETS CONNECTION` | `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | `ZEROMQ PULL`, `SYSLOG LISTENER` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | `HTTP REQUEST`, `PROMETHEUS QUERY` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...` |
-| `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `REJECT RETRY AFTER ...`, `BUFFER MAX SIZE ...` |
+| `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `REJECT RETRY AFTER ...`; `BUFFER MAX SIZE ...` only with `MODE NO ACK` |
 | `CLIENT PRODUCER` | `SUSPEND` |
 
 The mode is consulted for resumable model-alteration `ENTITY_PAUSE` holds, `DOMAIN_PAUSE` batches,
@@ -2156,8 +2166,9 @@ A `WEBSOCKETS ENDPOINT` ingestor reads each data frame's metadata:
 | `metadata.remote_addr` | The address and port of the peer whose TCP connection opened the WebSocket. |
 | `metadata.path` | The path the connection's upgrade request named, which is the endpoint's `PATH`. |
 
-Every field is a `STRING`, and every frame of a connection reads the same `remote_addr` and `path`,
-including frames its signaling protocol accepts before the handshake ends. Each node reads the
+Every field is `STRING OPTIONAL` and declared non-sensitive. Every frame of a connection reads the
+same `remote_addr` and `path`, including frames its signaling protocol accepts before the handshake
+ends. Each node reads the
 requests and frames it receives, so a field never depends on the node that owns the ingestor's
 output. A body that `BUFFER` retains keeps its metadata, and its replay reads the values it
 arrived with. This route keeps only acme's requests and records the peer that sent each one:
@@ -2174,8 +2185,11 @@ CREATE HTTP ENDPOINT INGESTOR tenant_requests
   ON GENERAL ERROR LOG;
 ```
 
-Header values follow the same contract on both endpoints: a value that is UTF-8, whether or not it
-is ASCII, reaches `read_header` and `read_headers` unchanged, and a value that is not UTF-8 is
+Both endpoints record header names in ASCII lowercase and keep every value of a repeated name in
+that name's original value order. They declare no ordering between different names. WebSocket
+header reads refer to the opening upgrade request, not to later data frames.
+A value that is UTF-8, whether or not it is ASCII, reaches `read_header` and `read_headers` unchanged,
+and a value that is not UTF-8 is
 dropped and counted in `nervix_ingestor_header_values_dropped_total` for every ingestor the request
 or WebSocket upgrade was routed to.
 
@@ -2191,18 +2205,21 @@ CREATE HTTP ENDPOINT INGESTOR acknowledged
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 ```
 
-| HTTP result in `MODE ACK` | Meaning |
-| --- | --- |
-| 200 | The payload's graph acknowledgement root completed under the declared error policies. |
-| 400 | The codec or local route construction refused the input. |
-| 503 with `Retry-After` | The window or execution capacity is full, intake is quiesced, downstream negatively acknowledged, the ACK timeout expired, or the exact intake ended. |
+| HTTP result in `MODE ACK` | `outcome` | `cause` | Meaning |
+| --- | --- | --- | --- |
+| 200 | `completed` | `none` | The payload's graph acknowledgement root completed under the declared error policies. |
+| 400 | `processing_failed` | `rejected` | The codec or local route construction refused the input. |
+| 503 | `not_admitted` | `busy` | The response window or execution capacity is full. |
+| 503 | `not_admitted` | `suspended` | Intake is quiesced before admission. |
+| 503 | `processing_failed` | `rejected` | Downstream negatively acknowledged admitted work. |
+| 503 | `processing_failed` | `ack_timeout` | The absolute response deadline expired. |
+| 503 | `outcome_unknown` | `interrupted` | The exact intake stopped or ended while the response was held. |
 
 Every ACK response has a JSON object containing exactly `outcome` and `cause`, using the existing
 [client submission outcome vocabulary](client-io-architecture.md). For example, a local refusal
 is `{"outcome":"processing_failed","cause":"rejected"}`. Downstream rejection uses that same
-object with status 503. Timeout uses `processing_failed` / `ack_timeout`; a full window uses
-`not_admitted` / `busy`; intake ending uses `outcome_unknown` / `interrupted`. The response contains
-no payload or diagnostic details. Runtime events retain the ingestor's ordinary diagnostics.
+object with status 503. The response contains no payload or diagnostic details. Runtime events
+retain the ingestor's ordinary diagnostics.
 A 503 uses the declared retry delay, rounded up to whole seconds. A retry can duplicate output
 that already completed; timeout or interruption does not roll back admitted work.
 
@@ -2216,8 +2233,10 @@ limit, and WebSocket messages retain the driver's message and frame limits.
 
 In `MODE NO ACK`, admission still answers HTTP 202 without waiting for downstream acknowledgement.
 A codec refusal becomes a decode rejection consumed by `ON GENERAL ERROR`; it also answers 202.
-With `BUFFER`, bodies that fit receive 202 and drain after resume. A full buffer rejects new intake
-without discarding bodies already accepted. If extension workers cannot unfold a fresh payload,
+WebSocket data frames receive no per-frame graph-completion reply in this mode; signaling replies
+still follow their protocol. With `BUFFER`, HTTP bodies that fit receive 202 and drain after resume.
+A full buffer rejects new intake without discarding bodies already accepted. If extension workers
+cannot unfold a fresh payload,
 HTTP answers 503 and a WebSocket closes with 1013; buffered payloads instead retain their place
 until workers can take them. See [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
 
@@ -2234,9 +2253,10 @@ JSON text. A protobuf outbound message must represent both string fields; startu
 fixed outcome before binding intake. The protocol's control frames retain their declared meaning.
 
 A WebSocket retains its selected route and signaling protocol throughout the connection. Stopping
-or replacing its source ends that exact intake, including signaling data intake. Held acknowledged
-responses resolve with 503 (or the equivalent outcome frame) when intake stops or ends; the next
-payload on a retained ended route closes with 1013. Open a new connection for a replacement source.
+or replacing its source ends that exact intake, including signaling data intake. An interrupted
+acknowledgement wait returns HTTP 503 or the equivalent WebSocket outcome frame. A request admitted
+before the ending may still finish. The next payload on a retained ended route closes with 1013.
+Open a new connection for a replacement source.
 Stopping a domain withdraws only its routes and intakes; other domains on the same host and path
 continue receiving requests. A withdrawn route returns HTTP 404.
 

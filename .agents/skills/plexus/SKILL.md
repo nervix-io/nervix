@@ -81,9 +81,11 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 
 Read [references/configuring-nervix.md](references/configuring-nervix.md), then use its routing
 guidance to select the relevant Markdown entries from the public index.
-For Plexus endpoint ACK declarations, require the explicit response window and reject-only quiesce
-policy; WebSocket replies use the endpoint's declared signaling format. The configuring reference
-and the Ingestors endpoint section define status, outcome, timeout and retry behavior.
+For endpoint declarations, read `Ingestors` → `HTTP ENDPOINT And WEBSOCKETS ENDPOINT` for both
+delivery modes, their quiesce sets, request/frame metadata and upgrade-header reads. Require an
+explicit response window and reject-only quiesce with `MODE ACK`; its absolute response deadline
+does not restart on progress. The configuring reference routes the status, signaling and retry
+contracts.
 For Kafka domain offsets, retain the documented native checkpoint quorum budget and at-least-once
 retry boundary when explaining source recovery.
 
@@ -573,8 +575,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `FLUSH` values as latency and boundary-cost controls, not as a throughput lever: `MAX BATCH SIZE`
   only clamps a batch, and the flush tuning guidance in the docs records which emitters benefit from
   larger batches.
-- Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; an ingestor's `NO ACK` and an emitter's
-  `NO ACK` have no in-flight ACK window and never accept `MAX`.
+- Use delivery-mode `MAX <n>` with `ACK PARALLEL` or an endpoint's `ACK`; an ingestor's `NO ACK`
+  and an emitter's `NO ACK` have no in-flight ACK window and never accept `MAX`.
 - Do not promise that an emitter's `NO ACK` survives a stop on every emitter. A `STOP`, a replacement
   or a node shutdown sends what a Kafka producer still queues, awaits the receipts of what a Pulsar
   producer accepted and waits for an MQTT QoS 0 client to send what it holds, all within its
