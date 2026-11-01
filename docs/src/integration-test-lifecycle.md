@@ -121,6 +121,15 @@ and requires only new records after `RESUME`. Both topologies use the production
 for recovery from persisted state. Their diagnostic inventory includes active/order execution and
 the corresponding lifecycle or restore stress selection. No phase or suite budget changes.
 
+The Kafka record-metadata fixture sends explicit binary keys, millisecond-aligned timestamps and
+null or non-null payloads, with one delivery pending at a time. It uses the existing Kafka fixture's
+five-second delivery, request and queue limits, observed through a six-second whole-send bound;
+timeout and driver causes remain typed. It adds no transport retry. The one- and three-node
+outlines check all three ACK modes, null versus empty values, and historical event-time windows in
+two branches. Their sixty-second output assertions observe the graph's result. The metadata
+mapping and native driver waits are untracked by Deloxide; the diagnostic selections reach the
+host's tracked ingestion and lifecycle locks.
+
 The Kafka consumer-retirement scenario holds the same broker's replies before it drops an ingestor
 whose eight instances joined their group, so destroying each consumer waits for its LeaveGroup
 answer. It waits for a running connector-storage job before sending a record through an HTTP

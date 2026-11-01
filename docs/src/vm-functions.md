@@ -385,6 +385,10 @@ The host builds a program's input with `project_vm_input_batch` in `src/runtime/
 - **Built columns.** Branch key fields, broadcast materialized-state values, lookup results, and
   selected ingest metadata are built as new columns. `SharedVmInputColumns` builds each of them
   once per dispatched batch and shares it among every output route that reads it.
+- **Missing nullable inputs.** These are typed Arrow null columns with the carrier's row count.
+  This includes unread metadata fields such as a Kafka record's binary key. Absence does not pass
+  through scalar `RuntimeValue` construction, so an unread `BYTES` declaration needs no scalar
+  byte representation and does not visit the message's metadata.
 - **Uninitialized outputs.** These stay `TypedArray::Uninitialized` until finalization
   materializes them.
 

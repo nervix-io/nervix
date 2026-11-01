@@ -2528,6 +2528,16 @@ impl Cluster {
         publish_kafka(&self.dependencies, topic, payload).await
     }
 
+    pub(crate) async fn publish_kafka_metadata_record(
+        &self,
+        topic: &str,
+        record: &crate::kafka_metadata::KafkaMetadataRecord,
+    ) -> io::Result<()> {
+        record
+            .publish(kafka_client_config(&self.dependencies)?, topic)
+            .await
+    }
+
     pub(crate) async fn publish_kafka_with_headers(
         &self,
         topic: &str,
