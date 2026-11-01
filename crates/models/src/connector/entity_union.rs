@@ -103,6 +103,17 @@ pub(crate) const ALTERED_PAIR_CHECKED: &str =
     "apply_alter compared the stored pair with the pair the alteration's head names before \
      applying any operation, and no operation changes the pair an input reads";
 
+/// The shared transport operations, or the typed operations the entity declares beside itself.
+macro_rules! ingestor_operation_type {
+    ($Model:ident) => {
+        $crate::AlterTransportIngestorOperation<$Model>
+    };
+    ($Model:ident, $Operation:ident) => {
+        $Operation
+    };
+}
+pub(crate) use ingestor_operation_type;
+
 /// Declares the sources of one connector: the union of its entity Models, the kind that names each
 /// entity, and the alterations of the ingestors that read each entity.
 ///
@@ -120,7 +131,7 @@ macro_rules! connector_ingestors {
         pub enum $Entity:ident {
             $(
                 $(#[$variant_meta:meta])*
-                $Variant:ident($Model:ident) = $keyword:literal, $form_label:literal;
+                $Variant:ident($Model:ident $(=> $Operation:ident)?) = $keyword:literal, $form_label:literal;
             )+
         }
     ) => {
@@ -213,7 +224,7 @@ macro_rules! connector_ingestors {
         pub enum $Alteration {
             $(
                 $(#[$variant_meta])*
-                $Variant(Vec<$crate::AlterTransportIngestorOperation<$Model>>),
+                $Variant(Vec<$crate::connector::entity_union::ingestor_operation_type!($Model $(, $Operation)?)>),
             )+
         }
 
@@ -258,6 +269,7 @@ macro_rules! connector_ingestors {
         $(
             impl From<Vec<$crate::AlterTransportIngestorOperation<$Model>>> for $Alteration {
                 fn from(operations: Vec<$crate::AlterTransportIngestorOperation<$Model>>) -> Self {
+                    $(let operations = operations.into_iter().map($Operation::from).collect();)?
                     Self::$Variant(operations)
                 }
             }
@@ -266,9 +278,23 @@ macro_rules! connector_ingestors {
                 for $crate::IngestorAlteration
             {
                 fn from(operations: Vec<$crate::AlterTransportIngestorOperation<$Model>>) -> Self {
-                    Self::$Connector($Alteration::$Variant(operations))
+                    Self::$Connector($Alteration::from(operations))
                 }
             }
+
+            $(
+                impl From<Vec<$Operation>> for $Alteration {
+                    fn from(operations: Vec<$Operation>) -> Self {
+                        Self::$Variant(operations)
+                    }
+                }
+
+                impl From<Vec<$Operation>> for $crate::IngestorAlteration {
+                    fn from(operations: Vec<$Operation>) -> Self {
+                        Self::$Connector($Alteration::$Variant(operations))
+                    }
+                }
+            )?
 
             impl $crate::connector::ingestor::AlteredIngestorEntity for $Model {
                 fn set_into(&self, input: &mut $crate::IngestorInput) {

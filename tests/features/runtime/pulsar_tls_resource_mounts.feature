@@ -37,7 +37,7 @@ Feature: Pulsar TLS resource mounts
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-        FROM pulsar_tls TOPIC 'tls_notifications_{{test_id}}' SUBSCRIPTION 'tls_notifications_group_{{test_id}}' OWNED BY INGESTOR MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM pulsar_tls TOPIC 'tls_notifications_{{test_id}}' SUBSCRIPTION 'tls_notifications_group_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
