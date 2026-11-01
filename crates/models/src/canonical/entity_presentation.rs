@@ -634,9 +634,7 @@ impl EmitterEntity {
                 presentation.external_locator(entity.topic.as_str());
                 presentation.written_option("QOS", entity.qos.spelling().to_owned());
             }
-            Self::Nats(NatsEmitter::Subject(entity)) => {
-                presentation.external_locator(entity.subject.as_str())
-            }
+            Self::Nats(entity) => entity.present_options(presentation),
             Self::Sqs(SqsEmitter::Queue(entity)) => {
                 presentation.external_locator(entity.queue.as_str());
                 let group = match &entity.fifo_group {
@@ -678,6 +676,18 @@ impl EmitterEntity {
             }
         }
         Ok(())
+    }
+}
+
+impl NatsEmitter {
+    fn present_options(&self, presentation: &mut EntityPresentation) {
+        match self {
+            Self::Subject(entity) => presentation.external_locator(entity.subject.as_str()),
+            Self::Stream(entity) => {
+                presentation.external_locator(entity.stream.as_str());
+                presentation.written_option("SUBJECT", string_literal(entity.subject.as_str()));
+            }
+        }
     }
 }
 
