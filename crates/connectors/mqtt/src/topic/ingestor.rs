@@ -508,8 +508,9 @@ impl MqttTopicIngestorPlan {
     #[cfg_attr(
         nervix_lint,
         nervix::context(
-            lifecycle,
-            reason = "release a stopped input or a refused subscription before reconnecting"
+            recurring,
+            reason = "resume retries refused subscription cleanup and teardown releases stopped \
+                      input sessions"
         )
     )]
     pub async fn retire(

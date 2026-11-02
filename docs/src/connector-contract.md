@@ -1706,8 +1706,10 @@ the host's resume context. The connector retains a `RetiringSubscription` phase.
 subscription attempt, it runs the existing retirement exchange: clean CONNECT, UNSUBSCRIBE and
 DISCONNECT with session expiry zero, bounded by the client's connection budget. A failed or
 cancelled retirement keeps that phase, including across suspension; only successful cleanup
-allows another attempt. A successfully retained session uses its original accepted grant and
-needs no new `SUBACK`; filter and QoS alterations retire it.
+allows another attempt. The retirement helper carries the recurring execution contract because
+`resume` can retry it; teardown also uses it to release stopped inputs. A successfully retained
+session uses its original accepted grant and needs no new `SUBACK`; filter and QoS alterations
+retire it.
 
 Under `NO ACK`, the client acknowledges every publish on receipt and the broker holds back none.
 Its read-ahead holds 64 outcomes. Once it is full, the task holds the next outcome and polls
