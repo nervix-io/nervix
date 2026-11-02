@@ -21,9 +21,9 @@ Feature: Kafka record keys, timestamps and tombstones
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY summaries SCHEMA summary BRANCHED BY by_tenant;
-      CREATE KAFKA CLIENT source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest' };
+      CREATE KAFKA CLIENT source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR records FROM source TOPIC 'event_time_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'event_time_{{test_id}}' MODE NO ACK
+        OFFSET BY CONSUMER GROUP 'event_time_{{test_id}}' START AT EARLIEST MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING event_codec TIMESTAMP AT metadata.timestamp
         TO events INHERIT ALL SET event_time = metadata.timestamp
           BRANCHED BY by_tenant SET tenant = message.tenant
@@ -82,9 +82,9 @@ Feature: Kafka record keys, timestamps and tombstones
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA observed UNBRANCHED;
-      CREATE KAFKA CLIENT source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest' };
+      CREATE KAFKA CLIENT source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR records FROM source TOPIC 'metadata_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'metadata_{{test_id}}' MODE <mode>
+        OFFSET BY CONSUMER GROUP 'metadata_{{test_id}}' START AT EARLIEST MODE <mode>
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL
           SET key_hex = coalesce(hex_encode(metadata.key), 'absent'),
@@ -136,9 +136,9 @@ Feature: Kafka record keys, timestamps and tombstones
       CREATE CODEC empty_codec FROM TOML TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '{marker: "seen"}';
       CREATE RELAY events SCHEMA observed UNBRANCHED;
-      CREATE KAFKA CLIENT source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest' };
+      CREATE KAFKA CLIENT source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR records FROM source TOPIC 'tombstones_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'tombstones_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        OFFSET BY CONSUMER GROUP 'tombstones_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING empty_codec
         TO events INHERIT ALL SET record_offset = metadata.offset, tombstone = metadata.tombstone
           UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

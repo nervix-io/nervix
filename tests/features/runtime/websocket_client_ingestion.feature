@@ -31,8 +31,7 @@ Feature: Websocket client ingestion
 
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE WEBSOCKETS CLIENT ws_main

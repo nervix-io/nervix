@@ -33,12 +33,11 @@ Feature: ClickHouse name resolution
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_ingress TOPIC 'clickhouse_dns_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'clickhouse_dns_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'clickhouse_dns_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
@@ -110,12 +109,11 @@ Feature: ClickHouse name resolution
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_ingress TOPIC 'clickhouse_dns_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'clickhouse_dns_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'clickhouse_dns_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
@@ -179,12 +177,11 @@ Feature: ClickHouse name resolution
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_ingress TOPIC 'clickhouse_dns_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'clickhouse_dns_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'clickhouse_dns_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
