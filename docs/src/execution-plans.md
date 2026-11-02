@@ -382,10 +382,12 @@ error taxonomy and public reporting contract.
 
 Each typed node carries its branch and schema fingerprint and the state components it may own.
 Each unit carries its scheduled primary, assigned nodes, ownership transition, and guest-state
-generations. State placement and restoration use the node and unit together. Relays currently have
-one `Single` owner; only their optional materialized state has scheduler-selected replicas. A
-configured listener is
+generations. State placement and restoration use the node and unit together. Each relay unit has
+one execution owner; its optional materialized state has scheduler-selected replicas. A configured listener is
 different: it runs on every live server node even when its graph node is not the local primary.
+Each executing listener installs its own node-local metric checkpoint writer and restores that
+checkpoint on restart. A spread ingestor instead captures the metrics of its exact instance unit,
+including the physical-node contributions retained through ownership handoff.
 Remote relay-consumer edges are derived from the same planned nodes and inputs as local tasks.
 
 Planned handoff prepares state against the exact committed-schedule fingerprint. Reassignment

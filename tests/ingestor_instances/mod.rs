@@ -8,6 +8,29 @@
 
 use super::*;
 
+#[then(
+    expr = "the last command output metric {string} {string} relay {string} instance {int} on any \
+            physical node has numeric values"
+)]
+async fn instance_metric_has_numeric_values(
+    world: &mut ScenarioWorld,
+    metric: String,
+    direction: String,
+    relay: String,
+    instance: u32,
+    #[step] step: &Step,
+) {
+    let output = world
+        .last_command_output
+        .as_deref()
+        .expect("a command output must exist before assertion");
+    let metric = expand_placeholders(world, &metric);
+    let direction = expand_placeholders(world, &direction);
+    let relay = expand_placeholders(world, &relay);
+    let prefix = format!("{metric} {direction} relay={relay} instance={instance} physical_node=");
+    assert_numeric_metric_lines(world, step, &prefix, output);
+}
+
 struct UnitPlacements {
     owners: BTreeMap<u32, String>,
 }

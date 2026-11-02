@@ -1879,8 +1879,12 @@ impl Runtime {
                     }
                 }
             }
+            let aggregate_primary = node
+                .unit_execution_node(*unit)
+                .cloned()
+                .or_else(|| executes_locally.then(|| local_node_id.clone()));
             if node.kind() != ModelKind::Relay
-                && let Some(primary) = node.unit_execution_node(*unit).cloned()
+                && let Some(primary) = aggregate_primary
             {
                 let aggregate = self
                     .replicated_branch_aggregated_state(

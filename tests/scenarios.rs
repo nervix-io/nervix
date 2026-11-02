@@ -23505,6 +23505,10 @@ async fn then_last_command_output_metric_on_any_physical_node_has_numeric_values
     let direction = expand_placeholders(world, &direction);
     let relay = expand_placeholders(world, &relay);
     let prefix = format!("{metric} {direction} relay={relay} physical_node=");
+    assert_numeric_metric_lines(world, step, &prefix, output);
+}
+
+fn assert_numeric_metric_lines(world: &ScenarioWorld, step: &Step, prefix: &str, output: &str) {
     let assertions = expand_placeholders(world, docstring(step))
         .lines()
         .map(str::trim)
@@ -23514,7 +23518,7 @@ async fn then_last_command_output_metric_on_any_physical_node_has_numeric_values
     let lines = output
         .lines()
         .map(str::trim)
-        .filter(|line| line.starts_with(&prefix))
+        .filter(|line| line.starts_with(prefix))
         .collect::<Vec<_>>();
 
     assert!(

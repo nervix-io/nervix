@@ -244,16 +244,16 @@ Feature: Ingestor metrics
       """
     Then within "5s" node "node-1" eventually reports describe ingestor "ingestor_metrics_source" as "status: running"
     When 10 JSON messages with user id 42 are rapidly published to "<entity_kind>" input "<input>"
-    Then within "10s" node "node-1" eventually reports describe ingestor "ingestor_metrics_source" as "messages_total sent relay=notifications physical_node=node-1 total=10"
-    And the last command output metric "messages_total" "sent" relay "notifications" on any physical node has numeric values
+    Then within "10s" node "node-1" eventually reports describe ingestor "ingestor_metrics_source" as "messages_total sent relay=notifications <metric_labels> total=10"
+    And the last command output metric "messages_total" "sent" relay "notifications" <metric_scope> has numeric values
       """
       total=10
       """
-    And the last command output metric "batches_total" "sent" relay "notifications" on any physical node has numeric values
+    And the last command output metric "batches_total" "sent" relay "notifications" <metric_scope> has numeric values
       """
       total=1
       """
-    And the last command output metric "messages_per_batch" "sent" relay "notifications" on any physical node has numeric values
+    And the last command output metric "messages_per_batch" "sent" relay "notifications" <metric_scope> has numeric values
       """
       p50_1m>=9
       p50_1m<=10
@@ -284,11 +284,11 @@ Feature: Ingestor metrics
       """
 
     Examples:
-      | cluster_size | branch_strategy | relay_branching                        | output_branching                                                     | entity_kind | source_head  | source_clause                                                               | input                     |
-      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | REDIS       | REDIS PUBSUB | redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK                  | notifications_{{test_id}} |
-      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | REDIS       | REDIS PUBSUB | redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK                  | notifications_{{test_id}} |
-      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | MQTT        | MQTT TOPIC   | mqtt_main TOPIC 'notifications_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK | notifications_{{test_id}} |
-      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | MQTT        | MQTT TOPIC   | mqtt_main TOPIC 'notifications_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK | notifications_{{test_id}} |
+      | cluster_size | branch_strategy | relay_branching                        | output_branching                                                     | entity_kind | source_head  | source_clause                                                               | input                     | metric_labels                   | metric_scope                    |
+      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | REDIS       | REDIS PUBSUB | redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK                  | notifications_{{test_id}} | physical_node=node-1            | on any physical node            |
+      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | REDIS       | REDIS PUBSUB | redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK                  | notifications_{{test_id}} | physical_node=node-1            | on any physical node            |
+      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | MQTT        | MQTT TOPIC   | mqtt_main TOPIC 'notifications_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK | notifications_{{test_id}} | instance=0 physical_node=node-1 | instance 0 on any physical node |
+      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | MQTT        | MQTT TOPIC   | mqtt_main TOPIC 'notifications_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK | notifications_{{test_id}} | instance=0 physical_node=node-1 | instance 0 on any physical node |
 
   Scenario Outline: FLUSH IMMEDIATE preserves batching during a rapid input burst
     Given MQTT is running
@@ -332,8 +332,8 @@ Feature: Ingestor metrics
     Then within "5s" node "node-1" eventually reports describe ingestor "immediate_source" as "status: running"
     And the last command output owner is saved as placeholder "immediate_source_owner"
     When 100 JSON messages with user id 42 are rapidly published to "MQTT" input "immediate_notifications_{{test_id}}"
-    Then within "10s" node "node-1" eventually reports describe ingestor "immediate_source" as "messages_total sent relay=notifications physical_node={{immediate_source_owner}} total=100"
-    And the last command output metric "batches_total" "sent" relay "notifications" on any physical node has numeric values
+    Then within "10s" node "node-1" eventually reports describe ingestor "immediate_source" as "messages_total sent relay=notifications instance=0 physical_node={{immediate_source_owner}} total=100"
+    And the last command output metric "batches_total" "sent" relay "notifications" instance 0 on any physical node has numeric values
       """
       total<100
       """
