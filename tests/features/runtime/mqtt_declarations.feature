@@ -99,6 +99,33 @@ Feature: MQTT TOPIC declarations
       | 1            | SESSION PERSISTENT QOS 0 MODE NO ACK                                                                                | SUSPEND | MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT and QOS 1 or 2                                                                         |
       | 3            | SESSION PERSISTENT QOS 0 MODE NO ACK                                                                                | SUSPEND | MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT and QOS 1 or 2                                                                         |
 
+  @mqtt_mode_completion
+  Scenario Outline: Completion after MODE offers the delivery modes the written session and quality of service keep
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = 'mqtt://127.0.0.1:1' };
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI suggests for "CREATE MQTT TOPIC INGESTOR intake FROM mqtt_main TOPIC 'devices/+' <choices> MODE |" on node "{{leader}}"
+    Then the CLI offers exactly "<offered>"
+
+    Examples:
+      | cluster_size | choices                  | offered     |
+      | 1            | SESSION CLEAN QOS 0      | NO ACK      |
+      | 3            | SESSION CLEAN QOS 0      | NO ACK      |
+      | 1            | SESSION CLEAN QOS 1      | NO ACK      |
+      | 3            | SESSION CLEAN QOS 1      | NO ACK      |
+      | 1            | SESSION CLEAN QOS 2      | NO ACK      |
+      | 3            | SESSION CLEAN QOS 2      | NO ACK      |
+      | 1            | SESSION PERSISTENT QOS 0 | NO ACK      |
+      | 3            | SESSION PERSISTENT QOS 0 | NO ACK      |
+      | 1            | SESSION PERSISTENT QOS 1 | ACK, NO ACK |
+      | 3            | SESSION PERSISTENT QOS 1 | ACK, NO ACK |
+      | 1            | SESSION PERSISTENT QOS 2 | ACK, NO ACK |
+      | 3            | SESSION PERSISTENT QOS 2 | ACK, NO ACK |
+
   Scenario Outline: MQTT TOPIC ingestors refuse a statement that leaves out its session or quality of service
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
