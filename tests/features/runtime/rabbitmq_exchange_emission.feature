@@ -272,6 +272,82 @@ Feature: RabbitMQ exchange emission and unroutable messages
       | 1            | ACK PARALLEL MAX 2 ACK TIMEOUT 30s | BATCH MAX MESSAGES 3 MAX SIZE 64KiB | [{"seq":1,"category":"order.created"}] | [{"seq":3,"category":"order.created"}] |
       | 3            | ACK PARALLEL MAX 2 ACK TIMEOUT 30s |                                     | {"seq":1,"category":"order.created"}   | {"seq":3,"category":"order.created"}   |
 
+  Scenario Outline: MANDATORY attributes a returned message across reordered publisher confirmations
+    Given RabbitMQ is running
+    And a RabbitMQ endpoint that reorders the first two publisher confirmations is configured
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And RabbitMQ exchange "events_{{test_id}}" of type direct exists
+    And RabbitMQ queue "routed_{{test_id}}" is bound to exchange "events_{{test_id}}" with routing key "order.created"
+    And RabbitMQ queue "routed_{{test_id}}" is observed
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64, category STRING );
+      CREATE SCHEMA rejected_event (
+        seq I64,
+        error_code STRING,
+        operation STRING,
+        error_message STRING
+      );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, category string );
+      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
+      CREATE VHOST edge mandatory-{{test_id}}.example.com;
+      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        TO events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = '{{rabbitmq_confirm_addr}}' };
+      CREATE RABBITMQ EXCHANGE EMITTER routed FROM events
+        TO broker EXCHANGE 'events_{{test_id}}' ROUTING KEY input.category
+          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
+          ENCODE USING event_codec
+          MANDATORY
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO rejected_events
+          SET seq = input.seq,
+              error_code = error.code,
+              operation = error.operation,
+              error_message = error.message
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
+      START;
+      """
+    And http payload is posted to host "mandatory-{{test_id}}.example.com" path "/events"
+      """
+      [{"seq":1,"category":"order.created"},{"seq":2,"category":"order.unrouted"},{"seq":3,"category":"order.created"}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "seq":2 | "error_code":"external" | "operation":"publish" | reply code 312 | NO_ROUTE
+      """
+    And within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":1,"category":"order.created"}
+      {"seq":3,"category":"order.created"}
+      """
+
+    And the RabbitMQ endpoint forwarded the controlled publisher confirmations
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: MANDATORY rejects a record its deleted queue can no longer receive
     Given RabbitMQ is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"

@@ -17,8 +17,9 @@ use nervix_connector::OfflineClientConfigError;
 use nervix_execution::{MemoryClass, QueueAdmission, StorageClass};
 use nervix_models::{
     ClientConfigEntry, ClientConfigOwner, ClientConfigSchemaError, ClientConfigValue,
-    ConfiguredClientRef, ConnectorKind, DomainName, PrometheusApiRoot, PrometheusClientConfigError,
-    WebsocketsClientConfig, WebsocketsClientConfigError, validate_clickhouse_client_config,
+    ConfiguredClientRef, ConnectorKind, DomainName, MqttClientConfig, MqttClientConfigError,
+    PrometheusApiRoot, PrometheusClientConfigError, WebsocketsClientConfig,
+    WebsocketsClientConfigError, validate_clickhouse_client_config,
 };
 
 use super::{ModelBindingValidationError, SessionServiceImpl};
@@ -104,9 +105,10 @@ impl SessionServiceImpl {
                 cancellation
                     .check()
                     .change_context(ClientValidationError::Cancelled)?;
-                // MQTT alone renders a branch instance into its client ID. Validate the first
-                // instance using the same renderer, leaving each actual instance to its host.
-                let resolved = if connector == ConnectorKind::Mqtt {
+                // A client whose templates name the instance that connects, MQTT's identity
+                // template, is validated as its first instance, which an emitter also connects
+                // as, using the same renderer; each ingestor instance renders its own on its host.
+                let resolved = if connector.renders_client_instance() {
                     execution_runtime.resolve_client_config_with_instance(
                         &worker_domain,
                         mount.as_ref(),
@@ -172,6 +174,9 @@ impl SessionServiceImpl {
             ConnectorKind::Prometheus => PrometheusApiRoot::of_client_config(config)
                 .map(|_| ())
                 .change_context(ClientValidationError::Schema),
+            ConnectorKind::Mqtt => MqttClientConfig::parse(config)
+                .map(|_| ())
+                .change_context(ClientValidationError::Schema),
             _ => Ok(()),
         }
     }
@@ -207,6 +212,9 @@ fn validate_driver(
         ConnectorKind::ZeroMq => nervix_connector_zeromq::validate_client_configuration(config),
         ConnectorKind::Sentry => nervix_connector_sentry::validate_client_configuration(config),
         ConnectorKind::Sqs => nervix_connector_sqs::validate_client_configuration(config),
+        ConnectorKind::Websockets => {
+            nervix_connector_websockets::validate_client_configuration(config)
+        }
         _ => Ok(()),
     }
 }
@@ -233,6 +241,8 @@ pub(in crate::application) fn client_validation_message<C: error_stack::Context>
         config.to_string()
     } else if let Some(config) = error.downcast_ref::<PrometheusClientConfigError>() {
         config.to_string()
+    } else if let Some(config) = error.downcast_ref::<MqttClientConfigError>() {
+        config.to_string()
     } else if let Some(validation) = error.downcast_ref::<ClientValidationError>() {
         match validation {
             ClientValidationError::Resolve => {
@@ -254,6 +264,8 @@ mod admission_tests;
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
+
     use super::*;
 
     #[test]
@@ -268,6 +280,68 @@ mod tests {
             refusal.current_context(),
             OfflineClientConfigError::InvalidKey { key } if key == "addr"
         ));
+    }
+
+    #[test]
+    fn a_websocket_ca_file_without_a_certificate_is_refused_by_its_key() {
+        let directory = tempfile::tempdir().assured("a temporary directory can be created");
+        let ca_file = directory.path().join("ca.pem");
+        std::fs::write(&ca_file, "no certificate is written here\n")
+            .assured("the fixture CA file can be written");
+        let config = [
+            ClientConfigEntry {
+                key: "endpoint".to_string(),
+                value: "wss://websocket.nervix.test/events".to_string(),
+            },
+            ClientConfigEntry {
+                key: "tls_ca_file".to_string(),
+                value: ca_file.display().to_string(),
+            },
+        ];
+        let report = validate_driver(ConnectorKind::Websockets, &config)
+            .err()
+            .assured("the file adds no trust root")
+            .change_context(ModelBindingValidationError::Client {
+                domain: DomainName::parse("sales").assured("sales is a valid domain name"),
+                node: nervix_models::ClientName::parse("socket")
+                    .assured("socket is a valid client name"),
+            });
+        assert_eq!(
+            client_validation_message(&report).as_deref(),
+            Some(
+                "invalid client 'socket' in domain 'sales': client config key 'tls_ca_file' holds \
+                 no certificate"
+            )
+        );
+    }
+
+    #[test]
+    fn a_rendered_websocket_endpoint_with_user_information_hides_its_value() {
+        let config = [ClientConfigEntry {
+            key: "endpoint".to_string(),
+            value: "wss://operator:private-password@websocket.nervix.test/events".to_string(),
+        }];
+        let report =
+            SessionServiceImpl::validate_rendered_client_values(ConnectorKind::Websockets, &config)
+                .err()
+                .assured("the upgrade never sends user information")
+                .change_context(ModelBindingValidationError::Client {
+                    domain: DomainName::parse("sales").assured("sales is a valid domain name"),
+                    node: nervix_models::ClientName::parse("socket")
+                        .assured("socket is a valid client name"),
+                });
+        assert_eq!(
+            report.downcast_ref::<WebsocketsClientConfigError>(),
+            Some(&WebsocketsClientConfigError::EndpointUserInformation)
+        );
+        assert_eq!(
+            client_validation_message(&report).as_deref(),
+            Some(
+                "invalid client 'socket' in domain 'sales': 'endpoint' must not carry user \
+                 information"
+            )
+        );
+        assert!(!format!("{report:#}").contains("private-password"));
     }
 
     #[test]
@@ -300,6 +374,39 @@ mod tests {
                  'addr'"
             )
         );
+    }
+
+    #[test]
+    fn rendered_mqtt_refusal_retains_its_cause_and_names_its_key_without_a_value() {
+        let entry = |key: &str, value: &str| ClientConfigEntry {
+            key: key.to_string(),
+            value: value.to_string(),
+        };
+        let config = [
+            entry("addr", "mqtt://broker.example.com:1883"),
+            entry("keep_alive_ms", "1500"),
+            entry("password", "private-mqtt-password"),
+        ];
+        let report =
+            SessionServiceImpl::validate_rendered_client_values(ConnectorKind::Mqtt, &config)
+                .expect_err("a keep-alive of a second and a half is not whole seconds")
+                .change_context(ModelBindingValidationError::Client {
+                    domain: DomainName::parse("sales").expect("valid domain name"),
+                    node: nervix_models::ClientName::parse("sensors").expect("valid client name"),
+                });
+        assert_eq!(
+            report.downcast_ref::<MqttClientConfigError>(),
+            Some(&MqttClientConfigError::KeepAlive)
+        );
+        let message = client_validation_message(&report);
+        assert_eq!(
+            message.as_deref(),
+            Some(
+                "invalid client 'sensors' in domain 'sales': 'keep_alive_ms' must be whole \
+                 seconds from 1 s through 65535 s"
+            )
+        );
+        assert!(!format!("{report:?}").contains("private-mqtt-password"));
     }
 
     #[test]

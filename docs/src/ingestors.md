@@ -13,7 +13,7 @@ CREATE BRANCH by_user
 CREATE IF NOT EXISTS KAFKA TOPIC INGESTOR kafka_notifications
   FROM kafka_main
   TOPIC 'notifications'
-  OFFSET BY CONSUMER GROUP 'nervix_consumer'
+  OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST
   INSTANCES 1
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -55,7 +55,8 @@ reference is refused when the statement is applied, with a message that names bo
 `requires a KAFKA client, but client 'cache' is a REDIS client`. `SHOW CREATE INGESTOR` renders the
 complete statement under its head. `DESCRIBE INGESTOR` prints the pair, reference and locator on
 its `from:` line, such as `from: KAFKA TOPIC kafka_main TOPIC 'Orders'`. The following rows show
-`options: OFFSET BY CONSUMER GROUP 'Readers' INSTANCES 1`, `mode: NO ACK`, and `quiesce: SUSPEND`.
+`options: OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST INSTANCES 1`, `mode: NO ACK`, and
+`quiesce: SUSPEND`.
 The shared [inspection block](connector-contract.md#shared-entity-presentation) then reports its
 envelope, batching, output flush policies and error policies. `SHOW INGESTORS` prints the pair
 alone, such as `from=KAFKA TOPIC`.
@@ -116,7 +117,10 @@ delivered. `TIMESTAMP NOW` records that snapshot. `TIMESTAMP AT <field>` reads a
 field and `TIMESTAMP AT metadata.<field>` a metadata field the source's entity declares; the field
 must be `DATETIME`, and `CREATE` and `ALTER` refuse an undeclared metadata field or one of another
 type, naming the fields the entity declares. A message that carries no value for the field is
-rejected as a null payload timestamp is. These and connector-owned event timestamps preserve the
+rejected as a null payload timestamp is, and one whose connector hands over a value no `DATETIME`
+holds is refused before selection (see the metadata rules under
+[Value Construction and Filters](#value-construction-and-filters)). These and connector-owned event
+timestamps preserve the
 external instant exactly; `TIME RATE` never scales them. The internal low
 and high watermarks initially equal the selected event time, so source event time remains distinct
 from delivery and observation time throughout the graph. The 5 ms source-idle close and the
@@ -214,10 +218,10 @@ again under the other head instead.
 
 `SET FROM` accepts the complete body that follows `FROM` in a `CREATE` statement with the same
 head, and only that pair's body. Change a client or endpoint, a Kafka topic or offset mode,
-`INSTANCES`, the delivery mode, an `HTTP REQUEST`'s `METHOD`, `HEADERS` or `MAX BODY SIZE`, or
-source-specific subscription settings by supplying that complete body, including its required
-`ON QUIESCE` clause. `SET QUIESCE` changes only the quiesce mode and
-its variables. It parses every quiesce body, and the stored source refuses one it does not honor,
+`INSTANCES`, the delivery mode, an `HTTP REQUEST`'s `METHOD`, `HEADERS` or `MAX BODY SIZE`, a
+`PROMETHEUS QUERY`'s `QUERY`, `MAX BODY SIZE` or `EVERY`, or source-specific subscription settings
+by supplying that complete body, including its required `ON QUIESCE` clause. `SET QUIESCE` changes
+only the quiesce mode and its variables. It parses every quiesce body, and the stored source refuses one it does not honor,
 for example with `HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND`; there is no
 `DROP QUIESCE` operation. `SET DECODE USING` exists under every head except `CLIENT PRODUCER`,
 which decodes nothing. `ADD ROUTE` appends a route, while `REPLACE ROUTE` preserves the matched
@@ -499,7 +503,9 @@ General notes:
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
   `metadata.topic`, `metadata.partition`, `metadata.offset`, `metadata.key`, `metadata.timestamp`,
-  `metadata.timestamp_type`, and `metadata.tombstone`, `SYSLOG LISTENER` declares
+  `metadata.timestamp_type`, and `metadata.tombstone`, `RABBITMQ QUEUE` declares the delivery's
+  envelope and its AMQP basic properties, `SQS QUEUE` declares the message identity and its system
+  attributes, `SYSLOG LISTENER` declares
   `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
   `metadata.remote_addr`, and `metadata.host`, `PROMETHEUS QUERY` declares `metadata.query` and
@@ -513,6 +519,13 @@ General notes:
 - an ingestor builds a metadata column only for the fields its route expressions or its
   `TIMESTAMP AT metadata.<field>` read; an ingestor that reads none visits no metadata values and
   builds no metadata columns
+- a message whose connector hands over a value its field's declared type cannot hold, such as a
+  `RABBITMQ QUEUE` AMQP timestamp after 2262-04-11, is refused once `FILTER WHERE` keeps it, wherever
+  a route or `TIMESTAMP AT` reads that field: every route's `ON MESSAGE ERROR` policy receives a
+  message error with code `validation` and operation `admit` that names `metadata.<field>` and
+  describes the value. The field never reads as null for it, and a field no program reads refuses
+  nothing. A `KAFKA TOPIC` record timestamp or an `SQS QUEUE` system attribute out of range fails
+  the read instead, as its reference states
 - supported sources expose transport headers through `read_header(name)` and `read_headers(name)`;
   header names may be any `STRING` expression, and these functions may be used in both top-level
   `FILTER WHERE` and per-route expressions
@@ -990,7 +1003,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Capability | Declaration |
 | --- | --- |
 | Reference | HTTP client |
-| Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
+| Locator and validation rule | Not offered: The client's endpoint URL names the polled resource, its path and query included, so this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals or client secrets); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
@@ -1007,61 +1020,222 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-ingest).
 <!-- connector-matrix:ingest-http-request:end -->
 
-- `METHOD '<token>'` is required on the ingestor. `HEADERS { '<name>' = <value>, … }` writes request
-  fields. Names are case-insensitive, and `CREATE` and `ALTER` refuse a name written twice. A value
-  is UTF-8 text with no control character but a tab and no space or tab at either end. `MAX BODY SIZE`
-  bounds the response body at its declared size, or 16 MiB where omitted. A response above that
-  bound fails its poll.
-- A header's value is a string literal or `CLIENT SECRET '<key>'`. A literal is part of the statement,
-  so `SHOW CREATE` and `DESCRIBE INGESTOR` print it, and a credential does not belong in one.
-  `CLIENT SECRET` names a key of the ingestor's client and sends that key's value:
+An `HTTP REQUEST` ingestor sends one request through an `HTTP CLIENT` on a cadence of domain time
+and delivers the body of each successful response as one payload. One scheduled node runs it. Every
+poll asks the endpoint again, so `NO ACK` is its only mode: nothing acknowledges a response, and an
+instant whose poll failed or was skipped delivers nothing.
 
-  ```plexus
-  CREATE HTTP CLIENT orders_api CONFIG {
-    'endpoint' = 'https://api.example.com/orders',
-    'timeout_ms' = 5000,
-    'secret.api_token' = 'Bearer example-token'
-  };
+```plexus
+CREATE SCHEMA order_status ( order_id I64, state STRING );
+CREATE SCHEMA polled_order_status (
+  order_id I64,
+  state STRING,
+  http_status U16 OPTIONAL,
+  polled_at DATETIME OPTIONAL,
+  request_id STRING OPTIONAL
+);
+CREATE WIRE JSON SCHEMA order_status_wire MODE STRICT ( order_id integer, state string );
+CREATE CODEC order_status_codec FROM WIRE JSON SCHEMA order_status_wire TO SCHEMA order_status;
+CREATE RELAY order_statuses SCHEMA polled_order_status UNBRANCHED;
 
-  CREATE HTTP REQUEST INGESTOR orders
-    FROM orders_api
-    METHOD 'GET'
-    HEADERS { 'accept' = 'application/json', 'authorization' = CLIENT SECRET 'secret.api_token' }
-    EVERY 30s MODE NO ACK ON QUIESCE SUSPEND DECODE USING orders_codec
-    TO orders_relay INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
-    ON GENERAL ERROR LOG;
-  ```
+CREATE HTTP CLIENT orders_api CONFIG {
+  'endpoint' = 'https://api.example.com/orders/latest',
+  'timeout_ms' = 5000,
+  'secret.api_token' = 'Bearer example-token'
+};
 
-  The operator names each `secret.<name>` key of an `HTTP` client. Inspection prints the reference:
-  `SHOW CREATE`, `DESCRIBE INGESTOR` and the console show `CLIENT SECRET 'secret.api_token'`, and
-  `SHOW CREATE CLIENT` and `DESCRIBE CLIENT` mask the key as `********`. `CREATE` and `ALTER` refuse a
-  reference to a key the client does not hold, to a key that is not a secret, and to a value that
-  cannot be a header, naming the header and the key and never quoting the value. A value that keeps a
-  `{{ … }}` template is rendered and checked where the ingestor opens instead, and one that cannot be
-  a header fails the open. A poll sends the value only to the client's origin, because it follows a
-  redirect nowhere else. Complete serialization keeps the value, as it keeps every client secret, so
-  a backup archive holds it; see [Backup And Restore](backup-and-restore.md).
-- The HTTP client requires `endpoint` and `timeout_ms`. It also declares optional
-  `follow_redirects` and `proxy` settings, plus TLS trust and client identity files. Polling follows
-  a redirect only to the client's own origin and only with `follow_redirects = true`, sends its
-  requests through the declared `proxy` alone and never through one the environment names, and
-  shares one `timeout_ms` between a request and the redirects it follows, as
-  [HTTP client transport](emitters.md#http-client-transport) describes. A redirect the poll does not
-  follow fails it with its status, and a failed poll's `transient error:` names its status or its
-  transport failure but never the endpoint's path or query.
-- `metadata.status` is the successful response's `U16` status and `metadata.polled_at` is the
-  scheduled `DATETIME` instant of that poll. `read_header` and `read_headers` read the response's
-  headers, including non-ASCII UTF-8 values. A header value with invalid UTF-8 bytes is omitted
-  without discarding the row and counted in `nervix_ingestor_header_values_dropped_total`;
-  `204 No Content` emits no row.
-- polls a configured HTTP endpoint periodically
-- issues the first request immediately, then follows an anchored domain-clock cadence; slow
-  responses coalesce missed occurrences into one request at the newest due instant
-- `204 No Content` is treated as no message
-- `SUSPEND` skips polls and therefore creates a sampling gap
-- `BUFFER` keeps polling on the declared cadence and drains retained poll payloads in order
-- a poll whose `ON INGESTION` unfolding finds the node's extension workers full waits for them; see
-  [When The Extension Workers Are Full](#when-the-extension-workers-are-full)
+CREATE HTTP REQUEST INGESTOR order_status_poll
+  FROM orders_api
+  METHOD 'GET'
+  HEADERS { 'accept' = 'application/json', 'authorization' = CLIENT SECRET 'secret.api_token' }
+  MAX BODY SIZE 1MiB
+  EVERY 30s
+  MODE NO ACK
+  ON QUIESCE SUSPEND
+  DECODE USING order_status_codec
+  TIMESTAMP AT metadata.polled_at
+  TO order_statuses INHERIT ALL
+    SET http_status = metadata.status,
+        polled_at = metadata.polled_at,
+        request_id = read_header('x-request-id')
+  UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+#### HTTP Polling Requests
+
+Each poll sends one request, which the statement's options and its client describe:
+
+- `METHOD '<method>'` is required and sent with the spelling it is written in. It is an HTTP token
+  of 1 to 64 ASCII bytes other than `CONNECT` and `TRACE` in any letter case, and `CREATE` and
+  `ALTER` refuse any other method, naming the ingestor. A poll sends no body and no
+  `content-length` field, whatever its method, so an endpoint that requires a length on a `POST`
+  can refuse the poll.
+- The request goes to the client's `endpoint` as written, its path and query included, so one client
+  names one resource; see [`HTTP CLIENT`](#http-client).
+- `HEADERS { '<name>' = <value>, … }` is optional and writes request fields. A name is an HTTP field
+  name, compared without ASCII case; `CREATE` and `ALTER` refuse a name written twice and the names
+  the transport owns: `host`, `content-length`, `transfer-encoding`, `connection`, `keep-alive`,
+  `proxy-connection`, `te`, `trailer`, `upgrade` and `expect`. A value is a string literal or
+  `CLIENT SECRET '<key>'`, and what it sends is UTF-8 text with no control character but a tab and
+  no space or tab at either end; an empty value is sent empty. A statement writes at most 128 fields
+  and 32 KiB of names and values together, the bounds an
+  [HTTP emitter](emitters.md#http-request-configuration) holds its application headers to. A
+  refusal names the ingestor and the header and never quotes a value, such as
+  `ingestor 'order_status_poll' in domain 'shop' cannot use its HEADERS: header 'X-Event' is set more than once`.
+- `MAX BODY SIZE <bytes>` bounds the response body; see
+  [HTTP Polling Response Bound](#http-polling-response-bound).
+- `EVERY <duration>` is required and sets the cadence; see
+  [HTTP Polling Cadence](#http-polling-cadence).
+
+Beside the fields `HEADERS` writes, a request carries the `host` field, or the HTTP/2 authority,
+`accept: */*` unless `HEADERS` writes `accept`, and `accept-encoding: gzip,deflate,br` unless
+`HEADERS` writes `accept-encoding`. It writes no `user-agent`.
+
+A literal is part of the statement, so `SHOW CREATE` and `DESCRIBE INGESTOR` print it, and a
+credential does not belong in one. `CLIENT SECRET` names a key of the ingestor's client and sends
+that key's value, as `authorization` does in the example above. The operator names each
+`secret.<name>` key of an `HTTP` client. Inspection prints the reference: `SHOW CREATE`,
+`DESCRIBE INGESTOR` and the console show `CLIENT SECRET 'secret.api_token'`, and `SHOW CREATE CLIENT`
+and `DESCRIBE CLIENT` mask the key as `********`. `CREATE` and `ALTER` refuse a reference to a key
+the client does not hold, to a key that is not a secret, and to a value that cannot be a header,
+naming the header and the key and never quoting the value. A value that keeps a `{{ … }}` template
+is rendered and checked where the ingestor opens instead, and one that cannot be a header fails the
+open. A poll sends the value only to the client's origin, because it follows a redirect nowhere
+else. Complete serialization keeps the value, as it keeps every client secret, so a backup archive
+holds it; see [Backup And Restore](backup-and-restore.md).
+
+`ALTER HTTP REQUEST INGESTOR … SET FROM <complete body>` replaces the client, method, headers,
+response bound and cadence together, and the next poll sends the new request.
+
+#### HTTP Poll Responses
+
+The final response of a poll decides what it delivers:
+
+- A `2xx` status other than `204 No Content` delivers the response body as one payload, which the
+  ingestor's codec decodes. An empty body is an empty payload, which the codec decodes or refuses
+  like any other; see [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
+- `204 No Content` delivers nothing. The poll still succeeded.
+- Every other status fails the poll, a redirect the client does not follow included; see
+  [When An HTTP Poll Fails](#when-an-http-poll-fails).
+
+A route reads what answered its payload. `read_header` and `read_headers` read the response's
+header fields under their lowercase names, every value of a repeated name together and in the
+order the response carried them. A value is read as UTF-8 text, non-ASCII characters included. A
+value that is not valid UTF-8 is left out without discarding the payload or the response's other
+fields, and is counted in `nervix_ingestor_header_values_dropped_total`. `metadata.status` is the
+response's status as a `U16`, and `metadata.polled_at` is the instant the poll was due, as a
+`DATETIME`, rather than the instant its response arrived, so `TIMESTAMP AT metadata.polled_at` gives
+each payload the instant of its poll.
+
+A response whose `content-encoding` is exactly `gzip`, `deflate` or `br` is decompressed before
+Nervix reads it, and its `content-encoding` and `content-length` fields are removed, so the payload
+is the decompressed body and `read_header` reads neither field. A response in any other encoding,
+or in several, arrives as it was sent, with those fields.
+
+#### HTTP Polling Cadence
+
+The first poll is sent as soon as the ingestor starts, where a Prometheus query first becomes due
+after one interval. Later polls stay on that anchored schedule of the domain clock, so a paced
+domain polls at the instants its own clock reaches. A poll slower than `EVERY` coalesces the
+occurrences it missed into one poll at the newest due instant.
+
+#### When An HTTP Poll Fails
+
+A poll that cannot deliver its response fails as a whole. `DESCRIBE INGESTOR` shows the failure as
+the ingestor's transient error, in the form `transient error: failed to read from http ingestor:
+<failure>`, and every attached session receives it as a server error. The next poll that succeeds,
+one answered with `204` included, clears it. A failed poll is not sent again: the next poll runs at
+the next due instant, so the failed instant delivers nothing.
+
+| What the poll met | `<failure>` |
+| --- | --- |
+| A status that is neither `2xx` nor a redirect its client follows | `HTTP ingestor returned status 503 Service Unavailable` |
+| A redirect its client does not follow | `HTTP ingestor returned status 302 Found` |
+| A response above `MAX BODY SIZE` | `HTTP ingestor response exceeds MAX BODY SIZE 1MiB` |
+| A request that could not be sent: a name that did not resolve, a connection or TLS session that failed, or a response head that did not arrive within `timeout_ms` | `failed to send HTTP ingestor request: error sending request`, then the transport's causes, such as `client error (Connect): dns error: error resolving DNS: resolving 'api.example.com' failed: the name does not exist`, `client error (Connect): tcp connect error: Connection refused (os error 111)` or `operation timed out` |
+| A response body that ended early or outlasted `timeout_ms` | `failed to read HTTP ingestor response body`, then the transport's causes, such as `error decoding response body: request or response body error: operation timed out` |
+
+A lookup failure names the endpoint's host, as the node's resolver reports it; see
+[Lookup Outcomes](name-resolution.md#lookup-outcomes). No failure names the request's URL, its path
+or query, a header value or a client secret.
+
+#### HTTP Polling Response Bound
+
+`MAX BODY SIZE <bytes>`, written between `HEADERS` and `EVERY`, bounds how many bytes of one
+response body a poll reads; a statement that leaves it out reads at most `16MiB`. The size is a
+whole number greater than zero followed by `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB` or
+`TiB`, and `SHOW CREATE` renders it in the unit it was written in. The bound counts the body Nervix
+reads, after the decompression above, so it limits the payload rather than the size of its transfer.
+A response whose `content-length` announces more than the bound fails before its body is read, and
+one whose body exceeds the bound fails when it does.
+
+`DESCRIBE INGESTOR` prints the bound in effect, whether the statement wrote it or not, in
+`options: METHOD 'GET' MAX BODY SIZE 16MiB EVERY 1s`. `SET FROM` replaces the whole body, so an
+`ALTER HTTP REQUEST INGESTOR` whose new body leaves `MAX BODY SIZE` out reads at most `16MiB` again.
+
+#### HTTP Polling Intake And Quiesce
+
+A poll delivers at most one payload, which enters the graph as an intake batch of its own. The next
+poll waits until that payload has entered the graph or, while a `BUFFER` quiesce holds the ingestor,
+has been handed to its buffer. A poll whose `ON INGESTION` unfolding finds the node's extension
+workers full waits for them; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
+
+`SUSPEND` skips polls and leaves a gap. `BUFFER` keeps polling on the declared cadence and delivers
+retained payloads in order after resume. It retains each payload whole: `MAX SIZE` counts the bytes
+of the response bodies it holds, and `ON OVERFLOW` drops whole payloads. Memory-pressure quiesce
+skips polls under either mode; see [Quiesce Modes](#quiesce-modes).
+
+A quiesce change or a stop that meets a poll in flight abandons that poll and keeps nothing of its
+response. A hold that begins or ends during a poll therefore leaves a gap of one occurrence, under
+`BUFFER` too.
+
+#### `HTTP CLIENT`
+
+Every key of an `HTTP CLIENT`'s `CONFIG` is Nervix's own. One client serves `HTTP REQUEST`
+ingestors and `HTTP REQUEST` emitters, and each key means the same for both:
+
+| Key | Required | Value |
+| --- | --- | --- |
+| `endpoint` | Yes | An `http` or `https` URL with a host. A poll is sent to it as written, its path and query included. An [HTTP emitter](emitters.md#http-request-configuration) requires an origin, a scheme, host and optional port with no user information, path beyond `/`, query or fragment, beneath which each record's `PATH` names its target. |
+| `timeout_ms` | Yes | A positive whole number of milliseconds that bounds one request and the redirects it follows, as [Client Deadlines](#client-deadlines) defines. For a poll it covers name resolution, connection setup, TLS, the request and the whole response body, and for an emitted request everything up to its complete final response headers. |
+| `follow_redirects` | No | `true` follows a redirect to the client's own origin; `false`, or leaving the key out, makes a redirect the response. See [HTTP client transport](emitters.md#http-client-transport). |
+| `proxy` | No | An `http` or `https` URL with a host, naming the proxy that every request of the client goes through. User information in it is sent to the proxy alone, as `Basic` proxy credentials. |
+| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the default roots: the platform's trust store for a poll, and the Mozilla roots Nervix ships together with the host's native roots for the emitter. |
+| `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
+| `secret.<name>` | No | A confidential string the operator names after the `secret.` prefix. A polling header sends it through `CLIENT SECRET 'secret.<name>'`; an emitter sends none of them. |
+
+`CREATE HTTP CLIENT` refuses a configuration that cannot configure the client, and names the key: a
+key the client does not declare, a key written twice or not in lowercase, a missing `endpoint` or
+`timeout_ms`, a URL of another scheme or without a host, a `follow_redirects` that is not a boolean,
+a `timeout_ms` that is not a positive whole number of milliseconds, or one of `tls_cert_file` and
+`tls_key_file` without the other. For example,
+`client 'orders_api' configuration is invalid in domain 'shop': missing required client config key 'timeout_ms'`.
+A value can name a file of the client's `MOUNT`, as in `'tls_ca_file' = '{{ api_tls }}/ca.pem'`.
+The rendered configuration must satisfy these rules before commitment, and a poll checks it again
+when its ingestor opens.
+
+`SHOW CREATE CLIENT` and `DESCRIBE CLIENT` print every key but mask as `********` each
+`secret.<name>` key and an `endpoint` or `proxy` that carries user information or a query string.
+Complete serialization keeps every value, so a backup archive holds them; see
+[Backup And Restore](backup-and-restore.md).
+
+#### HTTP Polling Transport
+
+A poll travels through the HTTP client Nervix shares with Prometheus, Sentry and OTEL over HTTP, and
+speaks the [transport contract](emitters.md#http-client-transport) one `HTTP CLIENT` declares for
+polling and emitting alike:
+
+- The host of `endpoint` is resolved through the node's DNS resolver. It stays the HTTP authority
+  and the name HTTPS verifies, as [Connection Identity](name-resolution.md#connection-identity)
+  describes.
+- A poll speaks HTTP/2 when the endpoint's TLS negotiates it, and HTTP/1.1 otherwise.
+- A poll follows a redirect only when its client sets `follow_redirects = true`, only to the
+  client's own origin and at most 10 times, sending the same method and fields again. It sends
+  through the declared `proxy` alone, and no proxy environment variable has any effect.
+- Basic credentials in the user information of `endpoint`, as in
+  `https://reader:secret@api.example.com/orders/latest`, are sent in the `authorization` field of
+  every poll and leave the URL the request names.
 
 ### Kafka
 
@@ -1069,7 +1243,7 @@ See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md
 ```plexus,ignore
 CREATE KAFKA TOPIC INGESTOR <name>
   FROM <client> TOPIC 'orders'
-  (OFFSET BY DOMAIN | OFFSET BY CONSUMER GROUP 'readers')
+  (OFFSET BY DOMAIN | OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST | OFFSET BY CONSUMER GROUP 'readers' START AT LATEST)
   [INSTANCES 2]
   MODE <mode>
   ON QUIESCE <quiesce>
@@ -1085,7 +1259,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | KAFKA client |
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers'` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |
@@ -1103,10 +1277,11 @@ See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#
 `TOPIC` takes a string literal that Kafka accepts as a topic name: 1 to 249 ASCII letters, digits,
 `.`, `_` and `-`, other than `.` and `..`. Nervix preserves its case in both directions, so
 `TOPIC 'Orders.EU'` reads exactly that topic. `OFFSET BY CONSUMER GROUP` takes the group's name as
-a string literal of 1 to 255 bytes without control characters, passed to Kafka as written. The
-ingestor names `ON QUIESCE SUSPEND`, the only quiesce mode it declares: the topic keeps its records
-after they are read, so a suspended ingestor resumes from its position, within the topic's
-retention. It reads a record's headers through `read_header` and `read_headers`.
+a string literal of 1 to 255 bytes without control characters, passed to Kafka as written, and
+requires `START AT EARLIEST` or `START AT LATEST`. The ingestor names `ON QUIESCE SUSPEND`, the
+only quiesce mode it declares: the topic keeps its records after they are read, so a suspended
+ingestor resumes from its position, within the topic's retention. It reads a record's headers
+through `read_header` and `read_headers`.
 
 The record's metadata also exposes its key as `metadata.key` (`BYTES`), its broker timestamp as
 `metadata.timestamp` (`DATETIME`), its timestamp kind as `metadata.timestamp_type` (`STRING`), and
@@ -1129,14 +1304,26 @@ rows into a host quiesce buffer.
 
 Offset modes:
 
-- `CONSUMER GROUP '<group>'`: Kafka manages offsets
+- `CONSUMER GROUP '<group>' START AT EARLIEST|LATEST`: Kafka manages offsets, and the statement says where the group starts a partition it holds no offset for
 - `DOMAIN`: Nervix stores the next offset in replicated runtime state and commits partition-to-instance assignment in the Raft-backed domain schedule
+
+`START AT` applies only to a partition the group has no usable committed offset for: a new group,
+a partition added to the topic, or an offset the topic's retention has passed. `EARLIEST` starts it
+at the earliest retained record, and `LATEST` at the partition's end, so a new group declared
+`LATEST` skips what the topic retains and reads what is produced after it takes the partition up.
+A partition the group holds an offset for resumes there whichever position the statement declares.
+`ALTER KAFKA TOPIC INGESTOR <name> SET START AT EARLIEST|LATEST` changes the position for the next
+such partition without moving any committed offset, and `SHOW CREATE` and `DESCRIBE INGESTOR`
+print the declared position, not a report of the group's current one. Writing `START AT` with
+`OFFSET BY DOMAIN` is refused at CREATE and `SET START AT` on such an ingestor is refused at ALTER,
+leaving its definition unchanged: the domain's start point places it.
 
 `CREATE KAFKA CLIENT` requires `bootstrap.servers`, the brokers that each consumer and producer of
 the client contacts first, and refuses a client without it, which could reach no broker. It refuses
 the Nervix-owned keys `group.id`, `enable.auto.commit`, `enable.partition.eof`,
-`allow.auto.create.topics` and `delivery.report.only.error`. Other property names and values are
-checked offline by librdkafka before commitment and passed through to it.
+`allow.auto.create.topics` and `delivery.report.only.error`, and `auto.offset.reset`, naming
+`START AT`, the clause that sets it. Other property names and values are checked offline by
+librdkafka before commitment and passed through to it.
 
 librdkafka reads some properties under two names and applies whichever it is handed last, and a
 client's entries reach it in no fixed order. A Kafka client therefore accepts each such property
@@ -1154,11 +1341,10 @@ setting. Each property a client sets therefore has one name and one value on eve
 
 The statement's offset mode supplies the consumer's `group.id`. Only `OFFSET BY CONSUMER GROUP`
 with `MODE NO ACK` enables `enable.auto.commit`. Every consumer disables `enable.partition.eof`
-and `allow.auto.create.topics`. Nervix does not override
-`auto.offset.reset`; set it explicitly, for example to `earliest`, when a new consumer group must
-read records that may already exist. Under `OFFSET BY DOMAIN` in an unpaced domain the same
-setting places a partition that has no domain offset yet. These overrides also take precedence
-over the configurable driver defaults in the table above.
+and `allow.auto.create.topics`. `START AT` sets `auto.offset.reset` under
+`OFFSET BY CONSUMER GROUP`, and every `OFFSET BY DOMAIN` consumer sets it to `earliest`, so a
+position the topic's retention passed while the consumer read resumes at the next retained record.
+These overrides also take precedence over the configurable driver defaults in the table above.
 
 A Kafka ingestor never creates the topic it reads. Every consumer Nervix runs for it sets
 `allow.auto.create.topics` to `false`, whatever the broker allows, and `CREATE KAFKA CLIENT` refuses a
@@ -1183,9 +1369,9 @@ in flight, refreshing the assignment leaves and rejoins the group, and a broker 
 outlasts the group session revokes it. Whenever the group assigns the partition to the ingestor
 again, the ingestor starts it at its earliest rejected record, until a commit passes that record,
 rather than at the group's committed offset or, for a group that committed nothing, where
-`auto.offset.reset` would start it. Another member that takes the partition resumes it from the
+`START AT` would start it. Another member that takes the partition resumes it from the
 committed offset, which never passes a rejected record; where the group has committed nothing for
-the partition, that member's `auto.offset.reset` decides, and `latest` skips the rejected
+the partition, that member's `START AT` decides, and `LATEST` skips the rejected
 records. Replays after a crash or assignment change may repeat records whose output was already
 written.
 
@@ -1240,15 +1426,15 @@ Offset recovery details:
 
 - `START AT <timestamp>` and `START AT NOW` apply once per domain start generation across all instances. The first initialization persists the resolved partition positions and the applied generation together before reading. Quiescence, reconnects, rebalances, ownership changes and restarts in that generation resume acknowledged positions; they do not apply the timestamp again. A new partition without a recorded position starts at that generation's original timestamp. A later explicit `START AT` begins a new generation and replaces the positions again.
 - persisted per-partition offsets are clamped to the partition's currently available Kafka watermark range on reassignment
-- in a generation begun with plain `START`, a partition without a stored domain offset starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts where the client's `auto.offset.reset` says: `earliest` at its earliest retained record, `latest`, librdkafka's default, at its end when the ingestor takes the partition up, and `error` refuses to start it, which `DESCRIBE INGESTOR` shows as the ingestor's transient error
+- in a generation begun with plain `START`, a partition without a stored domain offset starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts at its earliest retained record, so a plain `START` reads what the topic retains and `START AT NOW` is how an unpaced domain skips it
 - the instance that takes such a partition up records its start as the partition's domain offset before it reads, so a reconnect resumes the partition there instead of placing it again past records the instance has not acknowledged
 
 Quiescing leaves a consumer group, or unassigns domain-owned partitions. Domain-owned partitions
 resume from their recorded offsets, and consumer-group
 partitions resume from the group's committed offsets or an outstanding rejection floor as described
 above. Topic time and size retention continue during the pause. For consumer-group
-offsets that age out, the client's pass-through `auto.offset.reset` setting decides whether resume
-uses the earliest retained record, skips to new records, or raises a general source error. Domain
+offsets that age out, `START AT` decides whether resume uses the earliest retained record or skips
+to new records. Domain
 offsets clamp to the partition's current low and high watermarks; records retention has removed
 cannot be recovered. Other members of a user-named group may consume and commit while Nervix is
 absent. Quiescing does not change the auto-commit loss windows of `MODE NO ACK`.
@@ -1414,7 +1600,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | Not offered: The current queue declaration exposes transport headers but no typed AMQP delivery metadata namespace. |
+| Metadata | metadata.exchange: STRING OPTIONAL<br>metadata.routing_key: STRING OPTIONAL<br>metadata.delivery_tag: U64 OPTIONAL<br>metadata.redelivered: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.content_encoding: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.correlation_id: STRING OPTIONAL<br>metadata.reply_to: STRING OPTIONAL<br>metadata.type: STRING OPTIONAL<br>metadata.app_id: STRING OPTIONAL<br>metadata.user_id: STRING OPTIONAL<br>metadata.priority: U8 OPTIONAL<br>metadata.expiration: STRING OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
@@ -1430,6 +1616,22 @@ See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.
 Its string literal must contain 1 to 255 UTF-8 bytes, the AMQP short-string limit; a multibyte
 character contributes every byte to that limit. `SHOW CREATE INGESTOR` retains the exact queue
 name and the configured acknowledgement, retry and instance policies.
+
+Each delivery exposes its envelope and its AMQP basic properties as metadata.
+`metadata.exchange` is the exchange it was published to, `''` for the default exchange, which is
+AMQP's name for it, and `metadata.routing_key` the routing key it was published with.
+`metadata.delivery_tag` is the `U64` tag its consumer channel gave it, counting from 1 on each
+channel, so a reconnected instance starts again at 1. `metadata.redelivered` is true when the broker
+delivered the message before, such as after a requeue or a lost connection. `metadata.content_type`,
+`content_encoding`, `message_id`, `correlation_id`, `reply_to`, `type`, `app_id`, `user_id`,
+`priority`, `expiration` and `timestamp` are its basic properties, each null when the publisher did
+not set it. `priority` is the `U8` octet the publisher wrote, whatever priorities the queue
+supports, and `expiration` keeps the text the publisher wrote. `metadata.timestamp` reads the AMQP
+timestamp, a count of whole seconds since the Unix epoch, as that exact `DATETIME` instant, so
+`TIMESTAMP AT metadata.timestamp` admits a message at the instant its producer wrote. A count no
+`DATETIME` holds, past 2262-04-11, such as milliseconds written where AMQP specifies seconds, refuses
+its message wherever the ingestor's route programs or its `TIMESTAMP AT` read `metadata.timestamp`,
+with code `validation` and operation `admit`, and refuses nothing in an ingestor that reads none.
 
 
 Choose `MODE NO ACK`, `MODE ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY …`, or
@@ -1633,8 +1835,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
-| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE, PUBACK and PUBREC requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
-| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
+| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: set by max_packet_size, 10240 bytes when omitted; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE, PUBACK and PUBREC requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: client key `keep_alive_ms`; one interval of it, or of the broker's Server Keep Alive; 60 s when omitted<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
 | Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound.<br>ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow only. NO ACK retains backpressure. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1647,12 +1849,29 @@ wildcards it may hold.
 The client's `addr` names the broker by its scheme, host and port alone: `mqtt://` or `mqtts://`, a
 host, and a nonzero port, such as `mqtt://broker.example.com:1883`. A connection reads nothing else
 from it, so `CREATE MQTT CLIENT` refuses an address that leaves out its port or writes credentials,
-a path, a query or a fragment.
+a path, a query or a fragment. Credentials, the keep-alive and the admitted publish size are keys
+of their own, and `CREATE MQTT CLIENT` refuses any key it does not declare:
 
-Connections use the driver's 60-second keep-alive unless the broker supplies a Server Keep Alive
-in `CONNACK`. Plexus exposes no client setting for this interval. A broker-supplied zero disables
-the keep-alive and the acknowledgement-write deadline derived from it; it does not make a silent
-connection fail within a fixed time.
+| Key | What it sets |
+| --- | --- |
+| `addr` | The broker: `mqtt://` or `mqtts://`, a host and a nonzero port. Required. |
+| `client_id` | The identity template every connection renders, at most 65,535 bytes, not empty and without NUL; see the identities below. Omitted, each connection uses its entity's default identity. |
+| `username`, `password` | The credentials every `CONNECT` carries, each at most 65,535 bytes. MQTT 5 lets a client write either alone. `DESCRIBE CLIENT` and `SHOW CREATE CLIENT` redact the password. |
+| `keep_alive_ms` | The keep-alive every `CONNECT` asks for: whole seconds from 1 s through 65,535 s, written in milliseconds. `60000` when omitted. |
+| `max_packet_size` | The largest complete publish, in bytes, a source admits; see the oversized publishes below. From 1 through 268,435,460, `10240` when omitted. Emitters do not read it. |
+| `tls_ca_file`, `tls_cert_file`, `tls_key_file` | The TLS files of an `mqtts` connection, refused with `mqtt`. An `mqtts` client requires `tls_ca_file`, its only trust root, and writes the certificate and key together. |
+
+A broker that refuses a client's credentials, or a client that writes none to a broker requiring
+them, refuses its connection. The source reports the broker's reason as its transient error, such
+as ``Connection refused, return code: `BadUserNamePassword` ``, and connects again on its declared
+`RETRY POLICY`, or on the host's reconnect cadence in `MODE NO ACK`; it never subscribes meanwhile.
+
+Every `CONNECT` asks the broker for the client's `keep_alive_ms`. A broker that supplies a Server
+Keep Alive in `CONNACK` replaces it for that connection. The connection pings its broker after one
+interval without traffic and ends when the following interval passes without an answer, and one
+interval bounds each acknowledgement write. A broker-supplied zero disables the keep-alive and the
+acknowledgement-write deadline derived from it; it does not make a silent connection fail within a
+fixed time.
 
 `SESSION CLEAN` starts a fresh broker session on every connection and retains no session after
 disconnect. `SESSION PERSISTENT` resumes the broker session for the same client identity and
@@ -1670,7 +1889,8 @@ Delivery constraints:
 - `ACK` modes require `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. CREATE and ALTER refuse any other
   pairing, naming the session and quality of service the statement writes and underlining the
   mode, such as `MQTT TOPIC ingestors name MODE ACK SEQUENTIAL only with SESSION PERSISTENT and
-  QOS 1 or 2; the statement writes SESSION CLEAN and QOS 1`
+  QOS 1 or 2; the statement writes SESSION CLEAN and QOS 1`. Completion after `MODE` offers only the
+  modes the written session and quality of service keep, so any other pairing offers `NO ACK` alone
 - `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait;
   a quiesce change or a stop that meets a partial batch takes in the publishes it gathered at once
   rather than after its batch timeout
@@ -1712,14 +1932,15 @@ ingestor reads again. See
 [MQTT source connections](connector-contract.md#mqtt-source-connections).
 
 Every MQTT connection advertises the full protocol framing limit of 268,435,460 bytes in its
-`CONNECT`. Nervix separately admits complete publishes of at most 10 KiB, including their topic,
-properties and framing, so the payload must leave room for that overhead. It drops larger
-publishes locally, acknowledges them when their QoS
+`CONNECT`. Nervix separately admits complete publishes of at most the client's `max_packet_size`
+bytes, 10,240 when omitted, including their topic, properties and framing, so the payload must
+leave room for that overhead. It drops larger publishes locally, acknowledges them when their QoS
 requires it, then counts them in `nervix_ingestor_oversized_payloads_total`, visible in
 `DESCRIBE INGESTOR`. They never reach the codec and do not count as decode rejections. Releasing
 their broker inflight slots lets a persistent session continue delivering ordinary messages even
-after many oversized publishes. Raw framing may therefore use substantially more memory than an
-admitted publish; the two bounds are declared separately above.
+after many oversized publishes; a broker told the smaller bound in `CONNECT` could instead keep a
+larger publish in its inflight window and stall the session. Raw framing may therefore use
+substantially more memory than an admitted publish; the two bounds are declared separately above.
 
 Cancellation retains any discard acknowledgement and its original keep-alive deadline for the
 next read. An ordinary partial batch ahead of a discard is returned and acknowledged first,
@@ -1728,10 +1949,15 @@ deadline and reports its size exactly once after that acknowledgement has been w
 
 Without a `client_id` in the client configuration, one instance connects as
 `<domain>~<ingestor>`. Multiple instances connect as `<domain>~<ingestor>~<instance>`, with
-zero-based instance indices. An explicit identity shared by multiple instances must contain
-`{{instance}}`. An explicit identity replaces the whole default, including its domain prefix:
-choose identities unique to each live connection on the same broker, across domains too.
-Identities remain stable across node ownership changes.
+zero-based instance indices. A `client_id` is a template: its `{{instance}}` placeholder, however
+its braces are spaced, renders the zero-based index of the instance that connects, and an emitter
+that shares the client connects as instance 0. Each instance must render an identity of its own, so
+an ingestor with more than one instance names `{{instance}}` in its `client_id`. Instances whose
+identities render alike never subscribe: each reports
+`MQTT client_id '<identity>' is shared by <count> instances` as its transient error. An explicit
+identity replaces the whole default, including its domain prefix: choose identities unique to each
+live connection on the same broker, across domains too. Identities remain stable across node
+ownership changes.
 
 `DROP INGESTOR` releases the broker sessions, including after `STOP`. Nervix stops the source,
 opens a clean cleanup connection for each distinct identity, sends `UNSUBSCRIBE` for its filter,
@@ -2099,7 +2325,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: QUERY is a PromQL expression option rather than an external entity name. |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `QUERY 'up'` (string literal); required<br>`MAX BODY SIZE 16MiB` (byte size); optional; default 16MiB<br>`EVERY 15s` (duration); required |
-| Headers | Not offered: The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared. |
+| Headers | Not offered: An HTTP response's headers describe a whole answer rather than one of its samples, and each sample's labels travel in its payload under metric, so a query source reads no transport headers. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | metadata.query: STRING OPTIONAL<br>metadata.evaluated_at: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -2113,8 +2339,47 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [PROMETHEUS QUERY capability and mirror reference](connector-capabilities.md#prometheus-query-ingest).
 <!-- connector-matrix:ingest-prometheus-query:end -->
 
-A query source reads the `vector` of float samples an instant query answers, and delivers one JSON
-object per sample, in the shape the API's own `vector` result holds it:
+A `PROMETHEUS QUERY` ingestor evaluates one PromQL instant query on a cadence of domain time,
+through a `PROMETHEUS CLIENT`, and delivers one JSON object for each float sample of the answer. One
+scheduled node runs it. Every query asks for its own instant, so `NO ACK` is its only mode: nothing
+acknowledges a sample, and an instant no query read stays a gap in the series.
+
+```plexus
+CREATE SCHEMA sample ( job STRING, value F64, timestamp STRING );
+CREATE SCHEMA evaluated_sample (
+  job STRING,
+  value F64,
+  timestamp STRING,
+  evaluated_at DATETIME OPTIONAL
+);
+CREATE CODEC sample_codec FROM JSON TO SCHEMA sample
+  WITH JAQ TRANSFORMATIONS ON INGESTION '{job: .metric.job, value, timestamp}';
+CREATE RELAY samples SCHEMA evaluated_sample UNBRANCHED;
+
+CREATE PROMETHEUS CLIENT prom_main
+  CONFIG {
+    'addr' = 'https://prometheus.example.com/monitoring',
+    'timeout_ms' = 5000
+  };
+
+CREATE PROMETHEUS QUERY INGESTOR node_up
+  FROM prom_main
+  QUERY 'up{job="node"}'
+  EVERY 15s
+  MODE NO ACK
+  ON QUIESCE SUSPEND
+  DECODE USING sample_codec
+  TIMESTAMP AT metadata.evaluated_at
+  TO samples INHERIT ALL SET evaluated_at = metadata.evaluated_at
+  UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+#### Prometheus Samples
+
+A query source reads the `vector` of float samples an instant query answers. It delivers one object
+per sample: what the API's `vector` result holds for the sample, with the sample's instant written
+out as text.
 
 ```json
 {"metric":{"__name__":"up","instance":"node-1:9100","job":"node"},"value":1,"timestamp":"2026-04-07T00:00:00.123Z"}
@@ -2130,12 +2395,14 @@ object per sample, in the shape the API's own `vector` result holds it:
 - `timestamp` is the sample's own instant as RFC 3339 text in UTC, read from the digits of the API's
   decimal seconds so that no float rounds them. Prometheus reports it to the millisecond.
 
-`WIRE JSON` declares no nested object, so a codec that reads a label is a JAQ codec, and one that
-reads only the sample's own members can stay a `MODE LOOSE` wire schema, which drops `metric`:
+`WIRE JSON` declares no nested object, so a codec that reads a label is a JAQ codec, as in the
+example above. A codec that reads only the sample's own members can stay a `MODE LOOSE` wire schema,
+which drops `metric`:
 
 ```plexus
-CREATE CODEC sample_codec FROM JSON TO SCHEMA sample
-  WITH JAQ TRANSFORMATIONS ON INGESTION '{job: .metric.job, value, timestamp}';
+CREATE SCHEMA sample_value ( value F64 );
+CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE ( value number );
+CREATE CODEC value_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample_value;
 ```
 
 A route reads what the sample answers through its metadata. `metadata.query` is the statement's
@@ -2143,13 +2410,42 @@ A route reads what the sample answers through its metadata. `metadata.query` is 
 at, the due instant of the ingestor's cadence, which `TIMESTAMP AT metadata.evaluated_at` takes as
 each sample's event time.
 
-A `matrix`, `scalar` or `string` result, and a `vector` that holds a native histogram, are not read.
-Each fails its poll before any sample of the answer is delivered, as a transient error that names
-it, such as `Prometheus query returned unsupported result type 'matrix'`, and the next poll queries
-again. A query the API refuses reports the API's own words, such as `Prometheus rejected the query
-with HTTP status 400 Bad Request: bad_data: invalid parameter "query": 1:5: parse error: unclosed
-left parenthesis`. A status whose body is not the API's error, such as a proxy's page, reports that
-status. No failure names the request's URL, which carries the PromQL and the instant.
+#### Prometheus Cadence
+
+The first query becomes due after one `EVERY` interval, where an `HTTP REQUEST` polls at once. Later
+queries stay on that anchored schedule of the domain clock. Nervix sends each due instant as the
+query's evaluation time, so a paced domain queries the instant its own clock has reached rather
+than the present. A query slower than `EVERY` coalesces the occurrences it missed into one query at
+the newest due instant, and returned samples are evaluated with a fresh domain execution snapshot.
+
+#### When A Prometheus Poll Fails
+
+A poll that cannot read its answer fails as a whole, before any sample of the answer is delivered.
+`DESCRIBE INGESTOR` shows the failure as the ingestor's transient error, in the form
+`transient error: failed to read from prometheus ingestor: <failure>`, and every attached session
+receives it as a server error. The next query that succeeds clears it. A failed poll is not sent
+again: the next query runs at the next due instant, so the failed instant stays a gap in the series.
+
+| What the poll met | `<failure>` |
+| --- | --- |
+| A `matrix`, `scalar` or `string` result, which a query source does not read | `Prometheus query returned unsupported result type 'matrix'` |
+| A `vector` that holds a native histogram | `Prometheus query returned unsupported result type 'native histogram'` |
+| A query the API refuses, in the API's own words | `Prometheus rejected the query with HTTP status 400 Bad Request: bad_data: invalid parameter "query": 1:5: parse error: unclosed left parenthesis` |
+| Any other status whose body is not the API's error, such as a proxy's page or a redirect | `Prometheus query failed with HTTP status 503 Service Unavailable` |
+| A response above `MAX BODY SIZE` | `Prometheus query response exceeds MAX BODY SIZE 16MiB` |
+| A successful status whose body is not the API's answer | `failed to decode Prometheus query response` |
+| A request that could not be sent, or had no answer within `timeout_ms` | `failed to send Prometheus query`, then the transport's cause |
+| A response body that ended early or outlasted `timeout_ms` | `failed to read Prometheus query response`, then the transport's cause |
+
+No failure names the request's URL, which carries the PromQL, the instant and any credentials `addr`
+holds.
+
+One sample can also fail alone, when its value is neither a number nor one of the API's non-finite
+strings, or its instant does not fit a timestamp. Prometheus writes neither, though another server
+that answers the same API can. That sample is left out and reported to every attached session as a
+server error, and the samples beside it are delivered.
+
+#### Prometheus Response Bound
 
 `MAX BODY SIZE <bytes>`, written between `QUERY` and `EVERY`, bounds how many bytes of one query
 response a poll reads; a statement that leaves it out reads at most `16MiB`. The size is a whole
@@ -2157,46 +2453,43 @@ number greater than zero followed by `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`,
 `SHOW CREATE` renders it in the unit it was written in. The bound counts the bytes of the
 response's JSON: a response the server compressed is counted as it is decompressed, so the bound
 limits the JSON a poll reads rather than the size of its transfer. A response whose announced
-length or whose body exceeds the bound fails the poll before any of its samples is delivered:
-`DESCRIBE INGESTOR` shows the failure as the ingestor's transient error, such as `transient error:
-failed to read from prometheus source: Prometheus query response exceeds MAX BODY SIZE 16MiB`, and
-the next poll queries again. `DESCRIBE INGESTOR` prints the bound in effect, whether the statement
-wrote it or not, in `options: QUERY 'bulk' MAX BODY SIZE 16MiB EVERY 1s`. `SET FROM` replaces the
-whole body, so an
+length or whose body exceeds the bound fails its poll.
+
+`DESCRIBE INGESTOR` prints the bound in effect, whether the statement wrote it or not, in
+`options: QUERY 'bulk' MAX BODY SIZE 16MiB EVERY 1s`. `SET FROM` replaces the whole body, so an
 `ALTER PROMETHEUS QUERY INGESTOR` whose new body leaves `MAX BODY SIZE` out reads at most `16MiB`
 again.
+
+#### Prometheus Intake And Quiesce
+
 The samples of one response enter the graph in intake batches of at most 1024 samples, and each
 batch is decoded and routed as its own group, so a large vector is never taken in as one batch of
 any size. The remaining samples wait while a batch is routed, and the next query waits until every
 sample of the current one has entered the graph or, while a `BUFFER` quiesce holds the ingestor,
-has been handed to its buffer.
-The first query becomes due after one `EVERY` interval. Nervix supplies each anchored due instant
-as Prometheus's evaluation time; a slow query coalesces missed occurrences and returned samples are
-evaluated with a fresh domain execution snapshot.
-`SUSPEND` skips scrapes and leaves a sampling gap. `BUFFER` keeps querying at the declared cadence
-and delivers retained results in order after resume. It retains each intake batch as one payload:
-`MAX SIZE` counts the bytes of its samples' JSON, `ON OVERFLOW` drops whole batches, and
-`nervix_ingestor_quiesce_buffered_records` and `nervix_ingestor_quiesce_dropped_total` count
-batches rather than samples. On resume, each retained batch enters the graph as an ingest group of
-its own, oldest first. A scrape whose `ON INGESTION` unfolding finds the node's extension workers
-full waits for them; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
+has been handed to its buffer. A query whose `ON INGESTION` unfolding finds the node's extension
+workers full waits for them; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
 
-The ingestor reads through a `PROMETHEUS CLIENT`. Every key of its `CONFIG` is Nervix's own:
+`SUSPEND` skips queries and leaves a gap in the series. `BUFFER` keeps querying at the declared
+cadence and delivers retained results in order after resume. It retains each intake batch as one
+payload: `MAX SIZE` counts the bytes of its samples' JSON, `ON OVERFLOW` drops whole batches, and
+`nervix_ingestor_quiesce_buffered_records` and `nervix_ingestor_quiesce_dropped_total` count batches
+rather than samples. On resume, each retained batch enters the graph as an ingest group of its own,
+oldest first.
+
+A quiesce change or a stop that meets a query in flight abandons that query and keeps nothing of its
+answer. A hold that begins or ends during a query therefore leaves a gap of one occurrence, under
+`BUFFER` too.
+
+#### `PROMETHEUS CLIENT`
+
+Every key of a `PROMETHEUS CLIENT`'s `CONFIG` is Nervix's own:
 
 | Key | Required | Value |
 | --- | --- | --- |
 | `addr` | Yes | The root of the Prometheus HTTP API: an `http` or `https` URL with a host, whose path is the prefix the API is served under, such as `/monitoring` behind a reverse proxy. Each query is sent to `api/v1/query` beneath it, so the URL carries no query string and no fragment. |
-| `timeout_ms` | Yes | How long one query may take, as a positive whole number of milliseconds. It covers name resolution, connection setup, TLS and the response. |
-| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the roots the client already trusts. |
+| `timeout_ms` | Yes | A positive whole number of milliseconds that bounds one query, as [Client Deadlines](#client-deadlines) defines. It covers name resolution, connection setup, TLS and the whole response. |
+| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the platform's native roots. |
 | `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
-
-```plexus
-CREATE PROMETHEUS CLIENT prom_main
-  CONFIG {
-    'addr' = 'https://prometheus.example.com/monitoring',
-    'timeout_ms' = 5000
-  };
-```
 
 `CREATE PROMETHEUS CLIENT` refuses a configuration that cannot configure a query source, and names the key:
 a key the client does not declare, a key written twice, a missing `addr` or `timeout_ms`, an
@@ -2207,6 +2500,29 @@ Keys are lowercase and case-sensitive. A value can name a file
 of the client's `MOUNT`, as in `'tls_ca_file' = '{{ dev_tls }}/ca.pem'`. The rendered configuration
 must satisfy these rules before commitment, and a source checks it again when opening, so the
 address it queries is the one the rules admit.
+
+#### Prometheus Client Transport
+
+A query travels through the HTTP client Nervix shares with Sentry and OTEL over HTTP, and inherits
+its [transport contract](connector-contract.md#http-client-transport):
+
+- Each query is one `GET` to `api/v1/query` beneath `addr`, with the PromQL in its `query` parameter
+  and the due instant, in decimal seconds, in its `time` parameter. The PromQL travels in the URL, so
+  it must fit what the server and any proxy in front of it accept in one. The request carries no
+  `timeout` parameter, so the server's own query timeout applies beside `timeout_ms`.
+- The host of `addr` is resolved through the node's DNS resolver. It stays the HTTP authority and the
+  name HTTPS verifies, as [Connection Identity](name-resolution.md#connection-identity) describes.
+- No proxy is used. A `PROMETHEUS CLIENT` declares no `proxy`, and the proxy environment variables
+  `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and their lowercase forms are never read.
+- No redirect is followed, so a query goes only to the host of `addr`. A `3xx` answer fails its poll
+  with its status, such as `Prometheus query failed with HTTP status 302 Found`, so `addr` must name
+  the root that answers rather than one that redirects to it.
+- A client declares no bearer token, and a query writes no headers. A server that requires
+  authentication is reached with a client certificate, or with Basic credentials in the user
+  information of `addr`, as in `https://reader:secret@prometheus.example.com`. Every query sends
+  them in its `Authorization` header. `SHOW CREATE CLIENT` and `DESCRIBE CLIENT` mask such an `addr`
+  as `********`, and complete serialization keeps it, so a backup archive holds it; see
+  [Backup And Restore](backup-and-restore.md).
 
 ### `HTTP ENDPOINT` And `WEBSOCKETS ENDPOINT`
 
@@ -2228,7 +2544,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Capability | Declaration |
 | --- | --- |
 | Reference | Http endpoint |
-| Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
+| Locator and validation rule | Not offered: The endpoint declaration owns the host and path this cluster serves; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |
 | Options in statement order | No entity-specific options. |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
@@ -2546,33 +2862,44 @@ The client's Nervix-owned `CONFIG` is strict, with lowercase, case-sensitive key
 
 | Key | Contract |
 | --- | --- |
-| `endpoint` | Required `ws://` or `wss://` URL with a host and without a fragment. Its path and query are sent in the upgrade request. |
+| `endpoint` | Required `ws://` or `wss://` URL with a host, without a fragment and without user information. Its path and query are sent in the upgrade request. |
 | `connect_timeout_ms` | Positive whole milliseconds for DNS, TCP, TLS and upgrade together; omitted means 30000. |
 | `ping_interval_ms` | Positive whole milliseconds between client pings after signaling completes; omitted means only answering peer pings. |
 | `idle_timeout_ms` | Positive whole milliseconds without an inbound frame before reconnecting. When omitted, three configured ping intervals apply, or 30000 without configured pings. |
 | `handshake_buffer_capacity` | Accepted signaling messages retained before readiness: 1–65535, default 16. A full queue backpressures the connection within the signaling `TIMEOUT`. |
 | `max_message_size` | Positive whole bytes per incoming message, including fragmented messages: at most 4294967295, default 67108864 (64 MiB). |
 | `max_frame_size` | Positive whole bytes per incoming frame: at most 4294967295, default 16777216 (16 MiB). |
-| `tls_ca_file` | Optional PEM CA file; only with a `wss://` endpoint. Its certificates are trusted beside the bundled WebPKI roots and the platform's native roots, never instead of them. |
+| `tls_ca_file` | Optional PEM CA file holding at least one certificate; only with a `wss://` endpoint. Its certificates are trusted beside the bundled WebPKI roots and the platform's native roots, never instead of them. |
 | `tls_cert_file`, `tls_key_file` | Optional client identity files, supplied together; only with a `wss://` endpoint. |
 
 The client's declared key schema refuses unknown, repeated or mistyped keys and TLS file keys with
 `ws://`, and supplies the three declared defaults that `DESCRIBE CLIENT` shows. The WebSocket
-configuration then refuses an endpoint with a fragment, a count above its maximum and three ping
-intervals beyond the schedulable bound. Durations obey the shared schedulable physical-duration
-bound. Resource mounts and configuration templates keep their shared client contract; rendered
-values are checked before commitment and again when opening the source. A ping write has a
-one-second physical budget and a failure triggers recovery.
+configuration then refuses an endpoint with a fragment or user information, a count above its
+maximum and three ping intervals beyond the schedulable bound. Durations obey the shared
+schedulable physical-duration bound. Resource mounts and configuration templates keep their shared
+client contract; rendered values are checked before commitment and again when opening the source.
+A ping write has a one-second physical budget and a failure triggers recovery.
 
 No WebSockets key is declared confidential, but `DESCRIBE CLIENT` and `SHOW CREATE CLIENT` show an
-`endpoint` that carries user information or a query as `********`, because either can hold a
-credential. User information in the `endpoint` is not sent with the upgrade; a peer that needs
-credentials receives them as a `HEADERS` field, such as `authorization`, or in the query. `CREATE WEBSOCKETS CLIENT` requires each TLS file key, once its resource mount template
-is rendered, to name a readable regular file. The source parses the files when it opens: a CA
-certificate it cannot parse, or a client certificate chain and private key it cannot read or pair,
-fails the ingestor's start, which `DESCRIBE INGESTOR` shows as its transient status. A
-`tls_ca_file` that holds no PEM certificate adds no trust root, so the bundled and native roots
-alone verify the server. The server certificate is always verified against the endpoint's host.
+`endpoint` that carries a query as `********`, because a query can hold a credential. The upgrade
+never sends user information, so `CREATE WEBSOCKETS CLIENT` refuses an `endpoint` that carries it
+with `'endpoint' must not carry user information`, without printing the value. A peer that needs
+credentials receives them as a `HEADERS` field, such as `authorization`, or in the query.
+
+`CREATE WEBSOCKETS CLIENT` requires each TLS file key, once its resource mount template is
+rendered, to name a readable regular file. It also refuses a `tls_ca_file` that holds no PEM
+certificate, with `client config key 'tls_ca_file' holds no certificate`: such a file adds no trust
+root, so a private CA the client was meant to trust would surface only as a verification failure on
+every connection. `REBIND RESOURCE` applies the same checks to the version it moves a client to.
+The source parses the files when it opens: a CA certificate it cannot parse, or a client
+certificate chain and private key it cannot read or pair, fails the ingestor's start, which
+`DESCRIBE INGESTOR` shows as its transient status. The server certificate is always verified
+against the endpoint's host.
+
+These checks read the file on the node that validates the statement. A mounted file is the pinned
+version every node reads. A path outside a mount names each node's own file, and the source does
+not repeat the certificate check when it opens: a file that holds no certificate there adds no
+trust root, and the bundled and native roots alone verify the server.
 
 After signaling succeeds, the idle timer starts. An explicit idle timeout overrides the
 ping-derived value. Every received frame, including a ping or pong, refreshes activity. Sending a
@@ -2775,3 +3102,9 @@ The following entities declare `INSTANCES`; presence and defaults follow the voc
 | RABBITMQ QUEUE | optional; default 1 |
 | SQS QUEUE | optional; default 1 |
 <!-- connector-matrix:instancing:end -->
+
+The instances of a `KAFKA TOPIC` ingestor under `OFFSET BY CONSUMER GROUP` are members of one group
+and share its `START AT`: whichever instance takes a partition the group holds no usable offset for
+starts it there, and a partition that moves to another instance resumes from the group's committed
+offset. Under `OFFSET BY DOMAIN` the domain's start point places every partition, whichever instance
+the schedule assigns it to.

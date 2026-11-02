@@ -56,7 +56,7 @@ CREATE KAFKA CLIENT kafka_main
 CREATE KAFKA TOPIC INGESTOR kafka_notifications
   FROM kafka_main
   TOPIC 'notifications'
-  OFFSET BY CONSUMER GROUP 'nervix_consumer'
+  OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   ON QUIESCE SUSPEND DECODE USING notification_codec
   TO notifications

@@ -168,7 +168,7 @@ mod tests {
         for (key, value) in [
             ("nervix.unknown", "value"),
             ("fetch.wait.max.ms", "not-a-number"),
-            ("auto.offset.reset", "not-an-offset"),
+            ("security.protocol", "not-a-protocol"),
         ] {
             let refusal = validate_client_configuration(&config(key, value))
                 .expect_err("librdkafka refuses this property");

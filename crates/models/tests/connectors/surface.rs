@@ -253,9 +253,13 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
             envelope: &[EnvelopeClauseKind::Timestamp],
             ..located(ConnectorKind::Kafka, "TOPIC", "kafka_topic", &[])
         },
-        EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => {
-            located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
-        }
+        EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => EmitterSurface {
+            envelope: &[
+                EnvelopeClauseKind::Timestamp,
+                EnvelopeClauseKind::DeliverAfter,
+            ],
+            ..located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
+        },
         EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
             located(ConnectorKind::Mqtt, "TOPIC", "mqtt_topic", &[])
         }
@@ -645,7 +649,8 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
             "MODE ACK SEQUENTIAL",
             "MODE ACK PARALLEL",
             "OFFSET BY DOMAIN",
-            "OFFSET BY CONSUMER GROUP",
+            "OFFSET BY CONSUMER GROUP START AT EARLIEST",
+            "OFFSET BY CONSUMER GROUP START AT LATEST",
             "INSTANCES",
             "metadata.topic",
             "metadata.partition",

@@ -20,7 +20,7 @@
 
 use std::{
     io,
-    num::{NonZeroU16, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
     time::Duration,
 };
 
@@ -29,6 +29,7 @@ use nervix_connector::{
     IngestorBatch, IngestorBatchRequest, IngestorMessage as _, IngestorReadCancellation,
 };
 use nervix_model_harness::shuttle::check_interleavings;
+use nervix_models::{ClientConfigEntry, MqttClientConfig};
 use nervix_primitives::{
     sync::{Arc, mpsc},
     task::JoinHandle,
@@ -39,6 +40,18 @@ use rumqttc::{
 };
 
 use super::{AcknowledgementRequests, ConnectionEvents, MqttConnection};
+
+/// The largest complete publish a client that leaves `max_packet_size` out admits, below the checks'
+/// 20 KiB publishes, so those are discards.
+fn default_admission() -> NonZeroU32 {
+    let client = [ClientConfigEntry {
+        key: "addr".to_string(),
+        value: "mqtt://127.0.0.1:1883".to_string(),
+    }];
+    MqttClientConfig::parse(&client)
+        .assured("an address alone is a valid MQTT client configuration")
+        .max_packet_size()
+}
 use crate::topic::ingestor::{
     IngestorAcknowledgement, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorPosition,
     PublishRead as _, PublishReadOutcome, metrics_fixture::IngestorMetricsFixture,
@@ -150,6 +163,7 @@ fn connection(
             receive_maximum: read_ahead,
         },
         None,
+        default_admission(),
         IngestorMetricsFixture::new().counter(),
     );
     (connection, deliveries, record)
@@ -286,6 +300,7 @@ fn an_acknowledgement_stays_writable_during_qos_zero_overflow() {
                     .assured("the sequential window includes headroom"),
             },
             None,
+            default_admission(),
             metrics.counter(),
         );
         let first = publish(1, QoS::AtLeastOnce);

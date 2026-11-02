@@ -2,8 +2,8 @@
 //!
 //! Layer: vocabulary.
 //! - **Owns.** Key names, presence, types, confidentiality, file roles, the entities that read each
-//!   key, delegated namespaces, the other names a driver reads for one property and the family
-//!   of secret keys an operator names.
+//!   key, delegated namespaces, the clause that sets a reserved key a statement owns, the other
+//!   names a driver reads for one property and the family of secret keys an operator names.
 //! - **Depends on.** Configuration entries, the shared deadline contract and URL values.
 //! - **Must not know.** Driver implementations, resource installation or network operations.
 
@@ -604,6 +604,16 @@ impl ClientConfigStrippedPrefix {
     }
 }
 
+/// A reserved key Nervix sets from a statement rather than from the client, with the clause that
+/// sets it, which the key's refusal names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientConfigStatementKey {
+    /// The reserved key.
+    pub key: &'static str,
+    /// The clause to write instead, and the statement that holds it.
+    pub clause: &'static str,
+}
+
 /// A pass-through namespace, explicitly including the case where the driver reads every key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientConfigNamespace {
@@ -626,6 +636,8 @@ pub struct ClientConfigSchema {
     keys: &'static [ClientConfigKey],
     namespaces: &'static [ClientConfigNamespace],
     reserved: &'static [&'static str],
+    /// The reserved keys a statement sets, sorted by key.
+    statement_keys: &'static [ClientConfigStatementKey],
     /// The other names the driver reads for its properties, sorted by the name each refuses.
     aliases: &'static [ClientConfigAlias],
     stripped_prefix: Option<ClientConfigStrippedPrefix>,
@@ -685,6 +697,8 @@ pub enum ClientConfigSchemaError {
     },
     #[error("client config key '{key}' is reserved for Nervix")]
     Reserved { key: String },
+    #[error("client config key '{key}' is set by a statement; write {clause}")]
+    SetByStatement { key: String, clause: &'static str },
     #[error(
         "client config key '{key}' is the driver's other name for '{accepted}'; write '{accepted}'"
     )]
@@ -724,6 +738,7 @@ impl ClientConfigSchema {
             keys,
             namespaces,
             reserved,
+            statement_keys: &[],
             aliases: &[],
             stripped_prefix: None,
             secret_key_prefix: None,
@@ -739,6 +754,22 @@ impl ClientConfigSchema {
     pub const fn with_secret_keys(self, prefix: &'static str) -> Self {
         Self {
             secret_key_prefix: Some(prefix),
+            ..self
+        }
+    }
+
+    /// Declares the reserved keys a statement sets: `keys`, sorted by key, each one reserved.
+    pub const fn with_statement_keys(self, keys: &'static [ClientConfigStatementKey]) -> Self {
+        let mut index = 0;
+        while index < keys.len() {
+            assert!(Self::holds_name(self.reserved, keys[index].key));
+            if index > 0 {
+                assert!(Self::name_precedes(keys[index - 1].key, keys[index].key));
+            }
+            index += 1;
+        }
+        Self {
+            statement_keys: keys,
             ..self
         }
     }
@@ -943,12 +974,33 @@ impl ClientConfigSchema {
         self.reserved
     }
 
+    pub const fn statement_keys(self) -> &'static [ClientConfigStatementKey] {
+        self.statement_keys
+    }
+
     pub const fn aliases(self) -> &'static [ClientConfigAlias] {
         self.aliases
     }
 
     pub const fn stripped_prefix(self) -> Option<ClientConfigStrippedPrefix> {
         self.stripped_prefix
+    }
+
+    /// The refusal of the reserved key `key`, which names the clause that sets it when a statement
+    /// does.
+    fn reserved_refusal(self, key: &str) -> ClientConfigSchemaError {
+        let declared = self
+            .statement_keys
+            .binary_search_by_key(&key, |statement_key| statement_key.key);
+        match declared {
+            Ok(index) => ClientConfigSchemaError::SetByStatement {
+                key: key.to_string(),
+                clause: self.statement_keys[index].clause,
+            },
+            Err(_) => ClientConfigSchemaError::Reserved {
+                key: key.to_string(),
+            },
+        }
     }
 
     /// The pair that refuses `name`, if the driver reads `name` as another name for a property this
@@ -1079,9 +1131,7 @@ impl ClientConfigSchema {
                 }));
             }
             if self.reserved.contains(&entry.key.as_str()) {
-                return Err(Report::new(ClientConfigSchemaError::Reserved {
-                    key: entry.key.clone(),
-                }));
+                return Err(Report::new(self.reserved_refusal(&entry.key)));
             }
             self.refuse_driver_alias(&entry.key)?;
             let Some(key) = self.key(&entry.key) else {

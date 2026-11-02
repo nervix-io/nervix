@@ -446,8 +446,8 @@ impl PulsarTopicIngestorPlan {
     fn initial_position(&self) -> PulsarInitialPosition {
         match self.subscription.ownership {
             PulsarSubscriptionOwnership::Ingestor { start_at } => match start_at {
-                nervix_models::PulsarStartPosition::Earliest => PulsarInitialPosition::Earliest,
-                nervix_models::PulsarStartPosition::Latest => PulsarInitialPosition::Latest,
+                nervix_models::IngestStartPosition::Earliest => PulsarInitialPosition::Earliest,
+                nervix_models::IngestStartPosition::Latest => PulsarInitialPosition::Latest,
             },
             // The existing cursor controls a provisioned join. If it disappeared after the
             // existence check, retain the documented earliest position of that broker race.

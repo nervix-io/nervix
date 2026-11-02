@@ -58,8 +58,7 @@ Feature: Runtime startup admission
 
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE KAFKA TOPIC EMITTER admission_emitter

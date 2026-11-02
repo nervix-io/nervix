@@ -1323,6 +1323,23 @@ mod tests {
         assert!(parse_expression("input.inbound IN (input.from_unix)").is_ok());
     }
 
+    /// AMQP names a message's kind `type`, and a RabbitMQ delivery exposes it and its timestamp as
+    /// `metadata.type` and `metadata.timestamp`: the word after the `metadata.` scope names the
+    /// field even where a statement spells a keyword with it, such as `TYPE` or `TIMESTAMP AT`.
+    #[test]
+    fn a_metadata_field_may_be_named_by_a_keyword_after_its_scope() {
+        for name in ["type", "timestamp", "priority", "exchange", "expiration"] {
+            assert_eq!(
+                parsed(&format!("metadata.{name}")),
+                Expression::Field(FieldReference::scoped(
+                    FieldScope::Metadata,
+                    FieldName::try_from(name).expect("test field names are valid"),
+                )),
+                "metadata.{name} names a metadata field"
+            );
+        }
+    }
+
     fn cast(expression: Expression, target: ParseAsType) -> Expression {
         Expression::Cast {
             expression: Box::new(expression),
