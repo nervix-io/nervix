@@ -2452,7 +2452,24 @@ completed `drain` duration. These are measurements of the same cut budget, never
 An owner request remains a terminal operation: a coordinator waiting for owners names that phase,
 and owner-local administrative logs distinguish revision catch-up, cluster-state application,
 lifecycle checkpoints, storage capture and staging. No remote progress is inferred from elapsed
-time. A cut that cannot reach a node it needs is refused as
+time. The command boundary reads a preserved `ConsensusError::LeadershipLost` beneath a capture or
+lifecycle context, or the cut's explicit `CoordinatorChanged`, as
+`OutcomeUnknown(LeadershipLost)`. The execution stays applying under its original reference,
+including when the same leader could not confirm its lease during pause, resume or mutation lease
+release. A `CaptureTimeout` remains a definitive refusal even when its last lease-admission cause
+was leadership loss; storage failures likewise retain their definitive failure and full chain.
+The cut's result is joined with its resume and mutation-lease-release results at their production
+boundaries. When both operations fail, a definitive cut failure wins; an uncertain cut yields to
+the cleanup failure, including a definitive storage failure. Both reports retain their typed
+causes until they are logged together with the execution reference. A later authority-loss report
+therefore cannot replace an expired cut's refusal with an unknown outcome.
+`DomainAlterError::ResumeAfterAbandonedAlter` keeps the application or drain failure of an already
+confirmed pause alongside its failed resume. The phase projection inspects the typed lifecycle
+contexts beneath that compound report, so a pause-application or drain expiry keeps its
+`CaptureTimeout` measurements. An abandoned cut remains definitive even when the resume's cause
+is `ConsensusError::LeadershipLost`; both causes remain in the report.
+Every failed attempt logs its execution reference and report before command finalization can hold
+its result. A cut that cannot reach a node it needs is refused as
 `StateOwnerUnreachable` when the cluster does not report a placement's scheduled primary live, and
 as `ExecutorUnreachable` when, before a quiesced cut pauses, it does not report a node that runs the
 domain's work live. Each carries the domain, the entity's kind and name and the node as typed

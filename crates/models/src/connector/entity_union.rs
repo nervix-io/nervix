@@ -79,6 +79,13 @@ macro_rules! connector_ingestor_kinds {
                     $(Self::$Variant => <$Model as $crate::IngestorDeclaration>::CAPABILITIES,)+
                 }
             }
+
+            fn alternative_locators(&self) -> &'static [$crate::LocatorDeclaration] {
+                match self {
+                    $(Self::$Variant =>
+                        <$Model as $crate::IngestorDeclaration>::ALTERNATIVE_LOCATORS,)+
+                }
+            }
         }
 
         $(
