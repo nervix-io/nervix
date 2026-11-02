@@ -59,7 +59,7 @@ mirror = "Redis Pub/Sub carries a channel and a payload, and for a pattern subsc
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."PROMETHEUS QUERY"]
-ingest_headers = "The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared."
+ingest_headers = "An HTTP response's headers describe a whole answer rather than one of its samples, and each sample's labels travel in its payload under metric, so a query source reads no transport headers."
 ingest_locator = "QUERY is a PromQL expression option rather than an external entity name."
 mirror = "The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared."
 
