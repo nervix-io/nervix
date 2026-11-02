@@ -284,6 +284,10 @@ def render_matrix(surface, notes):
         namespaces = ", ".join(client["namespaces"]) or only_declared
         reserved = ", ".join(f"`{key}`" for key in client["reserved"]) or "none"
         lines.append(f"Delegated property namespaces: {namespaces}. Reserved keys: {reserved}.\n")
+        lines.extend(
+            f"`{key['key']}` is set by a statement: write {key['clause']}.\n"
+            for key in client["statement_keys"]
+        )
         if secret_keys:
             lines.append(f"Secret keys an operator names: `{secret_keys}`, each a confidential "
                          "string a statement reads by its whole key. Nervix owns them; no driver "

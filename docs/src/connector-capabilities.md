@@ -78,7 +78,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Reference | KAFKA client |  |
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers'` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |  |
+| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |  |
@@ -826,7 +826,6 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `auto.offset.reset` | optional | string | driver; best effort | no | none |
 | `bootstrap.servers` | required | string | driver; best effort | no | none |
 | `client.id` | optional | string | driver; best effort | no | none |
 | `delivery.timeout.ms` | optional | unsigned integer | driver; best effort | no | none |
@@ -848,7 +847,9 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `ssl.key.password` | optional | string | driver; best effort | yes | none |
 | `ssl.key.pem` | optional | string | driver; best effort | yes | none |
 
-Delegated property namespaces: all driver property names. Reserved keys: `allow.auto.create.topics`, `delivery.report.only.error`, `enable.auto.commit`, `enable.partition.eof`, `group.id`.
+Delegated property namespaces: all driver property names. Reserved keys: `allow.auto.create.topics`, `auto.offset.reset`, `delivery.report.only.error`, `enable.auto.commit`, `enable.partition.eof`, `group.id`.
+
+`auto.offset.reset` is set by a statement: write START AT on the consumer group of the KAFKA TOPIC ingestor.
 
 A property the driver reads under more than one name is accepted under one; the client refuses the other.
 

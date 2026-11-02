@@ -19462,8 +19462,7 @@ impl UnacknowledgedSourceFixture {
             Self::Kafka => {
                 r#"
       CREATE KAFKA CLIENT unacknowledged_client CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };"#
             }
             Self::Mqtt => {
@@ -19535,7 +19534,7 @@ impl UnacknowledgedSourceFixture {
         match self {
             Self::Kafka => {
                 "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'unacknowledged_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'unacknowledged_group_{{test_id}}' START AT EARLIEST
           MODE NO ACK
         ON QUIESCE SUSPEND"
             }
@@ -26954,6 +26953,56 @@ async fn when_kafka_message_is_published(
         .publish_kafka(&topic, &payload)
         .await
         .expect("failed to publish kafka message");
+}
+
+/// Publishes the docstring until the subscription receives `fragment`. A consumer that starts at
+/// a partition's end reads that end a moment after it takes the partition up, which no public
+/// surface shows, and a record published before then falls behind it. The first payload must hold
+/// `fragment`: records arrive in partition order, so anything the consumer should have skipped
+/// precedes everything published here and fails the step.
+#[when(
+    expr = "Kafka message is published to topic {string} until the relay subscription receives \
+            {string}"
+)]
+async fn when_kafka_message_is_published_until_received(
+    world: &mut ScenarioWorld,
+    topic: String,
+    fragment: String,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let payload = expand_placeholders(world, docstring(step));
+    let fragment = expand_placeholders(world, &fragment);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        nervix_primitives::task::consume_budget().await;
+        world.last_publish_at = Some(Instant::now());
+        world
+            .cluster()
+            .publish_kafka(&topic, &payload)
+            .await
+            .expect("failed to publish kafka message");
+        let session = world
+            .active_session
+            .as_mut()
+            .expect("an active session with subscription must exist");
+        let event = session
+            .try_next_subscription(Duration::from_millis(500))
+            .await
+            .expect("failed while waiting for a subscription payload");
+        let Some(event) = event else {
+            continue;
+        };
+        assert!(
+            event.payload.contains(&fragment),
+            "expected the first subscription payload to hold {fragment:?}, got: {}",
+            event.payload
+        );
+        return;
+    }
+    panic!(
+        "the relay subscription received no {fragment:?} while topic '{topic}' was published to"
+    );
 }
 
 #[when(

@@ -211,8 +211,7 @@ Feature: Kafka emission
 
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE KAFKA TOPIC EMITTER kafka_notifications
@@ -291,8 +290,7 @@ Feature: Kafka emission
         ON GENERAL ERROR LOG;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC EMITTER kafka_notifications FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
@@ -348,8 +346,7 @@ Feature: Kafka emission
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA CLIENT unavailable_kafka_sink CONFIG {
         'bootstrap.servers' = '127.0.0.1:1',
@@ -358,7 +355,7 @@ Feature: Kafka emission
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_ingress TOPIC 'mode_boundary_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'mode_boundary_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'mode_boundary_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -414,12 +411,11 @@ Feature: Kafka emission
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
       FROM kafka_main TOPIC 'detached_confirming_in_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'detached_confirming_group_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'detached_confirming_group_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
@@ -484,8 +480,7 @@ Feature: Kafka emission
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA CLIENT kafka_sink CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',
@@ -493,7 +488,7 @@ Feature: Kafka emission
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
       FROM kafka_ingress TOPIC 'stale_copy_in_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'stale_copy_group_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'stale_copy_group_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications

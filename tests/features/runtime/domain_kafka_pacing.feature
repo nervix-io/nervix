@@ -17,8 +17,7 @@ Feature: Kafka ingestor domain pacing
       CREATE CODEC resumed_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR source
         FROM kafka_main TOPIC 'start_once_in_{{test_id}}'
@@ -127,8 +126,7 @@ Feature: Kafka ingestor domain pacing
       CREATE CODEC resumed_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR source
         FROM kafka_main TOPIC 'restored_start_in_{{test_id}}'
@@ -283,11 +281,10 @@ Feature: Kafka ingestor domain pacing
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_pacing_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_pacing_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -339,11 +336,10 @@ Feature: Kafka ingestor domain pacing
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_pacing_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_pacing_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -402,11 +398,10 @@ Feature: Kafka ingestor domain pacing
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_pacing_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_pacing_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP AT occurred_at
         TO notifications
@@ -461,11 +456,10 @@ Feature: Kafka ingestor domain pacing
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_pacing_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_pacing_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP AT occurred_at
         TO notifications
@@ -521,8 +515,7 @@ Feature: Kafka ingestor domain pacing
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -597,8 +590,7 @@ Feature: Kafka ingestor domain pacing
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -690,8 +682,7 @@ Feature: Kafka ingestor domain pacing
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -768,8 +759,7 @@ Feature: Kafka ingestor domain pacing
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -850,8 +840,7 @@ Feature: Kafka ingestor domain pacing
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -934,8 +923,7 @@ Feature: Kafka ingestor domain pacing
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -974,67 +962,7 @@ Feature: Kafka ingestor domain pacing
       | 3            |
 
   @kafka_unrecorded_partition_start
-  Scenario Outline: A partition added while an unpaced domain is stopped starts at its end when the Kafka client resets to latest on <cluster_size> nodes
-    Given Kafka is running
-    And a <cluster_size> node nervix cluster is started
-    And the active domain is "{{domain}}"
-    And Kafka topic "added_latest_{{test_id}}" exists with 1 partitions
-    When these Plexus statements are executed on the leader node
-      """
-      CREATE UNPACED DOMAIN {{domain}};
-      CREATE SCHEMA added_event ( seq I64 );
-      CREATE WIRE JSON SCHEMA added_wire MODE STRICT ( seq integer );
-      CREATE CODEC added_codec FROM WIRE JSON SCHEMA added_wire TO SCHEMA added_event;
-      CREATE RELAY added_events SCHEMA added_event UNBRANCHED;
-      CREATE KAFKA CLIENT added_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'latest'
-      };
-      CREATE KAFKA TOPIC INGESTOR added_source
-        FROM added_kafka TOPIC 'added_latest_{{test_id}}'
-        OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
-        ON QUIESCE SUSPEND DECODE USING added_codec
-        TO added_events INHERIT ALL UNBRANCHED
-        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE SUBSCRIPTION added_subscription TO added_events;
-      START;
-      """
-    Then within "30s" DESCRIBE INGESTOR "added_source" on the leader node contains
-      """
-      kafka observed partitions: 0
-      """
-    When these Plexus statements are executed on the leader node
-      """
-      STOP;
-      """
-    And Kafka topic "added_latest_{{test_id}}" partition count is changed to 2
-    And Kafka message is published to topic "added_latest_{{test_id}}" partition 1
-      """
-      {"seq":2}
-      """
-    And these Plexus statements are executed on the leader node
-      """
-      START;
-      """
-    Then within "60s" DESCRIBE INGESTOR "added_source" on the leader node contains
-      """
-      kafka observed partitions: 0,1
-      """
-    # The added partition has no domain offset, and the client resets to latest, so the ingestor
-    # starts it at its end and never reads the record published before it took the partition up.
-    And within "60s" repeatedly publishing Kafka message to topic "added_latest_{{test_id}}" partition 1 yields a relay subscription payload
-      """
-      {"seq":3}
-      """
-    And the last relay subscription payload contains '"seq":3'
-
-    Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
-
-  @kafka_unrecorded_partition_start
-  Scenario Outline: A partition added while an unpaced domain is stopped starts at its earliest record when the Kafka client resets to earliest on <cluster_size> nodes
+  Scenario Outline: A partition added while an unpaced domain is stopped starts at its earliest record on <cluster_size> nodes
     Given Kafka is running
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -1047,8 +975,7 @@ Feature: Kafka ingestor domain pacing
       CREATE CODEC added_codec FROM WIRE JSON SCHEMA added_wire TO SCHEMA added_event;
       CREATE RELAY added_events SCHEMA added_event UNBRANCHED;
       CREATE KAFKA CLIENT added_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR added_source
         FROM added_kafka TOPIC 'added_earliest_{{test_id}}'
@@ -1080,8 +1007,8 @@ Feature: Kafka ingestor domain pacing
       """
       kafka observed partitions: 0,1
       """
-    # The added partition has no domain offset, and the client resets to earliest, so the ingestor
-    # starts it at its earliest record.
+    # The added partition has no domain offset, and an unpaced domain's plain START places it at
+    # its earliest record.
     And within "60s" the relay subscription receives payloads in order
       """
       "seq":2
