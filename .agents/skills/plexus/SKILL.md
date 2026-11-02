@@ -35,7 +35,7 @@ direct-value sections. Nervix validates the entity's declared limits and exact m
 `CREATE` and `ALTER`; correct a refused declaration before starting the domain.
 For MQTT sources, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt) before promising
 delivery during downstream stalls; it distinguishes QoS 0 overflow, acknowledged capacity and
-the counters that expose each outcome.
+the counters that expose each outcome, and the refusal of a broker grant below the declared QoS.
 
 For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
@@ -566,7 +566,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   TLS-file interface, certificate and key must be supplied together, and TLS files require
   `verify-full`. A `POSTGRES TABLE` names `'Orders'` or `'sales.Orders'`, each part sent with its
   case kept; `ON CONFLICT (...) DO UPDATE` needs a target and a mapped column outside it, and
-  `MAX SIZE` is at most `1073741822B`. Read
+  `MAX SIZE` is at most `1073741822B`. Keep its optional statement `timeout_ms` separate from
+  `pool_acquire_timeout_ms`; read their bounds and retry semantics in
   [Emitters → Postgres](../../../docs/src/emitters.md#postgres).
 - Give a `RABBITMQ` client an `amqp://` or `amqps://` `addr` that names a host and no port 0; Nervix
   refuses any other address before commit. Mounted `tls_ca_file`, `tls_cert_file` and
