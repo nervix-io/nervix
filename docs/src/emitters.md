@@ -303,7 +303,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Capability | Declaration |
 | --- | --- |
 | Reference | HTTP client |
-| Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
+| Locator and validation rule | Not offered: The client's endpoint names the origin, and each record's PATH expression names its target beneath it; PATH is a request option rather than an external-name locator. |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `METHOD 'POST'` (expression); required<br>`PATH '/events'` (expression); required |
 | Headers | `write_header`; `sorted_by_name`, lowercase names: one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
@@ -326,16 +326,17 @@ See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md
 the expression. `MODE ACK` has no acknowledgement window or `ACK TIMEOUT`, and `NO ACK` is not
 available. The ordinary route-local `FLUSH` clause is required.
 
-The referenced client must be a `HTTP CLIENT` in the same domain. Its `endpoint` is an
-`http://` or `https://` origin with a host and optional port, and no credentials, non-root path,
-query or fragment. It requires a positive, schedulable `timeout_ms`; the emitter's `METHOD` is its
-own expression. HTTPS retains certificate and hostname verification.
+The referenced client must be an `HTTP CLIENT` in the same domain, and
+[`HTTP CLIENT`](ingestors.md#http-client) describes every key it declares for polling and emitting
+alike. An emitter's client names an origin as its `endpoint`: an `http://` or `https://` URL with a
+host and optional port, and no credentials, path beyond `/`, query or fragment. It requires a
+positive, schedulable `timeout_ms`. HTTPS retains certificate and hostname verification.
 The optional `tls_cert_file` and `tls_key_file` settings must be supplied together, and mounted TLS
 files use the client's pinned resource version. The optional `follow_redirects` and `proxy`
 settings mean for the emitter what they mean for HTTP polling, as
 [HTTP client transport](#http-client-transport) describes. The client's `secret.<name>` keys are
-for [polling headers](ingestors.md#http-request) and the emitter sends none of them. Validation
-does not probe the destination.
+for [polling headers](ingestors.md#http-polling-requests) and the emitter sends none of them.
+Validation does not probe the destination.
 
 Method, path and `write_header` name and value expressions must each be exact, non-null `STRING`
 values. Request expressions read the original `input` and, with a codec, finalized `output` and
@@ -489,16 +490,18 @@ An `HTTP CLIENT` means the same transport for HTTP polling and for the HTTP emit
 HTTP through maintained implementations, Reqwest for polling and hyper for the emitter, over
 HTTP/2 when the endpoint's TLS negotiates it and HTTP/1.1 otherwise, and:
 
+- `timeout_ms` is the one deadline of a request and every redirect it follows. A poll's request
+  runs within it until the whole response body has been read, and an emitted request until its
+  final response headers are complete, as [HTTP requests](#http-requests) describes.
 - Without `follow_redirects`, or with `follow_redirects = false`, a redirect answer is the
   response: an emitted record is rejected with its status, and a poll fails with it.
 - With `follow_redirects = true`, a `301`, `302`, `307` or `308` answer, and a `303` answer to a
   `GET` or `HEAD`, whose one `Location` names the client's own origin, the same scheme, host and
   port, sends the same request there again: the same method, headers and body, never turning a
   `POST` into a `GET`. A relative `Location` is resolved against the request it answers, and its
-  fragment is dropped. One request follows at most 10 redirects, and every request of the chain
-  shares its one `timeout_ms`. A `Location` on another origin or carrying credentials, an answer
-  with no `Location` or with several, a `303` to any other method, which was handled where it was
-  sent, and the answer to the tenth repeat are the response.
+  fragment is dropped. One request follows at most 10 redirects. A `Location` on another origin or
+  carrying credentials, an answer with no `Location` or with several, a `303` to any other method,
+  which was handled where it was sent, and the answer to the tenth repeat are the response.
 - `proxy` names an `http` or `https` proxy that every request of the client goes through. The node
   resolves only the proxy's host; an `http` target is sent to the proxy in absolute form, and an
   `https` target tunnels through it with `CONNECT`, after which TLS still verifies the configured
@@ -1981,7 +1984,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | A batch is written as one frame within the frame limits below; general BATCH limits still apply. |

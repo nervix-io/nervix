@@ -7332,6 +7332,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "url",
+ "x509-parser",
 ]
 
 [[package]]

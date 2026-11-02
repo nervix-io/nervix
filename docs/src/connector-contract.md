@@ -404,6 +404,11 @@ one contract:
   names through the node resolver, never reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
   `NO_PROXY` or their lowercase forms, follows no redirect by itself, bounds each request by the
   client's `timeout_ms` where the client sets it, and presents the client's TLS trust and identity.
+  Reqwest's `gzip`, `deflate` and `brotli` features, which the OTEL connector selects and Cargo
+  unifies across the server's build, make such a client ask for those encodings with
+  `accept-encoding: gzip,deflate,br` unless its request writes that field, and decompress a
+  response whose `content-encoding` is exactly one of them, removing that field and
+  `content-length`; a connector crate built on its own, as its unit tests are, does neither.
   It also reads the one proxy a client declares with its `proxy` key, as a `DeclaredProxy`: a
   Reqwest client sends every request through it, and the HTTP request emitter's own transport reads
   the same declaration. Prometheus, Sentry and OTEL HTTP declare neither `proxy` nor
@@ -1362,7 +1367,8 @@ connection's peer address and its path, `KAFKA TOPIC` the topic, partition, offs
 timestamp, timestamp kind and tombstone flag, `RABBITMQ QUEUE` the delivery's exchange, routing key,
 delivery tag and redelivery flag followed by its AMQP basic properties, `SQS QUEUE` the message
 identity, send and first-receive times, receive count, group and deduplication identifiers,
-sequence number and sender identifier, `SYSLOG LISTENER` the peer address, `REDIS PUBSUB` the
+sequence number and sender identifier, `SYSLOG LISTENER` the peer address,
+transport and verified TLS client subject, `REDIS PUBSUB` the
 delivering channel and the pattern it matched, `PROMETHEUS QUERY` the query and the instant it was
 evaluated at, and every other entity none. The endpoint entities are served by the host itself
 rather than a connector crate, so the server's endpoint intake hands their values over the same way
@@ -2794,6 +2800,12 @@ sequenceDiagram
   octet count, at most eleven bytes with its space, is read whole again when a read splits it. A
   frame split anywhere across reads yields the same payload and the same typed framing failure as
   one read holding the whole stream. [Syslog ingestion](./syslog.md#tcp) defines the framing rules.
+  Each frame retains its peer address and transport. A successful TLS handshake supplies the
+  verified leaf client certificate, when client authentication is configured; its subject is
+  decoded once and shared by the connection's frames. UDP, TCP and TLS without a verified client
+  identity project a null TLS peer. A subject decoding failure retains the typed X.509 cause and
+  ends that connection before it hands over a frame. The generic metadata visit, lazy projection
+  and quiesce retention carry the entire declared row.
   Once a connection decodes a frame, it completes the bounded intake-queue send even if SUSPEND
   engages while that send waits for a place; suspension stops its next read. An accept failure
   retires only the listening socket. The source retains established connection tasks, their

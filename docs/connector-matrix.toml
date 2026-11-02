@@ -8,15 +8,15 @@ metadata = "Application batches carry their declared schema; there is no separat
 mirror = "Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope."
 
 [entity."HTTP REQUEST"]
-emit_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
+emit_locator = "The client's endpoint names the origin, and each record's PATH expression names its target beneath it; PATH is a request option rather than an external-name locator."
 envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
-ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
-mirror = "Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position."
+ingest_locator = "The client's endpoint URL names the polled resource, its path and query included, so this body has no separate external-name locator."
+mirror = "Polling writes its whole request in the statement, a literal METHOD and HEADERS of literals or client secrets, and sends it to the client's endpoint URL as written; HEADERS is ingest-only. Emitting computes METHOD and PATH for each record as expressions beneath an origin endpoint and writes headers with write_header; PATH is emit-only. Polling reads the response's headers, status and due instant, while an emitter reads only whether its final response headers deliver, retry or reject the record. Both directions share one HTTP CLIENT transport: timeout_ms and the follow_redirects and proxy opt-ins."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."HTTP ENDPOINT"]
-ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
-mirror = "Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position."
+ingest_locator = "The endpoint declaration owns the host and path this cluster serves; this body has no separate external-name locator."
+mirror = "An endpoint is the server side: every live node serves it, its requests carry no remote source position, and their headers and method, path, query, peer address and host metadata describe what a client sent. The HTTP REQUEST emitter instead sends requests to an external endpoint through an HTTP CLIENT."
 
 [entity."KAFKA TOPIC"]
 mirror = "Consumption tracks replayable log offsets and consumer groups; publication uses a producer queue or delivery report. Both directions use the same quoted, case-preserving Kafka topic names."
@@ -79,9 +79,9 @@ ingest_locator = "The configured client or endpoint owns the address and path; t
 mirror = "An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload."
 
 [entity."SYSLOG LISTENER"]
-ingest_headers = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
+ingest_headers = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
 ingest_locator = "The configured client owns the transport address; no separate external entity name is written in this body."
-mirror = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
+mirror = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
 
 [entity."CLIENT CONSUMER"]
 emit_headers = "Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope."
@@ -105,10 +105,10 @@ mirror = "The Sentry envelope API accepts one encoded event per request; this co
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."SYSLOG COLLECTOR"]
-emit_headers = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
+emit_headers = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
 emit_locator = "The configured client owns the transport address; no separate external entity name is written in this body."
 envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
-mirror = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
+mirror = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."OTEL LOGS"]
