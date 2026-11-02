@@ -86,7 +86,7 @@ Feature: Domain-paced branch buffering
       | 1            |
       | 3            |
 
-  @domain_buffer_timing
+  @domain_buffer_timing @slots_2
   Scenario Outline: Paced branch windows keep logical time while relay owners fan out slowly
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -173,7 +173,7 @@ Feature: Domain-paced branch buffering
       | 1            |
       | 3            |
 
-  @domain_buffer_timing
+  @domain_buffer_timing @slots_2
   Scenario Outline: Immediate flush keeps its physical minimum in a slow historical domain
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -250,7 +250,7 @@ Feature: Domain-paced branch buffering
       | 1            |
       | 3            |
 
-  @domain_buffer_timing
+  @domain_buffer_timing @slots_2
   Scenario Outline: Reingestor collection keeps separate logical deadlines for slow branches
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

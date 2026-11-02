@@ -24,7 +24,10 @@ use nervix_models::{
 };
 use strum::IntoEnumIterator as _;
 
-use crate::conformance_support::{assert_offers_exactly, created_model, refused};
+use crate::{
+    conformance_support::{assert_offers_exactly, created_model, refused},
+    statement::suggest_statement,
+};
 
 /// The batching clause a generated emitter writes where its entity batches.
 const BATCH: &str = "BATCH MAX MESSAGES 10 MAX SIZE 64KiB";
@@ -451,6 +454,55 @@ fn an_envelope_clause_or_property_the_entity_does_not_declare_is_refused() {
                 ..Generated::of(kind)
             };
             generated.assert_refused("PROPERTIES");
+        }
+    }
+}
+
+#[test]
+fn every_declared_envelope_clause_is_read_into_the_envelope() {
+    for kind in EmitterEntityKind::all() {
+        for clause in kind.capabilities().envelope {
+            let emitter = Generated {
+                envelope: Some(clause.example()),
+                ..Generated::of(kind)
+            }
+            .parse();
+            let mut written = Vec::new();
+            for envelope_clause in emitter.envelope.clauses() {
+                written.push(envelope_clause.kind());
+            }
+            assert_eq!(
+                written,
+                vec![*clause],
+                "{kind} declares {}, which its statement writes",
+                clause.keywords()
+            );
+        }
+    }
+}
+
+#[test]
+fn completion_after_the_body_offers_exactly_the_declared_envelope_clauses() {
+    for kind in EmitterEntityKind::all() {
+        let declared = kind.capabilities();
+        let generated = Generated::of(kind);
+        let mut words = vec![format!("{}{}", generated.through_mode(), generated.mode)];
+        if !generated.body.is_empty() {
+            words.push(generated.body.to_owned());
+        }
+        let prefix = format!("{} ", words.join(" "));
+        let suggestions = suggest_statement(&prefix, prefix.len());
+        for clause in EnvelopeClauseKind::iter() {
+            let offered = suggestions
+                .iter()
+                .any(|suggestion| clause.keywords().starts_with(suggestion.as_str()));
+            assert_eq!(
+                offered,
+                declared.envelope.contains(&clause),
+                "completion of `{prefix}` offers {} only where {kind} declares it; it offered \
+                 {suggestions:?}",
+                clause.keywords()
+            );
         }
     }
 }
