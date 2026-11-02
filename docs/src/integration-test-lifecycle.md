@@ -2860,6 +2860,17 @@ emitter stall, and checks every sequence and repeated header within the original
 followed by the 500-millisecond duplicate check. The source count does not confirm delivery to the
 broker's observing subscriber.
 
+## RabbitMQ Confirmation Ordering
+
+The RabbitMQ confirmation-order fixture forwards to the shared real broker. It leaves client
+traffic and returned message frames unchanged, waits for the broker's positive confirmations of
+the first two publishes, then forwards an individual acknowledgement of the first and a multiple
+acknowledgement through the second. This exposes a return arriving before another record's
+confirmation without depending on the broker's scheduling or changing which publishes it accepted.
+The scenario asserts that the controlled exchange occurred. The forwarder retains at most one
+bounded AMQP frame, and scenario cleanup closes its listener and forwarded connections after its
+nodes stop, using the same endpoint lifetime as the other scenario forwarders.
+
 ## DNS Authorities
 
 A scenario about how nodes find one another by name selects its cluster's peer addressing before the

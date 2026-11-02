@@ -812,14 +812,19 @@ body size and the limit as typed fields and becomes a record rejection of that m
 lost connection, and a close whose reason never arrives fail the attempt as an infrastructure
 failure, which the emitter retries on its backoff.
 
-A message the broker returns unrouted under `MANDATORY`, with its publisher confirm under `ACK` or
+A message the broker returns unrouted under `MANDATORY`, carried by a publisher confirm under `ACK` or
 before the round trip that ends a `NO ACK` write, is a record rejection with code `external` and
 operation `publish` whose message names the broker's reply code and text, such as `rabbitmq
 returned the message unrouted with reply code 312: NO_ROUTE`. A routing key longer than an AMQP
 short string carries is a `RabbitMqRecordError` keeping the driver's `ShortStringError` as its
 source and the key's length as a typed field, and becomes the same kind of rejection before the
 message is written. A return the emitter cannot attribute to a message of its write fails the
-attempt instead, because no record can be named as unrouted. An exchange emitter whose passive check
+attempt instead, because no record can be named as unrouted. Under `ACK`, returns are attributed
+across the bounded confirmation window rather than to the confirm carrying them. An unmatched
+return keeps its reply code and text in `RabbitMqConfirmationError`; a nack or disabled confirms
+uses that same typed owning context. No payload is included. An incomplete mandatory attribution
+is an infrastructure failure, including during size-refusal recovery, so an unresolved positive
+answer cannot disappear when the publisher replaces its channel. An exchange emitter whose passive check
 finds no exchange fails to open with `EmitterOpenError::MissingExternalEntity`, naming the exchange
 and keeping the broker's `NOT_FOUND` answer, a `lapin::Error`, as its typed cause; `DESCRIBE EMITTER`
 shows it as `RabbitMQ exchange '<name>' does not exist`. Any other failure of that check is an
@@ -1073,6 +1078,12 @@ response from the service keeps its existing description. None is a record rejec
 acknowledges input. A source read the host cancelled still waits for its receive in flight, and a
 service that has not answered it within 10 seconds of the cancellation ends the read with
 `SqsQueueIngestorError::CancelledReceiveUnanswered`, which names that budget, beneath `IngestorError::Read`.
+
+An SQS receive whose system attribute cannot be represented in its declared metadata type reports
+`SqsQueueIngestorError::SystemAttribute` with the typed attribute name beneath `IngestorError::Read`.
+The original integer-parse or timestamp-range cause remains inspectable in the report. The
+diagnostic prints no attribute value. An omitted attribute remains an optional metadata value;
+an invalid receive count or timestamp never becomes zero or null.
 The host shows it as the source's transient error; nothing is rejected or acknowledged, and a message
 the receive was returning stays invisible until its visibility timeout.
 
@@ -1100,10 +1111,13 @@ classification; diagnostics do not quote the row payload.
 
 A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar emitter: a message
 larger than the maximum message size the broker announced, which carries the measured size of its
-metadata and payload and the limit as typed fields, or a message the broker answered with
-`NotAllowedError`, which carries the broker's reason. Either becomes a record rejection with code
-`external` and operation `publish`. Every other failure of the client, its connection or the broker
-stays an infrastructure failure of the attempt, which the emitter retries.
+metadata and payload and the limit as typed fields, a message the broker answered with
+`NotAllowedError`, which carries the broker's reason, or a record whose envelope sets a time its
+message cannot carry, which carries the `PulsarMessageTimeError` naming that time: a `TIMESTAMP`
+before the Unix epoch's first millisecond, or a `DELIVER AFTER` past the last timestamp, with the
+batch's execution time and the delay. Each becomes a record rejection with code `external` and
+operation `publish`. Every other failure of the client, its connection or the broker stays an
+infrastructure failure of the attempt, which the emitter retries.
 
 The Pulsar emitter preserves the driver's `pulsar::Error` beneath `EmitterWriteError::Publish` for
 enqueue failures and failed receipts, with its description in a printable attachment. Its shared
@@ -1308,6 +1322,11 @@ TLS keys on `ws`, and unpaired identity files are typed refusals naming their ke
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a ingestor cannot produce its validated header collection. Rendered client values are
 validated again by the connector before opening transport.
+`HttpRequestHeadersError` is the frame beneath the registry's `InvalidHttpRequestHeaders` context,
+which names only the ingestor and its domain. It names the offending header of a polling
+ingestor's `HEADERS`, and the client key of a `CLIENT SECRET` it cannot read, with the client where
+the key is undeclared. It never quotes the key's value, and neither does the connector's
+`InvalidHeader` when a rendered secret cannot be a header at open.
 An Iceberg emitter's location refusal names its domain, emitter and `LOCATION`, with the
 vocabulary's typed location failure beneath that context. A malformed URL retains its URL-parser
 cause; a storage-scheme mismatch names the found scheme and the schemes its declared client

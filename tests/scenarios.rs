@@ -130,8 +130,8 @@ use crate::common::{
     cluster::{
         AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, BrokerRecordTime, Cluster,
         CommandHold, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
-        InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
-        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, TypedBrokerHeader,
+        InterconnectCredentialFault, JoinAttempt, PulsarMessageTimes, RejoinAttempt,
+        TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession, TypedBrokerHeader,
         WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
         bind_rabbitmq_queue, client_connect_options, client_domain, command_connect_options,
         delete_rabbitmq_queue, ensure_rabbitmq_exchange, ensure_rabbitmq_queue, ensure_sqs_queue,
@@ -169,6 +169,7 @@ use crate::common::{
         ProcessProgram, SERVER_PROGRAM, build_tools_directory, dependency_lifecycle_helper_command,
         scenario_executable,
     },
+    rabbitmq_confirm_order::RabbitMqConfirmOrder,
     raw_session::{
         SessionScope, TestSubscriptionEvent, TestUpload, TestUploadPart, WireOutcome as _,
         command_output, fresh_execution_reference, outcome_awaits_leader,
@@ -226,6 +227,7 @@ mod paced_simulation;
 mod postgres_fixtures;
 mod process_cluster;
 mod pulsar_delivery;
+mod pulsar_emission;
 mod pulsar_readiness;
 mod pulsar_subscriptions;
 mod restarted_voter;
@@ -531,6 +533,8 @@ struct ScenarioWorld {
     last_broker_time: Option<BrokerRecordTime>,
     /// The typed headers of the last observed broker message: SQS attributes with their data types.
     last_broker_typed_headers: Vec<TypedBrokerHeader>,
+    /// The times of the last message a step received, where a Pulsar broker delivered it.
+    last_pulsar_times: Option<PulsarMessageTimes>,
     clickhouse_table: Option<String>,
     clickhouse_tls: bool,
     postgres_table: Option<String>,
@@ -619,6 +623,8 @@ struct ScenarioWorld {
     kafka_mock_broker: Option<KafkaMockBroker>,
     /// The forwarder a scenario stood in front of the MQTT broker to drop chosen PUBLISH packets.
     mqtt_publish_filter: Option<MqttPublishFilter>,
+    /// The real-broker forwarder that gives two outstanding publishes a controlled confirm order.
+    rabbitmq_confirm_order: Option<RabbitMqConfirmOrder>,
     /// The forwarder a scenario stood in front of the SQS service to hold the answer that carries a
     /// chosen message.
     sqs_answer_hold: Option<SqsAnswerHold>,
@@ -697,6 +703,7 @@ impl fmt::Debug for ScenarioWorld {
                 &self.last_broker_payload.as_ref().map(|value| value.len()),
             )
             .field("last_broker_header_count", &self.last_broker_headers.len())
+            .field("last_pulsar_times", &self.last_pulsar_times)
             .field("last_broker_time", &self.last_broker_time)
             .field(
                 "last_auth_attempts_elapsed",
@@ -1407,6 +1414,50 @@ async fn given_mqtt_publish_filter(world: &mut ScenarioWorld) {
         .placeholders
         .insert("mqtt_filtered_addr".to_string(), endpoint_url.to_string());
     world.mqtt_publish_filter = Some(filter);
+}
+
+#[given("a RabbitMQ endpoint that reorders the first two publisher confirmations is configured")]
+async fn given_rabbitmq_confirm_order(world: &mut ScenarioWorld) {
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(RABBITMQ_ADDR)
+        .unwrap_or_else(|error| panic!("RabbitMQ endpoint is unavailable: {error}"));
+    let mut address = url::Url::parse(endpoint)
+        .unwrap_or_else(|error| panic!("RabbitMQ endpoint URL is invalid: {error}"));
+    let ip = address
+        .host_str()
+        .assured("the broker endpoint has a host")
+        .parse()
+        .assured("the test broker is addressed by its IP");
+    let port = address
+        .port()
+        .assured("the broker endpoint has an explicit port");
+    let forwarder = RabbitMqConfirmOrder::start(std::net::SocketAddr::new(ip, port))
+        .await
+        .assured("the RabbitMQ confirm forwarder can bind loopback");
+    address
+        .set_host(Some("127.0.0.1"))
+        .assured("loopback is a valid URL host");
+    address
+        .set_port(Some(forwarder.port()))
+        .assured("AMQP URLs accept an explicit port");
+    world
+        .placeholders
+        .insert("rabbitmq_confirm_addr".to_string(), address.to_string());
+    world.rabbitmq_confirm_order = Some(forwarder);
+}
+
+#[then("the RabbitMQ endpoint forwarded the controlled publisher confirmations")]
+fn then_rabbitmq_confirm_order(world: &mut ScenarioWorld) {
+    let forwarder = world
+        .rabbitmq_confirm_order
+        .as_ref()
+        .assured("the scenario configured the confirmation forwarder");
+    assert!(
+        forwarder.rewrote_confirmations(),
+        "the broker must confirm both messages before the fixture releases them"
+    );
 }
 
 /// From now on the MQTT endpoint drops every PUBLISH packet whose bytes carry the docstring, so the
@@ -2159,6 +2210,19 @@ impl ExpectedHttpRequest {
         );
     }
 
+    /// Asserts that every captured request with this docstring's request line is the request it
+    /// describes.
+    fn assert_every_captured(&self, receiver: &str, captured: &[CapturedRequest]) {
+        for request in captured {
+            if self.has_request_line_of(request) {
+                self.assert_matches(
+                    &format!("HTTP receiver '{receiver}' request '{}'", self.request_line),
+                    request,
+                );
+            }
+        }
+    }
+
     /// Asserts that `request`, which `described` names in a failure, is the request this
     /// docstring describes.
     fn assert_matches(&self, described: &str, request: &CapturedRequest) {
@@ -2247,6 +2311,26 @@ async fn then_http_receiver_eventually_captures_one_request_that_is(
         Err(error) => panic!("HTTP receiver '{name}': {error}"),
     };
     expected.assert_one_captured(&name, &captured);
+}
+
+/// Waits until the receiver captures a request with the docstring's request line, then compares
+/// every such request with the request the docstring describes. A scenario uses it for a request
+/// that repeats, such as a poll on its cadence, whose number it cannot name.
+#[then(expr = "HTTP receiver {string} eventually captures requests that are")]
+async fn then_http_receiver_eventually_captures_requests_that_are(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let expected = ExpectedHttpRequest::from_step(world, step);
+    let waited = http_receiver(world, &name)
+        .wait_for_request_line(&expected.request_line, HTTP_RECEIVER_WAIT)
+        .await;
+    let captured = match waited {
+        Ok(captured) => captured,
+        Err(error) => panic!("HTTP receiver '{name}': {error}"),
+    };
+    expected.assert_every_captured(&name, &captured);
 }
 
 /// Asserts the most requests the receiver ever held awaiting their final head at once. A request
@@ -7938,6 +8022,7 @@ async fn given_cluster_is_started(world: &mut ScenarioWorld, node_count: usize) 
     world.last_broker_headers.clear();
     world.last_broker_time = None;
     world.last_broker_typed_headers.clear();
+    world.last_pulsar_times = None;
     world.burst_raft_retention_peak = None;
     append_cucumber_log_line(&format!(
         "cluster start requested: nodes={node_count} domain={} test_id={}",
@@ -27048,6 +27133,51 @@ async fn when_tls_sqs_message_is_published(
         .expect("failed to publish tls sqs message");
 }
 
+#[when(
+    expr = "a redelivered SQS FIFO message with group {string} and deduplication id {string} is \
+            ready in queue {string}"
+)]
+async fn when_redelivered_sqs_metadata_is_ready(
+    world: &mut ScenarioWorld,
+    group: String,
+    deduplication_id: String,
+    queue: String,
+    #[step] step: &Step,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let group = expand_placeholders(world, &group);
+    let deduplication_id = expand_placeholders(world, &deduplication_id);
+    let payload = expand_placeholders(world, docstring(step));
+    let prepared = common::sqs_metadata::SqsMetadataFixture::prepare(
+        world.dependencies.endpoints(),
+        &queue,
+        &group,
+        &deduplication_id,
+        &payload,
+    )
+    .await;
+    let observed = match prepared {
+        Ok(observed) => observed,
+        Err(error) => panic!("failed to prepare a redelivered FIFO message: {error}"),
+    };
+    world
+        .placeholders
+        .insert("sqs_message_id".to_string(), observed.message_id);
+    world
+        .placeholders
+        .insert("sqs_sent_at".to_string(), observed.sent_at);
+    world.placeholders.insert(
+        "sqs_first_received_at".to_string(),
+        observed.first_received_at,
+    );
+    world
+        .placeholders
+        .insert("sqs_sequence_number".to_string(), observed.sequence_number);
+    world
+        .placeholders
+        .insert("sqs_sender_id".to_string(), observed.sender_id);
+}
+
 #[when(expr = "NATS message is published to subject {string}")]
 async fn when_nats_message_is_published(
     world: &mut ScenarioWorld,
@@ -30934,6 +31064,7 @@ async fn then_observed_broker_receives_payload(world: &mut ScenarioWorld, #[step
     world.last_broker_headers = message.headers;
     world.last_broker_time = message.time;
     world.last_broker_typed_headers = message.typed_headers;
+    world.last_pulsar_times = message.pulsar_times;
 
     let actual = world
         .last_broker_payload
@@ -33849,6 +33980,7 @@ async fn receive_exactly_these_broker_messages<Expected: BrokerMessageExpectatio
         }
         world.last_broker_payload = Some(message.payload.clone());
         world.last_broker_headers = message.headers;
+        world.last_pulsar_times = message.pulsar_times;
         world.last_broker_time = message.time;
         observed.push(delivered.describe());
     }
@@ -34651,6 +34783,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
                 world.mqtt_publish_filter = None;
+                world.rabbitmq_confirm_order = None;
                 world.sqs_answer_hold = None;
                 world.iceberg_catalog_gate = None;
                 world.nats_endpoint = None;
