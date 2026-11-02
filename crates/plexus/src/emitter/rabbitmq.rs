@@ -475,4 +475,28 @@ mod tests {
             ],
         );
     }
+
+    #[rstest]
+    #[case("QUEUE")]
+    #[case("EXCHANGE")]
+    fn property_alteration_completion_continues_with_unwritten_keys(#[case] entity: &str) {
+        let prefix = format!(
+            "ALTER RABBITMQ {entity} EMITTER outgoing SET PROPERTIES {{ 'app_id' = 'app', "
+        );
+        assert_offers_exactly(
+            &prefix,
+            &[
+                "\"content_type\"",
+                "\"content_encoding\"",
+                "\"message_id\"",
+                "\"correlation_id\"",
+                "\"reply_to\"",
+                "\"expiration\"",
+                "\"priority\"",
+                "\"type\"",
+                "\"user_id\"",
+                "}",
+            ],
+        );
+    }
 }

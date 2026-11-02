@@ -1123,7 +1123,8 @@ declares `DELAY` and `DEDUPLICATION ID`, which [SQS](#sqs) sends with each messa
 For the forms its entity declares, `ALTER` offers `SET PERSISTENT` and `DROP PERSISTENT`,
 `SET TIMESTAMP <expression>` and `DROP TIMESTAMP`, and `SET PROPERTIES { … }` and `DROP PROPERTIES`.
 `SET PROPERTIES` replaces the complete nonempty property set. Each targeted operation preserves
-the envelope fields it does not name.
+the envelope fields it does not name. Inside a property set, completion offers the declared keys
+that have not yet been written.
 
 | Clause | Written with | Value every record carries |
 | --- | --- | --- |
