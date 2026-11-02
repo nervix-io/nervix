@@ -153,9 +153,21 @@ impl Arbitrary<'_> {
             ["GET", "HEAD", "POST", "PATCH"][usize::from(self.entropy().byte() % 4)].to_owned();
         let mut headers = Vec::new();
         for index in 0..(self.entropy().byte() % 3) {
+            let value = if self.entropy.flag() {
+                nervix_models::HttpRequestHeaderValue::ClientSecret(format!(
+                    "{}fixture-{}'\"\\",
+                    nervix_models::HTTP_CLIENT_SECRET_KEY_PREFIX,
+                    self.entropy().byte()
+                ))
+            } else {
+                nervix_models::HttpRequestHeaderValue::Literal(format!(
+                    "fixture-{}'\"\\",
+                    self.entropy().byte()
+                ))
+            };
             headers.push(nervix_models::HttpRequestHeader {
                 name: format!("x-nervix-event-{index}"),
-                value: format!("fixture-{}'\"\\", self.entropy().byte()),
+                value,
             });
         }
         let max_body_size = if self.entropy.flag() {

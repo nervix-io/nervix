@@ -638,6 +638,20 @@ impl DomainState {
                                             },
                                         ));
                                     }
+                                    if let (
+                                        nervix_models::IngestorEntity::Http(
+                                            nervix_models::HttpIngestor::Request(polled),
+                                        ),
+                                        Model::ClientHttp(http_client),
+                                    ) = (&input.source, client_model)
+                                    {
+                                        polled.validate_headers(http_client).change_context_lazy(
+                                            || RegistryError::InvalidHttpRequestHeaders {
+                                                domain: domain.clone(),
+                                                ingestor: identifier.clone(),
+                                            },
+                                        )?;
+                                    }
                                     graph.add_edge(client_node, source, EdgeKind::RequiredBy);
                                 }
                                 IngestorReference::Endpoint(endpoint) => {

@@ -70,7 +70,7 @@ async fn when_private_broker_restarts(world: &mut ScenarioWorld) {
         panic!("the restarted broker did not accept AMQP within 30s: {last_error:?}")
     });
     connection
-        .close(200, "restart readiness observed")
+        .close(200, "restart readiness observed".into())
         .await
         .assured("the AMQP readiness probe closes");
 }
