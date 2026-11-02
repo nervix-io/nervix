@@ -214,8 +214,9 @@ again under the other head instead.
 
 `SET FROM` accepts the complete body that follows `FROM` in a `CREATE` statement with the same
 head, and only that pair's body. Change a client or endpoint, a Kafka topic or offset mode,
-`INSTANCES`, the delivery mode, or source-specific subscription settings by supplying that complete
-body, including its required `ON QUIESCE` clause. `SET QUIESCE` changes only the quiesce mode and
+`INSTANCES`, the delivery mode, an `HTTP REQUEST`'s `METHOD`, `HEADERS` or `MAX BODY SIZE`, or
+source-specific subscription settings by supplying that complete body, including its required
+`ON QUIESCE` clause. `SET QUIESCE` changes only the quiesce mode and
 its variables. It parses every quiesce body, and the stored source refuses one it does not honor,
 for example with `HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND`; there is no
 `DROP QUIESCE` operation. `SET DECODE USING` exists under every head except `CLIENT PRODUCER`,
@@ -991,7 +992,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | HTTP client |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
+| Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals or client secrets); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |
@@ -1006,10 +1007,40 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-ingest).
 <!-- connector-matrix:ingest-http-request:end -->
 
-- `METHOD '<token>'` is required on the ingestor. `HEADERS { '<name>' = '<value>', … }` writes
-  literal request fields; each value is visible in `SHOW CREATE`. `MAX BODY SIZE` bounds the
-  response body at its declared size, or 16 MiB where omitted. A response above that bound fails
-  its poll.
+- `METHOD '<token>'` is required on the ingestor. `HEADERS { '<name>' = <value>, … }` writes request
+  fields. Names are case-insensitive, and `CREATE` and `ALTER` refuse a name written twice. A value
+  is UTF-8 text with no control character but a tab and no space or tab at either end. `MAX BODY SIZE`
+  bounds the response body at its declared size, or 16 MiB where omitted. A response above that
+  bound fails its poll.
+- A header's value is a string literal or `CLIENT SECRET '<key>'`. A literal is part of the statement,
+  so `SHOW CREATE` and `DESCRIBE INGESTOR` print it, and a credential does not belong in one.
+  `CLIENT SECRET` names a key of the ingestor's client and sends that key's value:
+
+  ```plexus
+  CREATE HTTP CLIENT orders_api CONFIG {
+    'endpoint' = 'https://api.example.com/orders',
+    'timeout_ms' = 5000,
+    'secret.api_token' = 'Bearer example-token'
+  };
+
+  CREATE HTTP REQUEST INGESTOR orders
+    FROM orders_api
+    METHOD 'GET'
+    HEADERS { 'accept' = 'application/json', 'authorization' = CLIENT SECRET 'secret.api_token' }
+    EVERY 30s MODE NO ACK ON QUIESCE SUSPEND DECODE USING orders_codec
+    TO orders_relay INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+    ON GENERAL ERROR LOG;
+  ```
+
+  The operator names each `secret.<name>` key of an `HTTP` client. Inspection prints the reference:
+  `SHOW CREATE`, `DESCRIBE INGESTOR` and the console show `CLIENT SECRET 'secret.api_token'`, and
+  `SHOW CREATE CLIENT` and `DESCRIBE CLIENT` mask the key as `********`. `CREATE` and `ALTER` refuse a
+  reference to a key the client does not hold, to a key that is not a secret, and to a value that
+  cannot be a header, naming the header and the key and never quoting the value. A value that keeps a
+  `{{ … }}` template is rendered and checked where the ingestor opens instead, and one that cannot be
+  a header fails the open. A poll sends the value only to the client's origin, because it follows a
+  redirect nowhere else. Complete serialization keeps the value, as it keeps every client secret, so
+  a backup archive holds it; see [Backup And Restore](backup-and-restore.md).
 - The HTTP client requires `endpoint` and `timeout_ms`. It also declares optional
   `follow_redirects` and `proxy` settings, plus TLS trust and client identity files. Polling follows
   a redirect only to the client's own origin and only with `follow_redirects = true`, sends its
@@ -1950,7 +1981,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | Not offered: The current queue declaration exposes message attributes through headers but no separate typed receipt metadata namespace. |
+| Metadata | metadata.message_id: STRING OPTIONAL<br>metadata.sent_at: DATETIME OPTIONAL<br>metadata.receive_count: U32 OPTIONAL<br>metadata.first_received_at: DATETIME OPTIONAL<br>metadata.group_id: STRING OPTIONAL<br>metadata.deduplication_id: STRING OPTIONAL<br>metadata.sequence_number: STRING OPTIONAL<br>metadata.sender_id: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | answered |
@@ -1981,6 +2012,28 @@ message holds a receive for that long poll before it answers. Without `timeout_m
 unbounded. `CREATE SQS CLIENT` reads `tls_ca_file` before it commits the client, and refuses a file
 holding a section that is not a certificate, or no certificate at all, as
 `invalid client config key 'tls_ca_file'`: a client that trusted it alone could reach no service.
+
+Each receive requests SQS system attributes separately from the message attributes that
+`read_header` and `read_headers` read. Routes can read the following optional, non-sensitive
+metadata fields:
+
+| Field | Type | Value |
+| --- | --- | --- |
+| `metadata.message_id` | `STRING` | The service's message identifier, retained across redelivery; this is not the receipt handle used to delete a delivery. |
+| `metadata.sent_at` | `DATETIME` | SQS `SentTimestamp`, converted exactly from Unix milliseconds. |
+| `metadata.receive_count` | `U32` | SQS `ApproximateReceiveCount`: receives across queues before deletion, including this receive. |
+| `metadata.first_received_at` | `DATETIME` | SQS `ApproximateFirstReceiveTimestamp`, converted exactly from Unix milliseconds and retained across redelivery. |
+| `metadata.group_id` | `STRING` | `MessageGroupId`, when supplied by the service. |
+| `metadata.deduplication_id` | `STRING` | `MessageDeduplicationId`, when supplied by the service. |
+| `metadata.sequence_number` | `STRING` | SQS's FIFO sequence number, preserved as text without narrowing its range. |
+| `metadata.sender_id` | `STRING` | The service's sender identifier. |
+
+A field the service omits is null. Invalid numeric system attributes fail the read with a typed
+error naming the attribute; they never become zero or null. Timestamps must fit Nervix's signed
+Unix-nanosecond range. `TIMESTAMP AT metadata.sent_at` selects the service's send time for event
+admission and downstream windows. A route may use `WHERE metadata.receive_count >= (2 AS U32)`
+to direct redeliveries to a retry relay. The values remain attached to their exact message through
+ingest grouping and an in-flight receive completed during quiesce.
 
 Starting the ingestor sends no request to the service. Each source instance looks its queue up
 before its first poll and keeps the queue's URL from then on, suspensions included. The source

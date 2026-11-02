@@ -2148,6 +2148,19 @@ impl ExpectedHttpRequest {
         );
     }
 
+    /// Asserts that every captured request with this docstring's request line is the request it
+    /// describes.
+    fn assert_every_captured(&self, receiver: &str, captured: &[CapturedRequest]) {
+        for request in captured {
+            if self.has_request_line_of(request) {
+                self.assert_matches(
+                    &format!("HTTP receiver '{receiver}' request '{}'", self.request_line),
+                    request,
+                );
+            }
+        }
+    }
+
     /// Asserts that `request`, which `described` names in a failure, is the request this
     /// docstring describes.
     fn assert_matches(&self, described: &str, request: &CapturedRequest) {
@@ -2236,6 +2249,26 @@ async fn then_http_receiver_eventually_captures_one_request_that_is(
         Err(error) => panic!("HTTP receiver '{name}': {error}"),
     };
     expected.assert_one_captured(&name, &captured);
+}
+
+/// Waits until the receiver captures a request with the docstring's request line, then compares
+/// every such request with the request the docstring describes. A scenario uses it for a request
+/// that repeats, such as a poll on its cadence, whose number it cannot name.
+#[then(expr = "HTTP receiver {string} eventually captures requests that are")]
+async fn then_http_receiver_eventually_captures_requests_that_are(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let expected = ExpectedHttpRequest::from_step(world, step);
+    let waited = http_receiver(world, &name)
+        .wait_for_request_line(&expected.request_line, HTTP_RECEIVER_WAIT)
+        .await;
+    let captured = match waited {
+        Ok(captured) => captured,
+        Err(error) => panic!("HTTP receiver '{name}': {error}"),
+    };
+    expected.assert_every_captured(&name, &captured);
 }
 
 /// Asserts the most requests the receiver ever held awaiting their final head at once. A request
@@ -27036,6 +27069,51 @@ async fn when_tls_sqs_message_is_published(
         .publish_sqs_tls(&queue, &payload)
         .await
         .expect("failed to publish tls sqs message");
+}
+
+#[when(
+    expr = "a redelivered SQS FIFO message with group {string} and deduplication id {string} is \
+            ready in queue {string}"
+)]
+async fn when_redelivered_sqs_metadata_is_ready(
+    world: &mut ScenarioWorld,
+    group: String,
+    deduplication_id: String,
+    queue: String,
+    #[step] step: &Step,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let group = expand_placeholders(world, &group);
+    let deduplication_id = expand_placeholders(world, &deduplication_id);
+    let payload = expand_placeholders(world, docstring(step));
+    let prepared = common::sqs_metadata::SqsMetadataFixture::prepare(
+        world.dependencies.endpoints(),
+        &queue,
+        &group,
+        &deduplication_id,
+        &payload,
+    )
+    .await;
+    let observed = match prepared {
+        Ok(observed) => observed,
+        Err(error) => panic!("failed to prepare a redelivered FIFO message: {error}"),
+    };
+    world
+        .placeholders
+        .insert("sqs_message_id".to_string(), observed.message_id);
+    world
+        .placeholders
+        .insert("sqs_sent_at".to_string(), observed.sent_at);
+    world.placeholders.insert(
+        "sqs_first_received_at".to_string(),
+        observed.first_received_at,
+    );
+    world
+        .placeholders
+        .insert("sqs_sequence_number".to_string(), observed.sequence_number);
+    world
+        .placeholders
+        .insert("sqs_sender_id".to_string(), observed.sender_id);
 }
 
 #[when(expr = "NATS message is published to subject {string}")]
