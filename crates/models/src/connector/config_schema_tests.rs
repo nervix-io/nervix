@@ -749,6 +749,42 @@ fn a_key_conditioned_on_a_choice_needs_its_selector_to_select_it() {
     );
 }
 
+/// A choice-conditioned key whose selector is optional, so the key can be written alone.
+const OPTIONAL_SELECTOR_KEYS: [ClientConfigKey; 2] = [
+    ClientConfigKey::TLS_CA.only_for_choice("transport", &["secure"]),
+    ClientConfigKey::optional("transport", ClientConfigValue::Choice(&["plain", "secure"])),
+];
+
+#[test]
+fn a_key_conditioned_on_a_choice_is_refused_without_its_selector() {
+    // Built at run time, so the declaration's construction checks run here too.
+    let schema = ClientConfigSchema::new(&OPTIONAL_SELECTOR_KEYS, &[], &[]);
+    schema
+        .validate(&[])
+        .expect("a condition binds only a key that is written");
+    let refused = schema
+        .validate(&[entry("tls_ca_file", "/ca")])
+        .expect_err("the key's selector is not written");
+    assert_eq!(
+        refused.current_context(),
+        &ClientConfigSchemaError::RequiresChoice {
+            key: "tls_ca_file",
+            selector: "transport",
+            choices: &["secure"],
+        }
+    );
+}
+
+#[test]
+#[should_panic(expected = "selects_choices")]
+fn a_schema_refuses_a_key_conditioned_on_a_choice_its_selector_does_not_offer() {
+    const UNOFFERED: [ClientConfigKey; 2] = [
+        ClientConfigKey::TLS_CA.only_for_choice("transport", &["mutual"]),
+        ClientConfigKey::optional("transport", ClientConfigValue::Choice(&["plain", "secure"])),
+    ];
+    ClientConfigSchema::new(&UNOFFERED, &[], &[]);
+}
+
 #[test]
 fn a_templated_selector_waits_for_its_rendered_value() {
     let declared = [

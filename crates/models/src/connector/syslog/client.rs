@@ -18,7 +18,7 @@ use std::{
 };
 
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use strum::VariantNames as _;
 
 use super::CLIENT_CONFIG;
@@ -253,14 +253,13 @@ impl<'a> SyslogEntries<'a> {
         }
     }
 
-    /// The value of a key the declaration requires of rendered entries.
-    fn required(&self, key: &'static str) -> Result<&'a str, Report<ClientConfigSchemaError>> {
-        match self.values.get(key) {
-            Some(value) => Ok(*value),
-            None => Err(Report::new(ClientConfigSchemaError::MissingRequired {
-                key,
-            })),
-        }
+    /// The value of a key that rendered, effective entries always hold: one the declaration
+    /// requires, or one it gives a default.
+    fn required(&self, key: &'static str) -> &'a str {
+        self.values.get(key).copied().verified(
+            "validate_rendered refused entries without a required key, and effective_entries \
+             wrote every default",
+        )
     }
 
     fn file(&self, key: &str) -> Option<PathBuf> {
@@ -270,7 +269,7 @@ impl<'a> SyslogEntries<'a> {
 
     /// The largest message a listener admits: the key, or the default its declaration states.
     fn max_message_size(&self) -> Result<NonZeroUsize, Report<ClientConfigSchemaError>> {
-        let size = self.required(MAX_MESSAGE_SIZE_KEY)?;
+        let size = self.required(MAX_MESSAGE_SIZE_KEY);
         size.parse::<NonZeroUsize>()
             .change_context_lazy(|| ClientConfigSchemaError::InvalidValue {
                 key: MAX_MESSAGE_SIZE_KEY.to_string(),
@@ -306,7 +305,7 @@ impl SyslogListenerClient {
             }),
         };
         Ok(Self {
-            bind: SyslogEntries::literal_address(entries.required(ADDRESS_KEY)?)?,
+            bind: SyslogEntries::literal_address(entries.required(ADDRESS_KEY))?,
             max_message_size: entries.max_message_size()?,
             transport,
         })
@@ -333,12 +332,8 @@ impl SyslogCollectorClient {
             }
             SyslogProtocol::Tls => SyslogCollectorTransport::Tls,
         };
-        let target = HostPort::parse(entries.required(ADDRESS_KEY)?).change_context_lazy(|| {
-            ClientConfigSchemaError::InvalidValue {
-                key: ADDRESS_KEY.to_string(),
-                expected: "host:port",
-            }
-        })?;
+        let target = HostPort::parse(entries.required(ADDRESS_KEY))
+            .verified("validate_rendered held addr to its declared host:port value");
         Ok(Self { target, transport })
     }
 }

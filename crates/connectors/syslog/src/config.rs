@@ -247,4 +247,81 @@ mod tests {
         ));
         assert!(error.contains::<nervix_connector::ClientConfigError>());
     }
+
+    /// A self-signed identity written as the PEM files a listener's client names, which also
+    /// serves as the authority its clients chain to.
+    struct IdentityFiles {
+        root: tempfile::TempDir,
+        certificate: PathBuf,
+        key: PathBuf,
+    }
+
+    impl IdentityFiles {
+        fn write() -> Self {
+            let identity = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+                .expect("a self-signed identity for a fixed name can be generated");
+            let root = tempfile::tempdir().expect("temporary Syslog TLS directory should open");
+            let certificate = root.path().join("certificate.pem");
+            let key = root.path().join("key.pem");
+            std::fs::write(&certificate, identity.cert.pem())
+                .expect("the Syslog certificate fixture should be writable");
+            std::fs::write(&key, identity.key_pair.serialize_pem())
+                .expect("the Syslog key fixture should be writable");
+            Self {
+                root,
+                certificate,
+                key,
+            }
+        }
+
+        /// A file in the fixture directory that holds no PEM certificate.
+        fn without_certificate(&self) -> PathBuf {
+            let path = self.root.path().join("no-certificate.pem");
+            std::fs::write(&path, b"no certificate here")
+                .expect("the empty Syslog fixture should be writable");
+            path
+        }
+    }
+
+    #[test]
+    fn a_listener_identity_loads_with_and_without_a_client_authority() {
+        let identity = IdentityFiles::write();
+        let listener = SyslogListenerTls {
+            cert_file: identity.certificate.clone(),
+            key_file: identity.key.clone(),
+            client_ca_file: None,
+        };
+        tls_server_config(&listener).expect("a generated identity loads without an authority");
+        let verifying = SyslogListenerTls {
+            client_ca_file: Some(identity.certificate.clone()),
+            ..listener
+        };
+        tls_server_config(&verifying).expect("a generated identity loads with an authority");
+    }
+
+    #[test]
+    fn a_listener_refuses_tls_files_that_hold_no_certificate() {
+        let identity = IdentityFiles::write();
+        let empty = identity.without_certificate();
+        let error = tls_server_config(&SyslogListenerTls {
+            cert_file: empty.clone(),
+            key_file: identity.key.clone(),
+            client_ca_file: None,
+        })
+        .expect_err("a certificate file without a certificate must fail");
+        assert!(matches!(
+            error.current_context(),
+            SyslogConfigError::TlsMaterial { reason } if reason.contains("'tls_cert_file'")
+        ));
+        let error = tls_server_config(&SyslogListenerTls {
+            cert_file: identity.certificate.clone(),
+            key_file: identity.key.clone(),
+            client_ca_file: Some(empty),
+        })
+        .expect_err("an authority file without a certificate must fail");
+        assert!(matches!(
+            error.current_context(),
+            SyslogConfigError::TlsMaterial { reason } if reason.contains("'tls_client_ca_file'")
+        ));
+    }
 }

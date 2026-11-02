@@ -11,7 +11,6 @@
     nervix::layer(harness, reason = "qualifies the typed reads of a SYSLOG client")
 )]
 
-use meticulous::ResultExt as _;
 use rstest::rstest;
 
 use super::*;
@@ -91,6 +90,28 @@ fn a_tls_listener_reads_its_identity_and_the_authority_that_verifies_clients() {
             client_ca_file: Some(PathBuf::from("/mnt/clients-ca.crt")),
         })
     );
+}
+
+#[rstest]
+#[case(SyslogListenerTransport::Udp, None)]
+#[case(SyslogListenerTransport::Tcp { framing: None }, None)]
+#[case(
+    SyslogListenerTransport::Tcp { framing: Some(SyslogFraming::NonTransparent) },
+    Some(SyslogFraming::NonTransparent)
+)]
+#[case(
+    SyslogListenerTransport::Tls(SyslogListenerTls {
+        cert_file: PathBuf::from("/mnt/server.crt"),
+        key_file: PathBuf::from("/mnt/server.key"),
+        client_ca_file: None,
+    }),
+    Some(SyslogFraming::OctetCounting)
+)]
+fn a_listeners_streams_keep_the_framing_their_transport_fixes_or_declares(
+    #[case] transport: SyslogListenerTransport,
+    #[case] framing: Option<SyslogFraming>,
+) {
+    assert_eq!(transport.stream_framing(), framing);
 }
 
 #[rstest]

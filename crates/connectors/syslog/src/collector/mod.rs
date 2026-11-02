@@ -874,6 +874,40 @@ mod tests {
         }
     }
 
+    /// A TLS collector's client that trusts the authority in `authority`.
+    fn tls_collector(authority: &str) -> Vec<ClientConfigEntry> {
+        [
+            ("protocol", "tls"),
+            ("addr", "127.0.0.1:6514"),
+            ("tls_ca_file", authority),
+        ]
+        .into_iter()
+        .map(|(key, value)| ClientConfigEntry {
+            key: key.to_string(),
+            value: value.to_string(),
+        })
+        .collect()
+    }
+
+    #[test]
+    fn a_tls_collector_check_loads_the_trust_root_it_names() {
+        let identity = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .assured("a self-signed identity for a fixed name can be generated");
+        let root = TempDir::new().assured("a temporary directory opens");
+        let authority = root.path().join("authority.pem");
+        std::fs::write(&authority, identity.cert.pem()).assured("the authority is writable");
+        SyslogCollectorEmitter::check_client_config(&tls_collector(&authority.to_string_lossy()))
+            .assured("a readable trust root passes the check");
+        let failure =
+            SyslogCollectorEmitter::check_client_config(&tls_collector("/definitely/missing.pem"))
+                .err()
+                .assured("an unreadable trust root fails the check");
+        assert_eq!(
+            failure.current_context(),
+            &EmitterOpenError::InvalidConfiguration { connector: SYSLOG }
+        );
+    }
+
     #[nervix_primitives::test(start_paused = true)]
     async fn a_server_that_stops_reading_fails_the_frame_write_at_timeout_ms() {
         let server = nervix_primitives::net::TcpSocket::new_v4()
