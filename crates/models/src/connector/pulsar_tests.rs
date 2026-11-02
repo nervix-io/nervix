@@ -23,6 +23,22 @@ use crate::{
     IngestorEntityKind,
 };
 
+/// A Pulsar producer sets exactly these two clauses per message, and its emitter declares no
+/// property.
+#[test]
+fn the_topic_emitter_declares_the_event_time_and_the_delivery_time_it_writes() {
+    let emit = EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic).capabilities();
+
+    assert_eq!(
+        emit.envelope,
+        &[
+            EnvelopeClauseKind::Timestamp,
+            EnvelopeClauseKind::DeliverAfter,
+        ]
+    );
+    assert!(emit.properties.is_empty());
+}
+
 #[test]
 fn topic_declarations_match_the_subscription_and_producer_transport() {
     let ingest = IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic).capabilities();
@@ -97,7 +113,7 @@ fn both_topic_directions_share_the_topic_rule_and_the_client() {
 }
 
 #[test]
-fn topic_declares_message_properties_as_headers_and_no_envelope() {
+fn topic_declares_message_properties_as_headers() {
     let ingest = IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic).capabilities();
     let emit = EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic).capabilities();
 
@@ -112,8 +128,6 @@ fn topic_declares_message_properties_as_headers_and_no_envelope() {
     assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
     assert!(ingest.metadata.fields().is_empty());
     assert!(emit.options.is_empty());
-    assert!(emit.envelope.is_empty());
-    assert!(emit.properties.is_empty());
 }
 
 #[test]
