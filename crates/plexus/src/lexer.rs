@@ -95,6 +95,7 @@ pub enum Identifier {
     HttpHeaderFields,
     ClientBatchRows,
     Headers,
+    Secret,
     Platform,
     Create,
     Delete,

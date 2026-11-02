@@ -94,12 +94,6 @@ pub(in crate::registry) fn validate_ingestor_source(
     {
         HttpMethod::parse(&source.method, HttpBodyMode::WithoutBody)
             .map_err(|report| invalid(report.current_context().to_string()))?;
-        for header in &source.headers {
-            HttpHeaderName::parse(&header.name)
-                .map_err(|report| invalid(report.current_context().to_string()))?;
-            HttpHeaderValue::parse(&header.value)
-                .map_err(|report| invalid(report.current_context().to_string()))?;
-        }
     }
     if let Some(unmet) = ingestor.input.unmet_delivery() {
         return Err(Report::new(RegistryError::InvalidConnectorDeclaration {

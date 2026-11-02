@@ -94,8 +94,29 @@ fn queue_declares_message_attributes_as_headers_with_a_delay_and_a_deduplication
         ingest.headers,
         Some(HeaderModel::exact(HeaderLayout::LastWins))
     );
-    assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
-    assert!(ingest.metadata.fields().is_empty());
+    let fields: Vec<_> = ingest
+        .metadata
+        .fields()
+        .iter()
+        .map(|field| (field.name(), field.ty()))
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            ("message_id", IngestorMetadataType::String),
+            ("sent_at", IngestorMetadataType::Datetime),
+            ("receive_count", IngestorMetadataType::U32),
+            ("first_received_at", IngestorMetadataType::Datetime),
+            ("group_id", IngestorMetadataType::String),
+            ("deduplication_id", IngestorMetadataType::String),
+            ("sequence_number", IngestorMetadataType::String),
+            ("sender_id", IngestorMetadataType::String),
+        ]
+    );
+    for field in ingest.metadata.schema_fields() {
+        assert!(field.optional);
+        assert!(!field.sensitive);
+    }
     assert_eq!(ingest.options, &[OptionDeclaration::INSTANCES]);
     assert_eq!(
         emit.envelope,

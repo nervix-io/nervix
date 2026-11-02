@@ -378,11 +378,13 @@ on input. Dynamic names may replace earlier values, so transition validation ret
 byte contributions; request preparation checks each complete evaluated envelope against its captured
 bounds.
 
-Literal headers on an HTTP polling ingestor use these same committed caps. Validation counts
-case-insensitive names once and retains the last value written for each name. Both a model's
-admission and a later parameter transition check the complete literal header requirements, so a
-lower cap cannot invalidate an existing polling request and a raised cap governs new requests.
-Each literal name/value write must fit the byte cap, as must the complete retained envelope.
+HTTP polling headers use these same committed caps. Admission and parameter transitions count
+every declared name and the complete literal or non-templated client-secret value. The header
+declaration refuses repeated names ignoring case. A templated secret contributes its known name
+at admission; the host captures the current caps when it composes the connector, which checks the
+complete resolved values before opening a request. A raised cap governs new requests and a lower
+cap cannot invalidate a polling request's known requirements. Syntax validation checks physical
+representation bounds separately from committed policy, and secret values remain redacted.
 
 WebSocket connection ingestors use the same committed caps for their literal upgrade headers.
 The subprotocol offer counts as one field, with its canonical comma-joined tokens contributing

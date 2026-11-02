@@ -62,10 +62,38 @@ pub(crate) fn validate_resource_parameters(
     Ok(())
 }
 
+fn polling_header_value_bytes(
+    domain: &DomainName,
+    ingestor: &nervix_models::CreateIngestor,
+    header: &nervix_models::HttpRequestHeader,
+    client: Option<&nervix_models::CreateClientHttp>,
+) -> error_stack::Result<usize, RegistryError> {
+    if let nervix_models::HttpRequestHeaderValue::Literal(value) = &header.value {
+        return Ok(value.len());
+    }
+    // An incomplete transaction may not hold its client yet. Graph validation owns that
+    // reference; this check still accounts for every known name and every resolved value.
+    let Some(client) = client else {
+        return Ok(0);
+    };
+    let value =
+        header
+            .value_from(client)
+            .change_context(RegistryError::InvalidHttpRequestHeaders {
+                domain: domain.clone(),
+                ingestor: ingestor.name.clone().into(),
+            })?;
+    Ok(value.map_or(0, |value| value.as_str().len()))
+}
+
 fn validate_ingestor_header_parameters(
     domain: &DomainName,
     ingestor: &nervix_models::CreateIngestor,
     parameters: &ClusterParameterValues,
+    clients: &std::collections::BTreeMap<
+        nervix_models::ClientName,
+        &nervix_models::CreateClientHttp,
+    >,
     check: impl Fn(ClusterParameterKey, u64, u64) -> error_stack::Result<(), RegistryError>,
 ) -> error_stack::Result<(), RegistryError> {
     if let Some(nervix_models::IngestorEntity::Websockets(
@@ -110,20 +138,23 @@ fn validate_ingestor_header_parameters(
     {
         let mut headers = std::collections::BTreeMap::<String, u64>::new();
         for header in &source.headers {
+            let value_bytes = polling_header_value_bytes(
+                domain,
+                ingestor,
+                header,
+                clients.get(&source.client).copied(),
+            )?;
             let bytes = header
                 .name
                 .len()
-                .checked_add(header.value.len())
+                .checked_add(value_bytes)
                 .assured("literal header bytes fit the process address space");
             check(
                 ClusterParameterKey::HttpHeaderBytes,
                 bytes.arch_into(),
                 parameters.http_header_bytes(),
             )?;
-            headers.insert(
-                header.name.to_ascii_lowercase(),
-                header.value.len().arch_into(),
-            );
+            headers.insert(header.name.to_ascii_lowercase(), value_bytes.arch_into());
         }
         check(
             ClusterParameterKey::HttpHeaderFields,
@@ -151,7 +182,15 @@ pub(crate) fn validate_model_parameters<'a>(
     models: impl IntoIterator<Item = &'a Model>,
     parameters: &ClusterParameterValues,
 ) -> error_stack::Result<(), RegistryError> {
-    for model in models {
+    let models = models.into_iter().collect::<Vec<_>>();
+    let clients = models
+        .iter()
+        .filter_map(|model| match model {
+            Model::ClientHttp(client) => Some((client.name.clone(), client)),
+            _ => None,
+        })
+        .collect();
+    for model in &models {
         let check = |parameter: ClusterParameterKey, actual: u64, maximum: u64| {
             if actual > maximum {
                 Err(Report::new(RegistryError::ClusterParameterLimit {
@@ -167,7 +206,7 @@ pub(crate) fn validate_model_parameters<'a>(
         };
         match model {
             Model::Ingestor(ingestor) => {
-                validate_ingestor_header_parameters(domain, ingestor, parameters, check)?;
+                validate_ingestor_header_parameters(domain, ingestor, parameters, &clients, check)?;
             }
             Model::Udf(udf) => check(
                 ClusterParameterKey::UdfCodeBytes,
@@ -445,20 +484,14 @@ mod tests {
     }
 
     #[test]
-    fn polling_header_requirements_use_the_committed_caps_and_final_literal_values() {
+    fn polling_header_requirements_use_the_committed_caps() {
         let domain = DomainName::parse("scope").assured("the fixture domain is valid");
-        let model = polling_headers(vec![
-            nervix_models::HttpRequestHeader {
-                name: "x-key".to_string(),
-                value: "a".to_string(),
-            },
-            nervix_models::HttpRequestHeader {
-                name: "X-KEY".to_string(),
-                value: "bb".to_string(),
-            },
-        ]);
+        let model = polling_headers(vec![nervix_models::HttpRequestHeader {
+            name: "X-KEY".to_string(),
+            value: nervix_models::HttpRequestHeaderValue::Literal("bb".to_string()),
+        }]);
         validate_model_parameters(&domain, [&model], &parameters(1, 7))
-            .assured("case-insensitive replacement keeps one field and the final value");
+            .assured("the complete literal field fits the committed cap");
         let error = validate_model_parameters(&domain, [&model], &parameters(1, 6))
             .expect_err("the complete retained header needs seven bytes");
         assert!(matches!(
@@ -474,7 +507,7 @@ mod tests {
             (0..129)
                 .map(|index| nervix_models::HttpRequestHeader {
                     name: format!("x-key-{index}"),
-                    value: "a".to_string(),
+                    value: nervix_models::HttpRequestHeaderValue::Literal("a".to_string()),
                 })
                 .collect(),
         );
@@ -491,6 +524,52 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn polling_client_secret_headers_count_known_values_and_templated_names() {
+        use nervix_models::{
+            ClientConfigEntry, CreateClientHttp, HttpRequestHeader, HttpRequestHeaderValue,
+        };
+
+        let domain = DomainName::parse("scope").assured("the fixture domain is valid");
+        let model = polling_headers(vec![HttpRequestHeader {
+            name: "x-key".to_string(),
+            value: HttpRequestHeaderValue::ClientSecret("secret.payload".to_string()),
+        }]);
+        for (value, minimum_bytes) in [("bb", 7), ("{{ token }}", 5)] {
+            let client = Model::ClientHttp(CreateClientHttp {
+                name: ClientName::parse("api").assured("the fixture client is valid"),
+                mount: None,
+                config: vec![
+                    ClientConfigEntry {
+                        key: "endpoint".to_string(),
+                        value: "http://example.invalid".to_string(),
+                    },
+                    ClientConfigEntry {
+                        key: "timeout_ms".to_string(),
+                        value: "5000".to_string(),
+                    },
+                    ClientConfigEntry {
+                        key: "secret.payload".to_string(),
+                        value: value.to_string(),
+                    },
+                ],
+            });
+            validate_model_parameters(&domain, [&model, &client], &parameters(1, minimum_bytes))
+                .assured("every known byte fits the captured policy");
+            let error = validate_model_parameters(
+                &domain,
+                [&model, &client],
+                &parameters(1, minimum_bytes - 1),
+            )
+            .expect_err("the known name and resolved value must fit");
+            assert!(
+                matches!(error.current_context(), RegistryError::ClusterParameterLimit {
+                parameter: ClusterParameterKey::HttpHeaderBytes, actual, maximum, ..
+            } if *actual == minimum_bytes && *maximum == minimum_bytes - 1)
+            );
+        }
     }
 
     #[test]
