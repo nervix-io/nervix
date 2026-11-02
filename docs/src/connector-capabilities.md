@@ -34,9 +34,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | HTTP REQUEST | Compare `HTTP REQUEST`: options, modes, headers, ingest metadata. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
+| Entity | HTTP REQUEST | Compare `HTTP REQUEST`: options, modes, headers, ingest metadata. Polling writes its whole request in the statement, a literal METHOD and HEADERS of literals or client secrets, and sends it to the client's endpoint URL as written; HEADERS is ingest-only. Emitting computes METHOD and PATH for each record as expressions beneath an origin endpoint and writes headers with write_header; PATH is emit-only. Polling reads the response's headers, status and due instant, while an emitter reads only whether its final response headers deliver, retry or reject the record. Both directions share one HTTP CLIENT transport: timeout_ms and the follow_redirects and proxy opt-ins. |
 | Reference | HTTP client |  |
-| Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
+| Locator and validation rule | Not offered: The client's endpoint URL names the polled resource, its path and query included, so this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
 | Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals or client secrets); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |  |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
@@ -54,9 +54,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | HTTP ENDPOINT | Compare `HTTP REQUEST`: options, modes, headers, reference, ingest metadata. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
+| Entity | HTTP ENDPOINT | Compare `HTTP REQUEST`: options, modes, headers, reference, ingest metadata. An endpoint is the server side: every live node serves it, its requests carry no remote source position, and their headers and method, path, query, peer address and host metadata describe what a client sent. The HTTP REQUEST emitter instead sends requests to an external endpoint through an HTTP CLIENT. |
 | Reference | Http endpoint |  |
-| Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
+| Locator and validation rule | Not offered: The endpoint declaration owns the host and path this cluster serves; this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
@@ -294,14 +294,14 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SYSLOG LISTENER | Compare `SYSLOG COLLECTOR`: modes, ingest metadata. A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Entity | SYSLOG LISTENER | Compare `SYSLOG COLLECTOR`: modes, ingest metadata. A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
 | Reference | SYSLOG client |  |
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |  |
+| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
-| Metadata | metadata.peer_addr: STRING OPTIONAL |  |
+| Metadata | metadata.peer_addr: STRING OPTIONAL<br>metadata.transport: STRING OPTIONAL<br>metadata.tls_peer: STRING OPTIONAL |  |
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
@@ -337,9 +337,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | HTTP REQUEST | Compare `HTTP REQUEST`, `HTTP ENDPOINT`: options, modes, headers, reference. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
+| Entity | HTTP REQUEST | Compare `HTTP REQUEST`, `HTTP ENDPOINT`: options, modes, headers, reference. Polling writes its whole request in the statement, a literal METHOD and HEADERS of literals or client secrets, and sends it to the client's endpoint URL as written; HEADERS is ingest-only. Emitting computes METHOD and PATH for each record as expressions beneath an origin endpoint and writes headers with write_header; PATH is emit-only. Polling reads the response's headers, status and due instant, while an emitter reads only whether its final response headers deliver, retry or reject the record. Both directions share one HTTP CLIENT transport: timeout_ms and the follow_redirects and proxy opt-ins. |
 | Reference | HTTP client |  |
-| Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
+| Locator and validation rule | Not offered: The client's endpoint names the origin, and each record's PATH expression names its target beneath it; PATH is a request option rather than an external-name locator. |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `METHOD 'POST'` (expression); required<br>`PATH '/events'` (expression); required |  |
 | Headers | `write_header`; `sorted_by_name`, lowercase names: one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
@@ -568,12 +568,12 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SYSLOG COLLECTOR | Compare `SYSLOG LISTENER`: modes. A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Entity | SYSLOG COLLECTOR | Compare `SYSLOG LISTENER`: modes. A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
 | Reference | SYSLOG client |  |
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |  |
+| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
 | Protocol batch maximum | A batch is written as one frame within the frame limits below; general BATCH limits still apply. |  |
