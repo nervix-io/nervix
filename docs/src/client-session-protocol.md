@@ -378,6 +378,13 @@ and report the refusal if they find the session full. A request identity that is
 is refused with `DuplicateRequestId`, and that refusal necessarily names the same identity as the
 request still in flight.
 
+Completion resolves the semantic expectations of the composed Plexus grammar at the cursor.
+Connector functions use the selected entity's scope in filters, HTTP request expressions and
+`ALTER` constructions. Metadata candidates come from that ingestor's declaration; a timestamp
+position offers its datetime metadata fields. Header reads belong to supported ingestor entities
+and header writes to supported emitter `INVOKE` positions. Both transports return these candidates
+as text edits; [CLI Completion](./client-tools-cli.md#completion) describes their application.
+
 Semantic completion of placement members offers only placement-eligible runtime nodes. HTTP
 endpoint, WebSocket endpoint and Syslog listener ingestors execute on every cluster node, so their
 declared execution policy excludes them from these suggestions.

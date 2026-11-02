@@ -91,7 +91,7 @@ fn timestamp_source<'src>()
 -> impl Parser<'src, &'src [Token], IngestTimestampSource, extra::Err<ParseError<'src>>> + Clone {
     let metadata_field = kw(Identifier::Metadata)
         .ignore_then(tok(Token::Dot))
-        .ignore_then(field_ref())
+        .ignore_then(field_ref().labelled("ref:ingestor_timestamp_metadata"))
         .map(IngestTimestampSource::AtMetadata);
     let payload_field = field_ref().map(IngestTimestampSource::At);
     let at_field = kw(Identifier::At).ignore_then(choice((metadata_field, payload_field)));
@@ -2115,7 +2115,7 @@ mod tests {
         let metadata = format!("{head}metadata.");
         let suggestions = suggest_create_ingestor(&metadata, metadata.len());
         assert!(
-            suggestions.contains(&"field_name".to_string()),
+            suggestions.contains(&"ref:ingestor_timestamp_metadata".to_string()),
             "{suggestions:?}"
         );
         assert!(

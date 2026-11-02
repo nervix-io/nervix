@@ -1572,10 +1572,10 @@ fn expression_term_word<'src>()
 /// rendered back to text or lexed again, and a standalone entry point reads the same text with the
 /// same grammar.
 ///
-/// Completion sees none of the part's grammar. Where the part cannot begin, the rejection expects
-/// `label`, which completion offers. Any other rejection keeps the reader's message, located at
-/// the statement's tokens where the reader failed, and expects nothing, so an unfinished
-/// expression offers nothing and a finished one offers the clauses that may follow it.
+/// Where the part cannot begin, the rejection expects `label`. Further inside it, semantic
+/// expression expectations retain the reader's expected and found tokens at their statement
+/// positions. Completion uses those semantic expectations, and a finished part offers the
+/// surrounding statement's continuations.
 pub fn embedded<'src, O, R>(
     label: &'static str,
     read: R,
@@ -1638,7 +1638,26 @@ fn embedded_rejection<'src>(
             span,
         );
     }
-    Rich::custom(span, format_parse_error(&error))
+    let mut rejection = Rich::custom(span, format_parse_error(&error));
+    for pattern in error.expected() {
+        if is_expression_reference(pattern) {
+            <ParseError<'src> as LabelError<
+                'src,
+                &'src [Token],
+                RichPattern<'src, Token>,
+            >>::in_context(&mut rejection, pattern.clone(), span);
+        }
+    }
+    rejection
+}
+
+/// Semantic positions inside the expression grammar. Its other expected tokens remain available
+/// to diagnostics; completion resolves only these references when an expression is unfinished.
+fn is_expression_reference(pattern: &RichPattern<'_, Token>) -> bool {
+    match pattern {
+        RichPattern::Label(label) => label.starts_with("ref:expression_"),
+        _ => false,
+    }
 }
 
 /// An expression embedded in a statement, whose body completion names `label`.
@@ -2014,11 +2033,9 @@ pub fn into_parse_error(
 /// Split completion input at the cursor into the source the grammar should parse and the partial
 /// word the user is part-way through typing.
 ///
-/// The partial word is removed before parsing rather than left in place. A half-typed word is not a
-/// token the grammar can make sense of, and inside a free-form expression region it is swallowed
-/// into the region and read by the expression grammar, which fails with a custom error that
-/// carries no expectations — so completion falls silent the moment the user starts typing. The
-/// prefix comes back separately and only filters the result.
+/// The partial word is removed before parsing so the grammar sees the completed tokens before
+/// the cursor. The prefix comes back separately to filter literal offers and the concrete names
+/// the server expands from semantic expectations.
 pub fn completion_context(input: &str, cursor: usize) -> (String, String) {
     let safe_cursor = cursor.min(input.len());
     let head = &input[..safe_cursor];
@@ -2049,17 +2066,32 @@ pub fn suggestions_from_errors(mut errors: Vec<ParseError<'_>>, prefix: &str) ->
     };
     let best_span = best.span().into_range();
 
-    let candidates = SortedSet::from_unsorted(
-        errors
-            .iter()
-            .rev()
-            .take_while(|error| error.span().into_range() == best_span)
-            .flat_map(|error| error.expected())
-            .map(expected_to_suggestion)
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>(),
-    )
-    .into_vec();
+    let mut patterns = Vec::new();
+    for error in errors.iter().rev() {
+        if error.span().into_range() != best_span {
+            break;
+        }
+        patterns.extend(error.expected());
+        for (pattern, span) in error.contexts() {
+            if span == error.span() && is_expression_reference(pattern) {
+                patterns.push(pattern);
+            }
+        }
+    }
+    let expression = patterns
+        .iter()
+        .any(|pattern| is_expression_reference(pattern));
+    let mut candidates = Vec::new();
+    for pattern in patterns {
+        if expression && !is_expression_reference(pattern) {
+            continue;
+        }
+        let suggestion = expected_to_suggestion(pattern);
+        if !suggestion.is_empty() {
+            candidates.push(suggestion);
+        }
+    }
+    let candidates = SortedSet::from_unsorted(candidates).into_vec();
 
     filter_by_prefix(candidates, prefix)
 }
@@ -2077,9 +2109,13 @@ pub fn filter_by_prefix(suggestions: Vec<String>, prefix: &str) -> Vec<String> {
         .into_iter()
         .filter(|suggestion| {
             suggestion.starts_with("ref:")
+                || suggestion.ends_with("_expression")
                 || matches!(
                     suggestion.as_str(),
-                    "resource_version" | "completed_resource_version" | "set_assignments"
+                    "resource_version"
+                        | "completed_resource_version"
+                        | "set_assignments"
+                        | "invocations"
                 )
                 || suggestion.to_ascii_lowercase().starts_with(&prefix)
         })
@@ -2155,7 +2191,14 @@ fn expected_to_suggestion(pattern: &RichPattern<'_, Token>) -> String {
 
 fn format_expected_pattern(pattern: &RichPattern<'_, Token>) -> String {
     match pattern {
-        RichPattern::Label(label) => label.to_string(),
+        RichPattern::Label(label) => match label.as_ref() {
+            "ref:expression_function" | "ref:expression_invocation" => "function_name".to_string(),
+            "ref:expression_field"
+            | "ref:expression_target"
+            | "ref:ingestor_timestamp_metadata" => "field_name".to_string(),
+            "ref:expression_udf" => "udf_name".to_string(),
+            _ => label.to_string(),
+        },
         RichPattern::Identifier(identifier) => identifier.to_string(),
         RichPattern::Token(token) => format_found_token(token),
         RichPattern::Any => "any token".to_string(),
@@ -2604,17 +2647,30 @@ mod tests {
     }
 
     #[test]
-    fn completion_inside_an_unfinished_embedded_expression_offers_nothing() {
+    fn completion_at_a_non_operand_position_keeps_expression_syntax_internal() {
         for input in [
             "CREATE SUBSCRIPTION s TO r WHERE input.a IS ",
-            "CREATE SUBSCRIPTION s TO r WHERE CASE WHEN input.a THEN ",
-            "CREATE JUNCTION j FROM r UNBRANCHED TO o SET x = ",
             "CREATE JUNCTION j FROM r FILTER WHERE input.a NOT ",
         ] {
             assert_eq!(
                 crate::client_statement::suggest_client_statement(input, input.len()),
                 Vec::<String>::new(),
                 "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_operands_keep_the_expression_grammars_function_expectation() {
+        for input in [
+            "CREATE SUBSCRIPTION s TO r WHERE CASE WHEN input.a THEN ",
+            "CREATE JUNCTION j FROM r UNBRANCHED TO o SET x = ",
+            "CREATE JUNCTION j FROM r FILTER WHERE coalesce(",
+        ] {
+            let suggestions = crate::client_statement::suggest_client_statement(input, input.len());
+            assert!(
+                suggestions.contains(&"ref:expression_function".to_string()),
+                "{input}: {suggestions:?}"
             );
         }
     }

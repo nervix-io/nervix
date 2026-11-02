@@ -466,6 +466,10 @@ while an accepted commit continues on the leader without the browser. See
 [Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions) and
 [Client Session Protocol](client-session-protocol.md).
 
+Connector expression completion follows the same entity declarations as the
+[CLI](./client-tools-cli.md#completion), including filters, HTTP request expressions, `ALTER`
+constructions and typed metadata fields. Header functions are offered only in a supported scope.
+
 `Tab` cycles through completions offered by the server for the current cursor position. `ArrowUp`
 and `ArrowDown` walk the session's command history, `Ctrl`/`Cmd` with `Enter` submits, and `clear`
 empties the scrollback.
