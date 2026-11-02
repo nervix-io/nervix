@@ -304,12 +304,11 @@ Feature: Drain node
       CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
       CREATE KAFKA CLIENT wait_kafka
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC INGESTOR event_source
         FROM wait_kafka TOPIC 'wait_events_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_wait_events_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_wait_events_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 500ms
         ON QUIESCE SUSPEND DECODE USING wait_event_codec
@@ -321,7 +320,7 @@ Feature: Drain node
         ON GENERAL ERROR LOG;
       CREATE KAFKA TOPIC INGESTOR state_source
         FROM wait_kafka TOPIC 'wait_state_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_wait_state_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_wait_state_{{test_id}}' START AT EARLIEST
           MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING wait_event_codec
         TO event_state
@@ -430,12 +429,11 @@ Feature: Drain node
 
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE KAFKA TOPIC INGESTOR kafka_a
-        FROM kafka_main TOPIC 'notifications_a_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_a_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_a_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_a_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -445,7 +443,7 @@ Feature: Drain node
         ON GENERAL ERROR LOG;
 
       CREATE KAFKA TOPIC INGESTOR kafka_b
-        FROM kafka_main TOPIC 'notifications_b_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_b_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_b_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_b_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -455,7 +453,7 @@ Feature: Drain node
         ON GENERAL ERROR LOG;
 
       CREATE KAFKA TOPIC INGESTOR kafka_c
-        FROM kafka_main TOPIC 'notifications_c_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_c_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_c_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_c_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

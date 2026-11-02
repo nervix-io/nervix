@@ -19,18 +19,18 @@ use nervix_models::{
     ChoiceRequirement, ClientIngestorEntity, ClientName, DomainClockPeriod, EndpointIngestMode,
     EndpointName, HttpEndpointIngestor, HttpIngestorEntity, HttpRequestHeader,
     HttpRequestHeaderValue, HttpRequestIngestMode, HttpRequestIngestor, IngestDeliveryKind,
-    IngestQuiesceKind, IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity,
-    IngestorEntityKind, KafkaConsumerGroupName, KafkaIngestMode, KafkaIngestorEntity,
-    KafkaOffsetMode, KafkaTopicIngestor, KafkaTopicName, ModelName, MqttIngestMode,
-    MqttIngestorEntity, MqttQos, MqttSession, MqttTopicFilter, MqttTopicIngestor, NatsIngestMode,
-    NatsIngestorEntity, NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectName, NodeRef,
-    PayloadSizeLimit, PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor,
-    PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName,
-    PulsarSubscriptionOwnership, PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode,
-    RabbitMqIngestorEntity, RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName,
-    RedisChannelPattern, RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor,
-    RedisSubscriptionTarget, RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor,
-    SqsQueueName, SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor,
+    IngestQuiesceKind, IngestQuiesceMode, IngestQuiesceOverflow, IngestStartPosition,
+    IngestorEntity, IngestorEntityKind, KafkaConsumerGroupName, KafkaIngestMode,
+    KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicIngestor, KafkaTopicName, ModelName,
+    MqttIngestMode, MqttIngestorEntity, MqttQos, MqttSession, MqttTopicFilter, MqttTopicIngestor,
+    NatsIngestMode, NatsIngestorEntity, NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectName,
+    NodeRef, PayloadSizeLimit, PrometheusIngestMode, PrometheusIngestorEntity,
+    PrometheusQueryIngestor, PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription,
+    PulsarSubscriptionName, PulsarSubscriptionOwnership, PulsarTopicIngestor, PulsarTopicName,
+    RabbitMqIngestMode, RabbitMqIngestorEntity, RabbitMqQueueIngestor, RabbitMqQueueName,
+    RedisChannelName, RedisChannelPattern, RedisIngestorEntity, RedisPubSubIngestMode,
+    RedisPubSubIngestor, RedisSubscriptionTarget, RetryPolicy, SqsIngestMode, SqsIngestorEntity,
+    SqsQueueIngestor, SqsQueueName, SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor,
     WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
     WebsocketsIngestorEntity, WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, ZeroMqIngestMode,
     ZeroMqIngestorEntity, ZeroMqPullIngestor,
@@ -43,7 +43,31 @@ use super::SelectedReference;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OffsetChoice {
     Domain,
-    ConsumerGroup,
+    ConsumerGroup(IngestStartPosition),
+}
+
+impl OffsetChoice {
+    /// Every choice the `OFFSET BY` declaration offers.
+    const CHOICES: [Self; 3] = [
+        Self::Domain,
+        Self::ConsumerGroup(IngestStartPosition::Earliest),
+        Self::ConsumerGroup(IngestStartPosition::Latest),
+    ];
+
+    /// The name the declaration gives this choice.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Domain => "DOMAIN",
+            Self::ConsumerGroup(IngestStartPosition::Earliest) => {
+                "CONSUMER GROUP START AT EARLIEST"
+            }
+            Self::ConsumerGroup(IngestStartPosition::Latest) => "CONSUMER GROUP START AT LATEST",
+        }
+    }
+
+    pub(super) fn names_a_consumer_group(self) -> bool {
+        matches!(self, Self::ConsumerGroup(_))
+    }
 }
 
 /// One polled request header as a form edits it: its value is what the statement writes, either
@@ -213,10 +237,7 @@ impl IngestorEntityDraft {
             "SUBSCRIPTION" => self
                 .subscription_ownership
                 .map(|ownership| ownership.keywords()),
-            "OFFSET BY" => self.offset.map(|offset| match offset {
-                OffsetChoice::Domain => "DOMAIN",
-                OffsetChoice::ConsumerGroup => "CONSUMER GROUP",
-            }),
+            "OFFSET BY" => self.offset.map(OffsetChoice::name),
             _ => None,
         };
         selected.or_else(|| self.option_default(keywords))
@@ -234,11 +255,9 @@ impl IngestorEntityDraft {
                     .find(|value| value.keywords() == choice)
             }
             "OFFSET BY" => {
-                self.offset = match choice {
-                    "DOMAIN" => Some(OffsetChoice::Domain),
-                    "CONSUMER GROUP" => Some(OffsetChoice::ConsumerGroup),
-                    _ => None,
-                }
+                self.offset = OffsetChoice::CHOICES
+                    .into_iter()
+                    .find(|offset| offset.name() == choice)
             }
             _ => {}
         }
@@ -538,10 +557,11 @@ impl IngestorEntityDraft {
     fn offset_mode(&self) -> error_stack::Result<KafkaOffsetMode, IngestorEntityDraftError> {
         match self.offset {
             Some(OffsetChoice::Domain) => Ok(KafkaOffsetMode::Domain),
-            Some(OffsetChoice::ConsumerGroup) => Ok(KafkaOffsetMode::ConsumerGroup(
-                KafkaConsumerGroupName::parse(&self.consumer_group)
+            Some(OffsetChoice::ConsumerGroup(start_at)) => Ok(KafkaOffsetMode::ConsumerGroup {
+                group: KafkaConsumerGroupName::parse(&self.consumer_group)
                     .change_context(IngestorEntityDraftError::ConsumerGroup)?,
-            )),
+                start_at,
+            }),
             None => Err(Report::new(IngestorEntityDraftError::Offset)),
         }
     }
@@ -823,10 +843,11 @@ mod tests {
     use nervix_models::{
         CodecName, CreateStatement, GeneralErrorPolicy, HttpIngestorEntity, HttpRequestHeader,
         HttpRequestHeaderValue, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceOverflow,
-        IngestorEntity, IngestorEntityKind, KafkaIngestorEntity, Model, ModelKind, ModelName,
-        MqttIngestMode, MqttIngestor, MqttIngestorEntity, MqttQos, MqttSession, NatsIngestorEntity,
-        NodeRef, PulsarIngestor, PulsarIngestorEntity, PulsarSubscriptionOwnership,
-        RedisIngestorEntity, RequestedResourceVersion, Statement, WebsocketsIngestorEntity,
+        IngestStartPosition, IngestorEntity, IngestorEntityKind, KafkaIngestor,
+        KafkaIngestorEntity, KafkaOffsetMode, Model, ModelKind, ModelName, MqttIngestMode,
+        MqttIngestor, MqttIngestorEntity, MqttQos, MqttSession, NatsIngestorEntity, NodeRef,
+        PulsarIngestor, PulsarIngestorEntity, PulsarSubscriptionOwnership, RedisIngestorEntity,
+        RequestedResourceVersion, Statement, WebsocketsIngestorEntity,
     };
     use nervix_plexus::statement::parse_statement;
 
@@ -949,8 +970,8 @@ mod tests {
                 draft.instances = entity.instances.to_string();
                 match &entity.offset_mode {
                     KafkaOffsetMode::Domain => draft.offset = Some(OffsetChoice::Domain),
-                    KafkaOffsetMode::ConsumerGroup(group) => {
-                        draft.offset = Some(OffsetChoice::ConsumerGroup);
+                    KafkaOffsetMode::ConsumerGroup { group, start_at } => {
+                        draft.offset = Some(OffsetChoice::ConsumerGroup(*start_at));
                         draft.consumer_group = group.to_string();
                     }
                 }
@@ -1278,6 +1299,58 @@ mod tests {
             };
             assert_eq!(source.subscription.ownership, ownership);
             assert_eq!(source.subscription.name.as_str(), "workers");
+        }
+    }
+
+    #[test]
+    fn a_kafka_draft_builds_each_offset_choice_the_declaration_offers() {
+        let kind = IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic);
+        let mut draft = complete(kind);
+        draft.consumer_group = "readers".into();
+        let capabilities = kind.capabilities();
+        let offsets = capabilities
+            .options
+            .iter()
+            .find(|option| option.keywords == "OFFSET BY")
+            .assured("a Kafka topic ingestor declares OFFSET BY");
+        let nervix_models::OptionForm::Choice(choices) = offsets.form else {
+            panic!("OFFSET BY is a choice");
+        };
+
+        for choice in choices {
+            draft.choose_option("OFFSET BY", choice.name);
+            assert_eq!(draft.chosen_option("OFFSET BY"), Some(choice.name));
+            draft
+                .build()
+                .assured("a complete Kafka draft builds with every declared choice");
+        }
+    }
+
+    #[test]
+    fn a_kafka_draft_keeps_the_start_position_of_its_consumer_group() {
+        let mut draft = complete(IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic));
+        draft.consumer_group = "readers".into();
+
+        for (choice, position) in [
+            (
+                "CONSUMER GROUP START AT EARLIEST",
+                IngestStartPosition::Earliest,
+            ),
+            (
+                "CONSUMER GROUP START AT LATEST",
+                IngestStartPosition::Latest,
+            ),
+        ] {
+            draft.choose_option("OFFSET BY", choice);
+            let source = draft.build().assured("a complete Kafka draft builds");
+            let IngestorEntity::Kafka(KafkaIngestor::Topic(source)) = source else {
+                panic!("a Kafka draft builds a Kafka topic source");
+            };
+            let KafkaOffsetMode::ConsumerGroup { group, start_at } = source.offset_mode else {
+                panic!("the draft names a consumer group");
+            };
+            assert_eq!(group.as_str(), "readers");
+            assert_eq!(start_at, position);
         }
     }
 

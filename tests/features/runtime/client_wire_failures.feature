@@ -678,8 +678,7 @@ Feature: Client wire failure regressions
       CREATE RELAY relocation_output SCHEMA relocation_record UNBRANCHED;
       CREATE RELAY relocation_offsets SCHEMA relocation_record BRANCHED BY relocation_by_tenant;
       CREATE KAFKA CLIENT relocation_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR relocation_offset_source
         FROM relocation_kafka TOPIC 'relocation_offsets_{{test_id}}'

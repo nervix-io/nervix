@@ -33,12 +33,11 @@ CREATE RELAY chaos_paced_records SCHEMA chaos_paced_record BRANCHED BY chaos_pac
 
 CREATE KAFKA CLIENT chaos_paced_kafka
   CONFIG {
-    'bootstrap.servers' = 'broker:9092',
-    'auto.offset.reset' = 'earliest'
+    'bootstrap.servers' = 'broker:9092'
   };
 
 CREATE KAFKA TOPIC INGESTOR chaos_paced_ingestor
-  FROM chaos_paced_kafka TOPIC 'chaos_paced_input' OFFSET BY CONSUMER GROUP 'chaos_paced' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  FROM chaos_paced_kafka TOPIC 'chaos_paced_input' OFFSET BY CONSUMER GROUP 'chaos_paced' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
   DECODE USING chaos_paced_json
   TIMESTAMP NOW
   TO chaos_paced_records

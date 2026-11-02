@@ -205,8 +205,7 @@ Feature: Configuration backup into a public archive
       CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
       CREATE KAFKA CLIENT wait_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR wait_event_source
         FROM wait_kafka TOPIC 'backup_wait_{{test_id}}'
@@ -286,8 +285,7 @@ Feature: Configuration backup into a public archive
       CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
       CREATE KAFKA CLIENT wait_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR wait_event_source
         FROM wait_kafka TOPIC 'backup_slow_wait_{{test_id}}'
@@ -630,8 +628,7 @@ Feature: Configuration backup into a public archive
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR metric_source
         FROM kafka_ingress TOPIC 'backup_wasm_in_{{test_id}}'
@@ -764,8 +761,7 @@ Feature: Configuration backup into a public archive
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR metric_source
         FROM kafka_ingress TOPIC 'backup_wasm_in_{{test_id}}'
@@ -868,8 +864,7 @@ Feature: Configuration backup into a public archive
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR metric_source
         FROM kafka_ingress TOPIC 'backup_wasm_in_{{test_id}}'

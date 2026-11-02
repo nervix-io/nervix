@@ -311,6 +311,14 @@ listening socket. The test-only fault channel enters through the source plan and
 request until its selected listener acknowledges it. Another arm cannot replace an unobserved
 request, and a cancelled accept leaves it available. No shared lock or map is reached per frame.
 
+The Syslog frame carries its immutable peer metadata through that same handoff. UDP and TCP keep
+their socket address inline; TLS frames share one connection-owned address and optional verified
+client subject, decoded once after the handshake. Retaining a quiesced payload copies the complete
+declared metadata row, so ending the source message cannot change its transport or TLS peer. The
+source's Shuttle check includes metadata preservation across the occupied-queue pause race. Its
+async channel and watch, and the immutable metadata itself, have no tracked blocking-lock
+acquisition for Deloxide to observe.
+
 Restore storage qualification includes the store's cancellation, corruption, snapshot, queued
 writer, active chunk liveness and many-key cleanup regressions in `just test-deloxide`,
 `just test-deloxide-order` and `just test-deloxide-stress`, plus the public one-node and three-node `@restore_installation`
@@ -703,6 +711,17 @@ row and its retained replay to the source record. The registered `scenario.kafka
 from empty values, and drive event time through two branch windows beside tracked ingestion and
 lifecycle locks. Driver polling and metadata conversion remain outside Deloxide's lock detector;
 the ingestor-host Shuttle checks retain their existing intake and settlement scope.
+
+RabbitMQ delivery metadata stays with its delivery in the same way. The visit borrows the envelope
+and every basic property, adds no lock or shared state, and hands a timestamp no `DATETIME` holds
+over as unrepresentable, which the ingest group refuses through the message-error path its other
+admission refusals use. The `ingest-metadata-projection` Bolero property holds the projected values
+and refusals to their messages. The registered `scenario.rabbitmq-delivery-metadata`,
+`rabbitmq-redelivered-metadata`, `rabbitmq-timestamp-event-time` and `rabbitmq-timestamp-refusal`
+workloads, and their `stress.` forms, read every field in both ACK modes, observe a redelivery,
+drive a paced window from the producer's timestamp and refuse a timestamp beside tracked ingestion,
+acknowledgement and lifecycle locks. The AMQP client's reader, metadata visits and the async
+refusal step remain outside Deloxide's lock detector.
 
 ### Kafka source rejection floors
 

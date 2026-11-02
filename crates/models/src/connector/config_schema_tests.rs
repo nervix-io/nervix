@@ -488,6 +488,65 @@ fn a_refused_name_is_no_reserved_key() {
 }
 
 #[test]
+fn a_reserved_key_a_statement_sets_names_the_clause_that_sets_it() {
+    const STATEMENT_KEYS: [ClientConfigStatementKey; 1] = [ClientConfigStatementKey {
+        key: "owned.start",
+        clause: "START AT on the ingestor",
+    }];
+    let schema = ClientConfigSchema::new(&ALIASED_KEYS, &[], &["owned.group", "owned.start"])
+        .with_statement_keys(&STATEMENT_KEYS);
+
+    let refusal = schema
+        .validate(&[entry("owned.start", "value")])
+        .expect_err("a statement sets this key");
+    assert_eq!(
+        refusal.current_context(),
+        &ClientConfigSchemaError::SetByStatement {
+            key: "owned.start".to_string(),
+            clause: "START AT on the ingestor",
+        }
+    );
+
+    let refusal = schema
+        .validate(&[entry("owned.group", "value")])
+        .expect_err("Nervix sets this key itself");
+    assert_eq!(
+        refusal.current_context(),
+        &ClientConfigSchemaError::Reserved {
+            key: "owned.group".to_string()
+        }
+    );
+    assert_eq!(schema.statement_keys(), &STATEMENT_KEYS);
+}
+
+#[test]
+#[should_panic(expected = "holds_name")]
+fn a_key_a_statement_sets_is_reserved() {
+    const UNRESERVED: [ClientConfigStatementKey; 1] = [ClientConfigStatementKey {
+        key: "owned.start",
+        clause: "START AT on the ingestor",
+    }];
+    ClientConfigSchema::new(&ALIASED_KEYS, &[], &[]).with_statement_keys(&UNRESERVED);
+}
+
+#[test]
+#[should_panic(expected = "name_precedes")]
+fn keys_a_statement_sets_are_sorted() {
+    const UNSORTED: [ClientConfigStatementKey; 2] = [
+        ClientConfigStatementKey {
+            key: "owned.start",
+            clause: "START AT on the ingestor",
+        },
+        ClientConfigStatementKey {
+            key: "owned.group",
+            clause: "OFFSET BY on the ingestor",
+        },
+    ];
+    ClientConfigSchema::new(&ALIASED_KEYS, &[], &["owned.group", "owned.start"])
+        .with_statement_keys(&UNSORTED);
+}
+
+#[test]
 #[should_panic(expected = "name_precedes")]
 fn driver_aliases_are_sorted_by_the_name_each_refuses() {
     const UNSORTED: [ClientConfigAlias; 2] = [

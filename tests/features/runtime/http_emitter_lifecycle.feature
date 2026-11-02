@@ -480,11 +480,11 @@ Feature: HTTP REQUEST emitter lifecycle
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR source
         FROM kafka_main TOPIC 'http_recovery_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'http_recovery_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'http_recovery_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -597,11 +597,11 @@ Feature: HTTP REQUEST emitter lifecycle
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR source
         FROM kafka_main TOPIC 'http_stop_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'http_stop_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'http_stop_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

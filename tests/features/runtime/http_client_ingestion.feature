@@ -574,3 +574,44 @@ Feature: HTTP client ingestion
       | 3            | 'authorization' = CLIENT SECRET 'secret.padded'                 | ingestor 'polled' in domain '{{domain}}' cannot use its HEADERS: client secret 'secret.padded' of header 'authorization' is not a valid header value                |
       | 1            | 'x-event' = 'one', 'X-Event' = CLIENT SECRET 'secret.api_token' | ingestor 'polled' in domain '{{domain}}' cannot use its HEADERS: header 'X-Event' is set more than once                                                             |
       | 3            | 'x-event' = 'one', 'X-Event' = CLIENT SECRET 'secret.api_token' | ingestor 'polled' in domain '{{domain}}' cannot use its HEADERS: header 'X-Event' is set more than once                                                             |
+
+  @http_polling_request
+  Scenario Outline: A polling METHOD that HTTP cannot send is refused on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( user_id I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE HTTP CLIENT source CONFIG {
+        'endpoint' = 'http://polling.nervix.test/poll', 'timeout_ms' = 5000
+      };
+      """
+    When these Plexus statements fail with "ingestor 'polled' in domain '{{domain}}' cannot use its METHOD: method is not a supported HTTP token"
+      """
+      CREATE HTTP REQUEST INGESTOR polled FROM source METHOD '<method>' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    Then the last command error message contains "method is not a supported HTTP token" exactly once
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE HTTP REQUEST INGESTOR polled FROM source METHOD 'GET' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these Plexus statements fail with "ingestor 'polled' in domain '{{domain}}' cannot use its METHOD: method is not a supported HTTP token"
+      """
+      ALTER HTTP REQUEST INGESTOR polled
+        SET FROM source METHOD '<method>' EVERY 1s MODE NO ACK ON QUIESCE SUSPEND;
+      """
+    Then the last command error message contains "method is not a supported HTTP token" exactly once
+
+    Examples:
+      | cluster_size | method   |
+      | 1            | TRACE    |
+      | 3            | TRACE    |
+      | 1            | GET POST |
+      | 3            | GET POST |
