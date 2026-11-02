@@ -5215,6 +5215,34 @@ fn then_cli_suggestion_applies(
     );
 }
 
+#[then(expr = "the CLI offers exactly {string}")]
+fn then_cli_offers_exactly(world: &mut ScenarioWorld, expected: String) {
+    let output = world
+        .last_cli_output
+        .as_ref()
+        .verified("the preceding step ran the CLI");
+    assert!(
+        output.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .assured("the successful CLI suggestion mode prints JSON");
+    assert_eq!(response["status"], "Ready");
+    let candidates = response["suggestions"]
+        .as_array()
+        .assured("the CLI suggestion response has an array");
+    let mut offered = BTreeSet::new();
+    for candidate in candidates {
+        let value = candidate["value"]
+            .as_str()
+            .assured("a CLI suggestion carries its value");
+        offered.insert(value);
+    }
+    let expected: BTreeSet<&str> = expected.split(", ").collect();
+    assert_eq!(offered, expected);
+}
+
 #[then(expr = "the CLI output does not contain {string}")]
 fn then_cli_output_does_not_contain(world: &mut ScenarioWorld, unexpected: String) {
     let output = world
