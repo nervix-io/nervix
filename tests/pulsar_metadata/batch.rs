@@ -78,7 +78,7 @@ async fn publish(address: SocketAddr, topic: &str, producer: &str) -> CommandSen
     send(
         &mut connection,
         BaseCommand {
-            r#type: CommandType::Connect as i32,
+            r#type: i32::from(CommandType::Connect),
             connect: Some(CommandConnect {
                 client_version: "Nervix metadata fixture".into(),
                 protocol_version: Some(19),
@@ -93,7 +93,7 @@ async fn publish(address: SocketAddr, topic: &str, producer: &str) -> CommandSen
     send(
         &mut connection,
         BaseCommand {
-            r#type: CommandType::Producer as i32,
+            r#type: i32::from(CommandType::Producer),
             producer: Some(CommandProducer {
                 topic: topic.into(),
                 producer_id: 1,
@@ -114,7 +114,7 @@ async fn publish(address: SocketAddr, topic: &str, producer: &str) -> CommandSen
     send(
         &mut connection,
         BaseCommand {
-            r#type: CommandType::Send as i32,
+            r#type: i32::from(CommandType::Send),
             send: Some(CommandSend {
                 producer_id: 1,
                 sequence_id: 41,
@@ -207,11 +207,11 @@ async fn receive(connection: &mut Framed<TcpStream, Codec>, expected: CommandTyp
             .await
             .verified("the broker keeps the publication connection open")
             .assured("the broker sends a valid Pulsar frame");
-        if frame.command.r#type == CommandType::Ping as i32 {
+        if frame.command.r#type == i32::from(CommandType::Ping) {
             send(
                 connection,
                 BaseCommand {
-                    r#type: CommandType::Pong as i32,
+                    r#type: i32::from(CommandType::Pong),
                     pong: Some(CommandPong {}),
                     ..Default::default()
                 },
@@ -220,7 +220,12 @@ async fn receive(connection: &mut Framed<TcpStream, Codec>, expected: CommandTyp
             .await;
             continue;
         }
-        assert_eq!(frame.command.r#type, expected as i32, "{:?}", frame.command);
+        assert_eq!(
+            frame.command.r#type,
+            i32::from(expected),
+            "{:?}",
+            frame.command
+        );
         return frame;
     }
 }
