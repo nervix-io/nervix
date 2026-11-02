@@ -325,7 +325,7 @@ impl KafkaTopicIngestorStartPlan {
 
         let rebalance_tx = match &offsets {
             KafkaOffsetPlan::Domain(_) => Some(watch::channel(0_u64).0),
-            KafkaOffsetPlan::ConsumerGroup(_) => None,
+            KafkaOffsetPlan::ConsumerGroup { .. } => None,
         };
         let mut companions: Vec<Box<dyn IngestorCompanion>> = Vec::new();
         if let Some(rebalance_tx) = rebalance_tx.as_ref() {
@@ -351,10 +351,13 @@ impl KafkaTopicIngestorStartPlan {
 
         let mut domain_offsets = None;
         let source_offset_mode = match offsets {
-            KafkaOffsetPlan::ConsumerGroup(group) => KafkaTopicIngestorOffsetMode::ConsumerGroup {
-                group_id: group.as_str().to_string(),
-                commit: KafkaGroupCommit::for_acknowledgement(acknowledgement),
-            },
+            KafkaOffsetPlan::ConsumerGroup { group, start_at } => {
+                KafkaTopicIngestorOffsetMode::ConsumerGroup {
+                    group_id: group.as_str().to_string(),
+                    commit: KafkaGroupCommit::for_acknowledgement(acknowledgement),
+                    start_at,
+                }
+            }
             KafkaOffsetPlan::Domain(placement) => {
                 let Some(originator) = runtime.kafka_offset_originator(ingestor, &placement) else {
                     return Err(ingestor.connector_start_failure(
