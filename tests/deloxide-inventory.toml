@@ -187,6 +187,7 @@ tags = [
   "@client_ingestor_alter_drain",
   "@syslog_suspend_handoff",
   "@syslog_listener_rebind",
+  "@syslog_metadata",
   "@resource_source_discovery",
   "@resource_upload_publication",
   "@deadlock_reports",
@@ -1302,6 +1303,16 @@ scenario = "A full Syslog TCP intake keeps every frame through source suspension
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Verified TLS client-subject extraction and complete Syslog metadata projection through real one- and three-node hosts. The source's async connection and immutable peer metadata are outside Deloxide; node lifecycle and host owners retain their tracked locks."
+examples = 4
+feature = "tests/features/runtime/syslog_metadata.feature"
+id = "scenario.syslog-tls-metadata"
+invariant = "Every TLS frame carries its transport and peer address, with the exact client subject only after client-certificate verification."
+invocation = "scenarios"
+scenario = "A Syslog TLS frame exposes a peer only when the client certificate is verified"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Resource publication, a replica's temporarily empty source view, pending observation, archive installation and a lookup through the replicated file. The test-control map and watch are untracked; consensus persistence and node lifecycle use tracked owners."
 examples = 1
 feature = "tests/features/cluster/resource_source_discovery.feature"
@@ -1769,6 +1780,16 @@ id = "stress.syslog-suspend-handoff"
 invariant = "One-node and every three-node Syslog listener delivers every numbered frame once through entity suspension and resume."
 invocation = "stress-scenarios"
 scenario = "A full Syslog TCP intake keeps every frame through source suspension on <cluster_size> nodes via <node_id>"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: verified TLS subject extraction and complete Syslog metadata through the real host. Deloxide observes the host's tracked locks, not the source's async connection or immutable metadata."
+examples = 4
+feature = "tests/features/runtime/syslog_metadata.feature"
+id = "stress.syslog-tls-metadata"
+invariant = "Every TLS frame carries its transport and peer address, with the exact client subject only after client-certificate verification."
+invocation = "stress-scenarios"
+scenario = "A Syslog TLS frame exposes a peer only when the client certificate is verified"
 selections = ["deloxide-stress"]
 
 [[workload]]

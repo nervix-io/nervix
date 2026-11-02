@@ -1345,10 +1345,11 @@ vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the r
 the poll's scheduled instant, `HTTP ENDPOINT` the request's method, path, query, peer address and
 routed host, `WEBSOCKETS CONNECTION` the frame kind, `WEBSOCKETS ENDPOINT` the frame kind, the
 connection's peer address and its path, `KAFKA TOPIC` the topic, partition, offset, binary key,
-timestamp, timestamp kind and tombstone flag, `SYSLOG LISTENER` the peer address, `REDIS PUBSUB`
-the delivering channel and the pattern it matched, and every other entity none. The endpoint
-entities are served by the host itself rather than a connector crate, so the server's endpoint
-intake hands their values over the same way a connector's message does. Registry
+timestamp, timestamp kind and tombstone flag, `SYSLOG LISTENER` the peer address, transport and
+verified TLS client subject, `REDIS PUBSUB` the delivering channel and the pattern it matched,
+and every other entity none. The endpoint entities are served by the host itself rather than a
+connector crate, so the server's endpoint intake hands their values over the same way a connector's
+message does. Registry
 validation reads that declaration for the fields an ingestor's route programs and its
 `TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
 connector's message hands the host the value of every declared field in declared order, one typed
@@ -2699,6 +2700,12 @@ sequenceDiagram
   octet count, at most eleven bytes with its space, is read whole again when a read splits it. A
   frame split anywhere across reads yields the same payload and the same typed framing failure as
   one read holding the whole stream. [Syslog ingestion](./syslog.md#tcp) defines the framing rules.
+  Each frame retains its peer address and transport. A successful TLS handshake supplies the
+  verified leaf client certificate, when client authentication is configured; its subject is
+  decoded once and shared by the connection's frames. UDP, TCP and TLS without a verified client
+  identity project a null TLS peer. A subject decoding failure retains the typed X.509 cause and
+  ends that connection before it hands over a frame. The generic metadata visit, lazy projection
+  and quiesce retention carry the entire declared row.
   Once a connection decodes a frame, it completes the bounded intake-queue send even if SUSPEND
   engages while that send waits for a place; suspension stops its next read. An accept failure
   retires only the listening socket. The source retains established connection tasks, their

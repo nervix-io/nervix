@@ -127,7 +127,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'syslog_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but SYSLOG LISTENER ingestors declare only metadata.peer_addr"
+    When these Plexus statements fail with "ingestor 'syslog_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but SYSLOG LISTENER ingestors declare only metadata.peer_addr, metadata.transport and metadata.tls_peer"
       """
       CREATE SYSLOG LISTENER INGESTOR syslog_source
         FROM syslog_main MODE NO ACK ON QUIESCE DROP DECODE USING event_codec

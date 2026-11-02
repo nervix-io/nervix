@@ -85,9 +85,9 @@ ingest_locator = "The configured client or endpoint owns the address and path; t
 mirror = "An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload."
 
 [entity."SYSLOG LISTENER"]
-ingest_headers = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
+ingest_headers = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
 ingest_locator = "The configured client owns the transport address; no separate external entity name is written in this body."
-mirror = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
+mirror = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
 
 [entity."CLIENT CONSUMER"]
 emit_headers = "Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope."
@@ -111,10 +111,10 @@ mirror = "The Sentry envelope API accepts one encoded event per request; this co
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."SYSLOG COLLECTOR"]
-emit_headers = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
+emit_headers = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
 emit_locator = "The configured client owns the transport address; no separate external entity name is written in this body."
 envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
-mirror = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
+mirror = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."OTEL LOGS"]

@@ -251,6 +251,7 @@ class InventoryTests(unittest.TestCase):
             "simd-byte-classes",
             "simd-xml-chars",
             "syslog-stream-framing",
+            "syslog-listener-metadata",
             "rabbitmq-client-address",
             "syslog-structured-data",
             "replica-progress",

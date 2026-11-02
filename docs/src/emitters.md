@@ -1893,7 +1893,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | A batch is written as one frame within the frame limits below; general BATCH limits still apply. |

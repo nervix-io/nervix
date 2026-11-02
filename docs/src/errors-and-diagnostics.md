@@ -710,6 +710,11 @@ injector follows the same typed path. WebSocket signaling compilation and execut
 frame encoding and transport causes. The runtime's Syslog source-plan and signaling compilation
 errors keep those reports as typed fields while preserving their startup messages.
 
+A Syslog listener that cannot decode the subject of a verified TLS client certificate keeps the
+X.509 parser's typed cause beneath `SyslogConnectionError::TlsPeerCertificate`. It ends that
+connection before handing over frames. A connection without client authentication is an ordinary
+absent TLS peer and produces no failure.
+
 A MySQL pool is kept at its `POOL SIZE MIN` by a task no caller waits on, so that task is the only
 witness of a pass that ends below the minimum. It reports `PoolMinimumError::NotRestored`, naming
 the minimum, above the failed checkout's `PoolMinimumError::CheckOut` and the driver's error, at

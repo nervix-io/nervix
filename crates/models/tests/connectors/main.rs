@@ -359,7 +359,11 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
         },
         IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener) => IngestorDeclaration {
             headers: None,
-            metadata: &[("peer_addr", IngestorMetadataType::String)],
+            metadata: &[
+                ("peer_addr", IngestorMetadataType::String),
+                ("transport", IngestorMetadataType::String),
+                ("tls_peer", IngestorMetadataType::String),
+            ],
             every_node: true,
             reference: IngestorReferenceKind::Client(ConnectorKind::Syslog),
         },
