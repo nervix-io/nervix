@@ -336,7 +336,7 @@ Feature: Domain clock contract regressions
     When domain clock progress for domain "{{domain}}" on node "node-1" resumes
     Then within "20s" the clock session receives a tick with an id higher than before owner loss
 
-  @domain_bound_clock
+  @domain_bound_clock @slots_2
   Scenario: A joining or restarted node installs the current clock generation before execution
     Given the production sticky scheduler is configured
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -513,15 +513,10 @@ Feature: Domain clock contract regressions
         timestamp STRING,
         due STRING
       );
-      CREATE WIRE JSON SCHEMA cadence_sample_wire MODE STRICT (
-        source string,
-        value number,
-        timestamp string,
-        due string
-      );
       CREATE CODEC cadence_sample_codec
-        FROM WIRE JSON SCHEMA cadence_sample_wire
-        TO SCHEMA cadence_sample;
+        FROM JSON
+        TO SCHEMA cadence_sample
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, due: .metric.due, value, timestamp}';
       CREATE SCHEMA cadence_observation (
         due STRING,
         executed_at DATETIME
@@ -571,15 +566,10 @@ Feature: Domain clock contract regressions
         timestamp STRING,
         due STRING
       );
-      CREATE WIRE JSON SCHEMA rebound_sample_wire MODE STRICT (
-        source string,
-        value number,
-        timestamp string,
-        due string
-      );
       CREATE CODEC rebound_sample_codec
-        FROM WIRE JSON SCHEMA rebound_sample_wire
-        TO SCHEMA rebound_sample;
+        FROM JSON
+        TO SCHEMA rebound_sample
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, due: .metric.due, value, timestamp}';
       CREATE SCHEMA rebound_observation (
         due STRING,
         executed_at DATETIME

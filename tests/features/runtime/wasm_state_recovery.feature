@@ -199,6 +199,7 @@ Feature: Recovery from a rejected WASM guest snapshot
       | 1            |
       | 3            |
 
+  @slots_2
   Scenario Outline: A failed fresh initialization spends the one recovery attempt for good
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured

@@ -270,6 +270,14 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "TIMESTAMP"
+entity = "KAFKA TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_emission.feature", scenario = "A Kafka emitter writes each record's TIMESTAMP as the time its record was created" },
+  { feature = "tests/features/runtime/kafka_emission.feature", scenario = "A Kafka record its broker refused keeps its TIMESTAMP when the emitter sends it again" },
+]
+
+[[capability]]
 capability = "INSTANCES"
 entity = "KAFKA TOPIC INGESTOR"
 scenarios = [
@@ -780,6 +788,21 @@ capability = "QUERY"
 entity = "PROMETHEUS QUERY INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/prometheus_ingestion.feature", scenario = "Prometheus ingestor follows paced domain logical time and cadence" },
+]
+
+[[capability]]
+capability = "metadata.evaluated_at"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_samples.feature", scenario = "A route reads the query a sample answers and the instant its poll evaluated it at" },
+  { feature = "tests/features/runtime/prometheus_samples.feature", scenario = "A window takes each sample's event time from metadata.evaluated_at" },
+]
+
+[[capability]]
+capability = "metadata.query"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_samples.feature", scenario = "A route reads the query a sample answers and the instant its poll evaluated it at" },
 ]
 
 [[capability]]

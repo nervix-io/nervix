@@ -4,13 +4,13 @@
 //!
 //! - **Owns.** The Prometheus client Model with the `CONFIG` keys it declares and the API root
 //!   its address names, the query source Model with its delivery mode and response bound, and what
-//!   each declares.
+//!   each declares, which includes the sample a query source delivers and the metadata beside it.
 //!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and client declarations, the HTTP transport's request
 //!   timeout, the URL Standard parser, the domain clock's period, the byte size a limit holds and
 //!   the names a body references.
-//! - **Must not know.** The Prometheus HTTP API's endpoints and answers, how a client is built, or
-//!   how a query is evaluated on its cadence.
+//! - **Must not know.** The Prometheus HTTP API's endpoints, how a client is built or an answer is
+//!   read, or how a query is evaluated on its cadence.
 
 #![cfg_attr(
     nervix_lint,
@@ -24,6 +24,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
+mod sample;
+
+pub use sample::{
+    PROMETHEUS_VECTOR_RESULT, PrometheusNonFiniteValue, PrometheusSample, PrometheusSampleValue,
+    PrometheusSampleValueError, PrometheusUnsupportedResult,
+};
+
 use super::{
     bounds::{
         BufferBound, BufferCapacity, BufferOverflow, DeadlineKey, DeclaredBounds, DeclaredBuffer,
@@ -36,8 +43,9 @@ use crate::{
     AcknowledgementConfirmation, ByteSizeUnit, ClientConfigEntry, ClientName, ConnectorKind,
     DeclaredDelivery, DeclaredQuiesce, DomainClockPeriod, IngestAcknowledgement, IngestQuiesceMode,
     IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
-    IngestorMetadataDeclaration, IngestorReference, IngestorReferenceKind, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass,
+    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
+    IngestorReferenceKind, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PayloadSizeLimit, PositionClass,
 };
 
 configured_client!(Prometheus: unpooled, config CLIENT_CONFIG, CreateClientPrometheus => PrometheusConfigEntry);
@@ -195,12 +203,19 @@ const PROMETHEUS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
 };
 
+/// The statement's query and the instant its poll evaluated it at, the same for every sample of one
+/// poll.
+const PROMETHEUS_QUERY_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("query", IngestorMetadataType::String),
+    IngestorMetadataField::new("evaluated_at", IngestorMetadataType::Datetime),
+]);
+
 /// A query answer carries each sample's labels, which its payload holds, and no transport headers
 /// of its own, so a query source reads none.
 impl IngestorDeclaration for PrometheusQueryIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         headers: None,
-        metadata: IngestorMetadataDeclaration::NONE,
+        metadata: PROMETHEUS_QUERY_METADATA,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Prometheus),
         position_class: PositionClass::None,
