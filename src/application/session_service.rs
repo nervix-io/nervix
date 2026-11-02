@@ -2370,9 +2370,9 @@ mod tests {
         assert_eq!(response.diagnostics.len(), 1);
         assert_eq!(response.diagnostics[0].span, Some(42..47));
 
-        let query = "CREATE HTTP ENDPOINT INGESTOR logs FROM socket MODE NO ACK ON QUIESCE \
-                     SUSPEND DECODE USING lines TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE \
-                     ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+        let query = "CREATE HTTP ENDPOINT INGESTOR logs FROM socket MODE NO ACK ON QUIESCE BUFFER \
+                     MAX SIZE 1MiB DECODE USING lines TO events INHERIT ALL UNBRANCHED FLUSH \
+                     IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
         let err = error_stack::Report::new(RegistryError::IngestorEndpointTypeMismatch {
             domain: domain.clone(),
             ingestor: ingestor.clone(),
@@ -2622,8 +2622,8 @@ mod tests {
         let endpoint = suggestion_values(
             &service,
             &subscriptions,
-            "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE SUSPEND \
-             DECODE USING codec TO outgoing SET value = read_",
+            "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX \
+             SIZE 1MiB DECODE USING codec TO outgoing SET value = read_",
         )
         .await;
         assert_eq!(endpoint, vec!["read_header", "read_headers"]);

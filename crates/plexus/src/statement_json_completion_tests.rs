@@ -33,8 +33,6 @@ fn json_extraction_body_does_not_change_route_completion_context() {
         );
     }
 
-    let unfinished_conditional =
-        "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = CASE WHEN ";
     for unfinished in [
         "JSON_VALUE(input.doc, '$.a' AS ",
         "JSON_VALUE(input.doc, '$.a' AS VEC<",
@@ -44,9 +42,14 @@ fn json_extraction_body_does_not_change_route_completion_context() {
             "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = {unfinished}"
         );
         assert_eq!(
-            suggest_statement(unfinished_conditional, unfinished_conditional.len()),
             suggest_statement(&input, input.len()),
-            "an unfinished extraction offers what any unfinished expression offers: {unfinished}"
+            Vec::<String>::new(),
+            "a type or JSON-path literal position is not an expression operand: {unfinished}"
         );
     }
+    let operand =
+        "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = JSON_EXISTS(";
+    assert!(
+        suggest_statement(operand, operand.len()).contains(&"ref:expression_function".to_string())
+    );
 }
