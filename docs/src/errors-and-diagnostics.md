@@ -468,10 +468,13 @@ cannot begin at all, the diagnostic expects the placeholder the clause names, su
 the expression grammar's first diagnostic at the tokens of the statement where it failed, with the
 message the standalone reader gives the same text. Where a complete expression is followed by a token
 no clause of the statement expects, the statement reports that token with its own expectations. An
-expression's diagnostic carries no expectations of the expression grammar, so completion inside an
-unfinished expression offers nothing rather than guessing at expression syntax. A caller that owns
-a larger operation adds its own context above the
-language's report instead of copying the diagnostics into its error: splitting a client batch reports
+unfinished expression retains the expression grammar's semantic expectations for function names,
+invocations, qualified fields and assignment targets. These expectations keep the statement's
+token positions and participate in its composed grammar. Completion resolves functions in the
+selected connector scope and metadata fields from that entity's declaration; the diagnostic keeps
+the expression reader's expected tokens and found token. Ordinary clause continuations still
+belong to the surrounding statement grammar. A caller that owns a larger operation adds its own
+context above the language's report instead of copying the diagnostics into its error: splitting a client batch reports
 that the batch could not be split, and the formatter reports a source that did not parse, the line
 of a statement the vocabulary could not render, or a rendering defect whose output changed meaning
 or no longer parses. The formatter's command line reads the language's report beneath its context
@@ -891,6 +894,19 @@ configuration failure, not a record rejection. A checkout that runs out of
 `EmitterOpenError::Initialize` while the pool opens and beneath `EmitterWriteError::NotInitialized`
 on a write, which the host retries on its policy.
 
+The Postgres statement key `timeout_ms` is optional and held to PostgreSQL's signed integer
+millisecond range at the offline configuration boundary. A range refusal keeps its typed integer
+conversion cause beneath `ClientConfigError::InvalidDeadline` and projects the `timeout_ms` key,
+rather than the address, into `OfflineClientConfigError`. The connection's private
+`PostgresStatementDeadline` applies both the server option and each catalog-query or INSERT response
+budget. A local timeout keeps `DeadlineElapsed`, its operation, key and bound beneath
+`PostgresWriteError::Deadline` and the host publish context; its printable description survives that
+projection. The interrupted connection closes instead of returning its pending response to the
+idle pool. A server `57014` becomes `PostgresWriteError::StatementCanceled` when the client has a
+configured deadline: it reports that safe SQLSTATE and configured bound without treating every
+operator cancellation as a proven timeout. Both remain transient publish failures, with no record
+rejection or exposed server response text.
+
 Redis subscription protocol and read failures retain their driver causes beneath
 `RedisPubSubIngestorError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
 the shared `DeadlineElapsed` with `idle_timeout_ms` and its configured bound beneath `IdleProbe`
@@ -968,6 +984,12 @@ to take a record, and its `PublishNoticeError` when an answer leaves a record un
 `EmitterWriteError::Publish`, each with the connector's description of the failure for the
 emitter's transient error. A missed `ACK TIMEOUT` is the confirmation window's
 `ConfirmationWindowError`, which the window describes the same way.
+
+An MQTT broker's successful `SUBACK` with a grant below the requested QoS fails readiness with
+`MqttTopicIngestorError::SubscriptionDowngraded { requested, granted }` beneath
+`IngestorError::Resume`. Both fields are typed quality-of-service levels. The general error
+policy and `DESCRIBE INGESTOR` report those levels without payload or client credentials, in
+acknowledged and `NO ACK` modes alike.
 
 MQTT input retirement reports `RuntimeError::RetireIngestorEntity`, naming its domain and
 ingestor, above the connector's `MqttTopicIngestorError::RetireInstance` and instance index. The report

@@ -15,7 +15,7 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector::{OfflineClientConfigError, client_config_value};
+use nervix_connector::{ClientConfigError, OfflineClientConfigError, client_config_value};
 use nervix_models::{ClientConfigEntry, ConnectorKind};
 
 /// Parse the current address without opening a connection or resolving its host.
@@ -29,9 +29,16 @@ pub fn validate_client_configuration(
     address
         .parse::<sqlx::postgres::PgConnectOptions>()
         .change_context(OfflineClientConfigError::key("addr"))?;
-    crate::table::connect_options(&address, config)
-        .change_context(OfflineClientConfigError::key("addr"))?;
-    Ok(())
+    match crate::table::connect_options(&address, config) {
+        Ok(_) => Ok(()),
+        Err(report) => {
+            let key = match report.downcast_ref::<ClientConfigError>() {
+                Some(ClientConfigError::InvalidDeadline { key }) => *key,
+                _ => "addr",
+            };
+            Err(report.change_context(OfflineClientConfigError::key(key)))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -56,5 +63,26 @@ mod tests {
             matches!(refusal.current_context(), OfflineClientConfigError::InvalidKey { key } if key == "addr")
         );
         assert_eq!(refusal.to_string(), "invalid client config key 'addr'");
+    }
+
+    #[test]
+    fn offline_statement_deadline_refusal_names_its_key_and_keeps_its_cause() {
+        let config = [
+            ClientConfigEntry {
+                key: "addr".to_string(),
+                value: "postgres://127.0.0.1/nervix?sslmode=disable".to_string(),
+            },
+            ClientConfigEntry {
+                key: "timeout_ms".to_string(),
+                value: "2147483648".to_string(),
+            },
+        ];
+        let report = validate_client_configuration(&config)
+            .expect_err("the deadline exceeds PostgreSQL's statement_timeout range");
+        assert!(
+            matches!(report.current_context(), OfflineClientConfigError::InvalidKey { key } if key == "timeout_ms")
+        );
+        assert!(report.contains::<ClientConfigError>());
+        assert!(report.contains::<std::num::TryFromIntError>());
     }
 }
