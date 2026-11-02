@@ -55,8 +55,7 @@ Feature: Deduplicator state replication
         ON MESSAGE ERROR LOG;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC EMITTER kafka_notifications FROM ss2 TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING transaction_codec
         INHERIT ALL

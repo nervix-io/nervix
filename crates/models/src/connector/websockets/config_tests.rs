@@ -176,6 +176,32 @@ fn the_declared_schema_refuses_what_the_client_cannot_read_and_never_prints_valu
 }
 
 #[test]
+fn an_endpoint_with_user_information_is_refused_without_printing_it() {
+    for endpoint in [
+        "wss://operator:secret@peer.test/events",
+        "ws://operator:secret@peer.test",
+        "wss://operator@peer.test/events",
+        "wss://:secret@peer.test/events",
+    ] {
+        let Err(report) = WebsocketsClientConfig::parse(&config(&[("endpoint", endpoint)])) else {
+            panic!("the upgrade never sends an endpoint's user information");
+        };
+        assert_eq!(
+            report.current_context(),
+            &WebsocketsClientConfigError::EndpointUserInformation
+        );
+        let rendered = format!("{report:#}");
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("operator"));
+    }
+
+    for endpoint in ["ws://peer.test/user@host", "ws://peer.test/?user=a@b"] {
+        WebsocketsClientConfig::parse(&config(&[("endpoint", endpoint)]))
+            .assured("only the authority carries user information");
+    }
+}
+
+#[test]
 fn the_typed_configuration_refuses_what_the_schema_cannot_state() {
     let Err(fragment) =
         WebsocketsClientConfig::parse(&config(&[("endpoint", "ws://example.test/#secret")]))
