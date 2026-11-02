@@ -119,9 +119,10 @@ time, without an allocation per published batch.
 An HTTP polling leaf carries the validated method, header declarations with literal values or
 client-secret keys, and effective response size limit together with its cadence and client reference.
 Runtime composition resolves the client's mount and node DNS handle once and captures the current
-HTTP header caps. The connector checks the complete resolved headers against those caps before
-opening a request, retaining sensitivity on secret values. Polling never reads a configuration
-Model to recover the method or the policy.
+HTTP header caps. When it opens, the connector reads each referenced secret from the client's
+resolved configuration and checks the complete resolved headers against those caps before opening
+a request, retaining sensitivity on secret values. Polling never reads a configuration Model to
+recover the method or the policy.
 
 An Iceberg plan carries the statement's validated catalog namespace with its table identity.
 Local opening uses exactly those namespace levels, independently of the Nervix domain name.
