@@ -506,7 +506,8 @@ General notes:
   `metadata.timestamp_type`, and `metadata.tombstone`, `RABBITMQ QUEUE` declares the delivery's
   envelope and its AMQP basic properties, `SQS QUEUE` declares the message identity and its system
   attributes, `SYSLOG LISTENER` declares
-  `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
+  `metadata.peer_addr`, `metadata.transport`, and `metadata.tls_peer`, `HTTP REQUEST` declares
+  `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
   `metadata.remote_addr`, and `metadata.host`, `PROMETHEUS QUERY` declares `metadata.query` and
   `metadata.evaluated_at`, `WEBSOCKETS CONNECTION` declares `metadata.frame_type`,
@@ -1003,7 +1004,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Capability | Declaration |
 | --- | --- |
 | Reference | HTTP client |
-| Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
+| Locator and validation rule | Not offered: The client's endpoint URL names the polled resource, its path and query included, so this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals or client secrets); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
@@ -1020,61 +1021,222 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-ingest).
 <!-- connector-matrix:ingest-http-request:end -->
 
-- `METHOD '<token>'` is required on the ingestor. `HEADERS { '<name>' = <value>, … }` writes request
-  fields. Names are case-insensitive, and `CREATE` and `ALTER` refuse a name written twice. A value
-  is UTF-8 text with no control character but a tab and no space or tab at either end. `MAX BODY SIZE`
-  bounds the response body at its declared size, or 16 MiB where omitted. A response above that
-  bound fails its poll.
-- A header's value is a string literal or `CLIENT SECRET '<key>'`. A literal is part of the statement,
-  so `SHOW CREATE` and `DESCRIBE INGESTOR` print it, and a credential does not belong in one.
-  `CLIENT SECRET` names a key of the ingestor's client and sends that key's value:
+An `HTTP REQUEST` ingestor sends one request through an `HTTP CLIENT` on a cadence of domain time
+and delivers the body of each successful response as one payload. One scheduled node runs it. Every
+poll asks the endpoint again, so `NO ACK` is its only mode: nothing acknowledges a response, and an
+instant whose poll failed or was skipped delivers nothing.
 
-  ```plexus
-  CREATE HTTP CLIENT orders_api CONFIG {
-    'endpoint' = 'https://api.example.com/orders',
-    'timeout_ms' = 5000,
-    'secret.api_token' = 'Bearer example-token'
-  };
+```plexus
+CREATE SCHEMA order_status ( order_id I64, state STRING );
+CREATE SCHEMA polled_order_status (
+  order_id I64,
+  state STRING,
+  http_status U16 OPTIONAL,
+  polled_at DATETIME OPTIONAL,
+  request_id STRING OPTIONAL
+);
+CREATE WIRE JSON SCHEMA order_status_wire MODE STRICT ( order_id integer, state string );
+CREATE CODEC order_status_codec FROM WIRE JSON SCHEMA order_status_wire TO SCHEMA order_status;
+CREATE RELAY order_statuses SCHEMA polled_order_status UNBRANCHED;
 
-  CREATE HTTP REQUEST INGESTOR orders
-    FROM orders_api
-    METHOD 'GET'
-    HEADERS { 'accept' = 'application/json', 'authorization' = CLIENT SECRET 'secret.api_token' }
-    EVERY 30s MODE NO ACK ON QUIESCE SUSPEND DECODE USING orders_codec
-    TO orders_relay INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
-    ON GENERAL ERROR LOG;
-  ```
+CREATE HTTP CLIENT orders_api CONFIG {
+  'endpoint' = 'https://api.example.com/orders/latest',
+  'timeout_ms' = 5000,
+  'secret.api_token' = 'Bearer example-token'
+};
 
-  The operator names each `secret.<name>` key of an `HTTP` client. Inspection prints the reference:
-  `SHOW CREATE`, `DESCRIBE INGESTOR` and the console show `CLIENT SECRET 'secret.api_token'`, and
-  `SHOW CREATE CLIENT` and `DESCRIBE CLIENT` mask the key as `********`. `CREATE` and `ALTER` refuse a
-  reference to a key the client does not hold, to a key that is not a secret, and to a value that
-  cannot be a header, naming the header and the key and never quoting the value. A value that keeps a
-  `{{ … }}` template is rendered and checked where the ingestor opens instead, and one that cannot be
-  a header fails the open. A poll sends the value only to the client's origin, because it follows a
-  redirect nowhere else. Complete serialization keeps the value, as it keeps every client secret, so
-  a backup archive holds it; see [Backup And Restore](backup-and-restore.md).
-- The HTTP client requires `endpoint` and `timeout_ms`. It also declares optional
-  `follow_redirects` and `proxy` settings, plus TLS trust and client identity files. Polling follows
-  a redirect only to the client's own origin and only with `follow_redirects = true`, sends its
-  requests through the declared `proxy` alone and never through one the environment names, and
-  shares one `timeout_ms` between a request and the redirects it follows, as
-  [HTTP client transport](emitters.md#http-client-transport) describes. A redirect the poll does not
-  follow fails it with its status, and a failed poll's `transient error:` names its status or its
-  transport failure but never the endpoint's path or query.
-- `metadata.status` is the successful response's `U16` status and `metadata.polled_at` is the
-  scheduled `DATETIME` instant of that poll. `read_header` and `read_headers` read the response's
-  headers, including non-ASCII UTF-8 values. A header value with invalid UTF-8 bytes is omitted
-  without discarding the row and counted in `nervix_ingestor_header_values_dropped_total`;
-  `204 No Content` emits no row.
-- polls a configured HTTP endpoint periodically
-- issues the first request immediately, then follows an anchored domain-clock cadence; slow
-  responses coalesce missed occurrences into one request at the newest due instant
-- `204 No Content` is treated as no message
-- `SUSPEND` skips polls and therefore creates a sampling gap
-- `BUFFER` keeps polling on the declared cadence and drains retained poll payloads in order
-- a poll whose `ON INGESTION` unfolding finds the node's extension workers full waits for them; see
-  [When The Extension Workers Are Full](#when-the-extension-workers-are-full)
+CREATE HTTP REQUEST INGESTOR order_status_poll
+  FROM orders_api
+  METHOD 'GET'
+  HEADERS { 'accept' = 'application/json', 'authorization' = CLIENT SECRET 'secret.api_token' }
+  MAX BODY SIZE 1MiB
+  EVERY 30s
+  MODE NO ACK
+  ON QUIESCE SUSPEND
+  DECODE USING order_status_codec
+  TIMESTAMP AT metadata.polled_at
+  TO order_statuses INHERIT ALL
+    SET http_status = metadata.status,
+        polled_at = metadata.polled_at,
+        request_id = read_header('x-request-id')
+  UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+#### HTTP Polling Requests
+
+Each poll sends one request, which the statement's options and its client describe:
+
+- `METHOD '<method>'` is required and sent with the spelling it is written in. It is an HTTP token
+  of 1 to 64 ASCII bytes other than `CONNECT` and `TRACE` in any letter case, and `CREATE` and
+  `ALTER` refuse any other method, naming the ingestor. A poll sends no body and no
+  `content-length` field, whatever its method, so an endpoint that requires a length on a `POST`
+  can refuse the poll.
+- The request goes to the client's `endpoint` as written, its path and query included, so one client
+  names one resource; see [`HTTP CLIENT`](#http-client).
+- `HEADERS { '<name>' = <value>, … }` is optional and writes request fields. A name is an HTTP field
+  name, compared without ASCII case; `CREATE` and `ALTER` refuse a name written twice and the names
+  the transport owns: `host`, `content-length`, `transfer-encoding`, `connection`, `keep-alive`,
+  `proxy-connection`, `te`, `trailer`, `upgrade` and `expect`. A value is a string literal or
+  `CLIENT SECRET '<key>'`, and what it sends is UTF-8 text with no control character but a tab and
+  no space or tab at either end; an empty value is sent empty. A statement writes at most 128 fields
+  and 32 KiB of names and values together, the bounds an
+  [HTTP emitter](emitters.md#http-request-configuration) holds its application headers to. A
+  refusal names the ingestor and the header and never quotes a value, such as
+  `ingestor 'order_status_poll' in domain 'shop' cannot use its HEADERS: header 'X-Event' is set more than once`.
+- `MAX BODY SIZE <bytes>` bounds the response body; see
+  [HTTP Polling Response Bound](#http-polling-response-bound).
+- `EVERY <duration>` is required and sets the cadence; see
+  [HTTP Polling Cadence](#http-polling-cadence).
+
+Beside the fields `HEADERS` writes, a request carries the `host` field, or the HTTP/2 authority,
+`accept: */*` unless `HEADERS` writes `accept`, and `accept-encoding: gzip,deflate,br` unless
+`HEADERS` writes `accept-encoding`. It writes no `user-agent`.
+
+A literal is part of the statement, so `SHOW CREATE` and `DESCRIBE INGESTOR` print it, and a
+credential does not belong in one. `CLIENT SECRET` names a key of the ingestor's client and sends
+that key's value, as `authorization` does in the example above. The operator names each
+`secret.<name>` key of an `HTTP` client. Inspection prints the reference: `SHOW CREATE`,
+`DESCRIBE INGESTOR` and the console show `CLIENT SECRET 'secret.api_token'`, and `SHOW CREATE CLIENT`
+and `DESCRIBE CLIENT` mask the key as `********`. `CREATE` and `ALTER` refuse a reference to a key
+the client does not hold, to a key that is not a secret, and to a value that cannot be a header,
+naming the header and the key and never quoting the value. A value that keeps a `{{ … }}` template
+is rendered and checked where the ingestor opens instead, and one that cannot be a header fails the
+open. A poll sends the value only to the client's origin, because it follows a redirect nowhere
+else. Complete serialization keeps the value, as it keeps every client secret, so a backup archive
+holds it; see [Backup And Restore](backup-and-restore.md).
+
+`ALTER HTTP REQUEST INGESTOR … SET FROM <complete body>` replaces the client, method, headers,
+response bound and cadence together, and the next poll sends the new request.
+
+#### HTTP Poll Responses
+
+The final response of a poll decides what it delivers:
+
+- A `2xx` status other than `204 No Content` delivers the response body as one payload, which the
+  ingestor's codec decodes. An empty body is an empty payload, which the codec decodes or refuses
+  like any other; see [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
+- `204 No Content` delivers nothing. The poll still succeeded.
+- Every other status fails the poll, a redirect the client does not follow included; see
+  [When An HTTP Poll Fails](#when-an-http-poll-fails).
+
+A route reads what answered its payload. `read_header` and `read_headers` read the response's
+header fields under their lowercase names, every value of a repeated name together and in the
+order the response carried them. A value is read as UTF-8 text, non-ASCII characters included. A
+value that is not valid UTF-8 is left out without discarding the payload or the response's other
+fields, and is counted in `nervix_ingestor_header_values_dropped_total`. `metadata.status` is the
+response's status as a `U16`, and `metadata.polled_at` is the instant the poll was due, as a
+`DATETIME`, rather than the instant its response arrived, so `TIMESTAMP AT metadata.polled_at` gives
+each payload the instant of its poll.
+
+A response whose `content-encoding` is exactly `gzip`, `deflate` or `br` is decompressed before
+Nervix reads it, and its `content-encoding` and `content-length` fields are removed, so the payload
+is the decompressed body and `read_header` reads neither field. A response in any other encoding,
+or in several, arrives as it was sent, with those fields.
+
+#### HTTP Polling Cadence
+
+The first poll is sent as soon as the ingestor starts, where a Prometheus query first becomes due
+after one interval. Later polls stay on that anchored schedule of the domain clock, so a paced
+domain polls at the instants its own clock reaches. A poll slower than `EVERY` coalesces the
+occurrences it missed into one poll at the newest due instant.
+
+#### When An HTTP Poll Fails
+
+A poll that cannot deliver its response fails as a whole. `DESCRIBE INGESTOR` shows the failure as
+the ingestor's transient error, in the form `transient error: failed to read from http ingestor:
+<failure>`, and every attached session receives it as a server error. The next poll that succeeds,
+one answered with `204` included, clears it. A failed poll is not sent again: the next poll runs at
+the next due instant, so the failed instant delivers nothing.
+
+| What the poll met | `<failure>` |
+| --- | --- |
+| A status that is neither `2xx` nor a redirect its client follows | `HTTP ingestor returned status 503 Service Unavailable` |
+| A redirect its client does not follow | `HTTP ingestor returned status 302 Found` |
+| A response above `MAX BODY SIZE` | `HTTP ingestor response exceeds MAX BODY SIZE 1MiB` |
+| A request that could not be sent: a name that did not resolve, a connection or TLS session that failed, or a response head that did not arrive within `timeout_ms` | `failed to send HTTP ingestor request: error sending request`, then the transport's causes, such as `client error (Connect): dns error: error resolving DNS: resolving 'api.example.com' failed: the name does not exist`, `client error (Connect): tcp connect error: Connection refused (os error 111)` or `operation timed out` |
+| A response body that ended early or outlasted `timeout_ms` | `failed to read HTTP ingestor response body`, then the transport's causes, such as `error decoding response body: request or response body error: operation timed out` |
+
+A lookup failure names the endpoint's host, as the node's resolver reports it; see
+[Lookup Outcomes](name-resolution.md#lookup-outcomes). No failure names the request's URL, its path
+or query, a header value or a client secret.
+
+#### HTTP Polling Response Bound
+
+`MAX BODY SIZE <bytes>`, written between `HEADERS` and `EVERY`, bounds how many bytes of one
+response body a poll reads; a statement that leaves it out reads at most `16MiB`. The size is a
+whole number greater than zero followed by `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB` or
+`TiB`, and `SHOW CREATE` renders it in the unit it was written in. The bound counts the body Nervix
+reads, after the decompression above, so it limits the payload rather than the size of its transfer.
+A response whose `content-length` announces more than the bound fails before its body is read, and
+one whose body exceeds the bound fails when it does.
+
+`DESCRIBE INGESTOR` prints the bound in effect, whether the statement wrote it or not, in
+`options: METHOD 'GET' MAX BODY SIZE 16MiB EVERY 1s`. `SET FROM` replaces the whole body, so an
+`ALTER HTTP REQUEST INGESTOR` whose new body leaves `MAX BODY SIZE` out reads at most `16MiB` again.
+
+#### HTTP Polling Intake And Quiesce
+
+A poll delivers at most one payload, which enters the graph as an intake batch of its own. The next
+poll waits until that payload has entered the graph or, while a `BUFFER` quiesce holds the ingestor,
+has been handed to its buffer. A poll whose `ON INGESTION` unfolding finds the node's extension
+workers full waits for them; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
+
+`SUSPEND` skips polls and leaves a gap. `BUFFER` keeps polling on the declared cadence and delivers
+retained payloads in order after resume. It retains each payload whole: `MAX SIZE` counts the bytes
+of the response bodies it holds, and `ON OVERFLOW` drops whole payloads. Memory-pressure quiesce
+skips polls under either mode; see [Quiesce Modes](#quiesce-modes).
+
+A quiesce change or a stop that meets a poll in flight abandons that poll and keeps nothing of its
+response. A hold that begins or ends during a poll therefore leaves a gap of one occurrence, under
+`BUFFER` too.
+
+#### `HTTP CLIENT`
+
+Every key of an `HTTP CLIENT`'s `CONFIG` is Nervix's own. One client serves `HTTP REQUEST`
+ingestors and `HTTP REQUEST` emitters, and each key means the same for both:
+
+| Key | Required | Value |
+| --- | --- | --- |
+| `endpoint` | Yes | An `http` or `https` URL with a host. A poll is sent to it as written, its path and query included. An [HTTP emitter](emitters.md#http-request-configuration) requires an origin, a scheme, host and optional port with no user information, path beyond `/`, query or fragment, beneath which each record's `PATH` names its target. |
+| `timeout_ms` | Yes | A positive whole number of milliseconds that bounds one request and the redirects it follows, as [Client Deadlines](#client-deadlines) defines. For a poll it covers name resolution, connection setup, TLS, the request and the whole response body, and for an emitted request everything up to its complete final response headers. |
+| `follow_redirects` | No | `true` follows a redirect to the client's own origin; `false`, or leaving the key out, makes a redirect the response. See [HTTP client transport](emitters.md#http-client-transport). |
+| `proxy` | No | An `http` or `https` URL with a host, naming the proxy that every request of the client goes through. User information in it is sent to the proxy alone, as `Basic` proxy credentials. |
+| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the default roots: the platform's trust store for a poll, and the Mozilla roots Nervix ships together with the host's native roots for the emitter. |
+| `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
+| `secret.<name>` | No | A confidential string the operator names after the `secret.` prefix. A polling header sends it through `CLIENT SECRET 'secret.<name>'`; an emitter sends none of them. |
+
+`CREATE HTTP CLIENT` refuses a configuration that cannot configure the client, and names the key: a
+key the client does not declare, a key written twice or not in lowercase, a missing `endpoint` or
+`timeout_ms`, a URL of another scheme or without a host, a `follow_redirects` that is not a boolean,
+a `timeout_ms` that is not a positive whole number of milliseconds, or one of `tls_cert_file` and
+`tls_key_file` without the other. For example,
+`client 'orders_api' configuration is invalid in domain 'shop': missing required client config key 'timeout_ms'`.
+A value can name a file of the client's `MOUNT`, as in `'tls_ca_file' = '{{ api_tls }}/ca.pem'`.
+The rendered configuration must satisfy these rules before commitment, and a poll checks it again
+when its ingestor opens.
+
+`SHOW CREATE CLIENT` and `DESCRIBE CLIENT` print every key but mask as `********` each
+`secret.<name>` key and an `endpoint` or `proxy` that carries user information or a query string.
+Complete serialization keeps every value, so a backup archive holds them; see
+[Backup And Restore](backup-and-restore.md).
+
+#### HTTP Polling Transport
+
+A poll travels through the HTTP client Nervix shares with Prometheus, Sentry and OTEL over HTTP, and
+speaks the [transport contract](emitters.md#http-client-transport) one `HTTP CLIENT` declares for
+polling and emitting alike:
+
+- The host of `endpoint` is resolved through the node's DNS resolver. It stays the HTTP authority
+  and the name HTTPS verifies, as [Connection Identity](name-resolution.md#connection-identity)
+  describes.
+- A poll speaks HTTP/2 when the endpoint's TLS negotiates it, and HTTP/1.1 otherwise.
+- A poll follows a redirect only when its client sets `follow_redirects = true`, only to the
+  client's own origin and at most 10 times, sending the same method and fields again. It sends
+  through the declared `proxy` alone, and no proxy environment variable has any effect.
+- Basic credentials in the user information of `endpoint`, as in
+  `https://reader:secret@api.example.com/orders/latest`, are sent in the `authorization` field of
+  every poll and leave the URL the request names.
 
 ### Kafka
 
@@ -1675,7 +1837,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
 | Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: set by max_packet_size, 10240 bytes when omitted; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE, PUBACK and PUBREC requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
-| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: client key `keep_alive_ms`; one interval of it, or of the broker's Server Keep Alive; 60 s when omitted<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>retire a downgraded subscription before retrying: driver default, 5 s<br>ordinary and oversized-discard acknowledgements written to the connection: client key `keep_alive_ms`; one interval of it, or of the broker's Server Keep Alive; 60 s when omitted<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
 | Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound.<br>ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow only. NO ACK retains backpressure. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1740,6 +1902,14 @@ Delivery constraints:
   `BATCH TIMEOUT` ends it. The extra capacity lets the connection keep reading while the ingestor
   holds a batch
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages. Every instance subscribes to `$share/<domain>~<ingestor>/<filter>`, so the share group belongs to Nervix and a topic filter cannot begin with a `$share` level of its own
+
+A new subscription becomes ready only when the broker grants the declared QoS. A lower grant
+fails through the general error policy and `DESCRIBE INGESTOR` names the requested and granted
+levels. This applies to `NO ACK` too: its QoS still determines the broker's storage and redelivery
+contract. After a rejected grant, the next attempt first retires that broker session through a clean
+connection, unsubscription and session expiry zero. Cleanup failure keeps retirement pending, so a
+retained subscription cannot turn the rejection into a successful resume. An accepted persistent
+session keeps its original grant across reconnects; changing the filter or QoS retires that session.
 
 In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for,
 and every `PUBREC` its QoS 2 publishes ask for, is written to the connection, within one keep-alive
@@ -1997,9 +2167,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | No entity-specific options. |
-| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | metadata.peer_addr: STRING OPTIONAL |
+| Metadata | metadata.peer_addr: STRING OPTIONAL<br>metadata.transport: STRING OPTIONAL<br>metadata.tls_peer: STRING OPTIONAL |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2013,9 +2183,12 @@ See the [SYSLOG LISTENER capability and mirror reference](connector-capabilities
 
 The client binds a UDP, TCP, or TLS listener. UDP treats one datagram as one message; TCP detects
 RFC 6587 octet-counted or LF-terminated framing per frame; TLS uses RFC 5425 octet counting.
-Messages expose optional `metadata.peer_addr`. The source takes no `INSTANCES` clause and has no
-application acknowledgment. Every live cluster node runs the listener; it is independent of the
-leader and restarts or joins with its owning node. See [Syslog](syslog.md) for the client keys,
+Messages expose optional `STRING` fields `metadata.peer_addr`, `metadata.transport` (`udp`, `tcp`
+or `tls`) and `metadata.tls_peer` (the verified TLS client certificate's subject, null without a
+verified client identity). Routes may select a transport in `WHERE` and assign these values to
+schema fields; quiesce buffering retains the complete row. The source takes no `INSTANCES` clause
+and has no application acknowledgment. Every live cluster node runs the listener; it is independent
+of the leader and restarts or joins with its owning node. See [Syslog](syslog.md) for the client keys,
 cluster lifecycle, framing, TLS, limits, and failure semantics.
 An invalid client setting or unreadable TLS file fails listener startup with the Syslog key or
 file and its underlying cause. A frame or connection failure keeps its cause in the source
@@ -2383,7 +2556,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Capability | Declaration |
 | --- | --- |
 | Reference | Http endpoint |
-| Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
+| Locator and validation rule | Not offered: The endpoint declaration owns the host and path this cluster serves; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |
 | Options in statement order | No entity-specific options. |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
