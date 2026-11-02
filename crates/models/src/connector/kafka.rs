@@ -282,7 +282,9 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
     ],
     driver_limits: &[
-        "Every librdkafka key passes through, so a client can change each driver default above.",
+        "Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor \
+         supplies group.id and enable.auto.commit, and disables enable.partition.eof and \
+         allow.auto.create.topics.",
         "Connector control execution has two workers per node by default. A commit still \
          unanswered after its caller's 30 s deadline retains its worker and the source's one \
          in-flight commit until the native call ends. Native subscribe, assign and unsubscribe \
@@ -343,7 +345,8 @@ const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
     ],
     driver_limits: &[
-        "Every librdkafka key passes through, so a client can change each driver default above.",
+        "Kafka clients accept one name per property and refuse Nervix-owned keys. MODE ACK sets \
+         delivery.timeout.ms from ACK TIMEOUT.",
         "message.max.bytes 1000000",
         "A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through \
          ON MESSAGE ERROR.",

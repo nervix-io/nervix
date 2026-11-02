@@ -378,9 +378,10 @@ current connection, retry and deadline limits.
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default. Under `OFFSET BY DOMAIN` in an unpaced domain the same policy places a
   partition that has no domain offset yet, such as one added to the topic.
-- A Kafka client never sets `allow.auto.create.topics`; `CREATE KAFKA CLIENT` refuses it. Provision each
-  topic a Kafka ingestor reads: an ingestor never creates its topic and reports it as missing until
-  it exists.
+- For Kafka's reserved client keys and offline configuration checks, follow `Ingestors` → `Kafka`
+  and `Connector Capabilities` → `KAFKA client`. Provision both input and output topics explicitly:
+  consumers disable auto-creation, while a producer's metadata request can let the broker create
+  an output topic under its own policy. Offline validation establishes no broker availability.
 - Every Kafka client writes each librdkafka property under the Apache Kafka Java client's name,
   such as `bootstrap.servers`, `linger.ms`, `acks`, `retries`, `compression.type` and
   `delivery.timeout.ms`, and writes no `topic.` prefixed key other than librdkafka's own
@@ -537,8 +538,8 @@ current connection, retry and deadline limits.
 - Treat Kafka `NO ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces the
-  client's `delivery.timeout.ms` as the producer's delivery bound. The producer always reports every record, so `delivery.report.only.error` in a client's
-  `CONFIG` has no effect.
+  client's `delivery.timeout.ms` as the producer's delivery bound. The producer always requests
+  every delivery report; `CREATE KAFKA CLIENT` refuses `delivery.report.only.error` as Nervix-owned.
 - A `KAFKA TOPIC` emitter's `TIMESTAMP <expression>` is each record's Kafka create time: an exact,
   non-null, non-sensitive `DATETIME`, written as the millisecond that contains it. A time before
   `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Read `Emitters` →
