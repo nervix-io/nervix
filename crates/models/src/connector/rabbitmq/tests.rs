@@ -170,7 +170,30 @@ fn queue_ingestion_declares_current_consumer_modes_and_transport_bounds() {
     );
     assert!(!declaration.executes_on_every_cluster_node);
     assert_eq!(declaration.options, &[OptionDeclaration::INSTANCES]);
-    assert_eq!(declaration.metadata.fields(), vec![]);
+    let mut metadata = Vec::new();
+    for field in declaration.metadata.fields() {
+        metadata.push((field.name(), field.ty()));
+    }
+    assert_eq!(
+        metadata,
+        [
+            ("exchange", IngestorMetadataType::String),
+            ("routing_key", IngestorMetadataType::String),
+            ("delivery_tag", IngestorMetadataType::U64),
+            ("redelivered", IngestorMetadataType::Bool),
+            ("content_type", IngestorMetadataType::String),
+            ("content_encoding", IngestorMetadataType::String),
+            ("message_id", IngestorMetadataType::String),
+            ("correlation_id", IngestorMetadataType::String),
+            ("reply_to", IngestorMetadataType::String),
+            ("type", IngestorMetadataType::String),
+            ("app_id", IngestorMetadataType::String),
+            ("user_id", IngestorMetadataType::String),
+            ("priority", IngestorMetadataType::U8),
+            ("expiration", IngestorMetadataType::String),
+            ("timestamp", IngestorMetadataType::Datetime),
+        ]
+    );
     assert_eq!(
         declaration.headers,
         Some(HeaderModel::exact(HeaderLayout::SortedByName))

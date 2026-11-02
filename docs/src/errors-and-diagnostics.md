@@ -1323,9 +1323,14 @@ is created. The refusal names the connector, the client and the domain, with the
 or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in
 domain 'shop' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string`.
 A `WEBSOCKETS CLIENT` uses the same validation boundary with
-`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint, positive-duration or
-portable positive limit values, an unschedulable ping-derived idle bound,
-TLS keys on `ws`, and unpaired identity files are typed refusals naming their key, client and domain.
+`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint, an endpoint with a fragment
+or user information, positive-duration or portable positive limit values, an unschedulable
+ping-derived idle bound, TLS keys on `ws`, and unpaired identity files are typed refusals naming
+their key, client and domain without printing a value. The connector's offline check reports a
+`tls_ca_file` without a certificate as `OfflineClientConfigError::NoCertificate`, whose public
+message names only the key, and a file it cannot read as `InvalidKey` above the contract's
+`ClientConfigError`. A certificate section it cannot parse stays
+`TlsClientConfigError::ParseCaCertificate` beneath `IngestorError::Open` when the source opens.
 `WebsocketsUpgradeHeadersError` names the connection ingestor and offending field without printing
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a ingestor cannot produce its validated header collection. Rendered client values are
@@ -1703,9 +1708,14 @@ failure. An error handler whose own construction fails does not recursively invo
 
 Paced ingest admission reports a rejected event timestamp as a message error with code
 `validation` and operation `admit`. A null declared timestamp has the same classification and
-names its field. The host keeps the rejected row's source metadata and ACK attached while each
-output route applies its message-error policy. Accepted rows from the same decoded group continue
-through their normal routes.
+names its field. So does a transport metadata value its connector hands over as unrepresentable,
+with a description of it, such as an AMQP timestamp after the last `DATETIME` instant, wherever
+the ingestor's programs or its `TIMESTAMP AT` read that field: the host refuses the message after
+`FILTER WHERE` and before event-time selection, and the message names `metadata.<field>` and that
+description, never a payload value.
+The host keeps the rejected row's source metadata and ACK attached while each output route applies
+its message-error policy. Accepted rows from the same decoded group continue through their normal
+routes.
 
 Before a domain execution or replacement becomes active, the registry selects each DLQ route and
 resolves its source, partial-output and destination schemas, branch declarations and flush

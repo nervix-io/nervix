@@ -696,6 +696,66 @@ mod tests {
         ));
     }
 
+    #[nervix_primitives::test]
+    async fn an_endpoint_with_user_information_refuses_the_plan() {
+        let fixture = DnsFixture::start().await;
+        let error = WebsocketsConnectionIngestorPlan::new(
+            endpoint("wss://operator:private-password@websocket.nervix.test/events".to_string()),
+            WebsocketsUpgradeHeaders::default(),
+            None,
+            fixture.resolver,
+        )
+        .err()
+        .assured("the upgrade never sends user information");
+        assert!(matches!(
+            error.current_context(),
+            WebsocketsConnectionIngestorPlanError::Configuration
+        ));
+        assert_eq!(
+            error.downcast_ref::<nervix_models::WebsocketsClientConfigError>(),
+            Some(&nervix_models::WebsocketsClientConfigError::EndpointUserInformation)
+        );
+        assert!(!format!("{error:#}").contains("private-password"));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_certificate_section_it_cannot_parse_passes_the_statement_and_refuses_the_open() {
+        let fixture = DnsFixture::start().await;
+        let directory = tempfile::tempdir().assured("a temporary directory can be created");
+        let ca_file = directory.path().join("ca.pem");
+        std::fs::write(
+            &ca_file,
+            "-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n",
+        )
+        .assured("the fixture CA file can be written");
+        let mut entries = endpoint("wss://websocket.nervix.test/events".to_string());
+        entries.push(ClientConfigEntry {
+            key: "tls_ca_file".to_string(),
+            value: ca_file.display().to_string(),
+        });
+        crate::validate_client_configuration(&entries)
+            .assured("the file holds a certificate section");
+        let plan = WebsocketsConnectionIngestorPlan::new(
+            entries,
+            WebsocketsUpgradeHeaders::default(),
+            None,
+            fixture.resolver,
+        )
+        .assured("a plan reads no file");
+        let failure = WebsocketsConnectionIngestor::open(&plan, 0)
+            .await
+            .err()
+            .assured("the source cannot add a section it cannot parse to its roots");
+        assert!(matches!(
+            failure.current_context(),
+            IngestorError::Open { .. }
+        ));
+        assert!(matches!(
+            failure.downcast_ref::<nervix_connector::TlsClientConfigError>(),
+            Some(nervix_connector::TlsClientConfigError::ParseCaCertificate { .. })
+        ));
+    }
+
     async fn connected_pair() -> (WebsocketsConnectionIngestor, WebSocketStream<TcpStream>) {
         connected_pair_with(Vec::new(), WebsocketsUpgradeHeaders::default()).await
     }
