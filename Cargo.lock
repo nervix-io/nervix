@@ -7230,6 +7230,7 @@ version = "0.1.0-dev"
 dependencies = [
  "async-trait",
  "bb8",
+ "bolero",
  "combine",
  "error-stack",
  "futures-util",
