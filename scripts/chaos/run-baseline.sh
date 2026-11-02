@@ -19,6 +19,8 @@ source "${script_dir}/output-boundary.sh"
 source "${script_dir}/image-package-check.sh"
 # shellcheck source=verifier-self-check.sh
 source "${script_dir}/verifier-self-check.sh"
+# shellcheck source=instance-owners.sh
+source "${script_dir}/instance-owners.sh"
 
 usage() {
     cat <<EOF
@@ -2434,9 +2436,11 @@ fi
 
 phase "public placement evidence"
 if [[ "${node_count}" == "3" ]]; then
-    domain_cli_command \
-        'RELOCATE INGESTOR chaos_ingestor ONTO NODE node-1 IGNORE PREFERENCES;' \
-        >"${artifact_dir}/public/relocate-ingestor.txt" 2>&1
+    if [[ "${scenario}" != ingestor-instances-owner-crash ]]; then
+        domain_cli_command \
+            'RELOCATE INGESTOR chaos_ingestor ONTO NODE node-1 IGNORE PREFERENCES;' \
+            >"${artifact_dir}/public/relocate-ingestor.txt" 2>&1
+    fi
     domain_cli_command \
         'RELOCATE RELAY chaos_records ONTO NODE node-2 IGNORE PREFERENCES;' \
         >"${artifact_dir}/public/relocate-relay.txt" 2>&1
@@ -2452,9 +2456,15 @@ else
     expected_emitter_owner="node-1"
 fi
 
-wait_for "ingestor owner ${expected_ingestor_owner}" 60 \
-    describe_owner_ready 'DESCRIBE INGESTOR chaos_ingestor;' \
-    "${expected_ingestor_owner}" "${artifact_dir}/public/describe-ingestor.txt"
+if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
+    wait_for 'three distinct ready ingestor instance owners' 60 \
+        describe_spread_instances_ready "${artifact_dir}/public/describe-ingestor.txt" \
+        "${artifact_dir}/public/instance-owners.json"
+else
+    wait_for "ingestor owner ${expected_ingestor_owner}" 60 \
+        describe_owner_ready 'DESCRIBE INGESTOR chaos_ingestor;' \
+        "${expected_ingestor_owner}" "${artifact_dir}/public/describe-ingestor.txt"
+fi
 wait_for "relay owner ${expected_relay_owner}" 60 \
     describe_owner_ready 'DESCRIBE RELAY chaos_records;' \
     "${expected_relay_owner}" "${artifact_dir}/public/describe-relay.txt"
@@ -2479,6 +2489,14 @@ jq -n \
         "public/describe-emitter.txt"
       ]
     }' >"${artifact_dir}/results/remote-path.json"
+if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
+    remote_path_tmp="$(mktemp "${artifact_dir}/results/.remote-path.XXXXXX")"
+    jq --slurpfile instances "${artifact_dir}/public/instance-owners.json" \
+        'del(.ingestor_owner) | .ingestor_instances = $instances[0]
+        | .evidence += ["public/instance-owners.json"]' \
+        "${artifact_dir}/results/remote-path.json" >"${remote_path_tmp}"
+    mv "${remote_path_tmp}" "${artifact_dir}/results/remote-path.json"
+fi
 
 if [[ "${scenario}" != "baseline" ]]; then
     # Fault scenarios use this setup and the shared final ledger verifier.

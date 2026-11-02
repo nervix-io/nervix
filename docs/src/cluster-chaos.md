@@ -410,7 +410,7 @@ A run records each phase it enters in `phases.ndjson` and its final phase in `ma
 | `startup status publication` | The validated public status, published by byte copy and atomic rename within 30 seconds |
 | `image identity verification` | Every node container runs the resolved image |
 | `Plexus graph installation` | The domain `chaos_baseline`, the graph through the packaged CLI, and `START` |
-| `public placement evidence` | On three nodes, `RELOCATE` places the ingestor on `node-1`, the relay on `node-2` and the emitter on `node-3`, so traffic crosses nodes. Each owner must read back through `DESCRIBE` within 60 seconds |
+| `public placement evidence` | On three nodes, `RELOCATE` places the relay on `node-2` and the emitter on `node-3`, so traffic crosses nodes. The single-instance fixtures place the ingestor on `node-1`; the spread-instance fixture observes all three ready unit owners without relocating the logical ingestor. Each placement must read back through `DESCRIBE` within 60 seconds |
 | The scenario's own phases | Traffic startup, then each fault and its recovery |
 | `load pacing` | The pacing verdict of every continuous load |
 | `offset and output boundaries` | Consumer offsets at the source boundary, then the output boundary |
@@ -3099,3 +3099,8 @@ owners before the fault. During the outage every unit remains running and ready,
 owner's unit changes owner, and each sibling keeps its exact owner. The before/after index-to-owner
 JSON maps are retained beside the ordinary fault evidence. The case joins the soak inventory and
 runs locally against release and diagnostic images of the same source revision.
+
+The input topic has one partition, so Kafka may assign traffic to any one of the three consumers.
+The initial source metric must be positive on an observed intake node; the relay and emitter
+metrics must also be positive on their distinct, explicitly placed nodes. The setup retains every
+instance owner in `public/instance-owners.json` and `results/remote-path.json`.

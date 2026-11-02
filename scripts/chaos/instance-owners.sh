@@ -15,6 +15,25 @@ verify_spread_instance_start() {
     jq -e 'map(.owner) | unique | length == 3' "$2" >/dev/null
 }
 
+describe_spread_instances_ready() {
+    local description="$1"
+    local owners="$2"
+    domain_cli_command 'DESCRIBE INGESTOR chaos_ingestor;' >"${description}" 2>&1 \
+        && verify_spread_instance_start "${description}" "${owners}"
+}
+
+instance_source_traffic_ready() {
+    local host
+    for host in "${node_hosts[@]}"; do
+        if metric_is_positive "${artifact_dir}/public/metrics-${host}.txt" \
+            'direction="sent"' "physical_node_id=\"node-${host##*-}\"" \
+            'relay="chaos_records"' 'target="chaos_ingestor"'; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 verify_instance_handoff() {
     local before="$1"
     local description="$2"
