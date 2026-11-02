@@ -2966,6 +2966,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/pulsar/src/topic/__fuzz__/topic__message_times_tests__bolero_message_times_are_the_milliseconds_containing_what_their_record_sets/corpus"
+domain_version = 1
+features = []
+id = "pulsar-message-times"
+invariant = "A Pulsar message carries exactly the Unix milliseconds that contain what its record sets: an event time after the Unix epoch's first millisecond, and a delivery time measured from its batch's execution time. Every other record is refused, naming what it set, every attempt at a record writes the same times, and an event time reads back unchanged from the whole millisecond it names."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-connector-pulsar"
+random_iterations = 256
+source = "crates/connectors/pulsar/src/topic/message_times_tests.rs"
+test = "topic::message_times_tests::bolero_message_times_are_the_milliseconds_containing_what_their_record_sets"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/redis/src/pubsub/__fuzz__/pubsub__ingestor__tests__bolero_delivered_messages_keep_their_exact_bytes_and_metadata/corpus"
 domain_version = 1
 features = []
