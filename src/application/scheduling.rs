@@ -1688,8 +1688,8 @@ impl SessionServiceImpl {
             .zip(&desired_nodes)
             .map(|(member, node)| node.unit(member.unit))
             .collect::<Option<Vec<_>>>()?;
-        let old_primary = current_units.first()?.primary_node.clone();
-        let preserved = old_primary
+        let current_primary = current_units.first()?.primary_node.clone();
+        let preserved = current_primary
             .as_ref()
             .filter(|primary| {
                 *primary != unavailable_node_id
@@ -1741,7 +1741,7 @@ impl SessionServiceImpl {
                 None => target_nodes.first()?.clone(),
             },
         };
-        let primary_changed = old_primary.as_ref() != Some(&target);
+        let primary_changed = current_primary.as_ref() != Some(&target);
         let promoted_replica = (primary_changed
             && replicated
                 .iter()
@@ -1836,8 +1836,8 @@ impl SessionServiceImpl {
         let desired_unit = desired_node.unit(unit);
 
         let label = Self::scheduled_unit_label(node, unit);
-        let old_primary = current.primary_node.clone();
-        let preserved_live_primary = if let Some(primary) = old_primary.as_ref() {
+        let current_primary = current.primary_node.clone();
+        let preserved_live_primary = if let Some(primary) = current_primary.as_ref() {
             let primary_is_available =
                 primary != unavailable_node_id && live_nodes.contains(primary);
             if primary_is_available {
@@ -1911,7 +1911,7 @@ impl SessionServiceImpl {
             assignment_slots,
             ordered_candidates,
         );
-        let primary_changed = old_primary.as_ref() != Some(&target);
+        let primary_changed = current_primary.as_ref() != Some(&target);
         let target_was_already_assigned = current.assigned_nodes.contains(&target);
         let promotes_existing_replica = primary_changed && target_was_already_assigned;
         let promoted_replica = if promotes_existing_replica {
@@ -1920,7 +1920,7 @@ impl SessionServiceImpl {
             None
         };
         let mut ownership_transition = None;
-        if primary_changed && let Some(former_owner) = old_primary {
+        if primary_changed && let Some(former_owner) = current_primary {
             ownership_transition = Some(relocation.ownership_transition(
                 former_owner,
                 target.clone(),
