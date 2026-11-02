@@ -200,7 +200,10 @@ impl Arbitrary<'_> {
     /// A Kafka topic, its offsets kept by a consumer group or by the domain.
     pub fn kafka_topic_source(&mut self) -> KafkaTopicIngestor {
         let offset_mode = if self.entropy.flag() {
-            KafkaOffsetMode::ConsumerGroup(self.kafka_consumer_group_name())
+            KafkaOffsetMode::ConsumerGroup {
+                group: self.kafka_consumer_group_name(),
+                start_at: self.ingest_start_position(),
+            }
         } else {
             KafkaOffsetMode::Domain
         };
@@ -222,7 +225,7 @@ impl Arbitrary<'_> {
         let topic = self.pulsar_topic_name();
         let name = self.pulsar_subscription_name();
         let ownership = if self.entropy.flag() {
-            let start_at = self.pulsar_start_position();
+            let start_at = self.ingest_start_position();
             PulsarSubscriptionOwnership::Ingestor { start_at }
         } else {
             PulsarSubscriptionOwnership::Provisioned
@@ -238,12 +241,12 @@ impl Arbitrary<'_> {
         self.quiescing_as_supported(source)
     }
 
-    /// The explicit position of a newly created owned Pulsar subscription.
-    pub fn pulsar_start_position(&mut self) -> nervix_models::PulsarStartPosition {
+    /// A source's explicit `START AT` position.
+    pub fn ingest_start_position(&mut self) -> nervix_models::IngestStartPosition {
         if self.entropy.flag() {
-            nervix_models::PulsarStartPosition::Earliest
+            nervix_models::IngestStartPosition::Earliest
         } else {
-            nervix_models::PulsarStartPosition::Latest
+            nervix_models::IngestStartPosition::Latest
         }
     }
 

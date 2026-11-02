@@ -41,7 +41,6 @@ rdkafka = { workspace = true, features = [
   "aws-lc",
 ] }
 shuttle = { workspace = true, optional = true }
-strum = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

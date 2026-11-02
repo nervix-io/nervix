@@ -19,12 +19,11 @@ Feature: Ingestor quiesce engagement during dispatch
         TO SCHEMA quiesce_event;
       CREATE RELAY quiesce_output SCHEMA quiesce_event UNBRANCHED;
       CREATE KAFKA CLIENT quiesce_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR quiesce_source
         FROM quiesce_kafka TOPIC 'quiesce_dispatch_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_quiesce_dispatch_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_quiesce_dispatch_{{test_id}}' START AT EARLIEST
           MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING quiesce_event_codec
         TO quiesce_output INHERIT ALL UNBRANCHED

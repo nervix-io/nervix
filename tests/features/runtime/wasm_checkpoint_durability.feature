@@ -36,12 +36,11 @@ Feature: WASM guest-state checkpoint durability
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR metric_source
         FROM kafka_ingress TOPIC 'wasm_checkpoint_local_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'wasm_checkpoint_local_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_checkpoint_local_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec
@@ -142,12 +141,11 @@ Feature: WASM guest-state checkpoint durability
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR metric_source
         FROM kafka_ingress TOPIC 'wasm_checkpoint_alive_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'wasm_checkpoint_alive_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_checkpoint_alive_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec
@@ -232,12 +230,11 @@ Feature: WASM guest-state checkpoint durability
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR metric_source
         FROM kafka_ingress TOPIC 'wasm_checkpoint_replica_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'wasm_checkpoint_replica_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_checkpoint_replica_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec
@@ -335,13 +332,12 @@ Feature: WASM guest-state checkpoint durability
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest',
         'session.timeout.ms' = '6000',
         'heartbeat.interval.ms' = '500'
       };
       CREATE KAFKA TOPIC INGESTOR metric_source
         FROM kafka_ingress TOPIC 'wasm_checkpoint_failover_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'wasm_checkpoint_failover_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_checkpoint_failover_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec

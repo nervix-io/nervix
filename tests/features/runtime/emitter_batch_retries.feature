@@ -30,12 +30,11 @@ Feature: Emitter batch payloads through acknowledgements and retries
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_events
         FROM kafka_main TOPIC 'retried_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'retried_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'retried_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING ingest_codec
         TO events
@@ -112,12 +111,11 @@ Feature: Emitter batch payloads through acknowledgements and retries
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_events
         FROM kafka_main TOPIC 'detached_retried_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'detached_retried_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'detached_retried_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING ingest_codec
         TO events

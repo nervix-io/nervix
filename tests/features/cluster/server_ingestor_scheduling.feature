@@ -26,8 +26,7 @@ Feature: Server ingestor scheduling
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT http_notifications_endpoint
@@ -91,8 +90,7 @@ Feature: Server ingestor scheduling
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE VHOST edge ws-{{test_id}}.example.com;
         CREATE ENDPOINT ws_notifications_endpoint
@@ -156,8 +154,7 @@ Feature: Server ingestor scheduling
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT http_notifications_endpoint
@@ -225,8 +222,7 @@ Feature: Server ingestor scheduling
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE VHOST edge ws-{{test_id}}.example.com;
         CREATE ENDPOINT ws_notifications_endpoint

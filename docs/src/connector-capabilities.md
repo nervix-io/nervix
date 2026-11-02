@@ -78,7 +78,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Reference | KAFKA client |  |
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers'` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |  |
+| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |  |
@@ -87,7 +87,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Acknowledgement confirmation | answered |  |
 | Buffers | a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |  |
 | Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |  |
-| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |  |
+| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### PULSAR TOPIC ingest
@@ -154,14 +154,14 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE`: locator, options, modes. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names. |
+| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE`: locator, options, modes, ingest metadata. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names. |
 | Reference | RABBITMQ client |  |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
-| Metadata | Not offered: The current queue declaration exposes transport headers but no typed AMQP delivery metadata namespace. |  |
+| Metadata | metadata.exchange: STRING OPTIONAL<br>metadata.routing_key: STRING OPTIONAL<br>metadata.delivery_tag: U64 OPTIONAL<br>metadata.redelivered: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.content_encoding: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.correlation_id: STRING OPTIONAL<br>metadata.reply_to: STRING OPTIONAL<br>metadata.type: STRING OPTIONAL<br>metadata.app_id: STRING OPTIONAL<br>metadata.user_id: STRING OPTIONAL<br>metadata.priority: U8 OPTIONAL<br>metadata.expiration: STRING OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | written |  |
@@ -826,7 +826,6 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `auto.offset.reset` | optional | string | driver; best effort | no | none |
 | `bootstrap.servers` | required | string | driver; best effort | no | none |
 | `client.id` | optional | string | driver; best effort | no | none |
 | `delivery.timeout.ms` | optional | unsigned integer | driver; best effort | no | none |
@@ -848,7 +847,9 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | `ssl.key.password` | optional | string | driver; best effort | yes | none |
 | `ssl.key.pem` | optional | string | driver; best effort | yes | none |
 
-Delegated property namespaces: all driver property names. Reserved keys: `allow.auto.create.topics`, `delivery.report.only.error`, `enable.auto.commit`, `enable.partition.eof`, `group.id`.
+Delegated property namespaces: all driver property names. Reserved keys: `allow.auto.create.topics`, `auto.offset.reset`, `delivery.report.only.error`, `enable.auto.commit`, `enable.partition.eof`, `group.id`.
+
+`auto.offset.reset` is set by a statement: write START AT on the consumer group of the KAFKA TOPIC ingestor.
 
 A property the driver reads under more than one name is accepted under one; the client refuses the other.
 

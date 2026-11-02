@@ -27,7 +27,7 @@ fn settings<'a>(
             name: PulsarSubscriptionName::try_from("readers")
                 .assured("the fixture subscription name is valid"),
             ownership: PulsarSubscriptionOwnership::Ingestor {
-                start_at: nervix_models::PulsarStartPosition::Earliest,
+                start_at: nervix_models::IngestStartPosition::Earliest,
             },
         },
         consumer_name: "domain~events".to_string(),
@@ -48,7 +48,7 @@ fn equivalent_topics_and_changed_consumer_policies_keep_the_subscription() {
     let previous = settings(&config, &topic);
     let mut replacement = settings(&explicit_config, &qualified);
     replacement.subscription.ownership = PulsarSubscriptionOwnership::Ingestor {
-        start_at: nervix_models::PulsarStartPosition::Latest,
+        start_at: nervix_models::IngestStartPosition::Latest,
     };
     assert!(
         previous
