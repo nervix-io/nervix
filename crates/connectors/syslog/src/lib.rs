@@ -5,7 +5,7 @@
 //! - **Owns.** Syslog client configuration, UDP/TCP/TLS listener and sender transports, RFC
 //!   6587 framing, peer metadata, ingestor lifecycle operations, and record publication.
 //! - **Depends on.** The connector contract, typed client configuration entries,
-//!   execution-sensitive sockets, `memchr`, and rustls.
+//!   execution-sensitive sockets, `memchr`, rustls and X.509 client-subject inspection.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(

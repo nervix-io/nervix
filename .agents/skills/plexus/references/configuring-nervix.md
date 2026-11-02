@@ -42,7 +42,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions, placeholder and packet limits, operation deadlines, TLS verification and identity file formats, the declared checkout budget, connection lifetimes and maintained pool minimums | `Emitters` → `MySQL`, `Database Client Connection Pools`, then `Connector Capabilities` → `MYSQL client` |
-| Postgres table path parts, conflict rules, the `sslmode` policy, TLS identity files, the checkout deadline, connection lifetimes and the borrow test | `Emitters` → `Postgres`, and `Database Client Connection Pools` |
+| Postgres table path parts, conflict rules, the `sslmode` policy, TLS identity files, statement versus checkout deadlines, connection lifetimes and the borrow test | `Emitters` → `Postgres`, and `Database Client Connection Pools` |
 | Sentry platform options, event defaults and limit, batch transformations, strict DSN/timeout configuration, the inherited HTTP transport, rejected versus retried statuses and retry hints | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
@@ -214,7 +214,8 @@ current connection, retry and deadline limits.
   use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter,
   configure TLS identity for the client direction that consumes it, and set a key only one side
   reads, such as `framing` or `idle_timeout_ms`, only on a client that side uses; the SYSLOG
-  client reference in `Connector Capabilities` names those keys.
+  client reference in `Connector Capabilities` names those keys. Read `Common` → `Syslog` →
+  `Ingestor` for transport metadata and when a TLS connection exposes a verified client subject.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
   owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
   nodes each have one additional fixed dispatch slot.
