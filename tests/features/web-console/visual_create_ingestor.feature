@@ -320,7 +320,8 @@ Feature: Web console visual ingestor creation
       CREATE RELAY visual_http_relay SCHEMA visual_http_event UNBRANCHED;
       CREATE HTTP CLIENT visual_http_client CONFIG {
         'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
-        'timeout_ms' = 5000
+        'timeout_ms' = 5000,
+        'secret.visual_token' = 'Bearer visual-fixture-token'
       };
       """
     And the web console is opened on the leader node
@@ -337,6 +338,10 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-request-headers-add" is clicked
     And selector ".create-ingestor-request-header-name" is filled with "x-nervix-poll"
     And selector ".create-ingestor-request-header-value" is filled with "visual"
+    And selector ".create-ingestor-request-headers-add" is clicked
+    And selector ".create-ingestor-request-headers > div:nth-of-type(2) .create-ingestor-request-header-name" is filled with "authorization"
+    And selector ".create-ingestor-request-headers > div:nth-of-type(2) .create-ingestor-request-header-value" is filled with "secret.visual_token"
+    And selector ".create-ingestor-request-headers > div:nth-of-type(2) .create-ingestor-request-header-secret" is clicked
     And selector ".create-ingestor-max-body-size" is filled with "1MiB"
     And selector ".create-ingestor-every" is filled with "1s"
     And selector ".create-ingestor-quiesce [data-quiesce='suspend']" is clicked
@@ -353,7 +358,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-route .create-ingestor-message-error [data-error='log']" is clicked
     And selector ".create-ingestor-general-error [data-error='log']" is clicked
     Then selector ".create-preview" contains "CREATE HTTP REQUEST INGESTOR visual_http_source FROM visual_http_client METHOD 'GET'"
-    And selector ".create-preview" contains "HEADERS { 'x-nervix-poll' = 'visual' } MAX BODY SIZE 1MiB"
+    And selector ".create-preview" contains "HEADERS { 'x-nervix-poll' = 'visual', 'authorization' = CLIENT SECRET 'secret.visual_token' } MAX BODY SIZE 1MiB"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
@@ -373,7 +378,7 @@ Feature: Web console visual ingestor creation
       | 3            |
 
   @visual_ingestor_pulsar
-  Scenario Outline: A visually created Pulsar ingestor declares who owns its subscription and delivers
+  Scenario Outline: A visually created Pulsar ingestor declares its creation position and delivers
     Given Pulsar is running
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -415,8 +420,8 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-general-error [data-error='log']" is clicked
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "owns the subscription"
-    When selector ".create-ingestor-subscription-ownership [data-ownership='ingestor']" is clicked
-    Then selector ".create-preview" contains "SUBSCRIPTION 'visual_{{test_id}}' OWNED BY INGESTOR"
+    When selector ".create-ingestor-subscription-ownership [data-choice='OWNED BY INGESTOR START AT <start_position>']" is clicked
+    Then selector ".create-preview" contains "SUBSCRIPTION 'visual_{{test_id}}' OWNED BY INGESTOR START AT <start_position>"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
@@ -425,7 +430,8 @@ Feature: Web console visual ingestor creation
       CREATE SUBSCRIPTION visual_pulsar_subscription TO visual_pulsar_relay;
       START;
       """
-    And Pulsar message is published to topic "visual_{{test_id}}"
+    Then within "30s" Pulsar subscription "visual_{{test_id}}" of topic "visual_{{test_id}}" has 1 consumer
+    When Pulsar message is published to topic "visual_{{test_id}}"
       """
       {"user_id":42}
       """
@@ -435,6 +441,8 @@ Feature: Web console visual ingestor creation
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | start_position |
+      | 1            | EARLIEST       |
+      | 3            | EARLIEST       |
+      | 1            | LATEST         |
+      | 3            | LATEST         |

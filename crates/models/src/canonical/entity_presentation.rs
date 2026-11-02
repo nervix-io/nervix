@@ -23,12 +23,12 @@ use super::{
 };
 use crate::{
     ClickHouseEmitter, ClientProducerIngestor, EmitterEntity, EmitterEntityKind, EmitterReference,
-    HttpEmitter, HttpEndpointIngestor, HttpIngestor, HttpRequestIngestor, IcebergCatalog,
-    IcebergEmitter, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntity,
-    IngestorEntityBody, IngestorEntityKind, IngestorEntityModel, IngestorInput, KafkaEmitter,
-    KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, LocatorDeclaration, MongoDbEmitter,
-    MqttEmitter, MqttIngestor, MqttTopicIngestor, MySqlEmitter, NatsEmitter, NatsIngestor,
-    NatsSubjectIngestor, OptionDeclaration, OptionPresence, OtelEmitter, OtelMetric,
+    HttpEmitter, HttpEndpointIngestor, HttpIngestor, HttpRequestHeaderValue, HttpRequestIngestor,
+    IcebergCatalog, IcebergEmitter, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
+    IngestorEntity, IngestorEntityBody, IngestorEntityKind, IngestorEntityModel, IngestorInput,
+    KafkaEmitter, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, LocatorDeclaration,
+    MongoDbEmitter, MqttEmitter, MqttIngestor, MqttTopicIngestor, MySqlEmitter, NatsEmitter,
+    NatsIngestor, NatsSubjectIngestor, OptionDeclaration, OptionPresence, OtelEmitter, OtelMetric,
     OtelMetricKind, PostgresEmitter, PrometheusIngestor, PrometheusQueryIngestor, PulsarEmitter,
     PulsarIngestor, PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestor, RabbitMqQueueIngestor,
     RedisEmitter, RedisIngestor, RedisPubSubIngestor, SentryEmitter, SqsEmitter, SqsFifoGroup,
@@ -55,6 +55,14 @@ impl EntityBoundary {
         match self {
             Self::Ingestor(kind) => kind.capabilities().locator,
             Self::Emitter(kind) => kind.capabilities().locator,
+        }
+    }
+
+    /// Every locator the entity declares, its alternatives included.
+    fn locators(self) -> Vec<LocatorDeclaration> {
+        match self {
+            Self::Ingestor(kind) => kind.locators(),
+            Self::Emitter(kind) => kind.capabilities().locator.into_iter().collect(),
         }
     }
 
@@ -162,6 +170,20 @@ impl EntityPresentation {
             .locator()
             .assured("this concrete entity declares its external locator");
         self.locator = Some(format!("{} {}", declaration.keywords, string_literal(name)));
+    }
+
+    /// Writes `name` after the keywords of `locator`, the one of its entity's declared locators the
+    /// concrete Model holds.
+    fn declared_locator(&mut self, locator: LocatorDeclaration, name: &str) {
+        // An entity declares one locator and at most a handful of alternatives in its constant
+        // declaration, so the scan is bounded by that declaration.
+        let declared = self
+            .boundary
+            .locators()
+            .into_iter()
+            .find(|candidate| *candidate == locator)
+            .assured("the concrete Model names a locator its entity declares");
+        self.locator = Some(format!("{} {}", declared.keywords, string_literal(name)));
     }
 
     fn written_option(&mut self, keywords: &str, value: String) {
@@ -398,11 +420,13 @@ impl IngestorPresentationModel for HttpRequestIngestor {
                 .headers
                 .iter()
                 .map(|header| {
-                    format!(
-                        "{} = {}",
-                        string_literal(&header.name),
-                        string_literal(&header.value)
-                    )
+                    let value = match &header.value {
+                        HttpRequestHeaderValue::Literal(value) => string_literal(value),
+                        HttpRequestHeaderValue::ClientSecret(key) => {
+                            format!("CLIENT SECRET {}", string_literal(key))
+                        }
+                    };
+                    format!("{} = {value}", string_literal(&header.name))
                 })
                 .collect();
             presentation.written_option("HEADERS", format!("{{ {} }}", fields.join(", ")));
@@ -488,7 +512,7 @@ queue_ingestor_presentations!(RabbitMqQueueIngestor, SqsQueueIngestor);
 impl IngestorPresentationModel for RedisPubSubIngestor {
     fn entity_presentation(&self) -> EntityPresentation {
         let mut presentation = EntityPresentation::ingestor(self);
-        presentation.external_locator(self.channel.as_str());
+        presentation.declared_locator(self.subscription.locator(), self.subscription.as_str());
         presentation
     }
 }

@@ -40,8 +40,8 @@ use nervix_connector_kafka::testing_rdkafka::{
     client::DefaultClientContext,
     config::ClientConfig,
     consumer::{BaseConsumer, Consumer, StreamConsumer},
-    error::RDKafkaErrorCode,
-    message::{Header as KafkaHeader, Headers, Message, OwnedHeaders},
+    error::{KafkaError, RDKafkaErrorCode},
+    message::{Header as KafkaHeader, Headers, Message, OwnedHeaders, Timestamp as KafkaTimestamp},
     producer::{FutureProducer, FutureRecord},
     topic_partition_list::{Offset, TopicPartitionList},
 };
@@ -151,7 +151,9 @@ use super::{
     suite_watchdog::{LiveClusterRegistration, NodeStop, SUITE_BUDGET},
 };
 pub(crate) use super::{
-    broker_observer::{BrokerMessage, BrokerObserver, TypedBrokerHeader},
+    broker_observer::{
+        BrokerMessage, BrokerObserver, BrokerRecordTime, PulsarMessageTimes, TypedBrokerHeader,
+    },
     raw_session::{TestSession, open_raw_session},
 };
 
@@ -2426,6 +2428,16 @@ impl Cluster {
         publish_redis(&self.dependencies, channel, payload).await
     }
 
+    /// Publishes `payload` to `channel` exactly once and returns how many subscriptions Redis
+    /// delivered it to, which may be none.
+    pub(crate) async fn publish_redis_once(
+        &self,
+        channel: &str,
+        payload: &str,
+    ) -> io::Result<usize> {
+        publish_redis_once(&self.dependencies, channel, payload).await
+    }
+
     pub(crate) async fn publish_redis_burst(
         &self,
         channel: &str,
@@ -2449,6 +2461,16 @@ impl Cluster {
         max_message_size: u32,
     ) -> io::Result<()> {
         limit_pulsar_topic_message_size(&self.dependencies, topic, max_message_size).await
+    }
+
+    /// Bounds how far ahead a message published to `topic` may ask to be delivered, as an operator
+    /// does through the broker's admin API.
+    pub(crate) async fn limit_pulsar_topic_delivery_delay(
+        &self,
+        topic: &str,
+        maximum: Duration,
+    ) -> io::Result<()> {
+        limit_pulsar_topic_delivery_delay(&self.dependencies, topic, maximum).await
     }
 
     /// The number of messages the broker holds for `subscription` of `topic` that no consumer has
@@ -2543,6 +2565,16 @@ impl Cluster {
         publish_kafka(&self.dependencies, topic, payload).await
     }
 
+    pub(crate) async fn publish_kafka_metadata_record(
+        &self,
+        topic: &str,
+        record: &crate::kafka_metadata::KafkaMetadataRecord,
+    ) -> io::Result<()> {
+        record
+            .publish(kafka_client_config(&self.dependencies)?, topic)
+            .await
+    }
+
     pub(crate) async fn publish_kafka_with_headers(
         &self,
         topic: &str,
@@ -2585,6 +2617,24 @@ impl Cluster {
         partitions: i32,
     ) -> io::Result<()> {
         ensure_kafka_topic_partitions(&self.dependencies, topic, partitions).await
+    }
+
+    /// Historical CreateTime records must survive the broker's retention scans.
+    pub(crate) async fn create_kafka_metadata_topic(&self, topic: &str) -> io::Result<()> {
+        let admin = kafka_admin_client(&self.dependencies)?;
+        let definition = NewTopic::new(topic, 1, TopicReplication::Fixed(1))
+            .set("message.timestamp.type", "CreateTime")
+            .set("retention.ms", "-1")
+            .set("retention.bytes", "-1");
+        let options = AdminOptions::new().request_timeout(Some(Duration::from_secs(5)));
+        let created = admin
+            .create_topics(&[definition], &options)
+            .await
+            .map_err(io::Error::other)?;
+        for result in created {
+            result.map_err(|(_, code)| io::Error::other(KafkaError::AdminOp(code)))?;
+        }
+        wait_for_kafka_topic_partitions(&self.dependencies, topic, 1).await
     }
 
     /// Subscribes a consumer group member that Nervix does not run to `topic` in `group`.
@@ -2989,6 +3039,12 @@ impl Cluster {
 
     pub(crate) async fn observe_pulsar(&self, topic: &str) -> io::Result<BrokerObserver> {
         observe_pulsar(&self.dependencies, topic).await
+    }
+
+    /// Observes `topic` through a shared subscription, the only kind a broker holds a delayed
+    /// message back from.
+    pub(crate) async fn observe_pulsar_shared(&self, topic: &str) -> io::Result<BrokerObserver> {
+        observe_pulsar_shared(&self.dependencies, topic).await
     }
 
     pub(crate) async fn observe_pulsar_tls(&self, topic: &str) -> io::Result<BrokerObserver> {
@@ -5528,6 +5584,19 @@ async fn publish_redis(
     Ok(())
 }
 
+async fn publish_redis_once(
+    dependencies: &DependencyEndpoints,
+    channel: &str,
+    payload: &str,
+) -> io::Result<usize> {
+    let client = TestRedisClient::open(dependencies.get(REDIS_ADDR)?)?;
+    let mut connection = client.connect().await?;
+    connection
+        .publish(channel, payload)
+        .await
+        .map_err(io::Error::other)
+}
+
 async fn publish_redis_burst(
     dependencies: &DependencyEndpoints,
     channel: &str,
@@ -5718,6 +5787,48 @@ async fn publish_pulsar_with_addr(
 /// Sets the `maxMessageSize` policy of an existing topic through the broker's admin API, and waits
 /// until the broker reads the policy back. The broker updates a loaded topic's policies before it
 /// serves them, so the read-back is the evidence that the next message is measured against it.
+async fn limit_pulsar_topic_delivery_delay(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    maximum: Duration,
+) -> io::Result<()> {
+    const POLICY_TIMEOUT: Duration = Duration::from_secs(60);
+    let admin = dependencies.get(PULSAR_ADMIN_ADDR)?;
+    let url = format!("{admin}/admin/v2/persistent/public/default/{topic}/delayedDelivery");
+    let maximum_millis = u64::try_from(maximum.as_millis()).map_err(io::Error::other)?;
+    let client = reqwest::Client::new();
+    client
+        .post(&url)
+        .json(&serde_json::json!({
+            "active": true,
+            "tickTime": 1000,
+            "maxDeliveryDelayInMillis": maximum_millis,
+        }))
+        .send()
+        .await
+        .map_err(io::Error::other)?
+        .error_for_status()
+        .map_err(io::Error::other)?;
+
+    let deadline = Instant::now() + POLICY_TIMEOUT;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let observed = read_pulsar_admin_value(&client, &url).await;
+        if let Ok(policy) = serde_json::from_str::<serde_json::Value>(&observed)
+            && policy["maxDeliveryDelayInMillis"].as_u64() == Some(maximum_millis)
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "timed out waiting for Pulsar topic '{topic}' to report a maximum delivery delay \
+                 of {maximum_millis} ms; last observation: {observed}"
+            )));
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
 async fn limit_pulsar_topic_message_size(
     dependencies: &DependencyEndpoints,
     topic: &str,
@@ -6714,9 +6825,19 @@ pub(crate) async fn observe_kafka_through(
                     let key = message
                         .key()
                         .map(|key| String::from_utf8_lossy(key).to_string());
-                    let _ = payload_tx
-                        .send(BrokerMessage::from_bytes(bytes, headers).with_key(key))
-                        .await;
+                    let time = match message.timestamp() {
+                        KafkaTimestamp::CreateTime(unix_millis) => {
+                            Some(BrokerRecordTime::Created { unix_millis })
+                        }
+                        KafkaTimestamp::LogAppendTime(unix_millis) => {
+                            Some(BrokerRecordTime::Appended { unix_millis })
+                        }
+                        KafkaTimestamp::NotAvailable => None,
+                    };
+                    let observed = BrokerMessage::from_bytes(bytes, headers)
+                        .with_key(key)
+                        .with_time(time);
+                    let _ = payload_tx.send(observed).await;
                 }
                 Err(_) => continue,
             }
@@ -6730,7 +6851,26 @@ async fn observe_pulsar(
     dependencies: &DependencyEndpoints,
     topic: &str,
 ) -> io::Result<BrokerObserver> {
-    observe_pulsar_with_addr(dependencies.get(PULSAR_ADDR)?, None, topic).await
+    observe_pulsar_with_addr(
+        dependencies.get(PULSAR_ADDR)?,
+        None,
+        topic,
+        PulsarSubType::Exclusive,
+    )
+    .await
+}
+
+async fn observe_pulsar_shared(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+) -> io::Result<BrokerObserver> {
+    observe_pulsar_with_addr(
+        dependencies.get(PULSAR_ADDR)?,
+        None,
+        topic,
+        PulsarSubType::Shared,
+    )
+    .await
 }
 
 async fn observe_pulsar_tls(
@@ -6741,14 +6881,24 @@ async fn observe_pulsar_tls(
         dependencies.get(PULSAR_TLS_ADDR)?,
         Some(dependencies.tls_ca_pem()?),
         topic,
+        PulsarSubType::Exclusive,
     )
     .await
+}
+
+/// This host's clock in Unix milliseconds, which a containerized broker on this host shares.
+fn host_unix_millis() -> u64 {
+    let elapsed = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("system clock must be after unix epoch");
+    u64::try_from(elapsed.as_millis()).expect("this host's clock fits Unix milliseconds")
 }
 
 async fn observe_pulsar_with_addr(
     addr: &str,
     ca_certificate_chain: Option<Vec<u8>>,
     topic: &str,
+    subscription_type: PulsarSubType,
 ) -> io::Result<BrokerObserver> {
     let subscription = format!(
         "nervix-cucumber-observer-{}-{}",
@@ -6772,7 +6922,7 @@ async fn observe_pulsar_with_addr(
                 .consumer()
                 .with_topic(&topic)
                 .with_subscription(&subscription)
-                .with_subscription_type(PulsarSubType::Exclusive)
+                .with_subscription_type(subscription_type)
                 .with_options(
                     PulsarConsumerOptions::default()
                         .with_initial_position(PulsarInitialPosition::Earliest),
@@ -6784,9 +6934,17 @@ async fn observe_pulsar_with_addr(
 
             let task = nervix_primitives::task::spawn(async move {
                 while let Some(message) = consumer.next().await {
+                    let received_at = host_unix_millis();
                     nervix_primitives::task::consume_budget().await;
                     let Ok(message) = message else {
                         continue;
+                    };
+                    let metadata = message.metadata();
+                    let times = PulsarMessageTimes {
+                        event_time: metadata.event_time,
+                        deliver_at: metadata.deliver_at_time,
+                        published_at: metadata.publish_time,
+                        received_at,
                     };
                     // Pulsar keeps message properties as an unordered map, so they are compared
                     // in name order.
@@ -6798,7 +6956,8 @@ async fn observe_pulsar_with_addr(
                         .collect::<Vec<_>>();
                     properties.sort();
                     let observed = BrokerMessage::from_bytes(&message.payload.data, properties)
-                        .with_key(message.key());
+                        .with_key(message.key())
+                        .with_pulsar_times(times);
                     let _ = consumer.ack(&message).await;
                     if payload_tx.send(observed).await.is_err() {
                         break;
@@ -7115,7 +7274,7 @@ async fn nats_tls_client(dependencies: &DependencyEndpoints) -> io::Result<NatsC
         .map_err(io::Error::other)
 }
 
-async fn sqs_client(dependencies: &DependencyEndpoints) -> io::Result<SqsClient> {
+pub(super) async fn sqs_client(dependencies: &DependencyEndpoints) -> io::Result<SqsClient> {
     let sdk_config = aws_config::defaults(BehaviorVersion::latest())
         .region(aws_sdk_sqs::config::Region::new(SQS_REGION))
         .endpoint_url(dependencies.get(SQS_ENDPOINT)?)
@@ -7149,7 +7308,7 @@ async fn sqs_tls_client(dependencies: &DependencyEndpoints) -> io::Result<SqsCli
     Ok(SqsClient::new(&sdk_config))
 }
 
-async fn sqs_queue_url(client: &SqsClient, queue: &str) -> io::Result<String> {
+pub(super) async fn sqs_queue_url(client: &SqsClient, queue: &str) -> io::Result<String> {
     client
         .get_queue_url()
         .queue_name(queue)

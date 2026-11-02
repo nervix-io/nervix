@@ -1233,7 +1233,7 @@ Feature: Client ingestors
       | us     | o-2      |
     Then batch "after relocation" completes
 
-  @client_ingestor
+  @client_ingestor @slots_2
   Scenario Outline: A batch beyond a producer's credit is refused without graph effect and ends the producer
     Given HTTP receiver "emitter" is running
     And HTTP receiver "emitter" answers unscripted requests with "hold response until released"

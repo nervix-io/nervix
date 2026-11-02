@@ -17,6 +17,66 @@
 # the compiler's catalog: a new owner of tracked locks needs a record, and a record whose file no
 # longer acquires one is removed.
 
+[[workload]]
+coverage = "Kafka records through the real broker and the source host's tracked ingestion and ACK state, with every new metadata field read in NO ACK, ACK SEQUENTIAL and ACK PARALLEL on one and three nodes. Driver polling and borrowed metadata visits are untracked."
+examples = 6
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "scenario.kafka-record-metadata"
+invariant = "Every admitted record retains its own binary key, exact broker timestamp, timestamp kind and tombstone flag across ingestion and acknowledgement."
+invocation = "scenarios"
+scenario = "A Kafka <mode_name> ingestor projects each record's key, timestamp and type"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Kafka null and empty values decoded through TOML and JAQ, then projected beside tracked ingestion and acknowledgement state on one and three nodes. Driver data and metadata conversion are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "scenario.kafka-record-tombstones"
+invariant = "A null Kafka value has tombstone=true and an empty non-null value has tombstone=false for every row its codec produces."
+invocation = "scenarios"
+scenario = "A Kafka ingestor distinguishes a tombstone from an empty value"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Kafka metadata timestamps drive two branch-local historical windows through tracked source and processor lifecycle state on one and three nodes. Logical timer waits and borrowed metadata conversion are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "scenario.kafka-record-event-time"
+invariant = "TIMESTAMP AT metadata.timestamp uses the broker instant for each branch's duration window and preserves the row's fields."
+invocation = "scenarios"
+scenario = "Kafka broker event time makes historical windows due independently in two branches"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: real-broker Kafka ingestion and ACK state in all three modes with every record metadata field read. Driver polling and borrowed metadata visits remain untracked."
+examples = 6
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "stress.kafka-record-metadata"
+invariant = "Every admitted record retains its own binary key, exact broker timestamp, timestamp kind and tombstone flag across ingestion and acknowledgement."
+invocation = "stress-scenarios"
+scenario = "A Kafka <mode_name> ingestor projects each record's key, timestamp and type"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: real Kafka null and empty values decoded through TOML and JAQ beside tracked ingestion and acknowledgement state. Driver data and metadata conversion remain untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "stress.kafka-record-tombstones"
+invariant = "A null Kafka value has tombstone=true and an empty non-null value has tombstone=false for every row its codec produces."
+invocation = "stress-scenarios"
+scenario = "A Kafka ingestor distinguishes a tombstone from an empty value"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: metadata timestamps drive two historical branch windows beside tracked source and processor lifecycle state. Logical timer waits and borrowed metadata conversion remain untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "stress.kafka-record-event-time"
+invariant = "TIMESTAMP AT metadata.timestamp uses the broker instant for each branch's duration window and preserves the row's fields."
+invocation = "stress-scenarios"
+scenario = "Kafka broker event time makes historical windows due independently in two branches"
+selections = ["deloxide-stress"]
+
 [lane]
 # All diagnostic test and driver executables build before any workload starts, under their own
 # real-time budget. The measured cold stressed scenario build took 1988s on a loaded host; 80
@@ -109,6 +169,7 @@ kind = "cucumber"
 package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@kafka_record_metadata",
   "@restore_client_inspection",
   "@runtime_installation_retry",
   "@execution_class_drain",
@@ -165,6 +226,7 @@ tags = [
   "@websocket_declaration_lifecycle",
   "@endpoint_metadata_buffer",
   "@mqtt_source_retirement",
+  "@mqtt_client_credentials_refused",
   "@pulsar_source_retirement",
   "@forced_failover_delivery",
   "@mqtt_parallel_gather_at_quiesce",
@@ -825,6 +887,16 @@ scenario = "STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "MQTT sources and emitters on one and three nodes whose broker listener refuses a client that writes no credentials: each source resume and emitter connection fails with the broker's refusal, the source connects again on the host's reconnect cadence and the emitter on its retry policy, beside the tracked locks of the Plexus commands, the ingestor and emitter status publication and the cluster's teardown. The client's event loop, the broker's refusal and the reconnect waits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_client_keys.feature"
+id = "scenario.mqtt-client-credentials-refused"
+invariant = "An MQTT client that writes no credentials to a broker requiring them never subscribes or publishes, and its source and emitter keep reporting the broker's refusal while they connect again."
+invocation = "scenarios"
+scenario = "The broker refuses an MQTT client without credentials, and its source and emitter report the refusal"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "A connect-mode ZeroMQ emitter on one and three nodes whose sink open runs out of connect_timeout_ms against a port that refuses every connection, the emitter task's reopen on its retry policy, and the reopen that connects once a peer listens, beside the tracked locks of the Plexus commands, the HTTP endpoint intake and the cluster's teardown. The ZeroMQ driver's connection attempts, the connect deadline and the emitter's retry wait are untracked."
 examples = 2
 feature = "tests/features/runtime/zeromq_emission.feature"
@@ -1428,6 +1500,16 @@ id = "scenario.backup-cut-expiry"
 invariant = "A second-domain cut expiry returns its bounded failure and resumes both domains on one and three nodes."
 invocation = "scenarios"
 scenario = "A second-domain quiesce expiry returns its failure and resumes both domains"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Native-client command recovery and archive download after the first domain's mutation lease release meets a one-shot lapsed-leader-lease refusal. Existing client, storage and cluster lifecycle locks are tracked; consensus refusal and command-retry asynchronous waits are untracked."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-lease-release-recovery"
+invariant = "A refused first-domain mutation lease release leaves the admitted backup recoverable under its original reference, and the recovered archive contains both quiesced domain cuts on one and three nodes."
+invocation = "scenarios"
+scenario = "A cluster backup recovers a first-domain lease release refused by a lapsed leader lease on <cluster_size> nodes"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -2231,6 +2313,16 @@ scenario = "A bounded native wait recovers the original multi-domain backup afte
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
+coverage = "Under scheduling stress: native-client command recovery and archive download after the first domain's mutation lease release meets a one-shot lapsed-leader-lease refusal. Consensus refusal and command-retry asynchronous waits remain untracked."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-lease-release-recovery"
+invariant = "A refused first-domain mutation lease release leaves the admitted backup recoverable under its original reference, and the recovered archive contains both quiesced domain cuts on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A cluster backup recovers a first-domain lease release refused by a lapsed leader lease on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Under scheduling stress: client command and pending-reply lifetimes while two delayed domain cuts each stay within their own budget and together exceed the ordinary request budget."
 examples = 2
 feature = "tests/features/cluster/backup_wait.feature"
@@ -2328,6 +2420,16 @@ id = "stress.mqtt-finish-at-stop"
 invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
 invocation = "stress-scenarios"
 scenario = "STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: MQTT sources and emitters on one and three nodes whose broker listener refuses a client that writes no credentials: each source resume and emitter connection fails with the broker's refusal, the source connects again on the host's reconnect cadence and the emitter on its retry policy, beside the tracked locks of the Plexus commands, the ingestor and emitter status publication and the cluster's teardown. The client's event loop, the broker's refusal and the reconnect waits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_client_keys.feature"
+id = "stress.mqtt-client-credentials-refused"
+invariant = "An MQTT client that writes no credentials to a broker requiring them never subscribes or publishes, and its source and emitter keep reporting the broker's refusal while they connect again."
+invocation = "stress-scenarios"
+scenario = "The broker refuses an MQTT client without credentials, and its source and emitter report the refusal"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -2891,10 +2993,12 @@ path = "crates/client-core/src/client.rs"
 workloads = [
   "paced.reopen-generation",
   "paced.delayed-refusal",
+  "scenario.backup-lease-release-recovery",
   "scenario.backup-native-recovery",
   "scenario.backup-multi-domain-wait",
   "stress.paced.reopen-generation",
   "stress.paced.delayed-refusal",
+  "stress.backup-lease-release-recovery",
   "stress.backup-native-recovery",
   "stress.backup-multi-domain-wait",
 ]
@@ -2931,10 +3035,12 @@ path = "crates/client-core/src/exchange.rs"
 workloads = [
   "scenario.client-alter-drain",
   "paced.reopen-generation",
+  "scenario.backup-lease-release-recovery",
   "scenario.backup-native-recovery",
   "scenario.backup-multi-domain-wait",
   "stress.client-alter-drain",
   "stress.paced.reopen-generation",
+  "stress.backup-lease-release-recovery",
   "stress.backup-native-recovery",
   "stress.backup-multi-domain-wait",
 ]
@@ -3668,21 +3774,21 @@ scenario = "MQTT ACK PARALLEL publishes a quiesce change meets half gathered rea
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "An entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The held answer, the SQS client and the read's cancellation are outside the detector."
+coverage = "An entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The admitted message exercises U32 and DATETIME projection at the quiesce boundary; the bounded ingest-metadata-projection property separately verifies retained-copy replay. The held answer, the SQS client and the read's cancellation are outside the detector."
 examples = 2
 feature = "tests/features/runtime/sqs_ingestion.feature"
 id = "scenario.sqs-receive-at-quiesce"
-invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message reaches the relay without waiting for its visibility timeout, on one and three nodes."
+invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message with exact U32 receive_count and DATETIME sent_at reaches the relay without waiting for its visibility timeout, on one and three nodes."
 invocation = "scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Under scheduling stress: an entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The held answer, the SQS client and the read's cancellation are outside the detector."
+coverage = "Under scheduling stress: an entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The admitted message exercises U32 and DATETIME projection at the quiesce boundary; the bounded ingest-metadata-projection property separately verifies retained-copy replay. The held answer, the SQS client and the read's cancellation are outside the detector."
 examples = 2
 feature = "tests/features/runtime/sqs_ingestion.feature"
 id = "stress.sqs-receive-at-quiesce"
-invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message reaches the relay without waiting for its visibility timeout, on one and three nodes."
+invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message with exact U32 receive_count and DATETIME sent_at reaches the relay without waiting for its visibility timeout, on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
 selections = ["deloxide-stress"]

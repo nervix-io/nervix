@@ -18,18 +18,19 @@ use error_stack::{Report, ResultExt as _};
 use nervix_models::{
     ChoiceRequirement, ClientIngestorEntity, ClientName, DomainClockPeriod, EndpointIngestMode,
     EndpointName, HttpEndpointIngestor, HttpIngestorEntity, HttpRequestHeader,
-    HttpRequestIngestMode, HttpRequestIngestor, IngestDeliveryKind, IngestQuiesceKind,
-    IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind,
-    KafkaConsumerGroupName, KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode,
-    KafkaTopicIngestor, KafkaTopicName, ModelName, MqttIngestMode, MqttIngestorEntity, MqttQos,
-    MqttSession, MqttTopicFilter, MqttTopicIngestor, NatsIngestMode, NatsIngestorEntity,
-    NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectName, NodeRef, PayloadSizeLimit,
-    PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor, PulsarIngestMode,
-    PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
-    PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode, RabbitMqIngestorEntity,
-    RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName, RedisIngestorEntity,
-    RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SqsIngestMode, SqsIngestorEntity,
-    SqsQueueIngestor, SqsQueueName, SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor,
+    HttpRequestHeaderValue, HttpRequestIngestMode, HttpRequestIngestor, IngestDeliveryKind,
+    IngestQuiesceKind, IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity,
+    IngestorEntityKind, KafkaConsumerGroupName, KafkaIngestMode, KafkaIngestorEntity,
+    KafkaOffsetMode, KafkaTopicIngestor, KafkaTopicName, ModelName, MqttIngestMode,
+    MqttIngestorEntity, MqttQos, MqttSession, MqttTopicFilter, MqttTopicIngestor, NatsIngestMode,
+    NatsIngestorEntity, NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectName, NodeRef,
+    PayloadSizeLimit, PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor,
+    PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName,
+    PulsarSubscriptionOwnership, PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode,
+    RabbitMqIngestorEntity, RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName,
+    RedisChannelPattern, RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor,
+    RedisSubscriptionTarget, RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor,
+    SqsQueueName, SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor,
     WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
     WebsocketsIngestorEntity, WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, ZeroMqIngestMode,
     ZeroMqIngestorEntity, ZeroMqPullIngestor,
@@ -45,6 +46,46 @@ pub(super) enum OffsetChoice {
     ConsumerGroup,
 }
 
+/// One polled request header as a form edits it: its value is what the statement writes, either
+/// the header's value or the client key that holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct RequestHeaderDraft {
+    pub(super) name: String,
+    pub(super) value: String,
+    pub(super) client_secret: bool,
+}
+
+impl From<&RequestHeaderDraft> for HttpRequestHeader {
+    fn from(draft: &RequestHeaderDraft) -> Self {
+        let value = if draft.client_secret {
+            HttpRequestHeaderValue::ClientSecret(draft.value.clone())
+        } else {
+            HttpRequestHeaderValue::Literal(draft.value.clone())
+        };
+        Self {
+            name: draft.name.clone(),
+            value,
+        }
+    }
+}
+
+impl From<&HttpRequestHeader> for RequestHeaderDraft {
+    fn from(header: &HttpRequestHeader) -> Self {
+        match &header.value {
+            HttpRequestHeaderValue::Literal(value) => Self {
+                name: header.name.clone(),
+                value: value.clone(),
+                client_secret: false,
+            },
+            HttpRequestHeaderValue::ClientSecret(key) => Self {
+                name: header.name.clone(),
+                value: key.clone(),
+                client_secret: true,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(super) struct IngestorEntityDraft {
     pub(super) kind: Option<IngestorEntityKind>,
@@ -52,13 +93,14 @@ pub(super) struct IngestorEntityDraft {
     pub(super) topic: String,
     pub(super) queue: String,
     pub(super) channel: String,
+    pub(super) pattern: String,
     pub(super) subject: String,
     pub(super) queue_group: String,
     pub(super) subscription: String,
     pub(super) subscription_ownership: Option<PulsarSubscriptionOwnership>,
     pub(super) query: String,
     pub(super) method: String,
-    pub(super) request_headers: Vec<HttpRequestHeader>,
+    pub(super) request_headers: Vec<RequestHeaderDraft>,
     pub(super) max_body_size: String,
     pub(super) upgrade_headers: Vec<WebsocketsUpgradeHeader>,
     pub(super) every: String,
@@ -187,8 +229,9 @@ impl IngestorEntityDraft {
             }
             "QOS" => self.mqtt_qos = MqttQos::iter().find(|value| value.spelling() == choice),
             "SUBSCRIPTION" => {
-                self.subscription_ownership =
-                    PulsarSubscriptionOwnership::iter().find(|value| value.keywords() == choice)
+                self.subscription_ownership = PulsarSubscriptionOwnership::CHOICES
+                    .into_iter()
+                    .find(|value| value.keywords() == choice)
             }
             "OFFSET BY" => {
                 self.offset = match choice {
@@ -276,7 +319,11 @@ impl IngestorEntityDraft {
             IngestorEntityKind::Http(HttpIngestorEntity::Request) => HttpRequestIngestor {
                 client: self.client()?,
                 method: self.required(&self.method, IngestorEntityDraftError::Method)?,
-                headers: self.request_headers.clone(),
+                headers: self
+                    .request_headers
+                    .iter()
+                    .map(HttpRequestHeader::from)
+                    .collect(),
                 max_body_size: self.max_body_size()?,
                 every: self.every()?,
                 mode: HttpRequestIngestMode::NoAck,
@@ -342,8 +389,7 @@ impl IngestorEntityDraft {
             .into(),
             IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => RedisPubSubIngestor {
                 client: self.client()?,
-                channel: RedisChannelName::parse(&self.channel)
-                    .change_context(IngestorEntityDraftError::Channel)?,
+                subscription: self.redis_subscription()?,
                 mode: RedisPubSubIngestMode::NoAck,
                 quiesce,
             }
@@ -405,6 +451,24 @@ impl IngestorEntityDraft {
             return Err(Report::new(IngestorEntityDraftError::UnsupportedQuiesce));
         }
         Ok(source)
+    }
+
+    /// The subscription the Redis fields write: the pattern where one is written, otherwise the
+    /// channel. A form that writes both names two subscriptions, which no ingestor holds.
+    fn redis_subscription(
+        &self,
+    ) -> error_stack::Result<RedisSubscriptionTarget, IngestorEntityDraftError> {
+        if self.pattern.is_empty() {
+            let channel = RedisChannelName::parse(&self.channel)
+                .change_context(IngestorEntityDraftError::Channel)?;
+            return Ok(RedisSubscriptionTarget::Channel(channel));
+        }
+        if !self.channel.is_empty() {
+            return Err(Report::new(IngestorEntityDraftError::ChannelAndPattern));
+        }
+        let pattern = RedisChannelPattern::parse(&self.pattern)
+            .change_context(IngestorEntityDraftError::Pattern)?;
+        Ok(RedisSubscriptionTarget::Pattern(pattern))
     }
 
     fn client(&self) -> error_stack::Result<ClientName, IngestorEntityDraftError> {
@@ -691,6 +755,10 @@ pub(super) enum IngestorEntityDraftError {
     Queue,
     #[error("Enter a valid channel")]
     Channel,
+    #[error("Enter a valid channel pattern")]
+    Pattern,
+    #[error("Enter a channel or a channel pattern, not both")]
+    ChannelAndPattern,
     #[error("Enter a valid subject")]
     Subject,
     #[error("Enter a valid queue group")]
@@ -753,16 +821,16 @@ pub(super) enum IngestorEntityDraftError {
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        CodecName, CreateStatement, GeneralErrorPolicy, HttpIngestorEntity, IngestDeliveryKind,
-        IngestQuiesceKind, IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind,
-        KafkaIngestorEntity, Model, ModelKind, ModelName, MqttIngestMode, MqttIngestor,
-        MqttIngestorEntity, MqttQos, MqttSession, NatsIngestorEntity, NodeRef, PulsarIngestor,
-        PulsarIngestorEntity, PulsarSubscriptionOwnership, RedisIngestorEntity,
-        RequestedResourceVersion, Statement, WebsocketsIngestorEntity,
+        CodecName, CreateStatement, GeneralErrorPolicy, HttpIngestorEntity, HttpRequestHeader,
+        HttpRequestHeaderValue, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceOverflow,
+        IngestorEntity, IngestorEntityKind, KafkaIngestorEntity, Model, ModelKind, ModelName,
+        MqttIngestMode, MqttIngestor, MqttIngestorEntity, MqttQos, MqttSession, NatsIngestorEntity,
+        NodeRef, PulsarIngestor, PulsarIngestorEntity, PulsarSubscriptionOwnership,
+        RedisIngestorEntity, RequestedResourceVersion, Statement, WebsocketsIngestorEntity,
     };
     use nervix_plexus::statement::parse_statement;
 
-    use super::{IngestorEntityDraft, IngestorEntityDraftError, OffsetChoice};
+    use super::{IngestorEntityDraft, IngestorEntityDraftError, OffsetChoice, RequestHeaderDraft};
     use crate::create_dialog::{
         SelectedReference,
         ingestor_draft::{IngestorDraft, TimestampDraft},
@@ -858,7 +926,11 @@ mod tests {
         match source {
             IngestorEntity::Http(HttpIngestor::Request(entity)) => {
                 draft.method = entity.method.clone();
-                draft.request_headers = entity.headers.clone();
+                draft.request_headers = entity
+                    .headers
+                    .iter()
+                    .map(RequestHeaderDraft::from)
+                    .collect();
                 draft.max_body_size = entity
                     .max_body_size
                     .map(|limit| limit.to_string())
@@ -904,9 +976,10 @@ mod tests {
                 draft.queue = entity.queue.to_string();
                 draft.instances = entity.instances.to_string();
             }
-            IngestorEntity::Redis(RedisIngestor::PubSub(entity)) => {
-                draft.channel = entity.channel.to_string()
-            }
+            IngestorEntity::Redis(RedisIngestor::PubSub(entity)) => match &entity.subscription {
+                RedisSubscriptionTarget::Channel(channel) => draft.channel = channel.to_string(),
+                RedisSubscriptionTarget::Pattern(pattern) => draft.pattern = pattern.to_string(),
+            },
             IngestorEntity::Sqs(SqsIngestor::Queue(entity)) => {
                 draft.queue = entity.queue.to_string();
                 draft.instances = entity.instances.to_string();
@@ -921,6 +994,26 @@ mod tests {
             }
         }
         draft
+    }
+
+    #[test]
+    fn a_request_header_row_is_a_literal_until_it_reads_a_client_secret() {
+        let mut row = RequestHeaderDraft {
+            name: "authorization".to_string(),
+            value: "secret.api_token".to_string(),
+            client_secret: false,
+        };
+        assert_eq!(
+            HttpRequestHeader::from(&row).value,
+            HttpRequestHeaderValue::Literal("secret.api_token".to_string())
+        );
+        row.client_secret = true;
+        let header = HttpRequestHeader::from(&row);
+        assert_eq!(
+            header.value,
+            HttpRequestHeaderValue::ClientSecret("secret.api_token".to_string())
+        );
+        assert_eq!(RequestHeaderDraft::from(&header), row);
     }
 
     #[test]
@@ -952,6 +1045,34 @@ mod tests {
                     );
                 }
             });
+    }
+
+    #[test]
+    fn a_redis_form_subscribes_by_its_pattern_or_its_channel_but_never_both() {
+        use nervix_models::{RedisChannelPattern, RedisIngestor, RedisSubscriptionTarget};
+        let mut draft = complete(IngestorEntityKind::Redis(RedisIngestorEntity::PubSub));
+        draft.channel.clear();
+        draft.pattern = "orders.*".into();
+        let IngestorEntity::Redis(RedisIngestor::PubSub(source)) = draft
+            .build()
+            .assured("a pattern written alone is a subscription")
+        else {
+            panic!("the Redis Pub/Sub form builds a Redis Pub/Sub source");
+        };
+        assert_eq!(
+            source.subscription,
+            RedisSubscriptionTarget::Pattern(
+                RedisChannelPattern::parse("orders.*").assured("the pattern is within the bound")
+            )
+        );
+        draft.channel = "orders".into();
+        let error = draft
+            .build()
+            .expect_err("a channel and a pattern name two subscriptions");
+        assert_eq!(
+            error.current_context(),
+            &super::IngestorEntityDraftError::ChannelAndPattern
+        );
     }
 
     fn complete(kind: IngestorEntityKind) -> IngestorEntityDraft {
@@ -1148,11 +1269,8 @@ mod tests {
             error.current_context(),
             &super::IngestorEntityDraftError::SubscriptionOwnership
         );
-        for ownership in [
-            PulsarSubscriptionOwnership::Ingestor,
-            PulsarSubscriptionOwnership::Provisioned,
-        ] {
-            draft.subscription_ownership = Some(ownership);
+        for ownership in PulsarSubscriptionOwnership::CHOICES {
+            draft.choose_option("SUBSCRIPTION", ownership.keywords());
             let IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) =
                 draft.build().assured("a complete Pulsar draft builds")
             else {

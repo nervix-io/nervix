@@ -16,8 +16,9 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    PulsarIngestMode, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
-    PulsarTopicIngestor, PulsarTopicName,
+    PulsarIngestMode, PulsarStartPosition, PulsarSubscription, PulsarSubscriptionName,
+    PulsarSubscriptionOwnership, PulsarTopicIngestor, PulsarTopicIngestorOperation,
+    PulsarTopicName,
 };
 
 use super::delivery::{
@@ -26,10 +27,11 @@ use super::delivery::{
 };
 use crate::{
     lexer::{Identifier, Token},
-    parser_support::{ParseError, client_ref, external_name, kw, kw_phrase3},
+    parser_support::{ParseError, client_ref, external_name, kw, kw_phrase2, kw_phrase3},
 };
 
-/// `FROM <client> TOPIC '<topic>' SUBSCRIPTION '<subscription>' OWNED BY INGESTOR|PROVISIONED
+/// `FROM <client> TOPIC '<topic>' SUBSCRIPTION '<subscription>'
+/// (OWNED BY INGESTOR START AT EARLIEST|LATEST)|PROVISIONED
 /// [INSTANCES <n>] MODE … ON QUIESCE SUSPEND`.
 pub(super) fn topic_body<'src>()
 -> impl Parser<'src, &'src [Token], PulsarTopicIngestor, extra::Err<ParseError<'src>>> + Clone {
@@ -84,13 +86,13 @@ fn mode<'src>()
     ))
 }
 
-/// `SUBSCRIPTION '<subscription>' OWNED BY INGESTOR|PROVISIONED`: the subscription's name, then
-/// who owns it, which every statement declares.
+/// A subscription's name and ownership, with a required creation position when ingestor-owned.
 fn subscription<'src>()
 -> impl Parser<'src, &'src [Token], PulsarSubscription, extra::Err<ParseError<'src>>> + Clone {
     let ownership = choice((
         kw_phrase3(Identifier::Owned, Identifier::By, Identifier::Ingestor)
-            .to(PulsarSubscriptionOwnership::Ingestor),
+            .ignore_then(start_position())
+            .map(|start_at| PulsarSubscriptionOwnership::Ingestor { start_at }),
         kw(Identifier::Provisioned).to(PulsarSubscriptionOwnership::Provisioned),
     ));
     kw(Identifier::Subscription)
@@ -98,6 +100,198 @@ fn subscription<'src>()
         .then(ownership)
         .map(|(name, ownership)| PulsarSubscription { name, ownership })
         .boxed()
+}
+
+fn start_position<'src>()
+-> impl Parser<'src, &'src [Token], PulsarStartPosition, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Start, Identifier::At).ignore_then(choice((
+        kw(Identifier::Earliest).to(PulsarStartPosition::Earliest),
+        kw(Identifier::Latest).to(PulsarStartPosition::Latest),
+    )))
+}
+
+pub(super) fn alteration<'src>()
+-> impl Parser<'src, &'src [Token], nervix_models::AlterIngestor, extra::Err<ParseError<'src>>> + Clone
+{
+    let operation = choice((
+        kw(Identifier::Set)
+            .ignore_then(start_position())
+            .map(|position| PulsarTopicIngestorOperation::SetStartAt { position }),
+        super::transport_operation(topic_body()).map(PulsarTopicIngestorOperation::Transport),
+    ));
+    super::alteration::<PulsarTopicIngestor, _, _>(operation)
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "tests current Pulsar creation positions through the composed grammar"
+    )
+)]
+mod start_position_tests {
+    //! Layer: test harness.
+    //! - **Owns.** Current start-position parsing, refusal and completion examples.
+    //! - **Depends on.** The composed statement parser and its conformance checks.
+    //! - **Must not know.** Driver options, broker state or runtime lifecycle.
+    use meticulous::ResultExt as _;
+    use nervix_models::{
+        CreateIngestor, IngestorEntity, IngestorInput, Model, PulsarIngestor, PulsarStartPosition,
+        PulsarSubscriptionOwnership, Statement,
+    };
+
+    use crate::conformance_support::{assert_offers_exactly, refused};
+
+    fn ingestor(ownership: &str) -> CreateIngestor {
+        let text = format!(
+            "CREATE PULSAR TOPIC INGESTOR events FROM broker TOPIC 'events' SUBSCRIPTION \
+             'readers' {ownership} MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec TO \
+             output INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR \
+             LOG"
+        );
+        let Statement::Create(create) =
+            crate::statement::parse_statement(&text).verified("the current Pulsar creation parses")
+        else {
+            panic!("the statement creates a Model");
+        };
+        let Model::Ingestor(ingestor) = *create.body else {
+            panic!("the statement creates an ingestor");
+        };
+        ingestor
+    }
+
+    fn ownership(ingestor: &CreateIngestor) -> PulsarSubscriptionOwnership {
+        let IngestorInput::Transport(input) = &ingestor.input else {
+            panic!("Pulsar is a transport");
+        };
+        let IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) = &input.source else {
+            panic!("the source is Pulsar");
+        };
+        source.subscription.ownership
+    }
+
+    fn alteration(text: &str) -> nervix_models::AlterIngestor {
+        let statement = crate::statement::parse_statement(text).verified("current ALTER parses");
+        let canonical = statement
+            .to_canonical_plexus()
+            .verified("current ALTER renders");
+        assert_eq!(
+            crate::statement::parse_statement(&canonical).verified("canonical ALTER parses"),
+            statement
+        );
+        let Statement::AlterIngestor(alter) = statement else {
+            panic!("the statement is an ingestor alteration");
+        };
+        alter
+    }
+
+    #[test]
+    fn owned_subscription_start_positions_parse() {
+        for (text, position) in [
+            ("EARLIEST", PulsarStartPosition::Earliest),
+            ("LATEST", PulsarStartPosition::Latest),
+            ("earliest", PulsarStartPosition::Earliest),
+            ("latest", PulsarStartPosition::Latest),
+        ] {
+            let model = ingestor(&format!("OWNED BY INGESTOR START AT {text}"));
+            assert_eq!(
+                ownership(&model),
+                PulsarSubscriptionOwnership::Ingestor { start_at: position }
+            );
+        }
+    }
+
+    #[test]
+    fn alters_only_the_declared_start_position() {
+        for position in [PulsarStartPosition::Earliest, PulsarStartPosition::Latest] {
+            let mut model = ingestor("OWNED BY INGESTOR START AT EARLIEST");
+            let alter = alteration(&format!(
+                "ALTER PULSAR TOPIC INGESTOR events SET START AT {position}"
+            ));
+            model.apply_alter(&alter).verified("owned position changes");
+            assert_eq!(
+                ownership(&model),
+                PulsarSubscriptionOwnership::Ingestor { start_at: position }
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_operations_keep_their_order_and_canonical_shape() {
+        let mut model = ingestor("OWNED BY INGESTOR START AT LATEST");
+        let alter = alteration(
+            "ALTER PULSAR TOPIC INGESTOR events SET START AT LATEST, SET DECODE USING \
+             other_codec, SET START AT EARLIEST",
+        );
+        model.apply_alter(&alter).verified("mixed operations apply");
+        assert_eq!(
+            ownership(&model),
+            PulsarSubscriptionOwnership::Ingestor {
+                start_at: PulsarStartPosition::Earliest
+            }
+        );
+        assert_eq!(
+            model.input.codec().map(|codec| codec.as_str()),
+            Some("other_codec")
+        );
+    }
+
+    #[test]
+    fn provisioned_position_refusal_rolls_back_preceding_operations() {
+        let mut model = ingestor("PROVISIONED");
+        let before = model.clone();
+        let alter = alteration(
+            "ALTER PULSAR TOPIC INGESTOR events SET DECODE USING other_codec, SET START AT LATEST",
+        );
+        let error = model
+            .apply_alter(&alter)
+            .expect_err("provisioned cursors have no creation position");
+        assert!(
+            matches!(error.current_context(), nervix_models::AlterIngestorError::ProvisionedPulsarStartPosition { subscription } if subscription.as_str() == "readers")
+        );
+        assert_eq!(model, before);
+    }
+
+    #[test]
+    fn start_position_completion_stays_on_the_pulsar_subscription() {
+        assert_offers_exactly(
+            "CREATE PULSAR TOPIC INGESTOR events FROM broker TOPIC 'events' SUBSCRIPTION \
+             'readers' OWNED BY INGESTOR ",
+            &["START AT"],
+        );
+        assert_offers_exactly(
+            "CREATE PULSAR TOPIC INGESTOR events FROM broker TOPIC 'events' SUBSCRIPTION \
+             'readers' OWNED BY INGESTOR START AT ",
+            &["EARLIEST", "LATEST"],
+        );
+        assert_offers_exactly(
+            "ALTER PULSAR TOPIC INGESTOR events SET START AT ",
+            &["EARLIEST", "LATEST"],
+        );
+    }
+
+    #[test]
+    fn start_position_refuses_unknown_values_and_a_provisioned_cursor() {
+        for ownership in [
+            "OWNED BY INGESTOR START AT UNKNOWN",
+            "PROVISIONED START AT LATEST",
+        ] {
+            let statement = format!(
+                "CREATE PULSAR TOPIC INGESTOR events FROM broker TOPIC 'events' SUBSCRIPTION \
+                 'readers' {ownership} MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec TO \
+                 output INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
+                 ERROR LOG"
+            );
+            assert!(refused(&statement), "{statement}");
+        }
+        for statement in [
+            "ALTER PULSAR TOPIC INGESTOR events SET START AT UNKNOWN",
+            "ALTER KAFKA TOPIC INGESTOR events SET START AT LATEST",
+        ] {
+            assert!(refused(statement), "{statement}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -134,7 +328,7 @@ mod tests {
         source
     }
 
-    const OWNED: &str = "SUBSCRIPTION 'Readers (eu)' OWNED BY INGESTOR";
+    const OWNED: &str = "SUBSCRIPTION 'Readers (eu)' OWNED BY INGESTOR START AT EARLIEST";
 
     #[rstest]
     #[case("Orders-EU_1")]
@@ -148,7 +342,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case("OWNED BY INGESTOR", PulsarSubscriptionOwnership::Ingestor)]
+    #[case("OWNED BY INGESTOR START AT EARLIEST", PulsarSubscriptionOwnership::Ingestor { start_at: nervix_models::PulsarStartPosition::Earliest })]
+    #[case("OWNED BY INGESTOR START AT LATEST", PulsarSubscriptionOwnership::Ingestor { start_at: nervix_models::PulsarStartPosition::Latest })]
     #[case("PROVISIONED", PulsarSubscriptionOwnership::Provisioned)]
     fn the_subscription_keeps_its_name_and_its_declared_owner(
         #[case] owner: &str,
@@ -215,13 +410,17 @@ mod tests {
         assert_offers_exactly(
             "CREATE PULSAR TOPIC INGESTOR intake FROM pulsar_main TOPIC 'orders' SUBSCRIPTION \
              'readers' ",
-            &["OWNED BY INGESTOR", "PROVISIONED"],
+            &["OWNED BY INGESTOR START AT EARLIEST", "PROVISIONED"],
         );
     }
 
     #[test]
     fn the_composed_grammar_refuses_a_subscription_without_its_owner() {
-        for subscription in ["", "SUBSCRIPTION 'readers'", "OWNED BY INGESTOR"] {
+        for subscription in [
+            "",
+            "SUBSCRIPTION 'readers'",
+            "OWNED BY INGESTOR START AT EARLIEST",
+        ] {
             let statement = statement("orders", subscription, "NO ACK");
             assert!(
                 refused(&statement),

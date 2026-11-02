@@ -539,7 +539,7 @@ mod tests {
             (
                 IngestorEntity::Redis(RedisIngestor::PubSub(RedisPubSubIngestor {
                     client: client_name.clone(),
-                    channel: named("events"),
+                    subscription: nervix_models::RedisSubscriptionTarget::Channel(named("events")),
                     mode: RedisPubSubIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Drop,
                 })),

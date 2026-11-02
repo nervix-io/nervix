@@ -1072,7 +1072,7 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
-  @execution_resource_plan
+  @execution_resource_plan @slots_2
   Scenario Outline: WASM processor restores guest state after cluster restart
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And the production sticky scheduler is configured
@@ -1332,6 +1332,7 @@ Feature: WASM processor runtime behavior
       key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
       """
 
+  @slots_2
   Scenario Outline: WASM processor restarts each branch from its last saved guest state after a failed save and a guest error
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And the production sticky scheduler is configured
@@ -1674,6 +1675,7 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
+  @slots_3
   Scenario Outline: Rust and Go WASM processors emit one final value for four one-row ingests
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

@@ -12,7 +12,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::ResultExt as _;
 use rstest::rstest;
 
 use super::*;
@@ -22,6 +22,22 @@ use crate::{
     EmitterEntityKind, EmitterPublishingModeKind, IngestDeliveryKind, IngestQuiesceKind,
     IngestorEntityKind,
 };
+
+/// A Pulsar producer sets exactly these two clauses per message, and its emitter declares no
+/// property.
+#[test]
+fn the_topic_emitter_declares_the_event_time_and_the_delivery_time_it_writes() {
+    let emit = EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic).capabilities();
+
+    assert_eq!(
+        emit.envelope,
+        &[
+            EnvelopeClauseKind::Timestamp,
+            EnvelopeClauseKind::DeliverAfter,
+        ]
+    );
+    assert!(emit.properties.is_empty());
+}
 
 #[test]
 fn topic_declarations_match_the_subscription_and_producer_transport() {
@@ -97,7 +113,7 @@ fn both_topic_directions_share_the_topic_rule_and_the_client() {
 }
 
 #[test]
-fn topic_declares_message_properties_as_headers_and_no_envelope() {
+fn topic_declares_message_properties_as_headers() {
     let ingest = IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic).capabilities();
     let emit = EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic).capabilities();
 
@@ -112,8 +128,6 @@ fn topic_declares_message_properties_as_headers_and_no_envelope() {
     assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
     assert!(ingest.metadata.fields().is_empty());
     assert!(emit.options.is_empty());
-    assert!(emit.envelope.is_empty());
-    assert!(emit.properties.is_empty());
 }
 
 #[test]
@@ -125,22 +139,17 @@ fn the_subscription_is_required_with_its_owner_and_instances_are_optional() {
 
     assert_eq!(subscription.keywords, "SUBSCRIPTION");
     assert_eq!(subscription.presence, OptionPresence::Required);
-    let OptionForm::Choice([owned, provisioned]) = subscription.form else {
-        panic!("SUBSCRIPTION names its subscription and then who owns it");
+    let OptionForm::Choice(choices) = subscription.form else {
+        panic!("SUBSCRIPTION names its subscription and complete creation policy");
     };
-    assert_eq!(owned.name, PulsarSubscriptionOwnership::Ingestor.keywords());
-    assert_eq!(
-        owned.value,
-        Some(OptionValue::Name(PulsarSubscriptionName::DECLARATION))
-    );
-    assert_eq!(
-        provisioned.name,
-        PulsarSubscriptionOwnership::Provisioned.keywords()
-    );
-    assert_eq!(
-        provisioned.value,
-        Some(OptionValue::Name(PulsarSubscriptionName::DECLARATION))
-    );
+    assert_eq!(choices.len(), PulsarSubscriptionOwnership::CHOICES.len());
+    for (choice, ownership) in choices.iter().zip(PulsarSubscriptionOwnership::CHOICES) {
+        assert_eq!(choice.name, ownership.keywords());
+        assert_eq!(
+            choice.value,
+            Some(OptionValue::Name(PulsarSubscriptionName::DECLARATION))
+        );
+    }
     assert_eq!(*instances, OptionDeclaration::INSTANCES);
 }
 

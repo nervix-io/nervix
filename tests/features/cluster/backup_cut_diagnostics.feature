@@ -22,6 +22,7 @@ Feature: Attributing a quiesced backup cut's timeout
       | 1            |
       | 3            |
 
+  @slots_2
   Scenario Outline: A capture timeout reports its active phase and completed drain
     Given a <cluster_size> node nervix cluster is started
     When these Plexus commands are executed on the leader node

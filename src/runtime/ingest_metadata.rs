@@ -205,6 +205,7 @@ enum IngestMetadataColumnBuilder {
     Bytes(BinaryBuilder),
     Bool(BooleanBuilder),
     U16(UInt16Builder),
+    U32(UInt32Builder),
     I32(Int32Builder),
     I64(Int64Builder),
     Datetime(TimestampNanosecondBuilder),
@@ -221,6 +222,7 @@ impl IngestMetadataColumnBuilder {
             IngestorMetadataType::Bytes => Self::Bytes(BinaryBuilder::with_capacity(row_bound, 0)),
             IngestorMetadataType::Bool => Self::Bool(BooleanBuilder::with_capacity(row_bound)),
             IngestorMetadataType::U16 => Self::U16(UInt16Builder::with_capacity(row_bound)),
+            IngestorMetadataType::U32 => Self::U32(UInt32Builder::with_capacity(row_bound)),
             IngestorMetadataType::I32 => Self::I32(Int32Builder::with_capacity(row_bound)),
             IngestorMetadataType::I64 => Self::I64(Int64Builder::with_capacity(row_bound)),
             IngestorMetadataType::Datetime => {
@@ -236,6 +238,7 @@ impl IngestMetadataColumnBuilder {
             Self::Bytes(_) => IngestorMetadataType::Bytes,
             Self::Bool(_) => IngestorMetadataType::Bool,
             Self::U16(_) => IngestorMetadataType::U16,
+            Self::U32(_) => IngestorMetadataType::U32,
             Self::I32(_) => IngestorMetadataType::I32,
             Self::I64(_) => IngestorMetadataType::I64,
             Self::Datetime(_) => IngestorMetadataType::Datetime,
@@ -248,6 +251,7 @@ impl IngestMetadataColumnBuilder {
             Self::Bytes(builder) => builder.append_null(),
             Self::Bool(builder) => builder.append_null(),
             Self::U16(builder) => builder.append_null(),
+            Self::U32(builder) => builder.append_null(),
             Self::I32(builder) => builder.append_null(),
             Self::I64(builder) => builder.append_null(),
             Self::Datetime(builder) => builder.append_null(),
@@ -260,6 +264,7 @@ impl IngestMetadataColumnBuilder {
             Self::Bytes(builder) => StdArc::new(builder.finish()),
             Self::Bool(builder) => StdArc::new(builder.finish()),
             Self::U16(builder) => StdArc::new(builder.finish()),
+            Self::U32(builder) => StdArc::new(builder.finish()),
             Self::I32(builder) => StdArc::new(builder.finish()),
             Self::I64(builder) => StdArc::new(builder.finish()),
             Self::Datetime(builder) => StdArc::new(builder.finish().with_timezone("+00:00")),
@@ -396,6 +401,14 @@ impl IngestMetadataValues for ProjectedMetadataValues<'_> {
     fn u16(&mut self, value: u16) {
         if let Some(IngestMetadataColumnBuilder::U16(builder)) =
             self.next_column(IngestorMetadataType::U16)
+        {
+            builder.append_value(value);
+        }
+    }
+
+    fn u32(&mut self, value: u32) {
+        if let Some(IngestMetadataColumnBuilder::U32(builder)) =
+            self.next_column(IngestorMetadataType::U32)
         {
             builder.append_value(value);
         }
@@ -819,6 +832,10 @@ mod tests {
             Value::String(topic.to_string()),
             Value::I32(partition),
             Value::I64(offset),
+            Value::Absent,
+            Value::Absent,
+            Value::Absent,
+            Value::Bool(false),
         ])
     }
 
@@ -928,6 +945,55 @@ mod tests {
     }
 
     #[test]
+    fn unread_kafka_metadata_projects_typed_null_input_without_visiting_values() {
+        let record = test_runtime_row([("value".to_string(), RuntimeValue::I64(7))]);
+        let carrier = record.one_row_batch();
+        let mut fields = carrier.schema().fields().to_vec();
+        for field in kafka_declared().fields() {
+            fields.push(StdArc::new(
+                field
+                    .arrow_field()
+                    .with_name(format!("metadata.{}", field.name())),
+            ));
+        }
+        let schema = StdArc::new(arrow_schema::Schema::new(fields));
+        let projection = IngestMetadataProjection::reading(kafka_declared(), std::iter::empty())
+            .expect("the route reads no metadata field");
+        let metadata = ingest_metadata_for_test(projection, &[row(&Unvisited, &NoIngestHeaders)]);
+        let projected = project_vm_input_batch(
+            &schema,
+            &VmInputProjectionSources {
+                carrier: &carrier,
+                namespace_batches: &[],
+                strict_namespaces: &[],
+                keys: &[None],
+                side_inputs: &HashMap::default(),
+                ingest_metadata: Some(&metadata),
+                lookup_columns: &HashMap::default(),
+                uninitialized: None,
+            },
+            None,
+        )
+        .expect("unread binary metadata admits a typed VM input batch");
+
+        assert_eq!(metadata.columns.integration_fields.num_columns(), 0);
+        assert_eq!(
+            projected
+                .column(0)
+                .as_int64()
+                .expect("the carrier stays I64")
+                .value(0),
+            7
+        );
+        for (index, field) in schema.fields().iter().enumerate().skip(1) {
+            let column = projected.column(index);
+            assert_eq!(&column.data_type(), field.data_type());
+            assert_eq!(column.len(), 1);
+            assert_eq!(column.null_count(), 1);
+        }
+    }
+
+    #[test]
     fn only_the_fields_a_program_reads_become_columns_in_declared_order() {
         let offsets_only =
             IngestMetadataProjection::reading(kafka_declared(), ["offset", "offset"])
@@ -977,12 +1043,19 @@ mod tests {
         assert!(matches!(
             missing.current_context(),
             IngestMetadataError::MissingValues {
-                declared: 3,
+                declared: 7,
                 visited: 0,
             }
         ));
-        let mistyped =
-            RetainedIngestMetadata::from_values(vec![Value::I64(1), Value::I32(2), Value::I64(3)]);
+        let mistyped = RetainedIngestMetadata::from_values(vec![
+            Value::I64(1),
+            Value::I32(2),
+            Value::I64(3),
+            Value::Absent,
+            Value::Absent,
+            Value::Absent,
+            Value::Bool(false),
+        ]);
         let wrong_type = refusing
             .append(&row(&mistyped, &NoIngestHeaders))
             .expect_err("a value of another type than its field's declaration is refused");
@@ -998,6 +1071,10 @@ mod tests {
             Value::String("orders".to_string()),
             Value::I32(2),
             Value::I64(3),
+            Value::Absent,
+            Value::Absent,
+            Value::Absent,
+            Value::Bool(false),
             Value::I64(4),
         ]);
         let beyond = refusing
@@ -1005,13 +1082,13 @@ mod tests {
             .expect_err("a value beyond the last declared field is refused");
         assert!(matches!(
             beyond.current_context(),
-            IngestMetadataError::ExcessValues { declared: 3 }
+            IngestMetadataError::ExcessValues { declared: 7 }
         ));
-        let undeclared = IngestMetadataProjection::reading(kafka_declared(), ["key"])
+        let undeclared = IngestMetadataProjection::reading(kafka_declared(), ["missing"])
             .expect_err("a projection reads only declared fields");
         assert!(matches!(
             undeclared.current_context(),
-            IngestMetadataError::UndeclaredField { field } if field == "key"
+            IngestMetadataError::UndeclaredField { field } if field == "missing"
         ));
 
         let mut kafka_builders =

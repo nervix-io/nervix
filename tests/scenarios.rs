@@ -128,10 +128,10 @@ use crate::common::{
         SUBSCRIBED_LINE, corpus_report,
     },
     cluster::{
-        AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster, CommandHold,
-        DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
-        InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
-        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, TypedBrokerHeader,
+        AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, BrokerRecordTime, Cluster,
+        CommandHold, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
+        InterconnectCredentialFault, JoinAttempt, PulsarMessageTimes, RejoinAttempt,
+        TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession, TypedBrokerHeader,
         WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
         bind_rabbitmq_queue, client_connect_options, client_domain, command_connect_options,
         delete_rabbitmq_queue, ensure_rabbitmq_exchange, ensure_rabbitmq_queue, ensure_sqs_queue,
@@ -157,6 +157,7 @@ use crate::common::{
     iceberg_catalog_gate::IcebergCatalogGate,
     kafka_group_member::ExternalKafkaGroupMember,
     kafka_mock_broker::KafkaMockBroker,
+    mqtt_broker_clients::{MqttBrokerClient, mqtt_broker_client},
     mqtt_publish_filter::MqttPublishFilter,
     nats_endpoint::NatsEndpoint,
     node_bound_address::{NodeBoundAddress, NodeBoundListener, bind_as_its_node},
@@ -169,6 +170,7 @@ use crate::common::{
         ProcessProgram, SERVER_PROGRAM, build_tools_directory, dependency_lifecycle_helper_command,
         scenario_executable,
     },
+    rabbitmq_confirm_order::RabbitMqConfirmOrder,
     raw_session::{
         SessionScope, TestSubscriptionEvent, TestUpload, TestUploadPart, WireOutcome as _,
         command_output, fresh_execution_reference, outcome_awaits_leader,
@@ -216,6 +218,7 @@ mod generated_http_payloads;
 mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
+mod kafka_metadata;
 mod mqtt_fixtures;
 mod mqtt_sessions;
 mod mysql_isolation;
@@ -225,6 +228,7 @@ mod paced_simulation;
 mod postgres_fixtures;
 mod process_cluster;
 mod pulsar_delivery;
+mod pulsar_emission;
 mod pulsar_readiness;
 mod pulsar_subscriptions;
 mod restarted_voter;
@@ -525,8 +529,13 @@ struct ScenarioWorld {
     external_kafka_members: BTreeMap<String, ExternalKafkaGroupMember>,
     last_broker_payload: Option<String>,
     last_broker_headers: Vec<(String, String)>,
+    /// When the broker says the last message a step received was made, where its records carry a
+    /// time.
+    last_broker_time: Option<BrokerRecordTime>,
     /// The typed headers of the last observed broker message: SQS attributes with their data types.
     last_broker_typed_headers: Vec<TypedBrokerHeader>,
+    /// The times of the last message a step received, where a Pulsar broker delivered it.
+    last_pulsar_times: Option<PulsarMessageTimes>,
     clickhouse_table: Option<String>,
     clickhouse_tls: bool,
     postgres_table: Option<String>,
@@ -615,6 +624,8 @@ struct ScenarioWorld {
     kafka_mock_broker: Option<KafkaMockBroker>,
     /// The forwarder a scenario stood in front of the MQTT broker to drop chosen PUBLISH packets.
     mqtt_publish_filter: Option<MqttPublishFilter>,
+    /// The real-broker forwarder that gives two outstanding publishes a controlled confirm order.
+    rabbitmq_confirm_order: Option<RabbitMqConfirmOrder>,
     /// The forwarder a scenario stood in front of the SQS service to hold the answer that carries a
     /// chosen message.
     sqs_answer_hold: Option<SqsAnswerHold>,
@@ -693,6 +704,8 @@ impl fmt::Debug for ScenarioWorld {
                 &self.last_broker_payload.as_ref().map(|value| value.len()),
             )
             .field("last_broker_header_count", &self.last_broker_headers.len())
+            .field("last_pulsar_times", &self.last_pulsar_times)
+            .field("last_broker_time", &self.last_broker_time)
             .field(
                 "last_auth_attempts_elapsed",
                 &self.last_auth_attempts_elapsed,
@@ -1391,6 +1404,50 @@ async fn given_mqtt_publish_filter(world: &mut ScenarioWorld) {
         .placeholders
         .insert("mqtt_filtered_addr".to_string(), endpoint_url.to_string());
     world.mqtt_publish_filter = Some(filter);
+}
+
+#[given("a RabbitMQ endpoint that reorders the first two publisher confirmations is configured")]
+async fn given_rabbitmq_confirm_order(world: &mut ScenarioWorld) {
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(RABBITMQ_ADDR)
+        .unwrap_or_else(|error| panic!("RabbitMQ endpoint is unavailable: {error}"));
+    let mut address = url::Url::parse(endpoint)
+        .unwrap_or_else(|error| panic!("RabbitMQ endpoint URL is invalid: {error}"));
+    let ip = address
+        .host_str()
+        .assured("the broker endpoint has a host")
+        .parse()
+        .assured("the test broker is addressed by its IP");
+    let port = address
+        .port()
+        .assured("the broker endpoint has an explicit port");
+    let forwarder = RabbitMqConfirmOrder::start(std::net::SocketAddr::new(ip, port))
+        .await
+        .assured("the RabbitMQ confirm forwarder can bind loopback");
+    address
+        .set_host(Some("127.0.0.1"))
+        .assured("loopback is a valid URL host");
+    address
+        .set_port(Some(forwarder.port()))
+        .assured("AMQP URLs accept an explicit port");
+    world
+        .placeholders
+        .insert("rabbitmq_confirm_addr".to_string(), address.to_string());
+    world.rabbitmq_confirm_order = Some(forwarder);
+}
+
+#[then("the RabbitMQ endpoint forwarded the controlled publisher confirmations")]
+fn then_rabbitmq_confirm_order(world: &mut ScenarioWorld) {
+    let forwarder = world
+        .rabbitmq_confirm_order
+        .as_ref()
+        .assured("the scenario configured the confirmation forwarder");
+    assert!(
+        forwarder.rewrote_confirmations(),
+        "the broker must confirm both messages before the fixture releases them"
+    );
 }
 
 /// From now on the MQTT endpoint drops every PUBLISH packet whose bytes carry the docstring, so the
@@ -2143,6 +2200,19 @@ impl ExpectedHttpRequest {
         );
     }
 
+    /// Asserts that every captured request with this docstring's request line is the request it
+    /// describes.
+    fn assert_every_captured(&self, receiver: &str, captured: &[CapturedRequest]) {
+        for request in captured {
+            if self.has_request_line_of(request) {
+                self.assert_matches(
+                    &format!("HTTP receiver '{receiver}' request '{}'", self.request_line),
+                    request,
+                );
+            }
+        }
+    }
+
     /// Asserts that `request`, which `described` names in a failure, is the request this
     /// docstring describes.
     fn assert_matches(&self, described: &str, request: &CapturedRequest) {
@@ -2231,6 +2301,26 @@ async fn then_http_receiver_eventually_captures_one_request_that_is(
         Err(error) => panic!("HTTP receiver '{name}': {error}"),
     };
     expected.assert_one_captured(&name, &captured);
+}
+
+/// Waits until the receiver captures a request with the docstring's request line, then compares
+/// every such request with the request the docstring describes. A scenario uses it for a request
+/// that repeats, such as a poll on its cadence, whose number it cannot name.
+#[then(expr = "HTTP receiver {string} eventually captures requests that are")]
+async fn then_http_receiver_eventually_captures_requests_that_are(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let expected = ExpectedHttpRequest::from_step(world, step);
+    let waited = http_receiver(world, &name)
+        .wait_for_request_line(&expected.request_line, HTTP_RECEIVER_WAIT)
+        .await;
+    let captured = match waited {
+        Ok(captured) => captured,
+        Err(error) => panic!("HTTP receiver '{name}': {error}"),
+    };
+    expected.assert_every_captured(&name, &captured);
 }
 
 /// Asserts the most requests the receiver ever held awaiting their final head at once. A request
@@ -7920,7 +8010,9 @@ async fn given_cluster_is_started(world: &mut ScenarioWorld, node_count: usize) 
     world.broker_observer = None;
     world.last_broker_payload = None;
     world.last_broker_headers.clear();
+    world.last_broker_time = None;
     world.last_broker_typed_headers.clear();
+    world.last_pulsar_times = None;
     world.burst_raft_retention_peak = None;
     append_cucumber_log_line(&format!(
         "cluster start requested: nodes={node_count} domain={} test_id={}",
@@ -19429,7 +19521,8 @@ impl UnacknowledgedSourceFixture {
             }
             Self::Pulsar => {
                 "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
-          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR INSTANCES 1 MODE NO ACK
+          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST INSTANCES \
+                 1 MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::RedisPubSub => {
@@ -26655,6 +26748,79 @@ async fn when_sized_mqtt_qos1_messages_are_published(
         .expect("failed to publish the sized MQTT QoS 1 messages");
 }
 
+/// Waits until the test broker records the client whose identity is `client_id` as connected, and
+/// returns that record.
+async fn connected_mqtt_broker_client(
+    world: &ScenarioWorld,
+    duration: &str,
+    client_id: &str,
+) -> MqttBrokerClient {
+    let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
+    let client_id = expand_placeholders(world, client_id);
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let record = mqtt_broker_client(world.dependencies.endpoints(), &client_id)
+            .await
+            .expect("the MQTT broker's management API must answer");
+        if let Some(record) = record.as_ref()
+            && record.connected
+        {
+            return record.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the MQTT broker to report client '{client_id}' connected; its \
+             last record: {record:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(expr = "within {string} the MQTT broker reports client {string} connected")]
+async fn then_mqtt_broker_reports_client_connected(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_id: String,
+) {
+    connected_mqtt_broker_client(world, &duration, &client_id).await;
+}
+
+#[then(expr = "within {string} the MQTT broker reports client {string} connected as user {string}")]
+async fn then_mqtt_broker_reports_client_connected_as_user(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_id: String,
+    username: String,
+) {
+    let username = expand_placeholders(world, &username);
+    let record = connected_mqtt_broker_client(world, &duration, &client_id).await;
+    assert_eq!(
+        record.username.as_deref(),
+        Some(username.as_str()),
+        "the MQTT broker reports client '{}' connected under another username",
+        record.client_id
+    );
+}
+
+#[then(
+    expr = "within {string} the MQTT broker reports client {string} connected with a keep-alive \
+            of {int} seconds"
+)]
+async fn then_mqtt_broker_reports_client_connected_with_keep_alive(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_id: String,
+    keep_alive_seconds: u64,
+) {
+    let record = connected_mqtt_broker_client(world, &duration, &client_id).await;
+    assert_eq!(
+        record.keep_alive_seconds, keep_alive_seconds,
+        "the MQTT broker holds client '{}' to another keep-alive",
+        record.client_id
+    );
+}
+
 #[when(expr = "RabbitMQ message is published to queue {string}")]
 async fn when_rabbitmq_message_is_published(
     world: &mut ScenarioWorld,
@@ -26703,6 +26869,27 @@ async fn when_redis_message_is_published(
         .publish_redis(&channel, &payload)
         .await
         .expect("failed to publish redis message");
+}
+
+/// Publishes once without waiting for a subscriber, and requires that Redis delivered the message
+/// to none: no subscription, the scenario's own included, matches the channel.
+#[when(expr = "Redis message is published to channel {string} that no subscription receives")]
+async fn when_redis_message_is_published_to_no_subscription(
+    world: &mut ScenarioWorld,
+    channel: String,
+    #[step] step: &Step,
+) {
+    let channel = expand_placeholders(world, &channel);
+    let payload = expand_placeholders(world, docstring(step));
+    let receivers = world
+        .cluster()
+        .publish_redis_once(&channel, &payload)
+        .await
+        .expect("Redis accepts the publication");
+    assert_eq!(
+        receivers, 0,
+        "no subscription may receive the message published to Redis channel '{channel}'"
+    );
 }
 
 #[when(expr = "{int} Redis messages are published to channel {string}")]
@@ -26980,6 +27167,51 @@ async fn when_tls_sqs_message_is_published(
         .publish_sqs_tls(&queue, &payload)
         .await
         .expect("failed to publish tls sqs message");
+}
+
+#[when(
+    expr = "a redelivered SQS FIFO message with group {string} and deduplication id {string} is \
+            ready in queue {string}"
+)]
+async fn when_redelivered_sqs_metadata_is_ready(
+    world: &mut ScenarioWorld,
+    group: String,
+    deduplication_id: String,
+    queue: String,
+    #[step] step: &Step,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let group = expand_placeholders(world, &group);
+    let deduplication_id = expand_placeholders(world, &deduplication_id);
+    let payload = expand_placeholders(world, docstring(step));
+    let prepared = common::sqs_metadata::SqsMetadataFixture::prepare(
+        world.dependencies.endpoints(),
+        &queue,
+        &group,
+        &deduplication_id,
+        &payload,
+    )
+    .await;
+    let observed = match prepared {
+        Ok(observed) => observed,
+        Err(error) => panic!("failed to prepare a redelivered FIFO message: {error}"),
+    };
+    world
+        .placeholders
+        .insert("sqs_message_id".to_string(), observed.message_id);
+    world
+        .placeholders
+        .insert("sqs_sent_at".to_string(), observed.sent_at);
+    world.placeholders.insert(
+        "sqs_first_received_at".to_string(),
+        observed.first_received_at,
+    );
+    world
+        .placeholders
+        .insert("sqs_sequence_number".to_string(), observed.sequence_number);
+    world
+        .placeholders
+        .insert("sqs_sender_id".to_string(), observed.sender_id);
 }
 
 #[when(expr = "NATS message is published to subject {string}")]
@@ -30866,7 +31098,9 @@ async fn then_observed_broker_receives_payload(world: &mut ScenarioWorld, #[step
         .expect("failed to receive broker payload");
     world.last_broker_payload = Some(message.payload);
     world.last_broker_headers = message.headers;
+    world.last_broker_time = message.time;
     world.last_broker_typed_headers = message.typed_headers;
+    world.last_pulsar_times = message.pulsar_times;
 
     let actual = world
         .last_broker_payload
@@ -30927,6 +31161,7 @@ async fn then_observed_broker_receives_payload_no_sooner_than(
     );
     world.last_broker_payload = Some(message.payload);
     world.last_broker_headers = message.headers;
+    world.last_broker_time = message.time;
     world.last_broker_typed_headers = message.typed_headers;
 }
 
@@ -31383,6 +31618,107 @@ async fn postgres_application_connections(world: &ScenarioWorld, application: &s
         .await
         .expect("failed to count Postgres connections")
         .get(0)
+}
+
+/// One connection the database serves, as its connection list records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PostgresBackend {
+    pid: i32,
+    /// When the server started this backend, in milliseconds of the server's own clock.
+    started_at_ms: i64,
+}
+
+/// The connections one Nervix client holds on the database, the oldest first.
+async fn postgres_application_backends(
+    world: &ScenarioWorld,
+    application: &str,
+) -> Vec<PostgresBackend> {
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
+        .expect("failed to connect to Postgres");
+    let rows = sqlx::query(
+        "SELECT pid, (extract(epoch FROM backend_start) * 1000)::bigint FROM pg_stat_activity \
+         WHERE application_name = $1 ORDER BY backend_start",
+    )
+    .bind(application)
+    .fetch_all(&client)
+    .await
+    .expect("failed to list Postgres connections");
+    let mut backends = Vec::with_capacity(rows.len());
+    for row in rows {
+        backends.push(PostgresBackend {
+            pid: row.get(0),
+            started_at_ms: row.get(1),
+        });
+    }
+    backends
+}
+
+/// A pool retires a connection at a lifetime and opens its replacement to keep its minimum. The
+/// server's own start times measure the delay, so load moves both of them together.
+#[then(
+    expr = "Postgres eventually replaces the connection of application {string} at least {string} \
+            after it started"
+)]
+async fn then_postgres_replaces_connection_after(
+    world: &mut ScenarioWorld,
+    application: String,
+    minimum: String,
+) {
+    let application = expand_placeholders(world, &application);
+    let minimum = parse_duration_text(&minimum)
+        .unwrap_or_else(|error| panic!("the minimum delay '{minimum}' is invalid: {error}"));
+    let minimum_ms = i64::try_from(minimum.as_millis())
+        .unwrap_or_else(|error| panic!("the minimum delay fits in i64 milliseconds: {error}"));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut first = None;
+    loop {
+        let backends = postgres_application_backends(world, &application).await;
+        if first.is_none() {
+            first = backends.first().copied();
+        }
+        // A pool of one client holds a few connections, so this reads a short list.
+        if let Some(first) = first
+            && let Some(replacement) = backends.iter().find(|backend| backend.pid != first.pid)
+        {
+            let measured_ms = replacement.started_at_ms - first.started_at_ms;
+            append_cucumber_log_line(&format!(
+                "Postgres replaced connection {} with {} after {measured_ms}ms",
+                first.pid, replacement.pid
+            ));
+            assert!(
+                measured_ms >= minimum_ms,
+                "Postgres replaced a connection of {application} after {measured_ms}ms, expected \
+                 at least {minimum_ms}ms"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for Postgres to replace a connection of {application}; observed \
+             {backends:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Ends every connection of one client from the server's side. Nothing reads an idle pooled
+/// connection, so its pool goes on holding it until something uses it.
+#[when(expr = "Postgres terminates the connections of application {string}")]
+async fn when_postgres_terminates_connections(world: &mut ScenarioWorld, application: String) {
+    let application = expand_placeholders(world, &application);
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
+        .expect("failed to connect to Postgres");
+    sqlx::query(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1",
+    )
+    .bind(&application)
+    .fetch_all(&client)
+    .await
+    .expect("failed to terminate Postgres connections");
 }
 
 #[then(expr = "Postgres never reports more than {int} connections for application {string}")]
@@ -33377,6 +33713,117 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_message
     receive_exactly_these_broker_messages(world, &duration, expected).await;
 }
 
+/// Like the message table step, where every row is one exact message: its payload and the time
+/// the broker says its producer created it, in RFC 3339 at the millisecond a Kafka record carries.
+/// An empty cell is a message whose broker reports no time.
+#[then(expr = "within {string} the observed broker receives exactly these timed messages")]
+async fn then_within_duration_the_observed_broker_receives_exactly_these_timed_messages(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let table = step
+        .table
+        .as_ref()
+        .expect("the step lists every expected message in a table");
+    let mut rows = table.rows.iter();
+    let header = rows
+        .next()
+        .expect("the message table starts with its column names");
+    assert_eq!(
+        header.as_slice(),
+        ["payload", "created at"],
+        "the timed message table names its columns payload and created at"
+    );
+    let mut expected = BTreeMap::<ExpectedTimedBrokerMessage, usize>::new();
+    for row in rows {
+        let [payload, created_at] = row.as_slice() else {
+            panic!("each expected timed message row has two cells, got {row:?}");
+        };
+        let message = ExpectedTimedBrokerMessage {
+            payload: expand_placeholders(world, payload).into_bytes(),
+            time: expected_creation_time(created_at),
+        };
+        *expected.entry(message).or_insert(0) += 1;
+    }
+    receive_exactly_these_broker_messages(world, &duration, expected).await;
+}
+
+/// The last message a step received carries the time its producer created it, not a time a
+/// statement wrote: that time is at most `bound` before the clock this step reads, which it reads
+/// after the message arrived.
+#[then(
+    expr = "the last observed broker message was created by its producer at most {string} before \
+            the step observed it"
+)]
+fn then_last_observed_broker_message_was_created_by_its_producer_within(
+    world: &mut ScenarioWorld,
+    bound: String,
+) {
+    let bound = parse_duration_text(&bound).expect("step bound must be a valid duration");
+    let Some(BrokerRecordTime::Created { unix_millis }) = world.last_broker_time else {
+        panic!(
+            "the last observed broker message carries no creation time: {:?}",
+            world.last_broker_time
+        );
+    };
+    let observed_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the test host's clock is after the Unix epoch")
+        .as_millis();
+    let observed_millis =
+        i64::try_from(observed_millis).expect("the test host's clock fits Unix milliseconds");
+    let bound_millis =
+        i64::try_from(bound.as_millis()).expect("the step bound fits Unix milliseconds");
+    let age_millis = observed_millis
+        .checked_sub(unix_millis)
+        .expect("a creation time and the clock are both Unix milliseconds of this era");
+    assert!(
+        (0..=bound_millis).contains(&age_millis),
+        "the last observed broker message was created at {}, {age_millis} ms before the step \
+         observed {}; expected its producer to have created it at most {bound:?} earlier",
+        describe_record_time(world.last_broker_time),
+        describe_record_time(Some(BrokerRecordTime::Created {
+            unix_millis: observed_millis
+        })),
+    );
+}
+
+/// A created-at cell: absent when empty, otherwise the creation time it writes in RFC 3339, which
+/// a Kafka record carries in whole milliseconds.
+fn expected_creation_time(cell: &str) -> Option<BrokerRecordTime> {
+    let cell = cell.trim();
+    if cell.is_empty() {
+        return None;
+    }
+    let time = chrono::DateTime::parse_from_rfc3339(cell)
+        .unwrap_or_else(|error| panic!("created-at cell {cell:?} is not RFC 3339: {error}"));
+    assert_eq!(
+        time.timestamp_subsec_nanos() % 1_000_000,
+        0,
+        "created-at cell {cell:?} writes a time finer than the milliseconds a record carries"
+    );
+    Some(BrokerRecordTime::Created {
+        unix_millis: time.timestamp_millis(),
+    })
+}
+
+/// A record time as a failure message writes it: what made it, then the instant in RFC 3339.
+fn describe_record_time(time: Option<BrokerRecordTime>) -> String {
+    let (made, unix_millis) = match time {
+        None => return "no time".to_string(),
+        Some(BrokerRecordTime::Created { unix_millis }) => ("created", unix_millis),
+        Some(BrokerRecordTime::Appended { unix_millis }) => ("appended", unix_millis),
+    };
+    match chrono::DateTime::from_timestamp_millis(unix_millis) {
+        Some(instant) => format!(
+            "{made} {}",
+            instant.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        ),
+        None => format!("{made} at Unix millisecond {unix_millis}"),
+    }
+}
+
 /// A key or group cell: absent when empty, otherwise the exact value.
 fn expected_message_attribute(world: &ScenarioWorld, cell: &str) -> Option<String> {
     let cell = cell.trim();
@@ -33487,6 +33934,30 @@ impl BrokerMessageExpectation for ExpectedBrokerMessage {
     }
 }
 
+/// A message's payload bytes together with the time its broker says it was made.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ExpectedTimedBrokerMessage {
+    payload: Vec<u8>,
+    time: Option<BrokerRecordTime>,
+}
+
+impl BrokerMessageExpectation for ExpectedTimedBrokerMessage {
+    fn delivered(message: &BrokerMessage) -> Self {
+        Self {
+            payload: message.bytes.clone(),
+            time: message.time,
+        }
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "{} {}",
+            describe_broker_payload(&self.payload),
+            describe_record_time(self.time)
+        )
+    }
+}
+
 /// Receives messages until every expected one has arrived, in any order, and fails on the first
 /// message nothing expects and on any message that follows the expected ones.
 async fn receive_exactly_these_broker_messages<Expected: BrokerMessageExpectation>(
@@ -33545,6 +34016,8 @@ async fn receive_exactly_these_broker_messages<Expected: BrokerMessageExpectatio
         }
         world.last_broker_payload = Some(message.payload.clone());
         world.last_broker_headers = message.headers;
+        world.last_pulsar_times = message.pulsar_times;
+        world.last_broker_time = message.time;
         observed.push(delivered.describe());
     }
 
@@ -34346,6 +34819,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
                 world.mqtt_publish_filter = None;
+                world.rabbitmq_confirm_order = None;
                 world.sqs_answer_hold = None;
                 world.iceberg_catalog_gate = None;
                 world.nats_endpoint = None;
