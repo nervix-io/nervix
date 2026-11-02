@@ -810,6 +810,14 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "POSTGRES TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/postgres_timeouts.feature", scenario = "A Postgres emitter whose service stops answering is reported within timeout_ms on <nodes> nodes" },
+  { feature = "tests/features/runtime/postgres_timeouts.feature", scenario = "A Postgres insert blocked by a table lock times out and retries on <nodes> nodes" },
+]
+
+[[capability]]
 capability = "EVERY"
 entity = "PROMETHEUS QUERY INGESTOR"
 scenarios = [
@@ -1428,6 +1436,24 @@ capability = "metadata.peer_addr"
 entity = "SYSLOG LISTENER INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/syslog_support.feature", scenario = "Syslog TCP intake accepts mixed RFC 6587 framing and exposes peer metadata" },
+]
+
+[[capability]]
+capability = "metadata.transport"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog UDP frame carries its transport and has no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "Syslog TCP frames carry their transport and have no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog TLS frame exposes a peer only when the client certificate is verified" },
+]
+
+[[capability]]
+capability = "metadata.tls_peer"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog UDP frame carries its transport and has no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "Syslog TCP frames carry their transport and have no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog TLS frame exposes a peer only when the client certificate is verified" },
 ]
 
 [[capability]]

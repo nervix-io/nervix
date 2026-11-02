@@ -171,8 +171,9 @@ delegated configuration values through JSON/archive equality and public inspecti
 ## Client Configuration And Inspection
 
 `client-config-schema` includes omitted ClickHouse connection defaults, Redis command-pool
-lifetimes, Postgres pool keys and MQTT keep-alive and publish admission bounds, explicit typed TCP
-and pool intervals, lifetimes, checkout deadlines and borrow tests, and MQTT credentials whose
+lifetimes, Postgres pool and statement-deadline keys and MQTT keep-alive and publish admission
+bounds, explicit typed TCP and pool intervals, lifetimes, checkout deadlines and borrow tests,
+and MQTT credentials whose
 password public inspection redacts. `mqtt-client-config` separately converts every valid MQTT
 client configuration into its typed broker, transport, identity, credentials, keep-alive and
 admission bound. JSON and archive equality preserve the authored entries; the effective-default

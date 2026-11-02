@@ -113,6 +113,15 @@ after that word. The CLI reads successive bounded pages when the server has more
 missing or stale domain or transaction context does not produce candidates from a different
 configuration.
 
+Connector completion follows the selected entity's declaration: delivery modes, options,
+envelope clauses, property keys and client configuration keys stay specific to that entity.
+Expression positions offer ordinary functions, ingestor expressions also offer the header reads
+their entity supports, and emitter `INVOKE` offers header writes only for an entity that supports
+them. This includes ingestor `FILTER WHERE`, emitter input `WHERE`, HTTP `METHOD` and `PATH`,
+and constructions inside `ALTER`. After `metadata.`, an ingestor offers its declared metadata
+fields. Suggestions come from the grammar at the cursor, so a duration or mode position does
+not offer expression functions.
+
 Scripts can request the same candidates with `--suggest 'DROP SCHEMA ord' --cursor 15`.
 The cursor is a UTF-8 byte offset; omitting it selects the end of the input. The CLI prints JSON
 containing a status and each candidate's display value, kind, and exact text edit.

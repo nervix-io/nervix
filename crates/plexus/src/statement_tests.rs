@@ -503,14 +503,12 @@ fn tolerant_conversion_body_does_not_change_route_completion_context() {
         suggest_statement(converted, converted.len())
     );
 
-    let unfinished_conditional =
-        "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = CASE WHEN ";
     let unfinished_conversion = "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET \
                                  result = TRY_CAST(input.raw AS ";
     assert_eq!(
-        suggest_statement(unfinished_conditional, unfinished_conditional.len()),
         suggest_statement(unfinished_conversion, unfinished_conversion.len()),
-        "an unfinished conversion offers what any unfinished expression offers"
+        Vec::<String>::new(),
+        "a conversion's type position is not an expression operand"
     );
 }
 
