@@ -50,37 +50,14 @@ fn opened_mode(token: Option<&Token>) -> Option<EmitterPublishingModeKind> {
     }
 }
 
-/// `parser`, which reads a mode of `kind` only beside a quality of service that pairs with it.
-fn paired_with_qos<'src, P>(
-    kind: EmitterPublishingModeKind,
-    parser: P,
-) -> impl Parser<'src, &'src [Token], MqttTopicPublishingMode, MqttModeExtra<'src>> + Clone
-where
-    P: Parser<'src, &'src [Token], MqttTopicPublishingMode, extra::Err<ParseError<'src>>>
-        + Clone
-        + 'src,
-{
-    with_qos_context(parser)
-        .contextual()
-        .configure(move |_, qos: &MqttQos| unmet_pairing(kind, *qos).is_none())
-}
-
 /// `MODE …` after the quality of service the context holds. A supplied mode that does not pair with
-/// it is read through the shared parser and refused, naming what the statement writes. With none,
-/// the contextual gates keep completion to the modes this quality of service can use, so a statement
-/// that follows completion never reaches that refusal.
+/// it is read through the shared parser and refused, naming what the statement writes. Anything
+/// else reads through the one family of modes that pairs with it, so completion offers only those
+/// and a statement that follows completion never reaches that refusal.
 fn paired_mode<'src>()
 -> impl Parser<'src, &'src [Token], MqttTopicPublishingMode, MqttModeExtra<'src>> + Clone {
-    let paired = choice((
-        paired_with_qos(
-            EmitterPublishingModeKind::NoAck,
-            unconfirmed_mode!(MqttTopicPublishingMode),
-        ),
-        paired_with_qos(
-            EmitterPublishingModeKind::BrokerAck,
-            consumer_mode!(MqttTopicPublishingMode),
-        ),
-    ));
+    let unacknowledged = with_qos_context(unconfirmed_mode!(MqttTopicPublishingMode));
+    let acknowledged = with_qos_context(consumer_mode!(MqttTopicPublishingMode));
     let refused = with_qos_context(mode()).try_map_with(|mode: MqttTopicPublishingMode, extra| {
         let qos: MqttQos = *extra.ctx();
         match unmet_pairing(mode.publishing().kind(), qos) {
@@ -96,7 +73,10 @@ fn paired_mode<'src>()
             {
                 return input.parse(refused.clone());
             }
-            input.parse(paired.clone())
+            if unmet_pairing(EmitterPublishingModeKind::NoAck, qos).is_none() {
+                return input.parse(unacknowledged.clone());
+            }
+            input.parse(acknowledged.clone())
         },
     ))
 }
@@ -299,6 +279,22 @@ mod tests {
             at_bound
         );
         assert!(refused(&statement(&format!("{at_bound}x"), QOS_0)));
+    }
+
+    #[rstest]
+    #[case::unanswered("0", "expected NO ACK, found SOMEDAY")]
+    #[case::at_least_once("1", "expected ACK, found SOMEDAY")]
+    #[case::exactly_once("2", "expected ACK, found SOMEDAY")]
+    fn a_word_that_opens_no_mode_is_refused_where_it_stands(
+        #[case] qos: &str,
+        #[case] message: &str,
+    ) {
+        let source = statement("events", &format!("QOS {qos} MODE SOMEDAY"));
+        let refusals = refusal(&source);
+        assert!(
+            refusals.contains(&(message.to_owned(), "SOMEDAY".to_owned())),
+            "{refusals:?}"
+        );
     }
 
     #[rstest::rstest]
