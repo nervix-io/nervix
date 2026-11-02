@@ -120,3 +120,127 @@ Feature: Relay partition failover
       "tenant":"lambda" | "seq":2
       "tenant":"acme" | "seq":2
       """
+
+  Scenario: A partition a surviving node keeps goes on applying its materialized state after another partition's owner fails
+    Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA notification ( tenant STRING, seq I64 );
+
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        tenant string,
+        seq integer
+      );
+
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+
+      CREATE BRANCH by_tenant
+        SCHEMA tenant_branch TTL 5m PARTITIONS 4;
+
+      CREATE RELAY notifications
+        SCHEMA notification
+        BRANCHED BY by_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
+
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TIMESTAMP NOW
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When these Plexus commands are executed through the client on node "{{leader}}"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status places the partitions of relay "notifications" on at least 2 distinct owners
+    And the owner of every partition of relay "notifications" in the last cluster status is saved with placeholder prefix "owner_before"
+    And a node other than placeholder "leader" that owns a partition of relay "notifications" in the last cluster status is saved as placeholder "failed_owner"
+    When http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"eta","seq":1}
+      """
+    And http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"beta","seq":1}
+      """
+    And http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"lambda","seq":1}
+      """
+    And http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"acme","seq":1}
+      """
+    Then within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"eta"} payload={"seq":1,"tenant":"eta"}
+      """
+    And within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"beta"} payload={"seq":1,"tenant":"beta"}
+      """
+    And within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"lambda"} payload={"seq":1,"tenant":"lambda"}
+      """
+    And within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"acme"} payload={"seq":1,"tenant":"acme"}
+      """
+    When node "{{failed_owner}}" is stopped
+    Then within "90s" node "{{leader}}" eventually reports no partition of relay "notifications" owned by node "{{failed_owner}}"
+    When http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"eta","seq":2}
+      """
+    And http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"beta","seq":2}
+      """
+    And http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"lambda","seq":2}
+      """
+    And http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"acme","seq":2}
+      """
+    Then within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"eta"} payload={"seq":2,"tenant":"eta"}
+      """
+    And within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"beta"} payload={"seq":2,"tenant":"beta"}
+      """
+    And within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"lambda"} payload={"seq":2,"tenant":"lambda"}
+      """
+    And within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"acme"} payload={"seq":2,"tenant":"acme"}
+      """

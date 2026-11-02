@@ -249,11 +249,153 @@ Feature: Relay partitions
       """
       capacity: 3
       """
+    When these Plexus commands fail with "is divided into partitions that each have their own owner"
+      """
+      RELOCATE RELAY notifications ONTO NODE node-1 IGNORE PREFERENCES;
+      """
 
     Examples:
       | cluster_size | owners | reader |
       | 1            | 1      | node-1 |
       | 3            | 2      | node-3 |
+
+  Scenario Outline: A materialized relay keeps each key's latest record in its partition and a generator reads every partition
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA notification ( tenant STRING, seq I64 );
+
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        tenant string,
+        seq integer
+      );
+
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+
+      CREATE BRANCH by_tenant
+        SCHEMA tenant_branch TTL 5m PARTITIONS 4;
+
+      CREATE RELAY notifications
+        SCHEMA notification
+        BRANCHED BY by_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+
+      CREATE RELAY generated_notifications
+        SCHEMA notification
+        BRANCHED BY by_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
+
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TIMESTAMP NOW
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+
+      CREATE GENERATOR synth_notifications
+        USING MATERIALIZED STATE notifications
+        EACH 100ms
+        BRANCHED BY by_tenant
+        TO generated_notifications
+          SET tenant = relay_state.notifications.tenant,
+              seq = relay_state.notifications.seq
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+
+      START;
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"eta","seq":1}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"beta","seq":1}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"lambda","seq":1}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"acme","seq":1}
+      """
+    Then within "30s" node "<reader>" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"eta"} payload={"seq":1,"tenant":"eta"}
+      """
+    And within "30s" node "<reader>" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"beta"} payload={"seq":1,"tenant":"beta"}
+      """
+    And within "30s" node "<reader>" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"lambda"} payload={"seq":1,"tenant":"lambda"}
+      """
+    And within "30s" node "<reader>" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"acme"} payload={"seq":1,"tenant":"acme"}
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"eta","seq":2}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"acme","seq":2}
+      """
+    Then within "30s" node "<reader>" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"eta"} payload={"seq":2,"tenant":"eta"}
+      """
+    And within "30s" node "<reader>" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"acme"} payload={"seq":2,"tenant":"acme"}
+      """
+    And within "30s" node "<reader>" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"tenant":"beta"} payload={"seq":1,"tenant":"beta"}
+      """
+    And within "30s" node "<reader>" eventually reports materialized state for relay "generated_notifications" containing
+      """
+      key={"tenant":"eta"} payload={"seq":2,"tenant":"eta"}
+      """
+    And within "30s" node "<reader>" eventually reports materialized state for relay "generated_notifications" containing
+      """
+      key={"tenant":"beta"} payload={"seq":1,"tenant":"beta"}
+      """
+    And within "30s" node "<reader>" eventually reports materialized state for relay "generated_notifications" containing
+      """
+      key={"tenant":"lambda"} payload={"seq":1,"tenant":"lambda"}
+      """
+    And within "30s" node "<reader>" eventually reports materialized state for relay "generated_notifications" containing
+      """
+      key={"tenant":"acme"} payload={"seq":2,"tenant":"acme"}
+      """
+
+    Examples:
+      | cluster_size | replica_count | reader |
+      | 1            | 0             | node-1 |
+      | 3            | 0             | node-2 |
+      | 3            | 1             | node-3 |
 
   Scenario Outline: DESCRIBE RELAY WHERE is answered by the owner of the key's partition
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -724,3 +866,94 @@ Feature: Relay partitions
       | cluster_size | reader |
       | 1            | node-1 |
       | 3            | node-2 |
+
+  Scenario: DRAIN NODE moves each partition the node owns through a gated handoff and every partition keeps delivering
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA notification ( tenant STRING, seq I64 );
+
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        tenant string,
+        seq integer
+      );
+
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+
+      CREATE BRANCH by_tenant
+        SCHEMA tenant_branch TTL 5m PARTITIONS 4;
+
+      CREATE RELAY notifications
+        SCHEMA notification
+        BRANCHED BY by_tenant;
+
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
+
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When these Plexus commands are executed through the client on node "{{leader}}"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status places the partitions of relay "notifications" on at least 2 distinct owners
+    And a node other than placeholder "leader" that owns a partition of relay "notifications" in the last cluster status is saved as placeholder "drained_owner"
+    When these Plexus commands are executed on node "{{leader}}"
+      """
+      DRAIN NODE {{drained_owner}};
+      """
+    Then the last command output contains
+      """
+      drained node '{{drained_owner}}'
+      """
+    And within "90s" node "{{leader}}" eventually reports no partition of relay "notifications" owned by node "{{drained_owner}}"
+    When these Plexus commands are executed on node "{{leader}}"
+      """
+      CREATE SUBSCRIPTION drained_subscription TO notifications;
+      """
+    And http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"eta","seq":1}
+      """
+    And http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"beta","seq":1}
+      """
+    And http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"lambda","seq":1}
+      """
+    And http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"acme","seq":1}
+      """
+    Then within "30s" the relay subscription receives payloads keeping the order of each key
+      """
+      "tenant":"eta" | "seq":1
+      "tenant":"beta" | "seq":1
+      "tenant":"lambda" | "seq":1
+      "tenant":"acme" | "seq":1
+      """

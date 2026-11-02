@@ -246,12 +246,13 @@ platform string; connector preparation uses it only when the codec's event omits
 The registry's `NERVIX UNIT SRCS` archive signature identifies the current Model layout, including
 an owned Pulsar subscription's required start position, the required 16-bit branch partition count,
 Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's
-`SEND` request shape, and the session and quality of service an MQTT TOPIC ingestor writes beside
-its delivery mode, and a `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription. Consensus's `raft_unit_ingestor_` keyspaces and current state metadata
-encoding identify its stored shapes, including the partition count of every resolved branch
-declaration in the committed schedule. The runtime state store's
-`unit-labelled-metric-checkpoint-segments` format identifies the checkpoints it keeps, including the
-unit every branch-aggregated metric series carries. An unrecognized signature, namespace or
+`SEND` request shape, the session and quality of service an MQTT TOPIC ingestor writes beside its
+delivery mode, and a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
+`PATTERN`. Consensus's `raft_unit_ingestor_` keyspaces and current state metadata encoding
+identify its stored shapes, including the partition count of every resolved branch declaration in
+the committed schedule. The runtime state store's `unit-labelled-metric-checkpoint-segments` format
+identifies the checkpoints it keeps, including the unit every branch-aggregated metric series
+carries. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
