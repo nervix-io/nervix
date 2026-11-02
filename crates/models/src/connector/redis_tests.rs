@@ -130,7 +130,7 @@ fn pubsub_declares_payloads_without_headers_or_an_envelope() {
 }
 
 #[test]
-fn pubsub_declares_its_read_ahead_bound_and_each_connection_deadline() {
+fn pubsub_declares_its_read_ahead_bound_connection_deadlines_and_server_limits() {
     let ingest = IngestorEntityKind::Redis(RedisIngestorEntity::PubSub).capabilities();
     let emit = EmitterEntityKind::Redis(RedisEmitterEntity::PubSub).capabilities();
 
@@ -160,6 +160,7 @@ fn pubsub_declares_its_read_ahead_bound_and_each_connection_deadline() {
             omitted: OmittedDeadline::Required,
         }
     );
+    assert_eq!(ingest.bounds.driver_limits.len(), 1);
     assert_eq!(
         emit.bounds.buffers[0].bound,
         BufferBound::Bounded {
@@ -179,6 +180,13 @@ fn pubsub_declares_its_read_ahead_bound_and_each_connection_deadline() {
         }
     );
     assert_eq!(emit.bounds.waits[1].bound, WaitBound::Driver("500 ms"));
+    assert_eq!(
+        emit.bounds.driver_limits,
+        &[
+            "A payload above the server's proto-max-bulk-len is rejected, and Redis then closes \
+             the connection that sent it."
+        ]
+    );
 }
 
 fn config_entry(key: &str, value: &str) -> ClientConfigEntry {
