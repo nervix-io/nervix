@@ -19,7 +19,6 @@ ingest_locator = "The configured client or endpoint owns the address and path; t
 mirror = "Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position."
 
 [entity."KAFKA TOPIC"]
-envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
 mirror = "Consumption tracks replayable log offsets and consumer groups; publication uses a producer queue or delivery report. Both directions use the same quoted, case-preserving Kafka topic names."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
@@ -52,17 +51,15 @@ mirror = "No ingestor consumes an exchange: the exchange routes each message by 
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."REDIS PUBSUB"]
-emit_headers = "Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names."
+emit_headers = "Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving."
 envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
-ingest_headers = "Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names."
-metadata = "The current Pub/Sub declaration delivers payloads without a typed channel metadata namespace."
-mirror = "Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names."
+ingest_headers = "Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving."
+mirror = "Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."PROMETHEUS QUERY"]
 ingest_headers = "The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared."
 ingest_locator = "QUERY is a PromQL expression option rather than an external entity name."
-metadata = "The current query result is decoded as payload; no separate typed query or evaluation-time metadata namespace is declared."
 mirror = "The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared."
 
 [entity."ZEROMQ PULL"]
@@ -72,7 +69,6 @@ metadata = "The driver exposes no peer identity on receive. Only frame 0 is inge
 mirror = "The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map."
 
 [entity."SQS QUEUE"]
-metadata = "The current queue declaration exposes message attributes through headers but no separate typed receipt metadata namespace."
 mirror = "Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 

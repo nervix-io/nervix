@@ -326,19 +326,42 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             every_node: false,
             reference: IngestorReferenceKind::Client(ConnectorKind::RabbitMq),
         },
-        IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => {
-            headers_only(None, ConnectorKind::Redis)
-        }
-        IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => {
-            headers_only(None, ConnectorKind::Prometheus)
-        }
+        IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => IngestorDeclaration {
+            headers: None,
+            metadata: &[
+                ("channel", IngestorMetadataType::String),
+                ("pattern", IngestorMetadataType::String),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Redis),
+        },
+        IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => IngestorDeclaration {
+            headers: None,
+            metadata: &[
+                ("query", IngestorMetadataType::String),
+                ("evaluated_at", IngestorMetadataType::Datetime),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Prometheus),
+        },
         IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull) => {
             headers_only(None, ConnectorKind::ZeroMq)
         }
-        IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::LastWins)),
-            ConnectorKind::Sqs,
-        ),
+        IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
+            metadata: &[
+                ("message_id", IngestorMetadataType::String),
+                ("sent_at", IngestorMetadataType::Datetime),
+                ("receive_count", IngestorMetadataType::U32),
+                ("first_received_at", IngestorMetadataType::Datetime),
+                ("group_id", IngestorMetadataType::String),
+                ("deduplication_id", IngestorMetadataType::String),
+                ("sequence_number", IngestorMetadataType::String),
+                ("sender_id", IngestorMetadataType::String),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Sqs),
+        },
         IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
             metadata: &[
@@ -1323,7 +1346,7 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
 fn an_entity_model_converts_into_every_enum_that_holds_it() {
     let source = RedisPubSubIngestor {
         client: named("cache"),
-        channel: named("orders"),
+        subscription: nervix_models::RedisSubscriptionTarget::Channel(named("orders")),
         mode: RedisPubSubIngestMode::NoAck,
         quiesce: IngestQuiesceMode::Drop,
     };

@@ -2,9 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The PostgreSQL client Model with its connection pool and the TLS policy its address
-//!   selects, the table emitter Model with its table rule and conflict action, the encoding each
-//!   mapped value binds with, and what it declares.
+//! - **Owns.** The PostgreSQL client Model with its connection pool, the keys that set how the pool
+//!   treats a connection and the TLS policy its address selects, the table emitter Model with its
+//!   table rule and conflict action, the encoding each mapped value binds with, and what it
+//!   declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared emitter declarations and the names a body references.
 //! - **Must not know.** The PostgreSQL driver, or how rows are inserted.
@@ -25,8 +26,8 @@ use url::Url;
 
 use super::{
     bounds::{
-        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
-        WaitBound,
+        BufferBound, BufferCapacity, BufferOverflow, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
     },
     config_schema::{DriverUrl, OwnedQueryOption},
     configured_client::configured_client,
@@ -45,11 +46,21 @@ configured_client!(Postgres: pooled, config CLIENT_CONFIG, CreateClientPostgres 
 /// The client key that holds the connection URL.
 const ADDRESS: &str = "addr";
 
+/// How long one pool checkout may take, in milliseconds, where a client leaves
+/// `pool_acquire_timeout_ms` out. The client schema holds this default as `CONFIG` text and the
+/// declared wait holds it as a duration, so both expand this one literal.
+macro_rules! default_pool_acquire_timeout_ms {
+    () => {
+        30000
+    };
+}
+
 /// The current keys this connector reads, shared by validation, completion and inspection.
 ///
 /// Nervix owns the address's scheme and its `sslmode`; the driver reads every other query option,
 /// and its offline parser checks them before a client is committed. TLS files configure only the
-/// verifying policy.
+/// verifying policy. The pool keys belong to Nervix because the right values depend on the database
+/// and whatever stands in front of it, which differ per client.
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
     use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
     const OPTION: &str = PostgresSslMode::QUERY_OPTION.name;
@@ -63,6 +74,14 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
                     owned: &[PostgresSslMode::QUERY_OPTION],
                 }),
             ),
+            K::defaulted(
+                "pool_acquire_timeout_ms",
+                V::Milliseconds,
+                concat!(default_pool_acquire_timeout_ms!()),
+            ),
+            K::defaulted("pool_idle_timeout_ms", V::Milliseconds, "600000"),
+            K::defaulted("pool_max_lifetime_ms", V::Milliseconds, "1800000"),
+            K::defaulted("pool_test_before_acquire", V::Boolean, "true"),
             K::TLS_CA.only_for_query(ADDRESS, OPTION, VERIFY_FULL),
             K::TLS_CERT.only_for_query(ADDRESS, OPTION, VERIFY_FULL),
             K::TLS_KEY.only_for_query(ADDRESS, OPTION, VERIFY_FULL),
@@ -265,8 +284,14 @@ const POSTGRES_BOUNDS: DeclaredBounds = DeclaredBounds {
     }],
     waits: &[
         DeclaredWait {
-            wait: "a pool acquire: name resolution, connection, TLS and authentication",
-            bound: WaitBound::Fixed(Duration::from_secs(30)),
+            wait: "a pool checkout: the wait for the pool, name resolution, connection, TLS, \
+                   authentication and the borrow test",
+            bound: WaitBound::Key {
+                key: DeadlineKey::PoolAcquireTimeout,
+                omitted: OmittedDeadline::Default(Duration::from_millis(
+                    default_pool_acquire_timeout_ms!(),
+                )),
+            },
         },
         DeclaredWait {
             wait: "an insert and its metadata query",

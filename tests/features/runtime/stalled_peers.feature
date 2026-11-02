@@ -501,7 +501,7 @@ Feature: Stalled peers
     When these Plexus commands are executed
       """
       CREATE SCHEMA sample (value F64);
-      CREATE WIRE JSON SCHEMA sample_wire MODE STRICT (value number);
+      CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE (value number);
       CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
       CREATE RELAY samples SCHEMA sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
@@ -673,6 +673,39 @@ Feature: Stalled peers
     And within "20s" DESCRIBE EMITTER "to_clickhouse" on the leader node contains
       """
       transient error: ClickHouse insert request failed
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A Postgres emitter whose server never answers is reported within pool_acquire_timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "postgres_peer" is listening
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE POSTGRES CLIENT db POOL SIZE MIN 0 MAX 1 CONFIG {
+        'addr' = 'postgres://nervix@{{postgres_peer}}/nervix?sslmode=disable',
+        'pool_acquire_timeout_ms' = '1000'
+      };
+      CREATE POSTGRES TABLE EMITTER outgoing FROM notifications TO db TABLE 'notifications'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        VALUES { 'postgres_user_id' = input.user_id }
+        BATCH MAX MESSAGES 1 MAX SIZE 1MiB FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the silent endpoint "postgres_peer" eventually accepts a connection
+    And within "30s" DESCRIBE EMITTER "outgoing" on the leader node contains
+      """
+      within pool_acquire_timeout_ms 1s
       """
 
     Examples:

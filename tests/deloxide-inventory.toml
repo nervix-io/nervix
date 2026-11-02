@@ -1573,6 +1573,16 @@ scenario = "A second-domain quiesce expiry returns its failure and resumes both 
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Native-client command recovery and archive download after the first domain's mutation lease release meets a one-shot lapsed-leader-lease refusal. Existing client, storage and cluster lifecycle locks are tracked; consensus refusal and command-retry asynchronous waits are untracked."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-lease-release-recovery"
+invariant = "A refused first-domain mutation lease release leaves the admitted backup recoverable under its original reference, and the recovered archive contains both quiesced domain cuts on one and three nodes."
+invocation = "scenarios"
+scenario = "A cluster backup recovers a first-domain lease release refused by a lapsed leader lease on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Diagnostic cut timeout and domain resumption through the public CLI, retaining the active capture phase and elapsed completed drain."
 examples = 2
 feature = "tests/features/cluster/backup_cut_diagnostics.feature"
@@ -2373,6 +2383,16 @@ scenario = "A bounded native wait recovers the original multi-domain backup afte
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
+coverage = "Under scheduling stress: native-client command recovery and archive download after the first domain's mutation lease release meets a one-shot lapsed-leader-lease refusal. Consensus refusal and command-retry asynchronous waits remain untracked."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-lease-release-recovery"
+invariant = "A refused first-domain mutation lease release leaves the admitted backup recoverable under its original reference, and the recovered archive contains both quiesced domain cuts on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A cluster backup recovers a first-domain lease release refused by a lapsed leader lease on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Under scheduling stress: client command and pending-reply lifetimes while two delayed domain cuts each stay within their own budget and together exceed the ordinary request budget."
 examples = 2
 feature = "tests/features/cluster/backup_wait.feature"
@@ -3033,10 +3053,12 @@ path = "crates/client-core/src/client.rs"
 workloads = [
   "paced.reopen-generation",
   "paced.delayed-refusal",
+  "scenario.backup-lease-release-recovery",
   "scenario.backup-native-recovery",
   "scenario.backup-multi-domain-wait",
   "stress.paced.reopen-generation",
   "stress.paced.delayed-refusal",
+  "stress.backup-lease-release-recovery",
   "stress.backup-native-recovery",
   "stress.backup-multi-domain-wait",
 ]
@@ -3073,10 +3095,12 @@ path = "crates/client-core/src/exchange.rs"
 workloads = [
   "scenario.client-alter-drain",
   "paced.reopen-generation",
+  "scenario.backup-lease-release-recovery",
   "scenario.backup-native-recovery",
   "scenario.backup-multi-domain-wait",
   "stress.client-alter-drain",
   "stress.paced.reopen-generation",
+  "stress.backup-lease-release-recovery",
   "stress.backup-native-recovery",
   "stress.backup-multi-domain-wait",
 ]
@@ -3810,21 +3834,21 @@ scenario = "MQTT ACK PARALLEL publishes a quiesce change meets half gathered rea
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "An entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The held answer, the SQS client and the read's cancellation are outside the detector."
+coverage = "An entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The admitted message exercises U32 and DATETIME projection at the quiesce boundary; the bounded ingest-metadata-projection property separately verifies retained-copy replay. The held answer, the SQS client and the read's cancellation are outside the detector."
 examples = 2
 feature = "tests/features/runtime/sqs_ingestion.feature"
 id = "scenario.sqs-receive-at-quiesce"
-invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message reaches the relay without waiting for its visibility timeout, on one and three nodes."
+invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message with exact U32 receive_count and DATETIME sent_at reaches the relay without waiting for its visibility timeout, on one and three nodes."
 invocation = "scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Under scheduling stress: an entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The held answer, the SQS client and the read's cancellation are outside the detector."
+coverage = "Under scheduling stress: an entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The admitted message exercises U32 and DATETIME projection at the quiesce boundary; the bounded ingest-metadata-projection property separately verifies retained-copy replay. The held answer, the SQS client and the read's cancellation are outside the detector."
 examples = 2
 feature = "tests/features/runtime/sqs_ingestion.feature"
 id = "stress.sqs-receive-at-quiesce"
-invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message reaches the relay without waiting for its visibility timeout, on one and three nodes."
+invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message with exact U32 receive_count and DATETIME sent_at reaches the relay without waiting for its visibility timeout, on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
 selections = ["deloxide-stress"]

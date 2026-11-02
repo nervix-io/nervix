@@ -13,15 +13,17 @@
 
 use leptos::prelude::*;
 use nervix_models::{
-    HttpIngestorEntity, HttpRequestHeader, IngestDeliveryKind, IngestQuiesceKind,
-    IngestQuiesceOverflow, IngestorEntityKind, OptionDeclaration, OptionForm, OptionPresence,
-    WebsocketsIngestorEntity, WebsocketsUpgradeHeader,
+    HttpIngestorEntity, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceOverflow,
+    IngestorEntityKind, OptionDeclaration, OptionForm, OptionPresence, WebsocketsIngestorEntity,
+    WebsocketsUpgradeHeader,
 };
 
 use super::{
-    ChoiceControl, ChoiceGroup, CreateSignals, RequestSender, event_target_textarea_value,
-    event_target_value, ingestor_draft::TimestampDraft, ingestor_route_editor::IngestorRouteEditor,
-    ingestor_source_draft::IngestorEntityDraft,
+    ChoiceControl, ChoiceGroup, CreateSignals, RequestSender, event_target_checked,
+    event_target_textarea_value, event_target_value,
+    ingestor_draft::TimestampDraft,
+    ingestor_route_editor::IngestorRouteEditor,
+    ingestor_source_draft::{IngestorEntityDraft, RequestHeaderDraft},
 };
 
 #[derive(Clone, Copy)]
@@ -29,6 +31,7 @@ enum IngestorField {
     Topic,
     Queue,
     Channel,
+    Pattern,
     Subject,
     QueueGroup,
     Subscription,
@@ -53,6 +56,7 @@ impl IngestorField {
             Self::Topic => "Topic or topic filter",
             Self::Queue => "Queue",
             Self::Channel => "Channel",
+            Self::Pattern => "Channel pattern",
             Self::Subject => "Subject",
             Self::QueueGroup => "Queue group",
             Self::Subscription => "Subscription",
@@ -77,6 +81,7 @@ impl IngestorField {
             Self::Topic => "create-ingestor-topic",
             Self::Queue => "create-ingestor-queue",
             Self::Channel => "create-ingestor-channel",
+            Self::Pattern => "create-ingestor-pattern",
             Self::Subject => "create-ingestor-subject",
             Self::QueueGroup => "create-ingestor-queue-group",
             Self::Subscription => "create-ingestor-subscription",
@@ -101,6 +106,7 @@ impl IngestorField {
             Self::Topic => &source.topic,
             Self::Queue => &source.queue,
             Self::Channel => &source.channel,
+            Self::Pattern => &source.pattern,
             Self::Subject => &source.subject,
             Self::QueueGroup => &source.queue_group,
             Self::Subscription => &source.subscription,
@@ -125,6 +131,7 @@ impl IngestorField {
             Self::Topic => &mut source.topic,
             Self::Queue => &mut source.queue,
             Self::Channel => &mut source.channel,
+            Self::Pattern => &mut source.pattern,
             Self::Subject => &mut source.subject,
             Self::QueueGroup => &mut source.queue_group,
             Self::Subscription => &mut source.subscription,
@@ -186,6 +193,7 @@ impl EntityOptionField {
             "TOPIC" => IngestorField::Topic,
             "QUEUE" => IngestorField::Queue,
             "CHANNEL" => IngestorField::Channel,
+            "PATTERN" => IngestorField::Pattern,
             "SUBJECT" => IngestorField::Subject,
             "QUEUE GROUP" => IngestorField::QueueGroup,
             "SUBSCRIPTION" => IngestorField::Subscription,
@@ -263,7 +271,7 @@ fn RequestHeadersEditor(signals: CreateSignals) -> impl IntoView {
     let pending = move || signals.progress.get().is_pending();
     view! {
         <fieldset class="create-field create-ingestor-request-headers" data-option="HEADERS">
-            <legend>"HEADERS · optional literal request fields"</legend>
+            <legend>"HEADERS · optional request fields, literal or from a client secret"</legend>
             <For each=move || { (0..signals.ingestor.get().source.request_headers.len()).collect::<Vec<_>>() }
                 key=|index| *index
                 children=move |index| view! {
@@ -282,7 +290,9 @@ fn RequestHeadersEditor(signals: CreateSignals) -> impl IntoView {
                                     signals.edit();
                                 } />
                         </label>
-                        <label class="create-field"><span>"Value"</span>
+                        <label class="create-field">
+                            <span>{move || if signals.ingestor.get().source.request_headers.get(index)
+                                .is_some_and(|header| header.client_secret) { "Client key" } else { "Value" }}</span>
                             <input class="create-ingestor-request-header-value" type="text" autocomplete="off"
                                 disabled=pending
                                 prop:value=move || match signals.ingestor.get().source.request_headers.get(index) {
@@ -296,6 +306,17 @@ fn RequestHeadersEditor(signals: CreateSignals) -> impl IntoView {
                                     signals.edit();
                                 } />
                         </label>
+                        <label class="create-check"><input class="create-ingestor-request-header-secret" type="checkbox"
+                            prop:checked=move || signals.ingestor.get().source.request_headers.get(index)
+                                .is_some_and(|header| header.client_secret)
+                            disabled=pending
+                            on:change=move |event| {
+                                let client_secret = event_target_checked(&event);
+                                signals.ingestor.update(|draft| {
+                                    if let Some(header) = draft.source.request_headers.get_mut(index) { header.client_secret = client_secret; }
+                                });
+                                signals.edit();
+                            } /><span>"Client secret"</span></label>
                         <button type="button" class="create-ingestor-request-header-remove" disabled=pending
                             on:click=move |_| {
                                 signals.ingestor.update(|draft| {
@@ -307,9 +328,7 @@ fn RequestHeadersEditor(signals: CreateSignals) -> impl IntoView {
                 } />
             <button type="button" class="create-ingestor-request-headers-add" disabled=pending
                 on:click=move |_| {
-                    signals.ingestor.update(|draft| draft.source.request_headers.push(HttpRequestHeader {
-                        name: String::new(), value: String::new(),
-                    }));
+                    signals.ingestor.update(|draft| draft.source.request_headers.push(RequestHeaderDraft::default()));
                     signals.edit();
                 }>"Add request header"</button>
         </fieldset>
@@ -440,7 +459,10 @@ pub(super) fn IngestorEditor(
                 control=ChoiceControl::IngestSourceRef signals=signals request_tx=request_tx
                 session_generation=session_generation show_detail=true />
         </Show>
-        <For each={move || entity_kind().and_then(|kind| kind.capabilities().locator).into_iter().collect::<Vec<_>>()}
+        <For each={move || match entity_kind() {
+                Some(kind) => kind.locators(),
+                None => Vec::new(),
+            }}
             key={move |locator| (entity_kind(), locator.keywords)}
             children=move |locator| view! {
                 <EntityValueEditor signals=signals keywords=locator.keywords default=None />
@@ -579,7 +601,7 @@ mod tests {
     fn every_declared_transport_value_has_an_editor_binding() {
         for kind in IngestorEntityKind::modeled() {
             let declaration = kind.capabilities();
-            if let Some(locator) = declaration.locator {
+            for locator in kind.locators() {
                 assert!(
                     EntityOptionField::from_keywords(Some(kind), locator.keywords).is_some(),
                     "{} {}",

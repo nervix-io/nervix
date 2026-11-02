@@ -745,14 +745,25 @@ HTTP request-field compilation retains the VM report beneath the emitter's reque
 and attaches its safe message for diagnostics; an invalid request program never starts the emitter.
 
 A Prometheus query that fails is a `PrometheusQueryIngestorError` beneath `IngestorError::Read`: a request
-that could not be sent, a status other than success, a response whose announced length or body
-exceeds the ingestor's `MAX BODY SIZE`, a body that could not be read, a payload that does not
-decode, a query Prometheus answers with an error status, or a result that is not a vector. The
-oversized response is `ResponseTooLarge`, which names the bound and never the body, such as
-`Prometheus query response exceeds MAX BODY SIZE 16MiB`. The host shows the chain as the
+that could not be sent, a response whose announced length or body exceeds the ingestor's
+`MAX BODY SIZE`, a body that could not be read, a payload that does not decode, a query the API
+refuses, a status with nothing of the API's in its body, or a result a query source does not read.
+The oversized response is `ResponseTooLarge`, which names the bound and never the body, such as
+`Prometheus query response exceeds MAX BODY SIZE 16MiB`. A refused query is `QueryRejected`, whose
+HTTP status, `errorType` and `error` are typed fields read from the answer, and whose `error` is as
+long as the API wrote it within that bound. A status whose body holds neither, such as a proxy's page
+in front of the API, is `QueryStatus`, and a body that could not be read stays beneath it. A
+result that is not a vector of float samples is `UnsupportedResultType`, which carries the
+vocabulary's `PrometheusUnsupportedResult`: a `matrix`, `scalar` or `string` result, or a native
+histogram among the samples, which fails the whole poll.
+
+The request URL carries the PromQL and the evaluation instant, and an API root can carry
+credentials, so a request that could not be sent keeps Reqwest's error stripped of its URL beneath
+`QueryRequest`, and no report holds that URL in any rendering. The host shows the chain as the
 ingestor's transient error, which `DESCRIBE INGESTOR` prints, and the next poll queries again. A
-sample whose value or timestamp cannot be read fails only its own record, reported beside the
-poll's other messages.
+sample whose value or instant cannot be read fails only its own record, reported beside the poll's
+other messages. A value of `NaN`, `+Inf` or `-Inf` is not such a failure: it reaches the codec as the
+API's string, and a codec that refuses it reports a decode rejection.
 
 Iceberg object storage retains the Iceberg storage error contract when it installs the node's
 HTTP resolver. Invalid object URLs are `DataInvalid`, and an unsupported Azure connection string
@@ -854,6 +865,16 @@ them from the client's effective entries and checks them again: an invalid value
 pool with `RedisClientError::InvalidPoolLifetime`, naming the key above the schema's
 `ClientConfigSchemaError::InvalidValue`, which the node reports as
 `OpenClientError::InvalidPoolLifetime`. It is a configuration failure, not a record rejection.
+
+A Postgres client's pool keys are refused at `CREATE CLIENT` unless `pool_acquire_timeout_ms`,
+`pool_idle_timeout_ms` and `pool_max_lifetime_ms` are positive, schedulable whole milliseconds and
+`pool_test_before_acquire` is a boolean. The pool reads them from the client's effective entries and
+checks them again: an invalid value fails opening the pool with
+`EmitterOpenError::InvalidConfiguration` above the `ClientConfigError` that names the key, and it is a
+configuration failure, not a record rejection. A checkout that runs out of
+`pool_acquire_timeout_ms` keeps the shared `DeadlineElapsed` with the key and its bound, beneath
+`EmitterOpenError::Initialize` while the pool opens and beneath `EmitterWriteError::NotInitialized`
+on a write, which the host retries on its policy.
 
 Redis subscription protocol and read failures retain their driver causes beneath
 `RedisPubSubIngestorError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
@@ -959,7 +980,10 @@ drops without a delivery report keeps the report channel's cancellation the same
 the connector's description of the failure for the emitter's transient error, and a missed `ACK
 TIMEOUT` is again the confirmation window's `ConfirmationWindowError`. A delivery error about the
 record itself, an invalid or oversized message, timestamp or record, rejects that record through
-`ON MESSAGE ERROR` instead. A producer that librdkafka cannot create keeps its `KafkaError` beneath
+`ON MESSAGE ERROR` instead. A record whose `TIMESTAMP` falls before the Unix epoch's first
+millisecond, which a Kafka record cannot carry, is a record rejection in either mode before the
+producer takes it, rendered from `KafkaCreateTimeError::BeforeFirstMillisecond` with the timestamp.
+A producer that librdkafka cannot create keeps its `KafkaError` beneath
 `EmitterOpenError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `delivery.timeout.ms` can
 hold is `KafkaMessageTimeoutError::TooLong` beneath `EmitterOpenError::InvalidConfiguration`. A
 finish whose producer queue does not empty before its deadline keeps librdkafka's `KafkaError`
@@ -1049,6 +1073,12 @@ response from the service keeps its existing description. None is a record rejec
 acknowledges input. A source read the host cancelled still waits for its receive in flight, and a
 service that has not answered it within 10 seconds of the cancellation ends the read with
 `SqsQueueIngestorError::CancelledReceiveUnanswered`, which names that budget, beneath `IngestorError::Read`.
+
+An SQS receive whose system attribute cannot be represented in its declared metadata type reports
+`SqsQueueIngestorError::SystemAttribute` with the typed attribute name beneath `IngestorError::Read`.
+The original integer-parse or timestamp-range cause remains inspectable in the report. The
+diagnostic prints no attribute value. An omitted attribute remains an optional metadata value;
+an invalid receive count or timestamp never becomes zero or null.
 The host shows it as the source's transient error; nothing is rejected or acknowledged, and a message
 the receive was returning stays invisible until its visibility timeout.
 
@@ -1273,6 +1303,11 @@ TLS keys on `ws`, and unpaired identity files are typed refusals naming their ke
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a ingestor cannot produce its validated header collection. Rendered client values are
 validated again by the connector before opening transport.
+`HttpRequestHeadersError` is the frame beneath the registry's `InvalidHttpRequestHeaders` context,
+which names only the ingestor and its domain. It names the offending header of a polling
+ingestor's `HEADERS`, and the client key of a `CLIENT SECRET` it cannot read, with the client where
+the key is undeclared. It never quotes the key's value, and neither does the connector's
+`InvalidHeader` when a rendered secret cannot be a header at open.
 An Iceberg emitter's location refusal names its domain, emitter and `LOCATION`, with the
 vocabulary's typed location failure beneath that context. A malformed URL retains its URL-parser
 cause; a storage-scheme mismatch names the found scheme and the schemes its declared client
@@ -2440,7 +2475,24 @@ completed `drain` duration. These are measurements of the same cut budget, never
 An owner request remains a terminal operation: a coordinator waiting for owners names that phase,
 and owner-local administrative logs distinguish revision catch-up, cluster-state application,
 lifecycle checkpoints, storage capture and staging. No remote progress is inferred from elapsed
-time. A cut that cannot reach a node it needs is refused as
+time. The command boundary reads a preserved `ConsensusError::LeadershipLost` beneath a capture or
+lifecycle context, or the cut's explicit `CoordinatorChanged`, as
+`OutcomeUnknown(LeadershipLost)`. The execution stays applying under its original reference,
+including when the same leader could not confirm its lease during pause, resume or mutation lease
+release. A `CaptureTimeout` remains a definitive refusal even when its last lease-admission cause
+was leadership loss; storage failures likewise retain their definitive failure and full chain.
+The cut's result is joined with its resume and mutation-lease-release results at their production
+boundaries. When both operations fail, a definitive cut failure wins; an uncertain cut yields to
+the cleanup failure, including a definitive storage failure. Both reports retain their typed
+causes until they are logged together with the execution reference. A later authority-loss report
+therefore cannot replace an expired cut's refusal with an unknown outcome.
+`DomainAlterError::ResumeAfterAbandonedAlter` keeps the application or drain failure of an already
+confirmed pause alongside its failed resume. The phase projection inspects the typed lifecycle
+contexts beneath that compound report, so a pause-application or drain expiry keeps its
+`CaptureTimeout` measurements. An abandoned cut remains definitive even when the resume's cause
+is `ConsensusError::LeadershipLost`; both causes remain in the report.
+Every failed attempt logs its execution reference and report before command finalization can hold
+its result. A cut that cannot reach a node it needs is refused as
 `StateOwnerUnreachable` when the cluster does not report a placement's scheduled primary live, and
 as `ExecutorUnreachable` when, before a quiesced cut pauses, it does not report a node that runs the
 domain's work live. Each carries the domain, the entity's kind and name and the node as typed

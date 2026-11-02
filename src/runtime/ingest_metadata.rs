@@ -236,6 +236,7 @@ enum IngestMetadataColumnBuilder {
     Bool(BooleanBuilder),
     U8(UInt8Builder),
     U16(UInt16Builder),
+    U32(UInt32Builder),
     I32(Int32Builder),
     I64(Int64Builder),
     U64(UInt64Builder),
@@ -254,6 +255,7 @@ impl IngestMetadataColumnBuilder {
             IngestorMetadataType::Bool => Self::Bool(BooleanBuilder::with_capacity(row_bound)),
             IngestorMetadataType::U8 => Self::U8(UInt8Builder::with_capacity(row_bound)),
             IngestorMetadataType::U16 => Self::U16(UInt16Builder::with_capacity(row_bound)),
+            IngestorMetadataType::U32 => Self::U32(UInt32Builder::with_capacity(row_bound)),
             IngestorMetadataType::I32 => Self::I32(Int32Builder::with_capacity(row_bound)),
             IngestorMetadataType::I64 => Self::I64(Int64Builder::with_capacity(row_bound)),
             IngestorMetadataType::U64 => Self::U64(UInt64Builder::with_capacity(row_bound)),
@@ -271,6 +273,7 @@ impl IngestMetadataColumnBuilder {
             Self::Bool(_) => IngestorMetadataType::Bool,
             Self::U8(_) => IngestorMetadataType::U8,
             Self::U16(_) => IngestorMetadataType::U16,
+            Self::U32(_) => IngestorMetadataType::U32,
             Self::I32(_) => IngestorMetadataType::I32,
             Self::I64(_) => IngestorMetadataType::I64,
             Self::U64(_) => IngestorMetadataType::U64,
@@ -285,6 +288,7 @@ impl IngestMetadataColumnBuilder {
             Self::Bool(builder) => builder.append_null(),
             Self::U8(builder) => builder.append_null(),
             Self::U16(builder) => builder.append_null(),
+            Self::U32(builder) => builder.append_null(),
             Self::I32(builder) => builder.append_null(),
             Self::I64(builder) => builder.append_null(),
             Self::U64(builder) => builder.append_null(),
@@ -299,6 +303,7 @@ impl IngestMetadataColumnBuilder {
             Self::Bool(builder) => StdArc::new(builder.finish()),
             Self::U8(builder) => StdArc::new(builder.finish()),
             Self::U16(builder) => StdArc::new(builder.finish()),
+            Self::U32(builder) => StdArc::new(builder.finish()),
             Self::I32(builder) => StdArc::new(builder.finish()),
             Self::I64(builder) => StdArc::new(builder.finish()),
             Self::U64(builder) => StdArc::new(builder.finish()),
@@ -462,6 +467,14 @@ impl IngestMetadataValues for ProjectedMetadataValues<'_> {
     fn u16(&mut self, value: u16) {
         if let Some(IngestMetadataColumnBuilder::U16(builder)) =
             self.next_column(IngestorMetadataType::U16)
+        {
+            builder.append_value(value);
+        }
+    }
+
+    fn u32(&mut self, value: u32) {
+        if let Some(IngestMetadataColumnBuilder::U32(builder)) =
+            self.next_column(IngestorMetadataType::U32)
         {
             builder.append_value(value);
         }
