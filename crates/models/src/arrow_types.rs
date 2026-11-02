@@ -202,7 +202,11 @@ mod tests {
         );
         assert_eq!(
             described(IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener)),
-            Some(vec![("peer_addr".to_owned(), DataType::Utf8, true)])
+            Some(vec![
+                ("peer_addr".to_owned(), DataType::Utf8, true),
+                ("transport".to_owned(), DataType::Utf8, true),
+                ("tls_peer".to_owned(), DataType::Utf8, true)
+            ])
         );
         assert_eq!(
             described(IngestorEntityKind::Websockets(
