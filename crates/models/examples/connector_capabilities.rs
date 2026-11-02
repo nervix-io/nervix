@@ -495,13 +495,23 @@ fn client(kind: ConnectorKind) -> Option<Value> {
         Some(stripped) => json!({ "prefix": stripped.prefix, "properties": stripped.properties }),
         None => Value::Null,
     };
-    let constraints: &[&str] = match kind {
+    let declared_constraints: &[&str] = match kind {
         ConnectorKind::Otel => &[
             nervix_models::OTEL_HEADERS_FORMAT,
             nervix_models::OTEL_TLS_ENDPOINT_RULE,
         ],
         _ => &[],
     };
+    let mut constraints: Vec<String> = declared_constraints
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect();
+    if let Some(keys) = config.mutually_exclusive_keys() {
+        constraints.push(format!(
+            "Mutually exclusive CONFIG keys: {}.",
+            keys.join(", ")
+        ));
+    }
     Some(
         json!({ "kind": kind.keyword(), "pool": pool, "config_owner": config_owner, "options": options,
             "keys": keys, "namespaces": namespaces, "reserved": config.reserved(), "aliases": aliases,

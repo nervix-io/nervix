@@ -480,6 +480,11 @@ is assumed to be covered:
 | ZeroMQ sources and emitters, `zeromq` 0.4.1 | The driver's TCP transport connects with Tokio's `TcpStream::connect((host, port))`. A connect-mode emitter's connection, its lookups included, ends at its client's `connect_timeout_ms`, which ends the connection but not a lookup the blocking pool already runs | No socket hook |
 | The web console | The browser resolves the page's origin and its WebSocket and fetch requests | The browser owns resolution |
 
+NATS ingestors and emitters prepare authentication and TLS through the same connector-owned
+options builder. Token, user NKey and mounted credentials-file authentication add no resolution
+or dialling hook: the NATS driver still resolves the parsed server address itself, and a
+`tls://` address requires TLS on both sides while retaining that server name for verification.
+
 The pinned async-nats flush correction drains queued bytes before completing a local flush and
 exposes its successful-connection generation. It retains this driver's resolver, address-attempt
 policy and dependency features; the pin does not move NATS resolution onto the node's resolver.

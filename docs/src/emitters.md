@@ -1865,6 +1865,10 @@ waits `BACKOFF` before its first attempt and doubles the wait for each further a
 When the emitter stops, its finish flushes what the client still holds by the finish deadline; see
 [Finishing an emitter](./connector-contract.md#finishing-an-emitter).
 
+NATS emitters use the same optional token, user NKey or mounted credentials-file authentication
+as ingestors. The [NATS client authentication rules](ingestors.md#nats) define mutual exclusion,
+confidential inspection and TLS configuration for both directions.
+
 `JETSTREAM` waits for one `PubAck` per record. The stream must already exist and capture the
 subject; a missing stream is an infrastructure error that remains under backpressure until an
 operator provisions it.

@@ -3,7 +3,7 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The core NATS connection and queue subscription each ingestor instance reads
-//!   through, its TLS options, the end of that subscription when the connection is lost, and
+//!   through, the end of that subscription when the connection is lost, and
 //!   message headers as ingest headers.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   the boundary's channels and `async-nats`.
@@ -28,12 +28,13 @@ use futures_util::StreamExt as _;
 use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestorBatch,
     IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
-    IngestorReadCancellation, IngestorResult, IngestorResume, ServiceUrl, client_config_value,
-    client_tls_paths,
+    IngestorReadCancellation, IngestorResult, IngestorResume,
 };
 use nervix_models::{ClientConfigEntry, NatsQueueGroupName, NatsSubjectName};
 use nervix_primitives::sync::mpsc::{self, error::TrySendError};
 use thiserror::Error;
+
+use crate::client::NatsClientOptions;
 
 const NATS: &str = "nats";
 
@@ -42,8 +43,6 @@ const NATS: &str = "nats";
 pub enum NatsSubjectIngestorError {
     #[error("invalid NATS client configuration")]
     ClientConfig,
-    #[error("NATS TLS client authentication requires both 'tls_cert_file' and 'tls_key_file'")]
-    IncompleteTlsIdentity,
     #[error("failed to connect NATS client")]
     Connect,
     #[error("failed to subscribe to NATS subject '{subject}'")]
@@ -153,9 +152,11 @@ impl NatsSubjectIngestorPlan {
         config: &[ClientConfigEntry],
         lost: mpsc::Sender<()>,
     ) -> NatsSubjectIngestorResult<NatsClient> {
-        let addr = client_config_value(config, "addr", "NATS")
+        let prepared = NatsClientOptions::from_config(config)
+            .await
             .change_context(NatsSubjectIngestorError::ClientConfig)?;
-        let mut options = async_nats::ConnectOptions::new()
+        let options = prepared
+            .options
             .max_reconnects(1)
             .event_callback(move |event| {
                 let lost = lost.clone();
@@ -165,27 +166,8 @@ impl NatsSubjectIngestorPlan {
                     }
                 }
             });
-        let tls = client_tls_paths(config);
-        if let Some(ca_file) = tls.ca_file.as_ref() {
-            options = options.add_root_certificates(ca_file.clone());
-        }
-        match (&tls.cert_file, &tls.key_file) {
-            (Some(cert_file), Some(key_file)) => {
-                options = options.add_client_certificate(cert_file.clone(), key_file.clone());
-            }
-            (None, None) => {}
-            _ => {
-                return Err(Report::new(NatsSubjectIngestorError::IncompleteTlsIdentity));
-            }
-        }
-        if ServiceUrl::new(&addr, "NATS addr")
-            .has_scheme("tls")
-            .change_context(NatsSubjectIngestorError::ClientConfig)?
-        {
-            options = options.require_tls(true);
-        }
         options
-            .connect(addr)
+            .connect(prepared.address)
             .await
             .map_err(|source| Report::new(source).change_context(NatsSubjectIngestorError::Connect))
     }
@@ -565,7 +547,14 @@ mod tests {
         .expect_err("a client certificate without a key must fail");
         assert!(matches!(
             error.current_context(),
-            NatsSubjectIngestorError::IncompleteTlsIdentity
+            NatsSubjectIngestorError::ClientConfig
+        ));
+        assert!(matches!(
+            error.downcast_ref::<nervix_models::ClientConfigSchemaError>(),
+            Some(nervix_models::ClientConfigSchemaError::RequiresKey {
+                key: "tls_cert_file",
+                required: "tls_key_file"
+            })
         ));
     }
 

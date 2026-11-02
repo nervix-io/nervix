@@ -1150,6 +1150,15 @@ client failure the source does not classify keeps the driver's error as the type
 `Acknowledge` or `NegativelyAcknowledge`. The innermost context is the reason `DESCRIBE INGESTOR`
 shows.
 
+NATS client option preparation keeps schema and address refusals and credentials-file I/O or
+parsing failures beneath their owning typed contexts. A credentials-file I/O failure is an opaque
+typed attachment because the driver's message can name the confidential file path. Schema
+exclusion errors name the two authentication keys without their values. Ingestor and emitter
+configuration failures preserve those reports, and a broker authentication refusal retains the
+driver's typed connection failure. Emitter status projects its typed connection kind without
+driver values. Public client-validation outcomes continue to expose only reviewed, value-free
+contexts.
+
 A NATS source whose client loses its connection to the server reports
 `NatsSubjectIngestorError::ConnectionLost` beneath `IngestorError::Read` once it has handed over what the client
 received, and each reconnect that fails reports `NatsSubjectIngestorError::Connect` beneath

@@ -53,7 +53,7 @@ arch-into = { workspace = true }
 arrow-array = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
-async-nats = { workspace = true }
+async-nats = { workspace = true, features = ["nkeys"] }
 aws-config = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-sdk-sqs = { workspace = true }

@@ -3582,10 +3582,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 25
+domain_version = 26
 features = []
 id = "client-config-schema"
-invariant = "Bounded entries drawn from every current client key schema preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."
+invariant = "Bounded entries drawn from every current client key schema, choosing zero or one key of a declared exclusion group, preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."
 manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-models"

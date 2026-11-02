@@ -942,8 +942,8 @@ signaling precedes its mount. This syntax does not change which layer interprets
 how clients connect, pool or execute.
 
 Client keys are lowercase and case-sensitive. The pure registry refuses unknown, repeated,
-missing-required or mistyped Nervix-owned keys and incomplete TLS identities before a candidate
-can become an active graph. It also refuses a key its driver reads as another name for a property
+missing-required or mistyped Nervix-owned keys, mutually exclusive keys and incomplete TLS
+identities before a candidate can become an active graph. It also refuses a key its driver reads as another name for a property
 the client accepts under one name, and a key written under a prefix the driver strips, since the
 driver would apply whichever of two entries for one property it was handed last. Kafka properties
 and object-store/catalog properties are explicitly
@@ -1089,8 +1089,13 @@ acknowledgement for a subscriber. Both directions carry headers by name, and the
 no typed metadata field. The emitter declares Core `NO ACK` and `JETSTREAM ACK` publication, codec
 payloads, no envelope clause, and optional batching without a protocol maximum: each server
 announces its `max_payload`, and the client refuses a message above it before writing it. The
-unpooled client's Nervix-owned keys are the address, `timeout_ms` and the TLS files, while the
-address's userinfo and query options belong to the driver and are masked in inspection. The
+unpooled client's Nervix-owned keys are the address, `timeout_ms`, the TLS files and the optional
+authentication keys `token`, `credentials_file` and `nkey_seed`. Its schema declares the latter
+three mutually exclusive and confidential, and identifies `credentials_file` as a mounted file.
+Both sides build authentication and TLS options through one connector-owned builder, then attach
+their own connection-loss notifications or reconnect policy. Reading or parsing a credentials
+file preserves the driver's typed I/O cause; a broker's authentication refusal remains a typed
+connection failure. The address's userinfo and query options belong to the driver and are masked in inspection. The
 NATS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 

@@ -222,6 +222,7 @@ mod kafka_metadata;
 mod mqtt_fixtures;
 mod mqtt_sessions;
 mod mysql_isolation;
+mod nats_authentication;
 mod nats_delivery;
 mod paced_replication;
 mod paced_simulation;

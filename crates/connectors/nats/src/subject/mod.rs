@@ -56,8 +56,7 @@ use nervix_connector::{
     AckConfirmation, BrokerAnswer, BrokerVerdict, ConfiguredDeadline, ConfirmationWindow,
     EmitterFinish, EmitterFinishError, EmitterFinishResult, EmitterHost, EmitterLifecycle,
     EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError,
-    ParsedRetryPolicy, PerRecordOutcome, RecordEmitter, RejectedEmitterMember, client_config_value,
-    client_tls_paths,
+    ParsedRetryPolicy, PerRecordOutcome, RecordEmitter, RejectedEmitterMember,
 };
 use nervix_models::{ClientConfigEntry, NatsPublishSubjectName};
 use nervix_primitives::{
@@ -67,6 +66,8 @@ use nervix_primitives::{
     },
     time::Instant,
 };
+
+use crate::client::NatsClientOptions;
 
 const NATS: &str = "nats";
 
@@ -429,11 +430,20 @@ impl NatsSubjectEmitter {
         config: &[ClientConfigEntry],
         retry_policy: ParsedRetryPolicy,
     ) -> EmitterStartResult<NatsClient> {
-        let addr = Self::config_value(config, "addr")?;
+        let prepared = match NatsClientOptions::from_config(config).await {
+            Ok(prepared) => prepared,
+            Err(report) => {
+                let description = *report.current_context();
+                return Err(report
+                    .change_context(EmitterOpenError::InvalidConfiguration { connector: NATS })
+                    .attach_printable(description));
+            }
+        };
         let connected_once = StdArc::new(AtomicBool::new(false));
         let event_connected_once = connected_once.clone();
         let delay_connected_once = connected_once;
-        let mut options = async_nats::ConnectOptions::new()
+        let options = prepared
+            .options
             .event_callback(move |event| {
                 let connected_once = event_connected_once.clone();
                 async move {
@@ -449,23 +459,15 @@ impl NatsSubjectEmitter {
                     delay_connected_once.load(Ordering::Relaxed),
                 )
             });
-        let tls = client_tls_paths(config);
-        if let Some(ca_file) = tls.ca_file.as_ref() {
-            options = options.add_root_certificates(ca_file.clone());
-        }
-        match (&tls.cert_file, &tls.key_file) {
-            (Some(cert_file), Some(key_file)) => {
-                options = options.add_client_certificate(cert_file.clone(), key_file.clone());
-            }
-            (None, None) => {}
-            _ => {
-                return Err(Self::config_error(
-                    "NATS TLS client authentication requires both 'tls_cert_file' and \
-                     'tls_key_file'",
-                ));
+        match options.connect(prepared.address).await {
+            Ok(client) => Ok(client),
+            Err(source) => {
+                let kind = source.kind();
+                Err(Report::new(source)
+                    .change_context(EmitterOpenError::Initialize { connector: NATS })
+                    .attach_printable(kind))
             }
         }
-        options.connect(addr).await.map_err(Self::start_error)
     }
 
     fn connection_delay(
@@ -603,31 +605,6 @@ impl NatsSubjectEmitter {
     #[cfg(test)]
     fn jetstream_error_is_missing_stream(error: &JetStreamPublishError) -> bool {
         matches!(error.kind(), PublishErrorKind::StreamNotFound)
-    }
-
-    fn config_value(config: &[ClientConfigEntry], key: &str) -> EmitterStartResult<String> {
-        {
-            let mapping_input = client_config_value(config, key, "NATS");
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    let message = error.current_context().to_string();
-                    error
-                        .change_context(EmitterOpenError::InvalidConfiguration { connector: NATS })
-                        .attach_printable(message)
-                }),
-            }
-        }
-    }
-
-    fn config_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {
-        Report::new(EmitterOpenError::InvalidConfiguration { connector: NATS })
-            .attach_printable(error.to_string())
-    }
-
-    fn start_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {
-        Report::new(EmitterOpenError::Initialize { connector: NATS })
-            .attach_printable(error.to_string())
     }
 
     #[cfg_attr(

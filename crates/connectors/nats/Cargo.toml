@@ -13,7 +13,7 @@ default = []
 shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 
 [dependencies]
-async-nats = { workspace = true }
+async-nats = { workspace = true, features = ["nkeys"] }
 async-trait = { workspace = true }
 error-stack = { workspace = true }
 futures-util = { workspace = true }

@@ -2,8 +2,8 @@
 //!
 //! Layer: vocabulary.
 //! - **Owns.** Key names, presence, types, confidentiality, file roles, the entities that read each
-//!   key, delegated namespaces, the other names a driver reads for one property and the family
-//!   of secret keys an operator names.
+//!   key, exclusion groups, delegated namespaces, the other names a driver reads for one property
+//!   and the family of secret keys an operator names.
 //! - **Depends on.** Configuration entries, the shared deadline contract and URL values.
 //! - **Must not know.** Driver implementations, resource installation or network operations.
 
@@ -609,6 +609,7 @@ pub struct ClientConfigSchema {
     stripped_prefix: Option<ClientConfigStrippedPrefix>,
     /// The prefix of the secret keys an operator names on this client, when it declares them.
     secret_key_prefix: Option<&'static str>,
+    mutually_exclusive: Option<&'static [&'static str]>,
 }
 
 #[derive(Clone, Copy)]
@@ -623,6 +624,11 @@ pub enum ClientConfigSchemaError {
     UnknownKey { key: String },
     #[error("duplicate client config key '{key}'")]
     DuplicateKey { key: String },
+    #[error("client config keys '{first}' and '{second}' are mutually exclusive")]
+    MutuallyExclusive {
+        first: &'static str,
+        second: &'static str,
+    },
     #[error("missing required client config key '{key}'")]
     MissingRequired { key: &'static str },
     #[error("client config key '{key}' must be lowercase")]
@@ -705,6 +711,7 @@ impl ClientConfigSchema {
             aliases: &[],
             stripped_prefix: None,
             secret_key_prefix: None,
+            mutually_exclusive: None,
         }
     }
 
@@ -719,6 +726,53 @@ impl ClientConfigSchema {
             secret_key_prefix: Some(prefix),
             ..self
         }
+    }
+
+    /// Declares keys of which an authored or rendered configuration may hold at most one.
+    /// Names are sorted, unique and declared by this schema.
+    ///
+    /// ```
+    /// use nervix_models::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    /// const SCHEMA: ClientConfigSchema = ClientConfigSchema::new(
+    ///     &[K::optional("key", V::String), K::optional("token", V::String)], &[], &[],
+    /// ).with_mutually_exclusive(&["key", "token"]);
+    /// assert_eq!(SCHEMA.mutually_exclusive_keys(), Some(["key", "token"].as_slice()));
+    /// ```
+    ///
+    /// A constraint cannot name a key outside its declaration:
+    ///
+    /// ```compile_fail
+    /// use nervix_models::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    /// const SCHEMA: ClientConfigSchema = ClientConfigSchema::new(
+    ///     &[K::optional("token", V::String)], &[], &[],
+    /// ).with_mutually_exclusive(&["key", "token"]);
+    /// ```
+    pub const fn with_mutually_exclusive(mut self, keys: &'static [&'static str]) -> Self {
+        assert!(
+            keys.len() >= 2,
+            "an exclusion group names at least two keys"
+        );
+        let mut index = 0;
+        while index < keys.len() {
+            assert!(
+                Self::declares(self.keys, keys[index]),
+                "an exclusion key is declared"
+            );
+            if index > 0 {
+                assert!(
+                    Self::name_precedes(keys[index - 1], keys[index]),
+                    "exclusion keys are sorted and unique"
+                );
+            }
+            index += 1;
+        }
+        self.mutually_exclusive = Some(keys);
+        self
+    }
+
+    /// The declared group from which a client may set at most one key.
+    pub const fn mutually_exclusive_keys(self) -> Option<&'static [&'static str]> {
+        self.mutually_exclusive
     }
 
     /// Declares the other names the driver reads for its properties: `aliases`, sorted by the name
@@ -1086,9 +1140,33 @@ impl ClientConfigSchema {
                 }));
             }
         }
+        self.validate_exclusion(&values)?;
         self.validate_identity_pair(&values)?;
         self.validate_conditional_presence(&values, stage)?;
         self.validate_query_presence(&values, stage)
+    }
+
+    fn validate_exclusion(
+        self,
+        values: &BTreeMap<&str, &str>,
+    ) -> Result<(), Report<ClientConfigSchemaError>> {
+        let Some(keys) = self.mutually_exclusive else {
+            return Ok(());
+        };
+        let mut selected = None;
+        for &key in keys {
+            if !values.contains_key(key) {
+                continue;
+            }
+            if let Some(first) = selected {
+                return Err(Report::new(ClientConfigSchemaError::MutuallyExclusive {
+                    first,
+                    second: key,
+                }));
+            }
+            selected = Some(key);
+        }
+        Ok(())
     }
 
     /// Holds each key conditioned on a Nervix-owned query option to the choice its address sets.

@@ -5,7 +5,7 @@
 Client configuration declarations distinguish required, optional, defaulted and address-scheme-dependent keys, Nervix and driver
 ownership, typed value rules, TLS certificate/identity file roles and delegated property namespaces.
 `All` is an explicit driver namespace, not an empty-prefix sentinel. The vocabulary schema owns
-key presence, duplicates, type checks and TLS pairing; rendered mount values cross that same
+key presence, duplicates, type checks, mutually exclusive keys and TLS pairing; rendered mount values cross that same
 boundary again before storage. A driver's other names for one property are declared pairs, each
 naming the one key the schema accepts, and a prefix the driver strips is declared with the
 driver's own properties under it. An empty table and an absent prefix mean the driver reads every
@@ -14,6 +14,11 @@ property under one name. The schema refuses a declared other name and a key unde
 duplicate detection also covers the driver's names. Driver-specific validation stays in connector engines called by
 the composition root. Confidential inspection is an explicit projection of complete entries;
 stored configuration and archive serialization do not consume that projection.
+A declared exclusion group admits zero or one of its named keys. NATS uses it for `token`,
+`credentials_file` and `nkey_seed`, so absence uses the driver's unauthenticated or URL-configured
+connection rather than a fabricated empty credential. A refusal names the two conflicting keys
+and carries no credential values. The group's names are sorted, unique and declared by its
+schema, checked when the static declaration is constructed.
 Defaulted keys carry their declared value in their presence variant. The effective-entry projection
 adds it only when the authored key is absent; an invalid explicit value still fails validation.
 `DESCRIBE CLIENT` distinguishes these effective defaults from authored values, with the same
