@@ -222,6 +222,7 @@ class InventoryTests(unittest.TestCase):
             "nats-delivery-metadata",
             "endpoint-request-metadata",
             "websocket-client-config",
+            "mqtt-client-config",
             "websocket-upgrade-headers",
             "websocket-subprotocol-offers",
             "models-timestamps",
